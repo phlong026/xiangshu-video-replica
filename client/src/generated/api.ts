@@ -342,6 +342,23 @@ export interface paths {
     patch: operations["rename_generation_batch_record_api_generation_batches__batch_id__name_patch"];
     trace?: never;
   };
+  "/api/generation-batches/{batch_id}/regeneration-quote": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Batch Regeneration Quote */
+    get: operations["read_batch_regeneration_quote_api_generation_batches__batch_id__regeneration_quote_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/generation-batches/{batch_id}/regenerate": {
     parameters: {
       query?: never;
@@ -438,6 +455,23 @@ export interface paths {
     put?: never;
     /** Retry Task */
     post: operations["retry_task_api_generation_tasks__task_id__retry_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/generation-tasks/{task_id}/regeneration-quote": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Task Regeneration Quote */
+    get: operations["read_task_regeneration_quote_api_generation_tasks__task_id__regeneration_quote_get"];
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -1273,6 +1307,23 @@ export interface paths {
     head?: never;
     /** Rename Avatar */
     patch: operations["rename_avatar_api_oral_avatars__avatar_id__patch"];
+    trace?: never;
+  };
+  "/api/oral/avatars/{avatar_id}/compatibility": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Repair Avatar Compatibility */
+    post: operations["repair_avatar_compatibility_api_oral_avatars__avatar_id__compatibility_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
     trace?: never;
   };
   "/api/oral/avatars/{avatar_id}/refresh": {
@@ -2452,6 +2503,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/customers/{user_id}/source-refunds": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Create Source Refund
+     * @description 独立受理入口使新客户端遇到旧服务端时失败关闭，不能退回旧钱包扣减路径。
+     */
+    post: operations["create_source_refund_api_control_customers__user_id__source_refunds_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/adjustments": {
     parameters: {
       query?: never;
@@ -2607,6 +2678,49 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/customers/lifecycle": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Customer Lifecycle
+     * @description 生命周期分层清单 + 分布汇总；stage 为空时返回全部分层。
+     */
+    get: operations["list_customer_lifecycle_api_control_customers_lifecycle_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/retention": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Customer Retention
+     * @description ADM-23 客户队列留存：按激活（或注册）月分桶 × 近 N 月活跃矩阵。
+     *
+     *     活跃沿用生命周期同源事实（钱包流水/任务/会话事件）。留存口径：
+     *     每个队列在第 m 月的活跃客户数 / 队列总客户数；只统计在役客户。
+     */
+    get: operations["read_customer_retention_api_control_customers_retention_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/customers/{user_id}/package-grants": {
     parameters: {
       query?: never;
@@ -2698,6 +2812,234 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  "/api/control/refunds": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Refunds
+     * @description 退款双事实清单：负向 REFUND_APPROVAL 调账 × 退付执行登记。
+     *
+     *     ``executed``：空 = 全部；``pending`` = 已冲积分未登记退付（运营清队列的
+     *     默认视图）；``done`` = 双事实齐。
+     */
+    get: operations["list_refunds_api_control_refunds_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/refunds/{adjustment_id}/execution": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Mark Refund Execution
+     * @description 登记一笔退付执行结果（幂等键防重放；同一调账只允许登记一次）。
+     */
+    post: operations["mark_refund_execution_api_control_refunds__adjustment_id__execution_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/announcements": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Live Announcements
+     * @description 当前生效公告（置顶优先，最新次之，≤10 条），附带当前用户已读标记。
+     */
+    get: operations["list_live_announcements_api_announcements_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/announcements/{announcement_id}/read": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Mark Announcement Read
+     * @description 幂等已读回执：重复提交不产生第二行，也不报错。
+     */
+    post: operations["mark_announcement_read_api_announcements__announcement_id__read_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/announcements": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Announcements Admin */
+    get: operations["list_announcements_admin_api_control_announcements_get"];
+    put?: never;
+    /** Create Announcement */
+    post: operations["create_announcement_api_control_announcements_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/announcements/{announcement_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Delete Announcement
+     * @description 软删（下线）：已读回执保留；客户端立即不可见。
+     */
+    delete: operations["delete_announcement_api_control_announcements__announcement_id__delete"];
+    options?: never;
+    head?: never;
+    /**
+     * Update Announcement
+     * @description 部分更新：非空字段覆盖（置顶开关用 pinned 三态区分"不修改"）。
+     */
+    patch: operations["update_announcement_api_control_announcements__announcement_id__patch"];
+    trace?: never;
+  };
+  "/api/control/worker-observations": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Worker Observations */
+    get: operations["read_worker_observations_api_control_worker_observations_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/publish-stats": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Publish Stats */
+    get: operations["list_publish_stats_api_control_publish_stats_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/publish-stats/enabled": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /** Toggle Publish Stats */
+    put: operations["toggle_publish_stats_api_control_publish_stats_enabled_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/publish-stats/{record_id}/sync": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Sync Publish Stats */
+    post: operations["sync_publish_stats_api_control_publish_stats__record_id__sync_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/support-tickets": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Support Tickets */
+    get: operations["list_support_tickets_api_control_support_tickets_get"];
+    put?: never;
+    /** Create Support Ticket */
+    post: operations["create_support_ticket_api_control_support_tickets_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/support-tickets/{ticket_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Support Ticket */
+    patch: operations["update_support_ticket_api_control_support_tickets__ticket_id__patch"];
     trace?: never;
   };
   "/api/control/customer-sessions/{session_id}/revoke": {
@@ -6453,11 +6795,12 @@ export interface paths {
     put?: never;
     /**
      * Claim Viral Video Copy
-     * @description 获取共享文案：命中缓存即扣一次「获取文案」费并下发正文，未命中不扣费.
+     * @description 获取共享文案：命中缓存即按「获取文案」口径收费并下发正文，未命中不扣费.
      *
-     *     共享缓存的写入方是转写链路（``POST /videos/copy`` 与工作台文案工坊），它们各自
-     *     付转写费；本端点是**交付侧**的计费点：谁拿到文案谁付费，秒回别人的转写结果不
-     *     例外。未命中时如实回 null 且分文不扣——没有交付就没有收费。
+     *     共享缓存的写入方是转写链路（``POST /videos/copy`` 与工作台文案工坊），它们各
+     *     自为真实转写付费；本端点是**交付侧**的计费点：文案是自己的产出（或已购买过）
+     *     则免费，非生产者首次提取扣一次（2026-10-08 拍板）。未命中时如实回 null 且分文
+     *     不扣——没有交付就没有收费。
      */
     post: operations["claim_viral_video_copy_api_viral_videos_copy_claim_post"];
     delete?: never;
@@ -6534,9 +6877,10 @@ export interface paths {
      *     自己从**本地缓存的原视频**里抽出的单声道 m4a，服务端只做校验、登记与转写编排。
      *
      *     计费与工作台上传链路同一科目（``asr`` 按秒）：预留写在任务入队事务里，结算与
-     *     清理都交给既有 Worker。共享文案缓存命中时直接返回文案——不建任务、不预留转写费，
-     *     但交付本身照样扣一次「获取文案」费（``viral_copy``，同账号同视频只扣一次），
-     *     否则这条秒回就成了绕开 ``/videos/copy/claim`` 的免费旁路。
+     *     清理都交给既有 Worker——只对真实转写收（2026-10-08 拍板），入队时缓存已被别人
+     *     命中的秒回任务不产生转写费。共享文案缓存命中时直接返回文案——不建任务、不动
+     *     转写费，交付按生产者判定（``viral_copy``：自己的文案/已购免费，别人的文案
+     *     首提扣一次），否则走上传转写。
      *
      *     入库走既有 ``script_from_audio_tasks`` 租约体系（用户 2026-09-23 拍板方案 a）：
      *     断点续跑、``SUBMISSION_UNCERTAIN`` 不确定态、按秒预留结算与 ``viral_script_cache``
@@ -6560,7 +6904,12 @@ export interface paths {
     put?: never;
     /**
      * Search Viral Videos
-     * @description 搜索爆款视频并按次计费.
+     * @description 客户侧搜索爆款视频（一期停用，二期随「主动搜索」回归）.
+     *
+     *     2026-10-06 起爆款内容改为人工采集 + 推送到前端：搜索结果里的视频没有
+     *     归档素材可播，客户侧搜索失去交付物，故整端点关停（fail-closed，不产生
+     *     任何外呼与扣费）。管理端人工采集走 ``/api/control/viral/search``，与本
+     *     端点无关；二期恢复时删除下方守卫即可（其余外呼/计费/落库逻辑原样保留）。
      *
      *     不声明 ``AuthenticatedUser``：它会在**请求级**连接上做一次加行锁的会话校验，
      *     而下方多次 ``db.write()`` 会用**另一条**池连接对同一行再取锁 —— 自死锁，
@@ -7799,6 +8148,16 @@ export interface components {
        */
       credits: number;
       /**
+       * Operation Id
+       * @default
+       */
+      operation_id: string;
+      /**
+       * Original Recharge Order No
+       * @default
+       */
+      original_recharge_order_no: string;
+      /**
        * Source Document Type
        * @default
        */
@@ -8111,6 +8470,89 @@ export interface components {
       started_at: string | null;
       /** Completed At */
       completed_at: string | null;
+    };
+    /** AnnouncementCreateRequest */
+    AnnouncementCreateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Title
+       * @default
+       */
+      title: string;
+      /**
+       * Body
+       * @default
+       */
+      body: string;
+      /**
+       * Tone
+       * @default info
+       */
+      tone: string;
+      /**
+       * Starts At
+       * @default
+       */
+      starts_at: string;
+      /**
+       * Ends At
+       * @default
+       */
+      ends_at: string;
+      /**
+       * Pinned
+       * @default false
+       */
+      pinned: boolean;
+    };
+    /** AnnouncementUpdateRequest */
+    AnnouncementUpdateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Title
+       * @default
+       */
+      title: string;
+      /**
+       * Body
+       * @default
+       */
+      body: string;
+      /**
+       * Tone
+       * @default
+       */
+      tone: string;
+      /**
+       * Starts At
+       * @default
+       */
+      starts_at: string;
+      /**
+       * Ends At
+       * @default
+       */
+      ends_at: string;
+      /** Pinned */
+      pinned?: boolean | null;
     };
     /** ApiKeyListResponse */
     ApiKeyListResponse: {
@@ -10600,6 +11042,10 @@ export interface components {
     };
     /** GenerationBatchRequest */
     GenerationBatchRequest: {
+      /** Quote Token */
+      quote_token?: string | null;
+      /** Max Credits */
+      max_credits?: number | null;
       /** Quantity */
       quantity: number;
       /** Prompt Version Id */
@@ -10704,6 +11150,12 @@ export interface components {
       estimated_credits: number;
       /** Credit Price Version */
       credit_price_version: number;
+      /** Quote Token */
+      quote_token: string;
+      /** Quote Expires At */
+      quote_expires_at: number;
+      /** Max Credits */
+      max_credits: number;
       /** Discount Rate */
       discount_rate?: string | null;
       /** Discount Source */
@@ -10954,6 +11406,10 @@ export interface components {
     };
     /** IndependentVideoRequest */
     IndependentVideoRequest: {
+      /** Quote Token */
+      quote_token?: string | null;
+      /** Max Credits */
+      max_credits?: number | null;
       /** Display Name */
       display_name?: string | null;
       /**
@@ -11394,7 +11850,13 @@ export interface components {
        * Action
        * @enum {string}
        */
-      action: "search" | "prepare" | "statistics" | "feature" | "archive";
+      action:
+        | "search"
+        | "prepare"
+        | "statistics"
+        | "feature"
+        | "archive"
+        | "push";
       /**
        * Platform
        * @default douyin
@@ -11460,6 +11922,10 @@ export interface components {
     };
     /** OralTaskRequest */
     OralTaskRequest: {
+      /** Quote Token */
+      quote_token?: string | null;
+      /** Max Credits */
+      max_credits?: number | null;
       /** Identity Id */
       identity_id: string;
       /** Avatar Id */
@@ -11571,6 +12037,10 @@ export interface components {
     };
     /** PaidRegenerationRequest */
     PaidRegenerationRequest: {
+      /** Quote Token */
+      quote_token?: string | null;
+      /** Max Credits */
+      max_credits?: number | null;
       /** Idempotency Key */
       idempotency_key: string;
       /** Estimated Cost Snapshot */
@@ -12245,6 +12715,24 @@ export interface components {
       /** Updated At */
       updated_at: string;
     };
+    /** PublishStatsToggleRequest */
+    PublishStatsToggleRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Enabled
+       * @default false
+       */
+      enabled: boolean;
+    };
     /** PublishSummaryResponse */
     PublishSummaryResponse: {
       /** Published Total */
@@ -12382,6 +12870,10 @@ export interface components {
        * @default true
        */
       is_active: boolean;
+      /** Available From */
+      available_from?: string | null;
+      /** Available To */
+      available_to?: string | null;
       /** Expected Version */
       expected_version: number;
     };
@@ -12406,6 +12898,10 @@ export interface components {
       sort_order: number;
       /** Is Active */
       is_active: boolean;
+      /** Available From */
+      available_from?: string | null;
+      /** Available To */
+      available_to?: string | null;
       /** Version */
       version: number;
       /** Created At */
@@ -12448,6 +12944,10 @@ export interface components {
        * @default true
        */
       is_active: boolean;
+      /** Available From */
+      available_from?: string | null;
+      /** Available To */
+      available_to?: string | null;
     };
     /** ReconcileGenerationTaskRequest */
     ReconcileGenerationTaskRequest: {
@@ -12500,6 +13000,37 @@ export interface components {
     RefreshRequest: {
       /** Videoids */
       videoIds: string[];
+    };
+    /**
+     * RefundExecutionRequest
+     * @description 登记退付执行：channel + 第三方退款单号必填，note 可选。
+     */
+    RefundExecutionRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Channel
+       * @default
+       */
+      channel: string;
+      /**
+       * Provider Ref
+       * @default
+       */
+      provider_ref: string;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
     };
     /**
      * RegistrationBonusSettingsSnapshot
@@ -13702,6 +14233,62 @@ export interface components {
       /** Is Super Admin */
       is_super_admin?: boolean | null;
     };
+    /** TicketCreateRequest */
+    TicketCreateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Target User Id
+       * @default
+       */
+      target_user_id: string;
+      /**
+       * Category
+       * @default other
+       */
+      category: string;
+      /**
+       * Summary
+       * @default
+       */
+      summary: string;
+    };
+    /** TicketUpdateRequest */
+    TicketUpdateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Status
+       * @default
+       */
+      status: string;
+      /**
+       * Handler User Id
+       * @default
+       */
+      handler_user_id: string;
+      /**
+       * Resolution
+       * @default
+       */
+      resolution: string;
+    };
     /** UpdateCustomerProfileRequest */
     UpdateCustomerProfileRequest: {
       /** Display Name */
@@ -13942,7 +14529,14 @@ export interface components {
        * Action
        * @enum {string}
        */
-      action: "feature" | "unfeature" | "delete" | "prepare" | "hide" | "block";
+      action:
+        | "feature"
+        | "unfeature"
+        | "delete"
+        | "prepare"
+        | "hide"
+        | "block"
+        | "push";
       /** Expected Cost Snapshot */
       expected_cost_snapshot?: string | null;
       /** Items */
@@ -14477,6 +15071,8 @@ export interface components {
       quality_exclude_words?: string[];
       /** Monthly Budget Fen */
       monthly_budget_fen?: number | null;
+      /** Homepage Capacity */
+      homepage_capacity?: number | null;
       /**
        * Month Spend Fen
        * @default 0
@@ -14559,6 +15155,8 @@ export interface components {
       quality_exclude_words?: string[] | null;
       /** Monthly Budget Fen */
       monthly_budget_fen?: number | null;
+      /** Homepage Capacity */
+      homepage_capacity?: number | null;
     };
     /** ViralSearchBilling */
     ViralSearchBilling: {
@@ -15770,6 +16368,40 @@ export interface operations {
       };
     };
   };
+  read_batch_regeneration_quote_api_generation_batches__batch_id__regeneration_quote_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        batch_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GenerationPriceQuote"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   regenerate_batch_api_generation_batches__batch_id__regenerate_post: {
     parameters: {
       query?: never;
@@ -15964,6 +16596,40 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["TaskResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_task_regeneration_quote_api_generation_tasks__task_id__regeneration_quote_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GenerationPriceQuote"];
         };
       };
       /** @description Validation Error */
@@ -17675,7 +18341,10 @@ export interface operations {
   read_oral_price_api_oral_price_get: {
     parameters: {
       query?: never;
-      header?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
       path?: never;
       cookie?: never;
     };
@@ -17690,6 +18359,15 @@ export interface operations {
           "application/json": {
             [key: string]: number;
           };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };
@@ -17717,7 +18395,7 @@ export interface operations {
         };
         content: {
           "application/json": {
-            [key: string]: number;
+            [key: string]: unknown;
           };
         };
       };
@@ -17922,6 +18600,39 @@ export interface operations {
         "application/json": components["schemas"]["CloneRenameRequest"];
       };
     };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  repair_avatar_compatibility_api_oral_avatars__avatar_id__compatibility_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        avatar_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
     responses: {
       /** @description Successful Response */
       200: {
@@ -20423,6 +21134,43 @@ export interface operations {
       };
     };
   };
+  create_source_refund_api_control_customers__user_id__source_refunds_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdjustmentRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_all_admin_adjustments_api_control_adjustments_get: {
     parameters: {
       query?: {
@@ -20691,6 +21439,74 @@ export interface operations {
       };
     };
   };
+  list_customer_lifecycle_api_control_customers_lifecycle_get: {
+    parameters: {
+      query?: {
+        stage?: string;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_customer_retention_api_control_customers_retention_get: {
+    parameters: {
+      query?: {
+        months?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   grant_customer_package_api_control_customers__user_id__package_grants_post: {
     parameters: {
       query?: never;
@@ -20903,6 +21719,529 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["CustomerAnnotationUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_refunds_api_control_refunds_get: {
+    parameters: {
+      query?: {
+        target_username?: string;
+        executed?: string;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  mark_refund_execution_api_control_refunds__adjustment_id__execution_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        adjustment_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RefundExecutionRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_live_announcements_api_announcements_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  mark_announcement_read_api_announcements__announcement_id__read_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        announcement_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_announcements_admin_api_control_announcements_get: {
+    parameters: {
+      query?: {
+        include_offline?: boolean;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_announcement_api_control_announcements_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AnnouncementCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_announcement_api_control_announcements__announcement_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        announcement_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_announcement_api_control_announcements__announcement_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        announcement_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AnnouncementUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_worker_observations_api_control_worker_observations_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
+  list_publish_stats_api_control_publish_stats_get: {
+    parameters: {
+      query?: {
+        username?: string;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  toggle_publish_stats_api_control_publish_stats_enabled_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PublishStatsToggleRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  sync_publish_stats_api_control_publish_stats__record_id__sync_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        record_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_support_tickets_api_control_support_tickets_get: {
+    parameters: {
+      query?: {
+        status?: string;
+        category?: string;
+        username?: string;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_support_ticket_api_control_support_tickets_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TicketCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_support_ticket_api_control_support_tickets__ticket_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        ticket_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TicketUpdateRequest"];
       };
     };
     responses: {

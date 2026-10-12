@@ -1,4 +1,10 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   type CreatedRechargeOrder,
@@ -55,32 +61,70 @@ export function CustomerRechargeDialog({
   const [packages, setPackages] = useState<CustomerRechargePackage[]>([]);
   const [packageError, setPackageError] = useState("");
   const [amountYuan, setAmountYuan] = useState("");
-  const [order, setOrder] = useState<CreatedRechargeOrder | null>(null);
-  const [paymentCode, setPaymentCode] = useState<CustomerPaymentCode | null>(
-    null,
-  );
+  // 订单与码只能作为同一个视图替换，避免异步响应跨订单拼接。
+  const [payment, setPayment] = useState<{
+    order: CreatedRechargeOrder;
+    code: CustomerPaymentCode | null;
+    credentialToken: string;
+  } | null>(null);
+  const order = payment?.order ?? null;
+  const paymentCode = payment?.code ?? null;
+  const generation = useRef(0);
+  const busy = useRef(false);
   const [paymentState, setPaymentState] = useState<
     "choosing" | "creating" | "waiting" | "paid"
   >("choosing");
   const [isQrLoaded, setIsQrLoaded] = useState(false);
   const [error, setError] = useState("");
 
-  const loadCredential = useCallback(async () => {
-    const token = await store.loadSessionToken();
-    if (token === null) {
-      onSessionExpired();
-      return null;
-    }
-    return { kind: "session" as const, token };
-  }, [store, onSessionExpired]);
+  const loadCredential = useCallback(
+    async (round = generation.current) => {
+      const token = await store.loadSessionToken();
+      if (round !== generation.current) return null;
+      if (token === null) {
+        onSessionExpired();
+        return null;
+      }
+      return { kind: "session" as const, token };
+    },
+    [store, onSessionExpired],
+  );
+
+  const closeDialog = useCallback(() => {
+    generation.current += 1;
+    busy.current = false;
+    onClose();
+  }, [onClose]);
+
+  const stillCurrent = useCallback(
+    async (round: number, token: string) => {
+      if (round !== generation.current) return false;
+      const currentToken = await store.loadSessionToken();
+      if (round !== generation.current) return false;
+      if (currentToken !== token) {
+        generation.current += 1;
+        busy.current = false;
+        setPayment(null);
+        setWallet(null);
+        setPackages([]);
+        setPaymentState("choosing");
+        setError("登录账号已变化，请关闭后重新打开充值窗口。");
+        return false;
+      }
+      return true;
+    },
+    [store],
+  );
 
   useEffect(() => {
+    const round = ++generation.current;
+    busy.current = false;
     if (!isOpen) {
       return;
     }
+    setWallet(null);
     setAmountYuan(suggestedAmountYuan ? String(suggestedAmountYuan) : "");
-    setOrder(null);
-    setPaymentCode(null);
+    setPayment(null);
     setPaymentState("choosing");
     setIsQrLoaded(false);
     setError("");
@@ -97,7 +141,7 @@ export function CustomerRechargeDialog({
           customerGetWallet(credential),
           customerListRechargePackages(credential),
         ]);
-        if (!active) {
+        if (!active || !(await stillCurrent(round, credential.token))) {
           return;
         }
         if (walletResult.status === "fulfilled") {
@@ -114,20 +158,25 @@ export function CustomerRechargeDialog({
         }
       })
       .catch((cause) => {
-        if (active) {
+        if (active && round === generation.current) {
           setError(visibleError(cause, "充值信息暂不可用，请稍后重试。"));
         }
       });
     return () => {
       active = false;
+      generation.current += 1;
+      busy.current = false;
     };
-  }, [isOpen, suggestedAmountYuan, loadCredential]);
+  }, [isOpen, suggestedAmountYuan, loadCredential, stillCurrent]);
 
   useEffect(() => {
-    if (!isOpen || paymentState !== "waiting" || order === null) {
+    if (!isOpen || paymentState !== "waiting" || payment === null) {
       return;
     }
+    const polledOrder = payment.order;
+    const paymentToken = payment.credentialToken;
     let active = true;
+    const round = generation.current;
     let timer: number | undefined;
     // P2#20：与本页钱包面板同一个节奏（2s 起、翻倍、封顶 32s、5 分钟窗口）。
     let attempts = 0;
@@ -136,17 +185,22 @@ export function CustomerRechargeDialog({
     async function pollOrder() {
       const nextDelay = orderPollDelay(attempts);
       attempts += 1;
-      const credential = await loadCredential();
-      if (!active || credential === null) {
-        return;
-      }
       try {
+        if (!active || !(await stillCurrent(round, paymentToken))) return;
+        const credential = { kind: "session" as const, token: paymentToken };
         const latest = await customerGetRechargeOrder(
           credential,
-          order?.order_no ?? "",
+          polledOrder.order_no,
         );
-        if (!active) {
+        if (!active || !(await stillCurrent(round, credential.token))) {
           return;
+        }
+        if (
+          latest.order_no !== polledOrder.order_no ||
+          latest.amount_fen !== polledOrder.amount_fen ||
+          latest.credits !== polledOrder.credits
+        ) {
+          throw new Error("支付结果与当前订单不一致，请稍后重试。");
         }
         if (latest.status === "PAID") {
           setPaymentState("paid");
@@ -154,6 +208,7 @@ export function CustomerRechargeDialog({
           return;
         }
         if (latest.status === "FAILED" || latest.status === "CLOSED") {
+          setPayment(null);
           setError("该充值订单已结束，请重新创建订单。");
           setPaymentState("choosing");
           return;
@@ -166,7 +221,7 @@ export function CustomerRechargeDialog({
           setError(POLL_WINDOW_EXHAUSTED_NOTICE);
         }
       } catch (cause) {
-        if (!active) {
+        if (!active || round !== generation.current) {
           return;
         }
         if (orderPollWithinWindow(startedAt)) {
@@ -187,7 +242,7 @@ export function CustomerRechargeDialog({
         window.clearTimeout(timer);
       }
     };
-  }, [isOpen, paymentState, order, loadCredential, onPaid]);
+  }, [isOpen, paymentState, payment, onPaid, stillCurrent]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -195,47 +250,55 @@ export function CustomerRechargeDialog({
     }
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        onClose();
+        closeDialog();
       }
     }
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [isOpen, onClose]);
+  }, [isOpen, closeDialog]);
 
   async function createOrder(input: { amountFen: number; packageId?: string }) {
-    if (paymentState === "creating") {
-      return;
-    }
-    const credential = await loadCredential();
-    if (credential === null) {
-      return;
-    }
+    // 在读凭据前加锁，连续点击不能同时进入两个创建请求。
+    if (busy.current || !isOpen) return;
+    busy.current = true;
+    const round = ++generation.current;
+    setPayment(null);
     setPaymentState("creating");
     setError("");
     setIsQrLoaded(false);
     try {
+      const credential = await loadCredential();
+      if (credential === null || round !== generation.current) return;
       const created = await customerCreateRechargeOrder(
         credential,
         input.amountFen,
-        {
-          idempotencyKey: crypto.randomUUID(),
-          packageId: input.packageId,
-        },
+        { idempotencyKey: crypto.randomUUID(), packageId: input.packageId },
       );
-      setOrder(created);
-      // The order is durable before the provider QR call.  Refresh the wallet
-      // immediately so a temporary provider failure cannot hide a PENDING
-      // order that still needs payment, retry, or closure.
+      if (!(await stillCurrent(round, credential.token))) return;
+      setPayment({
+        order: created,
+        code: null,
+        credentialToken: credential.token,
+      });
+      // 订单已持久化；取码失败仍保留同一订单，供用户查询或重试。
       onOrderCreated();
       const code = await customerCreateRechargePaymentCode(
         credential,
         created.order_no,
       );
-      setPaymentCode(code);
+      if (!(await stillCurrent(round, credential.token))) return;
+      assertPaymentMatches(created, code);
+      setPayment({ order: created, code, credentialToken: credential.token });
       setPaymentState("waiting");
     } catch (cause) {
+      if (round !== generation.current) return;
       setError(visibleError(cause, "支付二维码暂时无法生成，请稍后重试。"));
       setPaymentState("choosing");
+    } finally {
+      if (round === generation.current) {
+        busy.current = false;
+        setPaymentState((state) => (state === "creating" ? "choosing" : state));
+      }
     }
   }
 
@@ -262,26 +325,39 @@ export function CustomerRechargeDialog({
   }
 
   async function retryPaymentCode() {
-    if (order === null) {
-      return;
-    }
-    const credential = await loadCredential();
-    if (credential === null) {
-      return;
-    }
+    if (payment === null || busy.current || !isOpen) return;
+    busy.current = true;
+    const round = ++generation.current;
+    const currentOrder = payment.order;
+    const paymentToken = payment.credentialToken;
+    setPayment({
+      order: currentOrder,
+      code: null,
+      credentialToken: paymentToken,
+    });
     setPaymentState("creating");
     setError("");
+    setIsQrLoaded(false);
     try {
+      if (!(await stillCurrent(round, paymentToken))) return;
+      const credential = { kind: "session" as const, token: paymentToken };
       const code = await customerCreateRechargePaymentCode(
         credential,
-        order.order_no,
+        currentOrder.order_no,
       );
-      setPaymentCode(code);
-      setIsQrLoaded(false);
+      if (!(await stillCurrent(round, credential.token))) return;
+      assertPaymentMatches(currentOrder, code);
+      setPayment({ order: currentOrder, code, credentialToken: paymentToken });
       setPaymentState("waiting");
     } catch (cause) {
+      if (round !== generation.current) return;
       setError(visibleError(cause, "支付二维码暂时无法生成，请稍后重试。"));
       setPaymentState("choosing");
+    } finally {
+      if (round === generation.current) {
+        busy.current = false;
+        setPaymentState((state) => (state === "creating" ? "choosing" : state));
+      }
     }
   }
 
@@ -314,7 +390,7 @@ export function CustomerRechargeDialog({
           <button
             aria-label="关闭充值窗口"
             className="secondary-button"
-            onClick={onClose}
+            onClick={closeDialog}
             type="button"
           >
             关闭
@@ -325,7 +401,7 @@ export function CustomerRechargeDialog({
           <div className="recharge-dialog__success" role="status">
             <strong>充值成功</strong>
             <p>积分已经到账，可以继续创建视频。</p>
-            <button onClick={onClose} type="button">
+            <button onClick={closeDialog} type="button">
               完成
             </button>
           </div>
@@ -334,6 +410,7 @@ export function CustomerRechargeDialog({
             <div className="recharge-dialog__qr">
               {!isQrLoaded ? <span>二维码加载中…</span> : null}
               <img
+                key={`${order.order_no}:${paymentCode.qr_image_url}`}
                 alt="充值支付二维码"
                 onError={() => {
                   setIsQrLoaded(false);
@@ -497,6 +574,7 @@ export function CustomerRechargeDialog({
             {order && !paymentCode ? (
               <button
                 className="secondary-button"
+                disabled={paymentState === "creating"}
                 onClick={() => void retryPaymentCode()}
                 type="button"
               >
@@ -506,6 +584,16 @@ export function CustomerRechargeDialog({
           </div>
         )}
 
+        {error && paymentCode ? (
+          <button
+            className="secondary-button"
+            disabled={paymentState === "creating"}
+            onClick={() => void retryPaymentCode()}
+            type="button"
+          >
+            重新获取本订单二维码
+          </button>
+        ) : null}
         {error ? (
           <p className="settings-error" role="alert">
             {error}
@@ -529,4 +617,17 @@ function visibleError(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message.trim()
     ? cause.message
     : fallback;
+}
+
+function assertPaymentMatches(
+  order: CreatedRechargeOrder,
+  code: CustomerPaymentCode,
+) {
+  if (
+    code.order_no !== order.order_no ||
+    code.amount_fen !== order.amount_fen ||
+    code.credits !== order.credits
+  ) {
+    throw new Error("支付二维码与当前订单不一致，请重新获取本订单二维码。");
+  }
 }

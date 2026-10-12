@@ -1,6 +1,12 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { apiBaseUrl, resolveManagedMediaUrl } from "./apiBase";
+import {
+  characterOperationDigest,
+  finishCharacterOperation,
+  openCharacterOperation,
+  saveCharacterOperation,
+} from "./characterTaskOperation";
 import { attachCustomerTaskReferences } from "./customerTaskReferences";
 import type { components } from "./generated/api";
 
@@ -189,6 +195,8 @@ export type GenerationBatchInput = Omit<
   prompt_text?: string;
   prompt_context?: PromptContext;
   ratio?: GenerationRatio;
+  quote_token?: string;
+  max_credits?: number;
 };
 export type GenerationRuntimeLimits =
   components["schemas"]["GenerationRuntimeLimits"];
@@ -201,6 +209,9 @@ export type GenerationRatio =
   | "3:4"
   | "9:16";
 export type GenerationPriceQuote = {
+  quote_token: string;
+  quote_expires_at: number;
+  max_credits: number;
   resolution: "768P" | "2K";
   duration_seconds: number;
   quantity: number;
@@ -251,7 +262,10 @@ export type GenerationReconcileOperation = {
   completed_at: string | null;
 };
 export type PaidRegenerationInput =
-  components["schemas"]["PaidRegenerationRequest"];
+  components["schemas"]["PaidRegenerationRequest"] & {
+    quote_token?: string;
+    max_credits?: number;
+  };
 export type GenerationBatchListItem = Omit<
   components["schemas"]["GenerationBatchListItem"],
   "tasks"
@@ -997,6 +1011,9 @@ export async function getLatestScriptFromAudioTask(
 }
 
 export type OralPrice = {
+  quote_token?: string;
+  quote_expires_at?: number;
+  max_credits?: number;
   budget_seconds?: number;
   estimated_credits?: number;
   unit_price_fen: number;
@@ -1316,6 +1333,8 @@ export type OralTaskRequest = {
   audioAssetId?: string;
   subtitle?: Record<string, unknown>;
   idempotencyKey: string;
+  quoteToken?: string;
+  maxCredits?: number;
 };
 
 export type OralTaskCreated = {
@@ -1345,6 +1364,8 @@ export async function createOralTask(
         audio_asset_id: input.audioAssetId ?? null,
         subtitle: input.subtitle ?? null,
         idempotency_key: input.idempotencyKey,
+        quote_token: input.quoteToken,
+        max_credits: input.maxCredits,
       }),
     },
   );
@@ -2100,6 +2121,8 @@ export type IndependentVideoTaskInput = {
   ratio: GenerationRatio;
   quantity: number;
   idempotency_key: string;
+  quote_token?: string;
+  max_credits?: number;
   provider?: "fake_h3" | "metaso";
 };
 
@@ -2156,6 +2179,17 @@ export async function getGenerationBatch(
   return requestApiJson<GenerationBatch>(
     `/api/generation-batches/${encodeURIComponent(batchId)}`,
     "任务批次暂不可用",
+  );
+}
+
+export async function getRegenerationQuote(
+  kind: "batch" | "task",
+  sourceId: string,
+): Promise<GenerationPriceQuote> {
+  const resource = kind === "batch" ? "generation-batches" : "generation-tasks";
+  return requestGenerationJson<GenerationPriceQuote>(
+    `/api/${resource}/${encodeURIComponent(sourceId)}/regeneration-quote`,
+    "读取重新生成报价失败",
   );
 }
 
@@ -3725,6 +3759,72 @@ type FirstFrameTaskWaiter = {
 };
 
 const firstFrameTaskWaiters = new Map<string, FirstFrameTaskWaiter>();
+export class CharacterSheetTaskError extends Error {
+  readonly taskId: string | null;
+  readonly status: DurableImageTaskStatus | "UNKNOWN";
+  readonly recoveryRequired: boolean;
+
+  constructor(
+    message: string,
+    taskId: string | null,
+    status: DurableImageTaskStatus | "UNKNOWN",
+  ) {
+    super(message);
+    this.name = "CharacterSheetTaskError";
+    this.taskId = taskId;
+    this.status = status;
+    this.recoveryRequired = status !== "FAILED";
+  }
+}
+
+async function runCharacterOperation(
+  parameters: unknown,
+  submit: (key: string) => Promise<CharacterSheetTask>,
+  onTask?: (task: CharacterSheetTask) => void,
+): Promise<CharacterSheetTask> {
+  const epoch = workspaceCredentialEpoch;
+  const owner = await getCurrentUser();
+  const operation = await openCharacterOperation(
+    `${apiBaseUrl()}/${owner.id}`,
+    parameters,
+  );
+  if (epoch !== workspaceCredentialEpoch)
+    throw new Error("登录状态已变化，请重新读取人物任务。");
+  try {
+    if (!operation.taskId) {
+      const task = await submit(operation.key);
+      operation.taskId = task.id;
+      saveCharacterOperation(operation);
+      onTask?.(task);
+    }
+    const completed = await waitForCharacterSheetTask(operation.taskId, onTask);
+    if (epoch !== workspaceCredentialEpoch)
+      throw new Error("登录状态已变化，请重新读取人物任务。");
+    finishCharacterOperation(operation);
+    return completed;
+  } catch (cause) {
+    if (cause instanceof CharacterSheetTaskError) {
+      if (cause.status === "FAILED") finishCharacterOperation(operation);
+      throw cause;
+    }
+    throw new CharacterSheetTaskError(
+      `${cause instanceof Error ? cause.message : "读取人物任务失败。"} 请核对上次任务状态，不要另行重复生成。`,
+      operation.taskId ?? null,
+      "UNKNOWN",
+    );
+  }
+}
+
+async function characterSourceDigest(file: File): Promise<string> {
+  const content = await new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(new Error("读取授权图片失败，请重新选择。"));
+    reader.readAsArrayBuffer(file);
+  });
+  return characterOperationDigest(content);
+}
+
 export async function uploadSimpleCharacter(
   projectId: string | null,
   file: File,
@@ -3743,16 +3843,27 @@ export async function uploadSimpleCharacter(
   if (personaName.trim()) {
     form.append("persona_name", personaName.trim());
   }
-  form.append("idempotency_key", createRequestKey("character-sheet"));
   const endpoint = projectId
     ? `/api/simple-characters/tasks/${encodeURIComponent(projectId)}/generate`
     : "/api/simple-characters/tasks/generate";
-  const task = await requestApiJson<CharacterSheetTask>(
-    endpoint,
-    "一键创建人物失败",
-    { method: "POST", body: form },
+  const completed = await runCharacterOperation(
+    [
+      "CREATE",
+      projectId,
+      displayName.trim(),
+      personaName.trim(),
+      imageConsentVersion,
+      file.type,
+      await characterSourceDigest(file),
+    ],
+    (key) => {
+      form.set("idempotency_key", key);
+      return requestApiJson<CharacterSheetTask>(endpoint, "一键创建人物失败", {
+        method: "POST",
+        body: form,
+      });
+    },
   );
-  const completed = await waitForCharacterSheetTask(task.id);
   if (!completed.result || !("persona_id" in completed.result)) {
     throw new Error("人物生成任务完成但结果不可用，请重新读取人物库。");
   }
@@ -3852,13 +3963,17 @@ export async function regenerateContactSheet(
   identityId: string,
 ): Promise<SimpleCharacterRegenerationResult> {
   const form = new FormData();
-  form.append("idempotency_key", createRequestKey("character-regenerate"));
-  const task = await requestApiJson<CharacterSheetTask>(
-    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/regenerate-contact-sheet-task`,
-    "重新生成五视图失败",
-    { method: "POST", body: form },
+  const completed = await runCharacterOperation(
+    ["REGENERATE", identityId],
+    (key) => {
+      form.set("idempotency_key", key);
+      return requestApiJson<CharacterSheetTask>(
+        `/api/simple-characters/identities/${encodeURIComponent(identityId)}/regenerate-contact-sheet-task`,
+        "重新生成五视图失败",
+        { method: "POST", body: form },
+      );
+    },
   );
-  const completed = await waitForCharacterSheetTask(task.id);
   if (!completed.result || !("previous_version_id" in completed.result)) {
     throw new Error("人物重新生成任务完成但结果不可用，请重新读取人物库。");
   }
@@ -3943,11 +4058,22 @@ async function pollCharacterSheetTask(
       return task;
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
-      throw new Error(task.error_message || "人物生成失败，请重新提交。");
+      throw new CharacterSheetTaskError(
+        task.error_message ||
+          (task.status === "SUBMISSION_UNCERTAIN"
+            ? "人物生成结果待核对，请联系管理员。"
+            : "人物生成失败，请重新提交。"),
+        task.id,
+        task.status,
+      );
     }
     await waitForPoll(nextDelay());
   }
-  throw new Error("人物生成仍在后台进行，请稍后返回人物库查看。");
+  throw new CharacterSheetTaskError(
+    "人物生成仍在后台进行，请核对上次任务状态。",
+    taskId,
+    "UNKNOWN",
+  );
 }
 
 export async function listSimpleCharacterLibraryPage(
@@ -4027,19 +4153,28 @@ export async function createCharacterSceneLook(
   },
   onTask?: (task: CharacterSheetTask) => void,
 ): Promise<SimpleSceneLook> {
-  const task = await requestApiJson<CharacterSheetTask>(
-    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks/tasks/generate`,
-    "启动场景造型生成失败",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        ...input,
-        idempotency_key: createRequestKey("scene-look"),
-      }),
-    },
+  const completed = await runCharacterOperation(
+    [
+      "SCENE",
+      identityId,
+      input.scene_name.trim(),
+      input.scene_description.trim(),
+      input.costume_description.trim(),
+    ],
+    (key) =>
+      requestApiJson<CharacterSheetTask>(
+        `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks/tasks/generate`,
+        "启动场景造型生成失败",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...input,
+            idempotency_key: key,
+          }),
+        },
+      ),
+    onTask,
   );
-  onTask?.(task);
-  const completed = await waitForCharacterSheetTask(task.id, onTask);
   if (!completed.result || !("scene_name" in completed.result)) {
     throw new Error("场景造型任务完成但结果不可用，请重新读取人物库。");
   }
@@ -6305,6 +6440,16 @@ async function requestControl(
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+/** 多步账号操作不得在会话切换后继续使用新用户的登录态。 */
+export function captureWorkspaceCredentialContext(): () => void {
+  const epoch = workspaceCredentialEpoch;
+  const baseUrl = apiBaseUrl();
+  return () => {
+    if (epoch !== workspaceCredentialEpoch || baseUrl !== apiBaseUrl())
+      throw new Error("登录状态已变化，请重新核对账号。");
+  };
 }
 
 export async function publishBrowserRequest(

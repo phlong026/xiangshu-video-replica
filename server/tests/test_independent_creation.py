@@ -78,6 +78,7 @@ os.environ.setdefault(
 
 import psycopg
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pg_test_kit import (
@@ -97,6 +98,7 @@ from app.generation import (
     GenerationBatchListPage,
     acquire_generation_task_lease,
     cancel_generation_batch,
+    generation_price_quote,
     get_generation_batch,
     list_generation_batches,
     refresh_batch_status,
@@ -285,6 +287,7 @@ def scene(independent_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
     """Point the app PG pool at the independent database and seed one clean scene."""
     close_pg_pool()
     monkeypatch.setenv(DATABASE_URL_ENV, independent_dsn)
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     _seed_scene(independent_dsn)
     yield independent_dsn
@@ -300,6 +303,18 @@ def scene(independent_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
 def _create(request: IndependentVideoRequest, actor: CurrentUser) -> BatchResult:
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
+        # 业务夹具取得真实报价；显式报价字段保持原样，避免掩盖合同反例。
+        if not {"quote_token", "max_credits"}.intersection(request.model_fields_set):
+            quote = generation_price_quote(
+                conn,
+                user_id=actor.id,
+                resolution=request.resolution,
+                duration_seconds=request.output_duration_seconds,
+                quantity=request.quantity,
+            )
+            request = request.model_copy(
+                update={"quote_token": quote.quote_token, "max_credits": quote.max_credits}
+            )
         return create_independent_batch(conn, actor=actor, request=request)
 
 
@@ -1284,6 +1299,16 @@ def test_video_task_route_creates_batch_through_fenced_write_on_pg(scene: str) -
     """
     _override_business_db(EMPLOYEE_1)
     client = TestClient(app)
+    # 本例只替代写围栏解析的身份；报价仍在真实 PG 上按同一操作者生成。
+    with pg_transaction() as raw:
+        quote = generation_price_quote(
+            BusinessConnection.postgres(raw),
+            user_id=EMPLOYEE_1.id,
+            resolution="768P",
+            duration_seconds=10,
+            quantity=1,
+        )
+    assert quote.estimated_credits == 10
     payload = {
         "mode": "i2v",
         "prompt_text": "路由建批：黄昏庭院航拍",
@@ -1291,6 +1316,8 @@ def test_video_task_route_creates_batch_through_fenced_write_on_pg(scene: str) -
         "output_duration_seconds": 10,
         "quantity": 1,
         "idempotency_key": "route-i2v-1",
+        "quote_token": quote.quote_token,
+        "max_credits": quote.max_credits,
     }
     response = client.post("/api/independent/video-tasks", json=payload)
     assert response.status_code == 201

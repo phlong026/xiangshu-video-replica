@@ -2,9 +2,9 @@
 
 退款链路的两段事实：
 
-- **账本侧**（已有，不重复建设）：``POST /api/customers/{id}/adjustments``
-  以 ``source_document_type='REFUND_APPROVAL'`` 反向调账冲减积分，上限为
-  客户当前可用余额（D2 拍板：只退未消耗部分），不建充值单（D4）。
+- **账本侧**（已有，不重复建设）：``POST /api/control/customers/{id}/source-refunds``
+  以 ``source_document_type='REFUND_APPROVAL'`` 反向调账冲减积分，仅使用可核对原充值的
+  尚未消费、尚未预留余额；来源不明转人工，不建新充值单。
 - **资金侧**（本模块）：ZPay 后台人工退付后，运营回到管理端登记退付执行
   结果——渠道、第三方退款单号、经办人。一笔调账至多登记一次；审计写
   ``refund.execution.mark`` 并入高敏事件清单。
@@ -51,6 +51,42 @@ _UNAVAILABLE_CODE = "REFUND_SERVICE_UNAVAILABLE"
 _UNAVAILABLE_MESSAGE = "退款管理需要 PostgreSQL 运行时。"
 
 
+# 列表、计数和登记必须使用同一个负向事实，来源单标签本身不能证明发生过冲减。
+REFUND_FACT_JOIN = """
+JOIN wallet_transactions tx
+  ON tx.id = 'admin_adjustment:refund:' || aa.id
+ AND tx.user_id = aa.target_user_id
+ AND tx.type = 'REFUND' AND tx.available_delta < 0 AND tx.reserved_delta = 0
+ AND aa.recharge_order_id IS NULL
+"""
+
+
+# 只认新退款同事务追加的来源证据；历史记录保持可见，但不能自动获得可退付资格。
+REFUND_SOURCE_EVIDENCE = """EXISTS (
+ SELECT 1 FROM admin_refund_allocations proof
+ JOIN billing_credit_lots source_lot ON source_lot.id=proof.credit_lot_id
+ JOIN wallet_transactions source_charge ON source_charge.id=source_lot.id
+ JOIN recharge_orders source_order ON source_order.id=proof.original_recharge_order_id
+ WHERE proof.adjustment_id=aa.id AND proof.refund_transaction_id=tx.id
+   AND proof.credits=-tx.available_delta
+   AND source_charge.recharge_order_id=source_order.id
+   AND source_charge.type='CHARGE' AND source_charge.reserved_delta=0
+   AND source_charge.user_id=aa.target_user_id AND source_lot.user_id=aa.target_user_id
+   AND source_order.user_id=aa.target_user_id AND source_order.status='PAID'
+   AND source_order.package_id IS NULL AND source_order.package_snapshot_json IS NULL
+   AND source_order.amount_fen>0 AND source_order.paid_at IS NOT NULL
+   AND ((source_order.provider='zpay' AND length(trim(source_order.provider_trade_no))>0)
+     OR (source_order.provider='wechat_native' AND length(trim(source_order.transaction_id))>0))
+   AND proof.source_credits=source_order.credits
+   AND proof.source_credits=source_charge.available_delta
+   AND proof.source_credits=source_lot.credits
+   AND proof.source_amount_fen=source_order.amount_fen
+   AND proof.source_amount_fen=source_lot.amount_fen
+   AND proof.lot_remaining_before-proof.lot_remaining_after=proof.credits
+   AND aa.balance_before-aa.balance_after=proof.credits
+)"""
+
+
 class RefundExecutionRequest(AdminWriteRequest):
     """登记退付执行：channel + 第三方退款单号必填，note 可选。"""
 
@@ -93,14 +129,17 @@ def list_refunds(
                        aa.created_at, admin_user.username,
                        COALESCE(tx.available_delta, 0),
                        re.channel, re.provider_ref, re.executed_by_user_id,
-                       re.executed_at, executor.username, re.note
+                       re.executed_at, executor.username, re.note,
+                       {REFUND_SOURCE_EVIDENCE}, original_order.merchant_order_no
                 FROM admin_adjustments aa
                 JOIN users target_user ON target_user.id = aa.target_user_id
                 JOIN users admin_user ON admin_user.id = aa.admin_user_id
-                LEFT JOIN wallet_transactions tx
-                  ON tx.id = 'admin_adjustment:refund:' || aa.id AND tx.type = 'REFUND'
+                {REFUND_FACT_JOIN}
                 LEFT JOIN refund_executions re ON re.adjustment_id = aa.id
                 LEFT JOIN users executor ON executor.id = re.executed_by_user_id
+                LEFT JOIN admin_refund_allocations allocation ON allocation.adjustment_id=aa.id
+                LEFT JOIN recharge_orders original_order
+                  ON original_order.id=allocation.original_recharge_order_id
                 {where}
                 ORDER BY aa.created_at DESC, aa.id DESC
                 LIMIT %s OFFSET %s
@@ -111,6 +150,7 @@ def list_refunds(
                 f"""
                 SELECT COUNT(*) FROM admin_adjustments aa
                 JOIN users target_user ON target_user.id = aa.target_user_id
+                {REFUND_FACT_JOIN}
                 LEFT JOIN refund_executions re ON re.adjustment_id = aa.id
                 {where}
                 """,  # noqa: S608
@@ -138,6 +178,8 @@ def list_refunds(
                 "executed_at": "" if row[12] is None else str(row[12]),
                 "executed_by": str(row[13] or ""),
                 "note": str(row[14] or ""),
+                "source_verified": bool(row[15]),
+                "original_recharge_order_no": str(row[16] or "") if row[15] else "",
             }
             for row in rows
         ],
@@ -159,7 +201,8 @@ def mark_refund_execution(
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         row = conn.execute(
-            "SELECT id, target_user_id, source_document_type FROM admin_adjustments WHERE id = %s",
+            "SELECT id, target_user_id, source_document_type FROM admin_adjustments "
+            "WHERE id = %s FOR UPDATE",
             (adjustment_id,),
         ).fetchone()
         if row is None:
@@ -172,6 +215,18 @@ def mark_refund_execution(
             )
         if (
             conn.execute(
+                f"SELECT 1 FROM admin_adjustments aa {REFUND_FACT_JOIN} WHERE aa.id=%s",
+                (adjustment_id,),
+            ).fetchone()
+            is None
+        ):
+            raise _http(
+                422,
+                "REFUND_NEGATIVE_LEDGER_REQUIRED",
+                "该调账没有对应的负向退款流水，不能登记退付执行。",
+            )
+        if (
+            conn.execute(
                 "SELECT 1 FROM refund_executions WHERE adjustment_id = %s",
                 (adjustment_id,),
             ).fetchone()
@@ -181,6 +236,19 @@ def mark_refund_execution(
                 409,
                 "REFUND_EXECUTION_ALREADY_MARKED",
                 "该笔退款已登记过退付执行；如需更正请走调账更正流程。",
+            )
+        if (
+            conn.execute(
+                f"SELECT 1 FROM admin_adjustments aa {REFUND_FACT_JOIN} "
+                f"WHERE aa.id=%s AND {REFUND_SOURCE_EVIDENCE}",
+                (adjustment_id,),
+            ).fetchone()
+            is None
+        ):
+            raise _http(
+                422,
+                "REFUND_SOURCE_REVIEW_REQUIRED",
+                "该笔历史退款缺少有效原充值来源证据，不能新登记退付执行，请转人工核对。",
             )
         channel = body.channel.strip()
         if channel not in REFUND_CHANNELS:

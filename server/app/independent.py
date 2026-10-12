@@ -72,6 +72,9 @@ _MAX_REFERENCE_TOTAL = 12
 class IndependentVideoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    quote_token: str | None = Field(default=None, min_length=1, max_length=8192)
+    max_credits: int | None = Field(default=None, ge=0, le=2_147_483_647)
+
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
     mode: IndependentMode
     prompt_text: str = Field(min_length=1, max_length=7000)
@@ -114,7 +117,9 @@ def read_independent_capabilities(conn: BusinessConnection) -> IndependentCapabi
 
 
 def _independent_request_hash(request: IndependentVideoRequest) -> str:
-    payload = request.model_dump(mode="json", exclude={"idempotency_key"})
+    payload = request.model_dump(
+        mode="json", exclude={"idempotency_key", "quote_token", "max_credits"}
+    )
     return content_hash(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
 
@@ -474,6 +479,18 @@ def create_independent_batch(
                 )
             return get_generation_batch(conn, batch_id=str(concurrent_existing["id"]), actor=actor)
 
+        from app.quote_contracts import validate_quote
+
+        pricing_snapshot = validate_quote(
+            conn,
+            user_id=actor.id,
+            service="video_2k" if request.resolution == "2K" else "video_768p",
+            units=request.output_duration_seconds,
+            quantity=request.quantity,
+            quote_token=request.quote_token,
+            max_credits=request.max_credits,
+        )
+
         batch_id = str(uuid4())
         request_snapshot = {
             "schema_version": "independent.v1",
@@ -569,6 +586,7 @@ def create_independent_batch(
                 user_id=actor.id,
                 task_id=task_id,
                 seconds=request.output_duration_seconds,
+                pricing_snapshot=pricing_snapshot,
             )
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()

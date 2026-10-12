@@ -103,6 +103,18 @@ const {
   requestPublishAccountVerify: vi.fn(),
 }));
 
+const { publishBrowserRequest, nativeInvoke, nativeIsTauri } = vi.hoisted(
+  () => ({
+    publishBrowserRequest: vi.fn(),
+    nativeInvoke: vi.fn(),
+    nativeIsTauri: vi.fn(() => false),
+  }),
+);
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: nativeInvoke,
+  isTauri: nativeIsTauri,
+}));
+
 vi.mock("./context", () => ({ useStudio }));
 vi.mock("./viralCache", () => ({
   cacheAvailable: vi.fn(() => false),
@@ -116,6 +128,7 @@ vi.mock("../api", async (importOriginal) => ({
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
   getPublishSummary,
+  publishBrowserRequest,
 }));
 vi.mock("./live", () => ({
   loadTaskPreview,
@@ -1938,7 +1951,7 @@ describe("V1.4 工作台上传与创作入口", () => {
 
     expect(
       screen.getByText(
-        /支持抖音、小红书的视频链接；其他平台请上传\s+MP4\/MOV\s+文件；视频复刻支持\s+4-15\s+秒、50\s+MB\s+以内的视频，更长的视频会自动提取音轨用于提取文案\s*（桌面端，原视频不上传）。/,
+        /支持抖音、小红书的视频链接；其他平台请上传\s+MP4\/MOV\s+文件；视频复刻支持\s+4-15\s+秒、200\s+MB\s+以内的视频，更长的视频会自动提取音轨用于提取文案\s*（桌面端，原视频不上传）。/,
       ),
     ).toBeInTheDocument();
   });
@@ -2583,6 +2596,32 @@ describe("发布账号官方扫码", () => {
     });
     getStudioNotificationPreferences.mockResolvedValue({ enabled: true });
     nativeAccounts.canUseLocalPublishAccounts.mockReturnValue(true);
+    nativeIsTauri.mockImplementation(() =>
+      nativeAccounts.canUseLocalPublishAccounts(),
+    );
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows");
+    // 新解绑编排使用模块内部函数，替身下沉到网络/原生命令边界，保留真实编排。
+    nativeInvoke.mockImplementation(async (command, args) => {
+      if (command === "remove_local_publish_account")
+        return nativeAccounts.removeLocalPublishAccount(
+          args.owner,
+          args.accountId,
+        );
+      if (command === "list_local_publish_accounts")
+        return nativeAccounts.listLocalPublishAccounts(args.owner);
+      throw new Error(`未预期的原生命令：${command}`);
+    });
+    publishBrowserRequest.mockImplementation(async (path, init) => {
+      if (init?.method === "DELETE") {
+        await nativeAccounts.deleteCloudPublishAccount(
+          decodeURIComponent(path.split("/").at(-1)),
+        );
+        return Response.json({ deleted: true });
+      }
+      if (path === "/api/studio/publish/browser/accounts")
+        return Response.json(await nativeAccounts.listCloudPublishAccounts());
+      throw new Error(`未预期的发布请求：${path}`);
+    });
     nativeAccounts.listLocalPublishAccounts.mockResolvedValue([]);
     nativeAccounts.listCloudPublishAccounts.mockResolvedValue([]);
     nativeAccounts.importCloudPublishAccount.mockResolvedValue({
@@ -2602,6 +2641,9 @@ describe("发布账号官方扫码", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+    nativeIsTauri.mockReturnValue(false);
+    nativeInvoke.mockReset();
+    publishBrowserRequest.mockReset();
   });
   it("自动检测暂停后打开官方窗口会恢复当前会话检测", async () => {
     vi.useFakeTimers();
@@ -2763,30 +2805,62 @@ describe("发布账号官方扫码", () => {
     );
     expect(screen.queryByText("服务端暂不可用")).toBeNull();
   });
-  it("解绑本机账号时同时删除服务端副本", async () => {
-    nativeAccounts.listLocalPublishAccounts.mockResolvedValue([account]);
-    nativeAccounts.listCloudPublishAccounts.mockResolvedValue([
-      {
-        ...account,
-        id: "cloud-9",
-        status: "connected",
-        error_message: null,
-        source: "desktop",
-      },
-    ]);
-    nativeAccounts.removeLocalPublishAccount.mockResolvedValue(undefined);
-    open();
+  it("解绑先删除并复查服务端副本，再清理确认的本机账号", async () => {
+    const cloud = {
+      ...account,
+      id: "cloud-9",
+      status: "connected",
+      error_message: null,
+      source: "desktop",
+    };
+    let cloudPresent = true;
+    let localPresent = true;
+    let cloudAbsenceConfirmed = false;
+    nativeAccounts.listLocalPublishAccounts.mockImplementation(async () =>
+      localPresent ? [account] : [],
+    );
+    nativeAccounts.listCloudPublishAccounts.mockImplementation(async () => {
+      if (!cloudPresent) cloudAbsenceConfirmed = true;
+      return cloudPresent ? [cloud] : [];
+    });
+    nativeAccounts.deleteCloudPublishAccount.mockImplementation(async () => {
+      expect(nativeAccounts.removeLocalPublishAccount).not.toHaveBeenCalled();
+      cloudPresent = false;
+    });
+    nativeAccounts.removeLocalPublishAccount.mockImplementation(async () => {
+      expect(cloudAbsenceConfirmed).toBe(true);
+      localPresent = false;
+    });
+    const { value } = open();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "小红书" })).toBeEnabled(),
     );
     fireEvent.click(screen.getByRole("button", { name: "小红书" }));
     await screen.findByText(/已同步服务端，可自动发布/);
     fireEvent.click(screen.getByRole("button", { name: "解绑" }));
+    expect(nativeAccounts.deleteCloudPublishAccount).not.toHaveBeenCalled();
+    expect(nativeAccounts.removeLocalPublishAccount).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "确认解绑" }));
     await waitFor(() =>
-      expect(nativeAccounts.deleteCloudPublishAccount).toHaveBeenCalledWith(
-        "cloud-9",
+      expect(nativeAccounts.removeLocalPublishAccount).toHaveBeenCalledWith(
+        value.user.id,
+        account.id,
       ),
+    );
+    expect(
+      nativeAccounts.deleteCloudPublishAccount,
+    ).toHaveBeenCalledExactlyOnceWith("cloud-9");
+    expect(cloudAbsenceConfirmed).toBe(true);
+    expect(
+      nativeAccounts.deleteCloudPublishAccount.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      nativeAccounts.removeLocalPublishAccount.mock.invocationCallOrder[0],
+    );
+    expect(value.notify).toHaveBeenCalledWith(
+      "已确认清除该账号的本机与云端登录状态。在途发布仍需核对发布记录。",
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("小红书 · 平台真实昵称")).toBeNull(),
     );
   });
   it("只从本机加载账号并显示官方用户名，不提供 Cookie 输入框", async () => {
@@ -2852,7 +2926,7 @@ describe("发布账号官方扫码", () => {
       ),
     );
   });
-  it("解绑必须指向确认的本机账号，失败保留记录并显示错误", async () => {
+  it("解绑必须指向确认的本机账号，本机失败保留记录及同目标重试", async () => {
     nativeAccounts.listLocalPublishAccounts.mockResolvedValue([account]);
     nativeAccounts.removeLocalPublishAccount.mockRejectedValue(
       new Error("请先关闭官方窗口"),
@@ -2866,12 +2940,32 @@ describe("发布账号官方扫码", () => {
     fireEvent.click(screen.getByRole("button", { name: "解绑" }));
     expect(nativeAccounts.removeLocalPublishAccount).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "确认解绑" }));
-    await screen.findByText("请先关闭官方窗口");
-    expect(nativeAccounts.removeLocalPublishAccount).toHaveBeenCalledWith(
-      value.user.id,
-      account.id,
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "云端已解绑，本机清理未完成，请重试。请先关闭官方窗口",
+        ),
+      ).toBeInTheDocument(),
     );
+    expect(
+      nativeAccounts.removeLocalPublishAccount,
+    ).toHaveBeenCalledExactlyOnceWith(value.user.id, account.id);
+    expect(nativeAccounts.deleteCloudPublishAccount).not.toHaveBeenCalled();
+    expect(value.notify).not.toHaveBeenCalled();
     expect(screen.getByText("小红书 · 平台真实昵称")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认解绑" })).toBeEnabled();
+
+    nativeAccounts.removeLocalPublishAccount.mockResolvedValue(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "确认解绑" }));
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "已确认清除该账号的本机与云端登录状态。在途发布仍需核对发布记录。",
+      ),
+    );
+    expect(nativeAccounts.removeLocalPublishAccount.mock.calls).toEqual([
+      [value.user.id, account.id],
+      [value.user.id, account.id],
+    ]);
   });
   it("网页端读取云端账号并允许扫码添加", async () => {
     nativeAccounts.canUseLocalPublishAccounts.mockReturnValue(false);

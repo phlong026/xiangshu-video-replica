@@ -3561,10 +3561,11 @@ def test_material_video_completion_persists_probed_duration(
         )
 
     def normalize(
-        content_bytes: bytes, *, target_width: int, target_height: int
+        content_bytes: bytes, *, target_width: int, target_height: int, max_bytes: int
     ) -> NormalizedGeneratedVideo:
         assert content_bytes == content
         assert (target_width, target_height) == (720, 1372)
+        assert max_bytes == materials.MAX_UPLOAD_BYTES
         return NormalizedGeneratedVideo(
             content=content,
             duration_seconds=12.066667,

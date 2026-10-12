@@ -733,6 +733,8 @@ def create_oral_task(
     subtitle: dict[str, Any] | None,
     idempotency_key: str,
     vendor: HiflyClient | None = None,
+    quote_token: str | None = None,
+    max_credits: int | None = None,
 ) -> OralTaskCreated:
     try:
         subtitle = validate_oral_subtitle(subtitle)
@@ -876,9 +878,23 @@ def create_oral_task(
         )
         _require_audio_purpose(audio_asset, "oral_audio", "口播音频")
 
-    price = oral_unit_price_fen(conn)
+    price = 0
     task_id = str(uuid4())
     with conn:
+        from app.billing_catalog import oral_budget_units
+        from app.quote_contracts import oral_quote_specification, validate_quote
+
+        pricing_snapshot = validate_quote(
+            conn,
+            user_id=actor.id,
+            service="oral",
+            units=oral_budget_units(conn, script_text=script_text, audio_asset_id=audio_asset_id),
+            quote_token=quote_token,
+            max_credits=max_credits,
+            specification=oral_quote_specification(
+                script_text=script_text, audio_asset_id=audio_asset_id
+            ),
+        )
         conn.execute(
             """
             INSERT INTO oral_tasks (
@@ -904,7 +920,9 @@ def create_oral_task(
                 request_hash,
             ),
         )
-        reserve_oral_billing(conn, user_id=actor.id, oral_task_id=task_id)
+        reserve_oral_billing(
+            conn, user_id=actor.id, oral_task_id=task_id, pricing_snapshot=pricing_snapshot
+        )
         accepted = conn.execute(
             "SELECT reserved_credits,pricing_snapshot_json FROM billing_operations WHERE "
             "source_id=%s AND service='oral'",
@@ -2330,12 +2348,17 @@ def list_oral_tasks(
     return [dict(row) for row in rows], int(total_row["total"] if total_row else 0)
 
 
-def oral_price_quote(conn: BusinessConnection) -> dict[str, int | float]:
+def oral_price_quote(
+    conn: BusinessConnection, *, user_id: str | None = None, snapshot: dict[str, Any] | None = None
+) -> dict[str, int | float]:
     from decimal import Decimal
 
     from app.billing_catalog import retail_snapshot
+    from app.usage_billing import resolve_wallet_owner
 
-    snapshot = retail_snapshot(conn, "oral", 1)
+    if snapshot is None:
+        owner_id = resolve_wallet_owner(conn, user_id) if user_id is not None else None
+        snapshot = retail_snapshot(conn, "oral", 1, user_id=owner_id)
     unit = (
         Decimal(str(snapshot["unit_credits"]))
         * Decimal(str(snapshot["discount_basis_points"]))

@@ -70,6 +70,7 @@ import {
   type LocalPublishAccount,
   listCloudPublishAccounts,
   listLocalPublishAccounts,
+  onPublishAccountsChanged,
   openLocalPublishAccount,
 } from "./localPublishAccounts";
 import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
@@ -2124,7 +2125,7 @@ export function ViralDetailPage() {
       return;
     }
     beginReplicateRef.current();
-  }, [state.viralReplicateIntent, video]);
+  }, [state.viralReplicateIntent, video, notify, patchState]);
 
   // hooks 必须在提前 return 之前声明完毕（刷新按钮渲染在下方详情分支里）。
   const [refreshBusy, setRefreshBusy] = useState(false);
@@ -5125,6 +5126,10 @@ export function PublishPage() {
       operation.current += 1;
     };
   }, [review, user.id, reload, patchState, updateData]);
+  useEffect(
+    () => onPublishAccountsChanged(() => setReload((value) => value + 1)),
+    [],
+  );
   useEffect(() => {
     void reload;
     let active = true;

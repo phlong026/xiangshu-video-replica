@@ -148,7 +148,8 @@ fn extract_audio_from_bytes(ffmpeg: &Path, video_bytes: &[u8]) -> Result<Vec<u8>
         let _ = std::fs::remove_dir(&workdir);
     };
     let result = (|| {
-        std::fs::write(&video, video_bytes).map_err(|error| format!("无法写入临时视频：{error}"))?;
+        std::fs::write(&video, video_bytes)
+            .map_err(|error| format!("无法写入临时视频：{error}"))?;
         extract_audio(ffmpeg, &video, &audio)?;
         std::fs::read(&audio).map_err(|error| format!("读取音轨失败：{error}"))
     })();
@@ -178,10 +179,11 @@ pub async fn local_video_extract_audio(
     }
     let (ffmpeg, _ffprobe) = locate_tools(&app)?;
     // ffmpeg 是阻塞进程，放到阻塞线程池，别占住异步运行时的工作线程。
-    let audio_bytes =
-        tauri::async_runtime::spawn_blocking(move || extract_audio_from_bytes(&ffmpeg, &video_bytes))
-            .await
-            .map_err(|error| format!("抽取音轨任务异常：{error}"))??;
+    let audio_bytes = tauri::async_runtime::spawn_blocking(move || {
+        extract_audio_from_bytes(&ffmpeg, &video_bytes)
+    })
+    .await
+    .map_err(|error| format!("抽取音轨任务异常：{error}"))??;
     Ok(tauri::ipc::Response::new(audio_bytes))
 }
 
@@ -208,7 +210,12 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(std::env::temp_dir())
             .expect("读临时目录")
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("local-audio-"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("local-audio-")
+            })
             .collect();
         assert!(leftovers.is_empty(), "临时目录未清理：{:?}", leftovers);
     }

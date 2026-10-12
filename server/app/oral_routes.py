@@ -183,8 +183,8 @@ def _serialize_tasks_for_owner(conn: Database, rows: list[dict[str, Any]]) -> li
 
 
 @router.get("/price")
-def read_oral_price(conn: Database) -> dict[str, int | float]:
-    return oral_price_quote(conn)
+def read_oral_price(conn: Database, actor: AuthenticatedUser) -> dict[str, int | float]:
+    return oral_price_quote(conn, user_id=actor.id)
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +208,9 @@ class OralBudgetRequest(BaseModel):
 @router.post("/quote")
 def read_oral_budget(
     payload: OralBudgetRequest, conn: Database, actor: AuthenticatedUser
-) -> dict[str, int | float]:
-    from app.billing_catalog import oral_budget_units, retail_snapshot
+) -> dict[str, Any]:
+    from app.billing_catalog import oral_budget_units
+    from app.quote_contracts import issue_quote, oral_quote_specification
 
     if payload.audio_asset_id:
         asset = conn.execute(
@@ -221,11 +222,21 @@ def read_oral_budget(
     units = oral_budget_units(
         conn, script_text=payload.script_text, audio_asset_id=payload.audio_asset_id
     )
-    quote = retail_snapshot(conn, "oral", units)
+    contract = issue_quote(
+        conn,
+        user_id=actor.id,
+        service="oral",
+        units=units,
+        specification=oral_quote_specification(
+            script_text=payload.script_text, audio_asset_id=payload.audio_asset_id
+        ),
+    )
+    quote = contract.pop("pricing_snapshot")
     if payload.audio_asset_id and units == 0 and quote["enabled"]:
         raise OralError("BILLABLE_DURATION_REQUIRED", "缺少有效音频时长，请重新上传。")
     return {
-        **oral_price_quote(conn),
+        **oral_price_quote(conn, snapshot=quote),
+        **contract,
         "budget_seconds": float(units),
         "estimated_credits": int(str(quote["credits"])),
     }
@@ -586,6 +597,9 @@ def delete_voice(
 class OralTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    quote_token: str | None = Field(default=None, min_length=1, max_length=8192)
+    max_credits: int | None = Field(default=None, ge=0, le=2_147_483_647)
+
     identity_id: str = Field(min_length=1, max_length=128)
     avatar_id: str = Field(min_length=1, max_length=128)
     voice_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -627,6 +641,8 @@ def create_oral_generation_task(
                 audio_asset_id=request.audio_asset_id,
                 subtitle=request.subtitle,
                 idempotency_key=request.idempotency_key,
+                quote_token=request.quote_token,
+                max_credits=request.max_credits,
             )
     except OralDomainError as exc:
         raise _domain_guard(exc) from exc

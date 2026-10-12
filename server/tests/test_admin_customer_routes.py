@@ -313,6 +313,7 @@ def _create_adjustment(
     reason: str = "客服补偿：拆解失败两次",
     confirm: bool = True,
     key: str | None = None,
+    original_recharge_order_no: str | None = None,
 ) -> object:
     headers = dict(admin_headers)
     headers[IDEMPOTENCY_KEY_HEADER] = key or f"key-{uuid.uuid4()}"
@@ -324,6 +325,11 @@ def _create_adjustment(
             "credits": credits,
             "source_document_type": source_document_type,
             "source_document_ref": source_document_ref,
+            **(
+                {"original_recharge_order_no": original_recharge_order_no}
+                if original_recharge_order_no is not None
+                else {}
+            ),
         },
         headers=headers,
     )
@@ -505,7 +511,11 @@ def test_admin_adjustments_append_only(adjustments_dsn: str) -> None:
         # （引用表不在同语句即拒，与行数无关），故与引用表同语句清理；
         # 036 守卫触发器仍先对 admin_adjustments 抛 RaiseException，原意图不变。
         with pytest.raises(psycopg.errors.RaiseException):
-            conn.execute("TRUNCATE admin_adjustments, refund_executions")
+            conn.execute(
+                "TRUNCATE admin_adjustments, refund_executions, "
+                "admin_adjustment_operations, admin_adjustment_operation_keys, "
+                "admin_refund_allocations"
+            )
         survivors = conn.execute("SELECT count(*) FROM admin_adjustments").fetchone()
     assert survivors is not None and int(survivors[0]) == 1
 
@@ -989,7 +999,9 @@ def test_suspended_code_prices_as_customer_revoked_does_not(client: TestClient) 
             "UPDATE activation_codes SET status = 'REVOKED', "
             "revoked_at = '2026-01-03T00:00:00+00:00' WHERE id = 'code-cu'"
         )
-    revoked = _create_adjustment(client, admin, credits=1, key="adj-scope-rev-1")
+    revoked = _create_adjustment(
+        client, admin, credits=1, key="adj-scope-rev-1", source_document_ref="scope-rev-1"
+    )
     assert revoked.status_code == 201, revoked.text
     assert revoked.json()["pricing_scope"] == "INTERNAL"
 
@@ -999,7 +1011,9 @@ def test_ledger_difference_is_zero_after_adjustment(client: TestClient) -> None:
     admin = _admin_session(client)
     before_available, _ = _wallet_balance(CUSTOMER_USER_ID)
     first = _create_adjustment(client, admin, credits=3, key="adj-zero-1")
-    second = _create_adjustment(client, admin, credits=7, key="adj-zero-2")
+    second = _create_adjustment(
+        client, admin, credits=7, key="adj-zero-2", source_document_ref="zero-second"
+    )
     assert first.status_code == 201 and second.status_code == 201
 
     after_available, after_reserved = _wallet_balance(CUSTOMER_USER_ID)
@@ -1039,7 +1053,9 @@ def test_adjustment_freezes_unit_price_snapshot(client: TestClient) -> None:
     with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
         conn.execute("UPDATE runtime_settings SET internal_base_unit_price_fen = 2500 WHERE id = 1")
     try:
-        second = _create_adjustment(client, admin, credits=2, key="adj-price-2")
+        second = _create_adjustment(
+            client, admin, credits=2, key="adj-price-2", source_document_ref="price-second"
+        )
         assert second.status_code == 201, second.text
         assert int(first.json()["amount_fen"]) == 2 * BASE_UNIT_PRICE_FEN
         assert int(second.json()["amount_fen"]) == 2 * 2500
@@ -1178,7 +1194,13 @@ def test_unauthenticated_write_is_rejected(client: TestClient) -> None:
 def test_nonpositive_credits_is_rejected(client: TestClient) -> None:
     admin = _admin_session(client)
     for credits in (0, -3):
-        response = _create_adjustment(client, admin, credits=credits, key=f"adj-cr-{credits}")
+        response = _create_adjustment(
+            client,
+            admin,
+            credits=credits,
+            key=f"adj-cr-{credits}",
+            original_recharge_order_no="VALIDATION-ONLY" if credits < 0 else None,
+        )
         assert response.status_code == 400, response.text
         assert response.json()["detail"]["code"] == "ADJUSTMENT_VALIDATION_FAILED"
     assert _wallet_balance(CUSTOMER_USER_ID) == (50, 0)
@@ -1390,6 +1412,9 @@ def test_customer_full_adjustment_pages_and_merged_refund_history(
     from app.admin_audit_routes import router as audit_router
 
     client.app.include_router(audit_router)
+    _seed_refundable_opening()
+    with psycopg.connect(_t23_dsn()) as conn:
+        conn.execute("UPDATE users SET role='customer' WHERE id=%s", (CUSTOMER_USER_ID,))
     admin = _admin_session(client)
     assert (
         _create_adjustment(
@@ -1405,10 +1430,11 @@ def test_customer_full_adjustment_pages_and_merged_refund_history(
     refund = _create_adjustment(
         client,
         admin,
-        credits=-100,
+        credits=-25,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="refund100",
-        reason="已审批退款扣减100积分",
+        reason="已审批从原充值扣减25积分",
         key="refund100",
     )
     assert refund.status_code == 201, refund.text
@@ -1447,7 +1473,7 @@ def test_customer_full_adjustment_pages_and_merged_refund_history(
     assert len({item["adjustment_id"] for item in items}) == 25
     returned = next(item for item in items if item["source_document_ref"] == "refund100")
     assert returned["admin_username"] == "admin_u"
-    assert (returned["balance_before"], returned["balance_after"]) == (150, 50)
+    assert (returned["balance_before"], returned["balance_after"]) == (150, 125)
     for action in ["suspend", "resume"]:
         response = client.post(
             f"/api/control/customers/{CUSTOMER_USER_ID}/{action}",
@@ -1502,8 +1528,8 @@ def test_customer_full_adjustment_pages_and_merged_refund_history(
     assert all(page["total"] == 32 for page in pages)
     assert [len(page["items"]) for page in pages] == [20, 12]
     event = next(item for item in events if item["source_document_ref"] == "refund100")
-    assert event["actor_username"] == "admin_u" and event["reason"] == "已审批退款扣减100积分"
-    assert event["change_detail"]["changes"]["available_credits"] == {"before": 150, "after": 50}
+    assert event["actor_username"] == "admin_u" and event["reason"] == "已审批从原充值扣减25积分"
+    assert event["change_detail"]["changes"]["available_credits"] == {"before": 150, "after": 125}
     assert any(item["event_type"] == "analysis.create" for item in events)
     for event_type in ["customer.suspend", "customer.resume", "customer_unit_price.update"]:
         operation = next(item for item in events if item["event_type"] == event_type)
@@ -1581,7 +1607,7 @@ def test_customer_full_adjustment_pages_and_merged_refund_history(
     assert len(csv_rows) == 26
     assert all(row["user_id"] == CUSTOMER_USER_ID for row in csv_rows)
     assert any(
-        row["business_label"] == "退款扣减" and row["available_delta"] == "-100" for row in csv_rows
+        row["business_label"] == "退款扣减" and row["available_delta"] == "-25" for row in csv_rows
     )
     assert any(
         row["order_no"] and row["business_label"] == "充值订单 · " + row["order_no"]
@@ -2354,7 +2380,7 @@ def test_w15_large_export_reports_real_filtered_total(route_state: str) -> None:
 #
 # - 反向调账落一条 `REFUND` 流水（available_delta < 0、不挂订单/任务/计费轮次），
 #   **不建**充值单（D4），审计行挂在 `admin_adjustments` 上；
-# - 余额下限（D2）：超过当前可用余额的退款返回 400 `ADJUSTMENT_BALANCE_INSUFFICIENT`，
+# - 来源下限：超过原充值未用余额的退款返回 422 `REFUND_SOURCE_BALANCE_INSUFFICIENT`，
 #   DB 的 `ck_wallets_available_nonnegative` 是纵深兜底；
 # - 正向调账零回归：其余来源类型仍然只收正数。
 
@@ -2379,8 +2405,24 @@ def _audit_row_for(adjustment_id: str) -> tuple:
     return row
 
 
+def _seed_refundable_opening() -> None:
+    """只更新隔离测试夹具：给开场余额补齐真实在线充值的合成来源链。"""
+    with psycopg.connect(_t23_dsn()) as conn:
+        conn.execute(
+            "UPDATE recharge_orders SET provider='zpay',provider_trade_no='fixture-paid' "
+            "WHERE id=%s",
+            (f"opening-{CUSTOMER_USER_ID}",),
+        )
+        updated = conn.execute(
+            "UPDATE billing_credit_lots SET amount_fen=50000 WHERE id=%s",
+            (f"opening-charge-{CUSTOMER_USER_ID}",),
+        )
+        assert updated.rowcount == 1
+
+
 def test_reversal_writes_refund_row_and_audit_row_without_order(client: TestClient) -> None:
     """DoD 1: 反向调账 → `REFUND` 负向流水 + 可审计的 admin_adjustments 行，且无充值单."""
+    _seed_refundable_opening()
     admin = _admin_session(client)
     before_counts = _fetch_one(
         "SELECT (SELECT COUNT(*) FROM recharge_orders), "
@@ -2392,6 +2434,7 @@ def test_reversal_writes_refund_row_and_audit_row_without_order(client: TestClie
         client,
         admin,
         credits=-8,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="REFUND-2026-0918",
         reason="客户诉求退款：视频未交付，工单 2026-0918",
@@ -2459,11 +2502,13 @@ def test_reversal_writes_refund_row_and_audit_row_without_order(client: TestClie
 
 def test_reversal_is_visible_in_the_audit_listings(client: TestClient) -> None:
     """反向调账必须出现在两个调账列表里（LEFT JOIN），并且能看出方向."""
+    _seed_refundable_opening()
     admin = _admin_session(client)
     created = _create_adjustment(
         client,
         admin,
         credits=-6,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="REFUND-2026-0919",
         reason="退款审批通过",
@@ -2513,7 +2558,8 @@ def test_reversal_is_visible_in_the_audit_listings(client: TestClient) -> None:
 def test_reversal_beyond_available_balance_is_rejected_with_a_business_code(
     client: TestClient,
 ) -> None:
-    """DoD 3（最关键的一条）D2：不允许负余额，超额退款是 400 而不是 500，也不静默截断."""
+    """不允许负余额或借用其他原单来源，超额退款明确拒绝且不静默截断。"""
+    _seed_refundable_opening()
     admin = _admin_session(client)
     before_wallet = _wallet_balance(CUSTOMER_USER_ID)
     before_counts = _fetch_one(
@@ -2522,23 +2568,23 @@ def test_reversal_beyond_available_balance_is_rejected_with_a_business_code(
         "(SELECT COUNT(*) FROM admin_adjustments)"
     )
 
-    # 50 available, ask for 51 back: the customer already consumed nothing here,
-    # but the guard is the balance, not the consumption history.
+    # 原充值未用余额为 50；请求 51 必须拒绝，不借用其他来源。
     over = _create_adjustment(
         client,
         admin,
         credits=-51,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="REFUND-2026-0920",
         reason="超额退款必须被拒",
         key="adj-refund-over-1",
     )
-    assert over.status_code == 400, over.text
+    assert over.status_code == 422, over.text
     detail = over.json()["detail"]
-    assert detail["code"] == "ADJUSTMENT_BALANCE_INSUFFICIENT"
+    assert detail["code"] == "REFUND_SOURCE_BALANCE_INSUFFICIENT"
     # The operator must be told the consumed part is not refundable through the
     # ledger — never silently clamped to the maximum refundable amount.
-    assert "unspent" in detail["message"]
+    assert "原充值" in detail["message"]
     assert _wallet_balance(CUSTOMER_USER_ID) == before_wallet
     assert (
         _fetch_one(
@@ -2554,6 +2600,7 @@ def test_reversal_beyond_available_balance_is_rejected_with_a_business_code(
         client,
         admin,
         credits=-50,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="REFUND-2026-0920",
         reason="全额退未消耗部分",
@@ -2567,13 +2614,14 @@ def test_reversal_beyond_available_balance_is_rejected_with_a_business_code(
         client,
         admin,
         credits=-1,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
-        source_document_ref="REFUND-2026-0920",
+        source_document_ref="REFUND-2026-0920-FLOOR",
         reason="余额为 0 后不能再退",
         key="adj-refund-floor-1",
     )
-    assert floor.status_code == 400, floor.text
-    assert floor.json()["detail"]["code"] == "ADJUSTMENT_BALANCE_INSUFFICIENT"
+    assert floor.status_code == 422, floor.text
+    assert floor.json()["detail"]["code"] == "REFUND_SOURCE_BALANCE_INSUFFICIENT"
     assert _wallet_balance(CUSTOMER_USER_ID) == (0, 0)
 
     # The DB CHECK remains the defence in depth for any path that bypasses the
@@ -2595,6 +2643,7 @@ def test_reversal_rejects_zero_and_oversized_credits(client: TestClient) -> None
             client,
             admin,
             credits=credits,
+            original_recharge_order_no="SYNTHETIC-VALIDATION-ONLY" if credits < 0 else None,
             source_document_type="REFUND_APPROVAL",
             source_document_ref="REFUND-BOUNDS",
             key=f"adj-refund-bounds-{credits}",
@@ -2645,6 +2694,7 @@ def test_non_reversal_sources_still_reject_negative_credits(
         client,
         admin,
         credits=-1,
+        original_recharge_order_no="SYNTHETIC-VALIDATION-ONLY",
         source_document_type=source_document_type,
         key=f"adj-forward-negative-{source_document_type}",
     )
@@ -2655,11 +2705,13 @@ def test_non_reversal_sources_still_reject_negative_credits(
 
 def test_reversal_is_idempotent_and_auditor_cannot_write_it(client: TestClient) -> None:
     """四件套对反向调账同样成立：幂等重放不重复冲减；auditor 只读."""
+    _seed_refundable_opening()
     admin = _admin_session(client)
     first = _create_adjustment(
         client,
         admin,
         credits=-5,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="LEDGER_CORRECTION",
         source_document_ref="LEDGER-FIX-2026-1",
         reason="账本更正：重复计费冲回",
@@ -2672,6 +2724,7 @@ def test_reversal_is_idempotent_and_auditor_cannot_write_it(client: TestClient) 
         client,
         admin,
         credits=-5,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="LEDGER_CORRECTION",
         source_document_ref="LEDGER-FIX-2026-1",
         reason="账本更正：重复计费冲回",
@@ -2692,6 +2745,7 @@ def test_reversal_is_idempotent_and_auditor_cannot_write_it(client: TestClient) 
         client,
         admin,
         credits=-4,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="REFUND-2026-0922",
         reason="第二笔独立退款",
@@ -2714,6 +2768,7 @@ def test_reversal_is_idempotent_and_auditor_cannot_write_it(client: TestClient) 
         client,
         auditor,
         credits=-5,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="REFUND-2026-0921",
         key="adj-refund-auditor-1",
@@ -2750,6 +2805,7 @@ def test_reconcile_invariants_stay_green_after_a_refund(client: TestClient) -> N
     baseline = _invariants()
     baseline_codes = sorted(f"{issue.code}:{issue.scope}" for issue in baseline)
 
+    _seed_refundable_opening()
     admin = _admin_session(client)
     before_zero = _create_adjustment(client, admin, credits=4, key="adj-reconcile-before")
     assert before_zero.status_code == 201, before_zero.text
@@ -2757,6 +2813,7 @@ def test_reconcile_invariants_stay_green_after_a_refund(client: TestClient) -> N
         client,
         admin,
         credits=-9,
+        original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
         source_document_type="REFUND_APPROVAL",
         source_document_ref="REFUND-2026-0922",
         reason="对账前的一笔实际退款",
@@ -2817,6 +2874,7 @@ def test_suspend_and_resume_customer_with_audit_and_session_revoke(
 ) -> None:
     """方案 P1 客户管理：暂停吊销会话并写审计；恢复只翻回标记；幂等重放一致。"""
     with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        conn.execute("UPDATE users SET role='customer' WHERE id=%s", (CUSTOMER_USER_ID,))
         # 给目标客户一台在绑设备 + 一条在线会话：暂停必须在同一事务里把它吊销。
         conn.execute(
             """
@@ -3254,3 +3312,108 @@ def test_funds_compensation_offline_and_unverified_history_are_separate(client: 
         business["metrics"]["recharge_fen"] == 20000
         and business["metrics"]["paying_customers"] == 1
     )
+
+
+def test_original_source_refund_concurrent_requests_never_overdraw(client: TestClient) -> None:
+    """两个实际 PG 事务争同一原单，最多成功一笔，不能借用赠送或他单。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    _seed_refundable_opening()
+    admin = _admin_session(client)
+    barrier = Barrier(2)
+
+    def refund(index: int):
+        barrier.wait(timeout=10)
+        return _create_adjustment(
+            client,
+            admin,
+            credits=-30,
+            source_document_type="REFUND_APPROVAL",
+            source_document_ref=f"CONCURRENT-REFUND-{index}",
+            original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
+            key=f"concurrent-refund-{index}",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(refund, [1, 2]))
+    assert sorted(response.status_code for response in responses) == [201, 422]
+    assert _wallet_balance(CUSTOMER_USER_ID) == (20, 0)
+    assert _fetch_one(
+        "SELECT remaining_credits FROM billing_credit_lots WHERE id=%s",
+        (f"opening-charge-{CUSTOMER_USER_ID}",),
+    ) == (20,)
+    assert len(_ledger_rows(CUSTOMER_USER_ID, "REFUND")) == 1
+    assert _fetch_one("SELECT COUNT(*) FROM admin_refund_allocations") == (1,)
+
+
+def test_original_source_refund_concurrent_same_key_is_single_effect(client: TestClient) -> None:
+    """并发丢响应重放只有一条退款、分配和钱包效果。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    _seed_refundable_opening()
+    admin = _admin_session(client)
+    barrier = Barrier(2)
+
+    def refund(_index: int):
+        barrier.wait(timeout=10)
+        return _create_adjustment(
+            client,
+            admin,
+            credits=-30,
+            source_document_type="REFUND_APPROVAL",
+            source_document_ref="CONCURRENT-REPLAY",
+            original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
+            key="concurrent-same-key",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(refund, [1, 2]))
+    assert [response.status_code for response in responses] == [201, 201]
+    assert responses[0].json()["adjustment_id"] == responses[1].json()["adjustment_id"]
+    assert _wallet_balance(CUSTOMER_USER_ID) == (20, 0)
+    assert _fetch_one(
+        "SELECT remaining_credits FROM billing_credit_lots WHERE id=%s",
+        (f"opening-charge-{CUSTOMER_USER_ID}",),
+    ) == (20,)
+    assert len(_ledger_rows(CUSTOMER_USER_ID, "REFUND")) == 1
+    assert _fetch_one("SELECT COUNT(*) FROM admin_refund_allocations") == (1,)
+
+
+def test_original_source_refund_failure_rolls_back_wallet_lot_and_audit(client: TestClient) -> None:
+    """真实 PG 在来源证据落库时故障，整笔钱包/lot/流水必须共同回滚。"""
+    _seed_refundable_opening()
+    admin = _admin_session(client)
+    with psycopg.connect(_t23_dsn()) as conn:
+        conn.execute(
+            "CREATE FUNCTION fixture_refund_fail() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN RAISE EXCEPTION 'synthetic allocation failure'; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER fixture_refund_fail BEFORE INSERT ON admin_refund_allocations "
+            "FOR EACH ROW EXECUTE FUNCTION fixture_refund_fail()"
+        )
+    try:
+        with pytest.raises(psycopg.errors.RaiseException, match="synthetic allocation failure"):
+            _create_adjustment(
+                client,
+                admin,
+                credits=-20,
+                source_document_type="REFUND_APPROVAL",
+                source_document_ref="ROLLBACK-SOURCE",
+                original_recharge_order_no=f"OPENING-{CUSTOMER_USER_ID}",
+                key="rollback-source",
+            )
+        assert _wallet_balance(CUSTOMER_USER_ID) == (50, 0)
+        assert _fetch_one(
+            "SELECT remaining_credits FROM billing_credit_lots WHERE id=%s",
+            (f"opening-charge-{CUSTOMER_USER_ID}",),
+        ) == (50,)
+        assert _ledger_rows(CUSTOMER_USER_ID, "REFUND") == []
+        assert _fetch_one("SELECT COUNT(*) FROM admin_adjustments") == (0,)
+        assert _fetch_one("SELECT COUNT(*) FROM admin_refund_allocations") == (0,)
+    finally:
+        with psycopg.connect(_t23_dsn()) as conn:
+            conn.execute("DROP TRIGGER fixture_refund_fail ON admin_refund_allocations")
+            conn.execute("DROP FUNCTION fixture_refund_fail()")

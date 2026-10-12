@@ -98,6 +98,20 @@ def accept_operation(
             },
         )
     credits = int(str(snapshot["credits"]))
+    if "quote_max_credits" in snapshot:
+        if (
+            snapshot.get("quote_wallet_owner_id") != wallet_owner_id
+            or snapshot.get("quote_actor_user_id") != user_id
+            or credits * int(str(snapshot["quote_quantity"]))
+            > int(str(snapshot["quote_max_credits"]))
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "QUOTE_LIMIT_EXCEEDED",
+                    "message": "账号或积分上限已改变，请重新确认报价。",
+                },
+            )
     funding: list[dict[str, Any]] = []
     if credits:
         if wallet_owner_id != user_id:

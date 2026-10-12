@@ -784,3 +784,40 @@ def test_finalize_after_lease_loss_is_reported_not_written(
             conn, work=stale, result=PublishResult(platform="douyin", status="published")
         )
     assert record_row(pg, record, "status") == ("publishing",)
+
+
+def test_unbind_cancels_unclaimed_but_preserves_inflight_status(
+    pg: psycopg.Connection, lane_env: str
+) -> None:
+    from app.publish_browser import delete_browser_account
+
+    account = seed_account(pg)
+    first = seed_record(pg, account_id=account, video_id=seed_asset(pg))
+    with open_txn() as conn:
+        work = claim_publish_work(conn, worker_id="already-inflight")
+    assert work is not None and work.record_id == first
+    queued = seed_record(pg, account_id=account, video_id=seed_asset(pg))
+    with open_txn() as conn:
+        delete_browser_account(conn, "employee_1", account)
+    assert record_row(pg, queued, "status, account_id") == ("cancelled", None)
+    assert record_row(pg, first, "status") == ("publishing",)
+    # 重试先读取本人账号列表；账号已无，无需再执行 DELETE。
+    assert (
+        pg.execute("SELECT id FROM publish_browser_accounts WHERE id=%s", (account,)).fetchone()
+        is None
+    )
+    with open_txn() as conn:
+        assert claim_publish_work(conn, worker_id="after-unbind") is None
+
+
+def test_claim_skips_account_locked_by_unbind(pg: psycopg.Connection, lane_env: str) -> None:
+    account = seed_account(pg)
+    queued = seed_record(pg, account_id=account, video_id=seed_asset(pg))
+    # 锁定账号模拟解绑已开始但尚未取消队列的时隙；不能复制旧登录态开始新发布。
+    with open_txn() as deleting:
+        deleting.execute(
+            "SELECT id FROM publish_browser_accounts WHERE id = %s FOR UPDATE", (account,)
+        )
+        with open_txn() as claiming:
+            assert claim_publish_work(claiming, worker_id="racing-unbind") is None
+    assert record_row(pg, queued, "status, attempt_count") == ("queued", 0)

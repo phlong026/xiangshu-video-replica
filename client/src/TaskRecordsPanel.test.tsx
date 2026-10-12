@@ -22,6 +22,7 @@ vi.mock("./api", async () => {
     getGenerationBatch: vi.fn(),
     getLatestGenerationReconcileOperation: vi.fn(),
     listGenerationBatches: vi.fn(),
+    getRegenerationQuote: vi.fn(),
     regenerateGenerationBatch: vi.fn(),
     regenerateGenerationTask: vi.fn(),
     renameGenerationBatch: vi.fn(),
@@ -414,6 +415,13 @@ describe("TaskRecordsPanel", () => {
     expect(screen.queryByText("下载成功")).not.toBeInTheDocument();
   });
   beforeEach(() => {
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: (_name: string, callback: () => unknown) =>
+          Promise.resolve().then(callback),
+      },
+    });
     window.localStorage.clear();
     vi.mocked(api.listGenerationBatches).mockResolvedValue({
       items: [listItem()],
@@ -454,6 +462,18 @@ describe("TaskRecordsPanel", () => {
           completed_at: "2026-08-16 10:00:05",
         }),
     );
+    vi.mocked(api.getRegenerationQuote).mockResolvedValue({
+      quote_token: "q-first",
+      quote_expires_at: Math.floor(Date.now() / 1000) + 300,
+      max_credits: 24,
+      estimated_credits: 24,
+      resolution: "768P",
+      duration_seconds: 6,
+      quantity: 2,
+      unit_price_fen_per_second: 1,
+      estimated_seconds: 12,
+      estimated_price_fen: 12,
+    });
     vi.mocked(api.regenerateGenerationBatch).mockImplementation(
       async (_batchId) => batch({ id: "batch-regenerated" }),
     );
@@ -1419,6 +1439,201 @@ describe("TaskRecordsPanel", () => {
     expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
   });
 
+  async function openBatchQuote() {
+    await switchToOpsView();
+    fireEvent.change(screen.getByLabelText("整批重生成原因"), {
+      target: { value: "再次生成" },
+    });
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "确认新建 2 个付费任务" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "整批付费再次生成" }));
+  }
+
+  it.each(["unmount", "account"])(
+    "等待持久化锁期间 %s 后不提交旧账号付费请求",
+    async (change) => {
+      let release: (() => void) | undefined;
+      Object.defineProperty(navigator, "locks", {
+        configurable: true,
+        value: {
+          request: (_name: string, callback: () => unknown) =>
+            new Promise<void>((resolve) => {
+              release = () => {
+                callback();
+                resolve();
+              };
+            }),
+        },
+      });
+      const view = render(
+        <TaskRecordsPanel
+          currentUserId="quote-user"
+          handoffBatch={null}
+          onHandoffConsumed={vi.fn()}
+          userRole="employee"
+        />,
+      );
+      await openBatchQuote();
+      fireEvent.click(
+        await screen.findByRole("button", { name: "确认报价并生成" }),
+      );
+      const dialog = screen.getByRole("dialog", { name: "确认重新生成报价" });
+      const cancel = new Event("cancel", { bubbles: true, cancelable: true });
+      fireEvent(dialog, cancel);
+      expect(cancel.defaultPrevented).toBe(true);
+      expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+      if (change === "unmount") view.unmount();
+      else
+        view.rerender(
+          <TaskRecordsPanel
+            currentUserId="different-user"
+            handoffBatch={null}
+            onHandoffConsumed={vi.fn()}
+            userRole="employee"
+          />,
+        );
+      await act(async () => {
+        release?.();
+      });
+      expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("无法持久保存请求时阻止收费并明确提示", async () => {
+    render(
+      <TaskRecordsPanel
+        currentUserId="quote-user"
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await openBatchQuote();
+    const confirm = await screen.findByRole("button", {
+      name: "确认报价并生成",
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota");
+    });
+    fireEvent.click(confirm);
+    expect(
+      await screen.findByText(/无法安全保存或读取原生成请求/),
+    ).toBeInTheDocument();
+    expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+  });
+
+  it("连续确认只发送一次收费请求", async () => {
+    vi.mocked(api.regenerateGenerationBatch).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    render(
+      <TaskRecordsPanel
+        currentUserId="quote-user"
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await openBatchQuote();
+    const confirm = await screen.findByRole("button", {
+      name: "确认报价并生成",
+    });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(api.regenerateGenerationBatch).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it("取消报价不会新增付费任务", async () => {
+    render(
+      <TaskRecordsPanel
+        currentUserId="quote-user"
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await openBatchQuote();
+    expect(await screen.findByText(/最多预留 24 积分/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+  });
+
+  it("失效报价不能提交新的付费请求", async () => {
+    vi.mocked(api.getRegenerationQuote).mockResolvedValue({
+      quote_token: "expired",
+      quote_expires_at: 1,
+      max_credits: 24,
+      estimated_credits: 24,
+      resolution: "768P",
+      duration_seconds: 6,
+      quantity: 2,
+      unit_price_fen_per_second: 1,
+      estimated_seconds: 12,
+      estimated_price_fen: 12,
+    });
+    render(
+      <TaskRecordsPanel
+        currentUserId="quote-user"
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await openBatchQuote();
+    expect(
+      await screen.findByText("报价已失效，请重新获取并确认。"),
+    ).toBeInTheDocument();
+    expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+  });
+
+  it("切账号后迟到报价不能打开确认或收费", async () => {
+    let resolveQuote!: (value: api.GenerationPriceQuote) => void;
+    vi.mocked(api.getRegenerationQuote).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveQuote = resolve;
+        }),
+    );
+    const view = render(
+      <TaskRecordsPanel
+        currentUserId="alice"
+        handoffBatch={batch()}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await openBatchQuote();
+    view.rerender(
+      <TaskRecordsPanel
+        currentUserId="bob"
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await act(async () =>
+      resolveQuote({
+        quote_token: "q-alice",
+        quote_expires_at: Math.floor(Date.now() / 1000) + 300,
+        max_credits: 24,
+        estimated_credits: 24,
+        resolution: "768P",
+        duration_seconds: 6,
+        quantity: 2,
+        unit_price_fen_per_second: 1,
+        estimated_seconds: 12,
+        estimated_price_fen: 12,
+      }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "确认重新生成报价" }),
+    ).not.toBeInTheDocument();
+    expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+  });
+
   it("requires an explicit reason and payment confirmation before regenerating a frozen batch", async () => {
     vi.mocked(api.getGenerationBatch).mockImplementation(async (batchId) =>
       batchId === "batch-regenerated"
@@ -1439,6 +1654,7 @@ describe("TaskRecordsPanel", () => {
 
     render(
       <TaskRecordsPanel
+        currentUserId="quote-user"
         handoffBatch={null}
         onHandoffConsumed={vi.fn()}
         userRole="employee"
@@ -1457,18 +1673,24 @@ describe("TaskRecordsPanel", () => {
       screen.getByRole("checkbox", { name: "确认新建 2 个付费任务" }),
     );
     fireEvent.click(regenerate);
+    expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认报价并生成" }),
+    );
 
     await waitFor(() =>
       expect(api.regenerateGenerationBatch).toHaveBeenCalledWith("batch-1", {
         idempotency_key: expect.any(String),
         estimated_cost_snapshot: 2.5,
         generation_reason: "再生成一批备选",
+        quote_token: "q-first",
+        max_credits: 24,
       }),
     );
     expect(await screen.findByText("来源批次 batch-1")).toBeInTheDocument();
   });
 
-  it("reuses the same paid task idempotency key after a failed response", async () => {
+  it("刷新后仍用原付费请求核对未知响应，修改原因不生成新 key", async () => {
     vi.mocked(api.getGenerationBatch).mockResolvedValue(
       batch({
         quantity: 1,
@@ -1509,8 +1731,9 @@ describe("TaskRecordsPanel", () => {
         }),
       );
 
-    render(
+    const view = render(
       <TaskRecordsPanel
+        currentUserId="quote-user"
         handoffBatch={null}
         onHandoffConsumed={vi.fn()}
         userRole="employee"
@@ -1531,10 +1754,42 @@ describe("TaskRecordsPanel", () => {
       }),
     );
     fireEvent.click(regenerate);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认报价并生成" }),
+    );
     expect(
-      await screen.findByText("付费重新生成失败，已保留本次请求供重试。"),
+      await screen.findByText(
+        "付费重新生成结果未确认，已保留原报价与请求，请重试核对，勿另建任务。",
+      ),
     ).toBeInTheDocument();
-    fireEvent.click(regenerate);
+    view.unmount();
+    render(
+      <TaskRecordsPanel
+        currentUserId="quote-user"
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await switchToOpsView();
+    const restoredButton = await screen.findByRole("button", {
+      name: "付费重新生成 task-paid-regenerate",
+    });
+    fireEvent.change(
+      screen.getByLabelText("重新生成原因 task-paid-regenerate"),
+      {
+        target: { value: "刷新换原因仍只能核对原请求" },
+      },
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "确认为任务 task-paid-regenerate 新增一次付费生成",
+      }),
+    );
+    fireEvent.click(restoredButton);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重试核对原请求" }),
+    );
 
     await waitFor(() =>
       expect(api.regenerateGenerationTask).toHaveBeenCalledTimes(2),
@@ -1543,11 +1798,14 @@ describe("TaskRecordsPanel", () => {
       .calls[0][1];
     const replayRequest = vi.mocked(api.regenerateGenerationTask).mock
       .calls[1][1];
-    expect(replayRequest.idempotency_key).toBe(firstRequest.idempotency_key);
+    expect(replayRequest).toEqual(firstRequest);
+    expect(api.getRegenerationQuote).toHaveBeenCalledTimes(1);
     expect(firstRequest).toEqual({
       idempotency_key: expect.any(String),
       estimated_cost_snapshot: 1.25,
       generation_reason: "音频质检失败后重新生成",
+      quote_token: "q-first",
+      max_credits: 24,
     });
   });
 

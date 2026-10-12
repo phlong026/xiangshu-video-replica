@@ -11,7 +11,7 @@ on:
   push:
     # The task branch makes the first build reviewable before merging to main.
     branches: [main, feat/desktop-actions-20260917]
-    # v* 标签是正式发布入口：打 tag 必发三平台包并挂到 GitHub Releases
+    # v* 标签构建三平台内部未签名预览；全部成功后才允许挂到预发布 Release
     # （标签推送不适用 paths 过滤，保证发版不受改动路径影响）。
     tags: ['v*']
     paths:
@@ -20,7 +20,8 @@ on:
       - 'package-lock.json'
       - '.cargo/**'
       - '.github/workflows/desktop-build.yml'
-      - 'scripts/release/collect-desktop-artifacts.mjs'
+      - 'scripts/release/**'
+      - 'scripts/ffmpeg-minimal/**'
       - 'scripts/require_customer_api_base.mjs'
 
 permissions:
@@ -31,12 +32,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ffmpeg-windows-binaries:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # 复用受审阅的 LGPL 构建，不能依赖本轮尚未创建的 Release。
+      - run: bash scripts/ffmpeg-minimal/build.sh "$RUNNER_TEMP/ffmpeg-out"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ffmpeg-windows-lgpl
+          path: ${{ runner.temp }}/ffmpeg-out/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
   build:
+    needs: ffmpeg-windows-binaries
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -92,20 +108,12 @@ jobs:
         run: npm ci
       - name: Scan source for secrets
         run: npm run check:security
-      # bundle.resources 现在包含 ffmpeg.exe/ffprobe.exe，缺失会让 tauri build
-      # 直接失败，所以必须在打包前把 ffmpeg 产物放到 resources/ffmpeg/。
-      # 国内源对海外 runner 不可达，改从本仓库 Release 资产取（CDN 分发）
-      - name: Fetch ffmpeg binaries from release
+      - name: Download verified build inputs
         if: runner.os == 'Windows'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p client/src-tauri/resources/ffmpeg
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern "ffmpeg.exe" --pattern "ffprobe.exe" \
-            --dir client/src-tauri/resources/ffmpeg
-          test -s client/src-tauri/resources/ffmpeg/ffmpeg.exe
-          test -s client/src-tauri/resources/ffmpeg/ffprobe.exe
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: ffmpeg-windows-lgpl
+          path: client/src-tauri/resources/ffmpeg
       - name: Build desktop installer
         run: |
           sign_args=()
@@ -158,13 +166,35 @@ jobs:
           test -f "output/desktop/$PLATFORM/manifest.json"
           test -f "output/desktop/$PLATFORM/SHA256SUMS.txt"
           test -f "output/desktop/$PLATFORM/RELEASE-CHANNEL.txt"
-      # Release 资产不走存储配额；三个平台并行创建用 || true 容忍重复
-      - name: Publish installer to GitHub Release
+      - name: Archive platform installer and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: output/desktop/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          pattern: desktop-*
+          path: output/downloaded
+          merge-multiple: false
+      - name: Validate all provenance and package distinct platform assets
+        run: python3 scripts/release/prepare-desktop-release.py output/downloaded output/release
+      # gh release create 仅在明确不存在时执行；已有同名资产须逐字节一致。
+      # 这里只发布内部未签名预览包，不生成生产 stable 清单。
+      - name: Publish internal preview assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          gh release create "$TAG_NAME" --title "众墅之家 AI 爆款视频工具 $TAG_NAME" \
-            --notes "自动更新通道发布产物。API: $VITE_API_BASE_URL" 2>/dev/null || true
-          gh release upload "$TAG_NAME" output/desktop/$PLATFORM/* --clobber
-
+        run: python3 scripts/release/publish-desktop-release.py output/release

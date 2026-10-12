@@ -685,26 +685,60 @@ describe("CharacterLibrary", () => {
     expect(api.waitForCharacterSheetTask).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["FAILED", "图片服务拒绝了请求"],
-    ["SUBMISSION_UNCERTAIN", "云端提交结果暂时无法确认"],
-  ] as const)(
-    "restores a %s background task as an actionable error",
-    async (status, message) => {
-      vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([]);
-      vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(
-        characterTask(status, { error_message: message }),
-      );
+  it("restores a FAILED background task with an explicit retry path", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([]);
+    vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(
+      characterTask("FAILED", { error_message: "图片服务拒绝了请求" }),
+    );
 
-      render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
 
-      expect(await screen.findByText(message)).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "移除失败任务" }),
-      ).toBeInTheDocument();
-      expect(api.waitForCharacterSheetTask).not.toHaveBeenCalled();
-    },
-  );
+    expect(await screen.findByText("图片服务拒绝了请求")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除失败任务" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "一键生成五视图拼合图" }),
+    ).toBeEnabled();
+    expect(api.waitForCharacterSheetTask).not.toHaveBeenCalled();
+  });
+
+  it("restores SUBMISSION_UNCERTAIN for status checks without a new generation", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([]);
+    vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(
+      characterTask("SUBMISSION_UNCERTAIN", {
+        error_message: "云端提交结果暂时无法确认",
+      }),
+    );
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+
+    expect(
+      await screen.findByText("云端提交结果暂时无法确认"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "移除失败任务" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "请先核对未完成任务" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "核对人物任务状态" }));
+    await waitFor(() =>
+      expect(api.getLatestCharacterSheetTask).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByText("待核对")).toBeInTheDocument();
+    expect(api.uploadSimpleCharacter).not.toHaveBeenCalled();
+    expect(api.regenerateContactSheet).not.toHaveBeenCalled();
+    expect(api.waitForCharacterSheetTask).not.toHaveBeenCalled();
+
+    vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(
+      characterTask("FAILED", { error_message: "已核实请求未受理" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "核对人物任务状态" }));
+    expect(await screen.findByText("已核实请求未受理")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除失败任务" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "一键生成五视图拼合图" }),
+    ).toBeEnabled();
+    expect(api.uploadSimpleCharacter).not.toHaveBeenCalled();
+    expect(api.regenerateContactSheet).not.toHaveBeenCalled();
+  });
 
   it("marks non-provider placeholder publications explicitly", async () => {
     vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([

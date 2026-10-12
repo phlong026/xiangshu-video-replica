@@ -210,6 +210,10 @@ function priceQuote(resolution: "768P" | "2K"): GenerationPriceQuote {
   const unit = resolution === "768P" ? 1000 : 2000;
   return {
     resolution,
+    quote_token: "q-live",
+    quote_expires_at: Math.floor(Date.now() / 1000) + 300,
+    max_credits: unit * 4,
+    estimated_credits: unit * 4,
     duration_seconds: 4,
     quantity: 1,
     unit_price_fen_per_second: unit,

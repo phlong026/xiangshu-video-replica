@@ -20,6 +20,7 @@ import {
   type GenerationTask,
   getGenerationBatch,
   getLatestGenerationReconcileOperation,
+  getRegenerationQuote,
   listGenerationBatches,
   openVideoDownloadFolder,
   reconcileUncertainTask,
@@ -31,6 +32,14 @@ import {
   VideoDownloadUnconfirmedError,
   waitForGenerationReconcileOperation,
 } from "./api";
+import { CustomerConfirmDialog } from "./customer/CustomerConfirmDialog";
+import {
+  clearPendingRegeneration,
+  type PendingRegeneration,
+  readPendingRegeneration,
+  savePendingRegeneration,
+} from "./regenerationPending";
+import { isCurrentQuote, isQuoteRejection } from "./studio/quoteConfirmation";
 import { VideoPreview } from "./VideoPreview";
 import {
   generationBatchDisplayStatus,
@@ -62,6 +71,8 @@ type TaskRecordsPanelProps = {
 };
 
 type TaskViewMode = "stage" | "ops";
+
+type RegenerationConfirmation = PendingRegeneration;
 
 function previewSourceVersion(task: GenerationTask): string {
   return task.result_asset_id
@@ -136,6 +147,27 @@ export function TaskRecordsPanel({
   >({});
   const taskOperationKeysRef = useRef<Record<string, string>>({});
   const canOperate = userRole !== "auditor";
+  const roleRef = useRef(userRole);
+  roleRef.current = userRole;
+  const [regenerationConfirmation, setRegenerationConfirmation] =
+    useState<RegenerationConfirmation | null>(null);
+  const [regenerationError, setRegenerationError] = useState("");
+  const [regenerationBusy, setRegenerationBusy] = useState(false);
+  const regenerationInFlight = useRef(false);
+  const regenerationAttempts = useRef(
+    new Map<string, RegenerationConfirmation>(),
+  );
+  const quoteRequestSequence = useRef(0);
+  const quoteScopeRef = useRef("");
+  useEffect(() => {
+    // 账号、批次或角色变化后，旧报价不能留在新上下文继续确认。
+    const scope = JSON.stringify([currentUserId, activeBatchId, userRole]);
+    if (scope === quoteScopeRef.current) return;
+    quoteScopeRef.current = scope;
+    quoteRequestSequence.current += 1;
+    setRegenerationConfirmation(null);
+    setRegenerationError("");
+  }, [currentUserId, activeBatchId, userRole]);
 
   const updateBatch = useCallback((nextBatch: GenerationBatch | null) => {
     const changed = new Set(
@@ -603,9 +635,13 @@ export function TaskRecordsPanel({
       updateBatch(nextBatch);
       setBatchError("");
       delete taskOperationKeysRef.current[actionKey];
-    } catch {
+    } catch (cause) {
       if (activeBatchIdRef.current === batchIdAtStart) {
-        setBatchError("任务安全重试失败，请检查当前状态后再试。");
+        setBatchError(
+          isQuoteRejection(cause)
+            ? cause.message
+            : "任务安全重试失败，请检查当前状态后再试。",
+        );
       }
     } finally {
       if (retryAccepted && activeBatchIdRef.current === batchIdAtStart) {
@@ -658,79 +694,218 @@ export function TaskRecordsPanel({
     }
   }
 
-  async function handleRegenerateBatch() {
-    const reason = batchRegenerationReason.trim();
+  async function requestRegeneration(
+    kind: "batch" | "task",
+    sourceId: string,
+    reason: string,
+    estimatedCost: number | null,
+  ) {
     if (
       !canOperate ||
-      !batch ||
       !activeBatchId ||
-      !reason ||
-      !batchPaymentConfirmed
-    ) {
+      !reason.trim() ||
+      regenerationInFlight.current
+    )
+      return;
+    if (!currentUserId) {
+      setBatchError("无法确认当前账号，请重新登录后获取报价。");
       return;
     }
     const batchIdAtStart = activeBatchId;
-    const estimatedCost = estimatedBatchCost(batch);
-    const actionKey = `${batch.id}:paid-regenerate:${reason}:${estimatedCost ?? "unknown"}`;
-    const operationKey = operationIdempotencyKey(
-      taskOperationKeysRef.current,
-      actionKey,
-    );
+    const accountAtStart = currentUserId;
+    let stored: PendingRegeneration | null;
+    try {
+      stored = readPendingRegeneration(accountAtStart, kind, sourceId);
+    } catch (cause) {
+      setBatchError(cause instanceof Error ? cause.message : "无法核对原请求");
+      return;
+    }
+    const actionKey = JSON.stringify([
+      accountAtStart,
+      kind,
+      sourceId,
+      reason.trim(),
+    ]);
+    const previous =
+      stored ??
+      [...regenerationAttempts.current.values()].find(
+        (attempt) =>
+          attempt.account === accountAtStart &&
+          attempt.kind === kind &&
+          attempt.sourceId === sourceId,
+      );
+    if (previous) {
+      setRegenerationConfirmation(previous);
+      setRegenerationError("");
+      return;
+    }
+    const sequence = ++quoteRequestSequence.current;
+    regenerationInFlight.current = true;
     setActiveTaskAction(actionKey);
     try {
-      const replacement = await regenerateGenerationBatch(batch.id, {
-        idempotency_key: operationKey,
-        estimated_cost_snapshot: estimatedCost,
-        generation_reason: reason,
-      });
-      if (activeBatchIdRef.current !== batchIdAtStart) {
+      const quote = await getRegenerationQuote(kind, sourceId);
+      if (
+        !isMountedRef.current ||
+        sequence !== quoteRequestSequence.current ||
+        accountRef.current !== accountAtStart ||
+        activeBatchIdRef.current !== batchIdAtStart ||
+        roleRef.current === "auditor"
+      )
         return;
-      }
-      delete taskOperationKeysRef.current[actionKey];
-      selectBatch(replacement.id, replacement);
-      void loadHistory();
-    } catch {
-      if (activeBatchIdRef.current === batchIdAtStart) {
-        setBatchError("整批付费再次生成失败，已保留本次请求供重试。");
+      if (!isCurrentQuote(quote))
+        throw new Error("报价已失效，请重新获取并确认。");
+      setRegenerationConfirmation({
+        kind,
+        sourceId,
+        batchId: batchIdAtStart,
+        account: accountAtStart,
+        actionKey,
+        quote,
+        submitted: false,
+        request: {
+          idempotency_key: operationIdempotencyKey(
+            taskOperationKeysRef.current,
+            actionKey,
+          ),
+          estimated_cost_snapshot: estimatedCost,
+          generation_reason: reason.trim(),
+          quote_token: quote.quote_token,
+          max_credits: quote.max_credits,
+        },
+      });
+      setRegenerationError("");
+    } catch (cause) {
+      if (
+        sequence === quoteRequestSequence.current &&
+        accountRef.current === accountAtStart
+      ) {
+        setBatchError(
+          cause instanceof Error
+            ? cause.message
+            : "读取重新生成报价失败，请重试。",
+        );
       }
     } finally {
+      regenerationInFlight.current = false;
       setActiveTaskAction((current) => (current === actionKey ? "" : current));
     }
   }
 
-  // 付费再次生成（单任务）：舞台轻量确认卡与运维详情表单共用此路径，
-  // reason 由调用方 UI 组装（付费确认门控在各自按钮上）。
+  async function handleRegenerateBatch() {
+    if (!batch || !batchPaymentConfirmed) return;
+    await requestRegeneration(
+      "batch",
+      batch.id,
+      batchRegenerationReason,
+      estimatedBatchCost(batch),
+    );
+  }
+
   async function handleRegenerateTask(task: GenerationTask, reason: string) {
-    const trimmedReason = reason.trim();
-    if (!canOperate || !activeBatchId || !trimmedReason) {
+    await requestRegeneration(
+      "task",
+      task.id,
+      reason,
+      task.estimated_cost ?? null,
+    );
+  }
+
+  async function confirmRegeneration() {
+    const attempt = regenerationConfirmation;
+    const canSubmit = () =>
+      Boolean(
+        attempt &&
+          isMountedRef.current &&
+          accountRef.current === attempt.account &&
+          activeBatchIdRef.current === attempt.batchId &&
+          roleRef.current !== "auditor",
+      );
+    if (
+      !attempt ||
+      regenerationInFlight.current ||
+      roleRef.current === "auditor" ||
+      accountRef.current !== attempt.account ||
+      activeBatchIdRef.current !== attempt.batchId
+    )
+      return;
+    // 丢响应只能重放原请求；尚未提交的过期报价必须重新确认，不偷换新价格。
+    if (!attempt.submitted && !isCurrentQuote(attempt.quote)) {
+      setRegenerationError("报价已失效，请取消后重新获取报价并确认。");
       return;
     }
-    const batchIdAtStart = activeBatchId;
-    const estimatedCost = task.estimated_cost ?? null;
-    const actionKey = `${task.id}:paid-regenerate:${trimmedReason}:${estimatedCost ?? "unknown"}`;
-    const operationKey = operationIdempotencyKey(
-      taskOperationKeysRef.current,
-      actionKey,
-    );
-    setActiveTaskAction(actionKey);
+    regenerationInFlight.current = true;
+    setRegenerationBusy(true);
+    const wasSubmitted = attempt.submitted;
+    attempt.submitted = true;
     try {
-      const replacement = await regenerateGenerationTask(task.id, {
-        idempotency_key: operationKey,
-        estimated_cost_snapshot: estimatedCost,
-        generation_reason: trimmedReason,
-      });
-      if (activeBatchIdRef.current !== batchIdAtStart) {
-        return;
+      await savePendingRegeneration(attempt);
+    } catch (cause) {
+      attempt.submitted = wasSubmitted;
+      regenerationInFlight.current = false;
+      setRegenerationBusy(false);
+      setRegenerationError(
+        cause instanceof Error ? cause.message : "无法保存原请求",
+      );
+      return;
+    }
+    if (!canSubmit()) {
+      regenerationInFlight.current = false;
+      setRegenerationBusy(false);
+      return;
+    }
+    regenerationAttempts.current.set(attempt.actionKey, attempt);
+    setRegenerationBusy(true);
+    setRegenerationError("");
+    const isCurrent = () =>
+      isMountedRef.current &&
+      accountRef.current === attempt.account &&
+      activeBatchIdRef.current === attempt.batchId &&
+      roleRef.current !== "auditor";
+    try {
+      const replacement = await (attempt.kind === "batch"
+        ? regenerateGenerationBatch
+        : regenerateGenerationTask)(attempt.sourceId, attempt.request);
+      let storageWarning = "";
+      try {
+        await clearPendingRegeneration(attempt);
+        regenerationAttempts.current.delete(attempt.actionKey);
+      } catch {
+        storageWarning =
+          "任务已受理，但原请求记录未能清除；再次操作会先核对原请求。";
       }
-      delete taskOperationKeysRef.current[actionKey];
+      delete taskOperationKeysRef.current[attempt.actionKey];
+      if (!isCurrent()) return;
+      setRegenerationConfirmation(null);
       selectBatch(replacement.id, replacement);
+      if (storageWarning) setBatchError(storageWarning);
       void loadHistory();
-    } catch {
-      if (activeBatchIdRef.current === batchIdAtStart) {
-        setBatchError("付费重新生成失败，已保留本次请求供重试。");
+    } catch (cause) {
+      if (isQuoteRejection(cause)) {
+        try {
+          await clearPendingRegeneration(attempt);
+        } catch (storageError) {
+          if (isCurrent())
+            setRegenerationError(
+              storageError instanceof Error
+                ? storageError.message
+                : "无法清理原请求",
+            );
+          return;
+        }
+        regenerationAttempts.current.delete(attempt.actionKey);
+        delete taskOperationKeysRef.current[attempt.actionKey];
+        if (isCurrent()) {
+          setRegenerationConfirmation(null);
+          setBatchError("报价已变更或失效，请重新获取报价并确认后再生成。");
+        }
+      } else if (isCurrent()) {
+        setRegenerationError(
+          "付费重新生成结果未确认，已保留原报价与请求，请重试核对，勿另建任务。",
+        );
       }
     } finally {
-      setActiveTaskAction((current) => (current === actionKey ? "" : current));
+      regenerationInFlight.current = false;
+      setRegenerationBusy(false);
     }
   }
 
@@ -1137,6 +1312,26 @@ export function TaskRecordsPanel({
           ) : null}
         </div>
       </div>
+      <CustomerConfirmDialog
+        request={
+          regenerationConfirmation
+            ? {
+                title: "确认重新生成报价",
+                description: `本次新增 ${regenerationConfirmation.quote.quantity} 个生成任务，最多预留 ${regenerationConfirmation.quote.max_credits} 积分。原任务保留。`,
+                confirmLabel: regenerationConfirmation.submitted
+                  ? "重试核对原请求"
+                  : "确认报价并生成",
+                onConfirm: confirmRegeneration,
+              }
+            : null
+        }
+        busy={regenerationBusy}
+        error={regenerationError}
+        onConfirm={() => void confirmRegeneration()}
+        onClose={() => {
+          if (!regenerationInFlight.current) setRegenerationConfirmation(null);
+        }}
+      />
     </section>
   );
 }

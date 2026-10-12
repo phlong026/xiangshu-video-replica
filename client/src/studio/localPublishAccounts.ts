@@ -1,5 +1,8 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { publishBrowserRequest } from "../api";
+import {
+  captureWorkspaceCredentialContext,
+  publishBrowserRequest,
+} from "../api";
 import type { PublishPlatform } from "./PlatformLogo";
 
 export type LocalPublishAccount = {
@@ -128,6 +131,92 @@ export async function deleteCloudPublishAccount(
   accountId: string,
 ): Promise<void> {
   await cloudDeleteAccount(accountId);
+}
+
+export const PUBLISH_ACCOUNTS_CHANGED =
+  "video-replica:publish-accounts-changed";
+const PUBLISH_ACCOUNTS_REVISION = "video-replica:publish-accounts-revision";
+
+export function onPublishAccountsChanged(listener: () => void): () => void {
+  const changed = (event: StorageEvent) => {
+    if (event.key === PUBLISH_ACCOUNTS_REVISION) listener();
+  };
+  window.addEventListener(PUBLISH_ACCOUNTS_CHANGED, listener);
+  window.addEventListener("storage", changed);
+  return () => {
+    window.removeEventListener(PUBLISH_ACCOUNTS_CHANGED, listener);
+    window.removeEventListener("storage", changed);
+  };
+}
+
+function publishAccountsChanged() {
+  window.dispatchEvent(new Event(PUBLISH_ACCOUNTS_CHANGED));
+  try {
+    localStorage.setItem(PUBLISH_ACCOUNTS_REVISION, crypto.randomUUID());
+  } catch {
+    // 浏览器存储不可用不改变服务端解绑结果，同窗口仍收到刷新通知。
+  }
+}
+
+/** 两处确认后才返回成功；失败时保留本机账号，供原目标重试。 */
+export async function disconnectPublishAccount(
+  owner: string,
+  account: LocalPublishAccount,
+): Promise<void> {
+  const native = canUseLocalPublishAccounts();
+  const requireSession = captureWorkspaceCredentialContext();
+  const cloudTargets = async () => {
+    requireSession();
+    const targets = await listCloudPublishAccounts();
+    requireSession();
+    return targets;
+  };
+  const matches = (item: CloudPublishAccount) =>
+    native
+      ? item.platform === account.platform &&
+        item.platform_user_id === account.platform_user_id
+      : item.id === account.id;
+  try {
+    const targets = (await cloudTargets()).filter(matches);
+    for (const target of targets) {
+      try {
+        requireSession();
+        await deleteCloudPublishAccount(target.id);
+        requireSession();
+      } catch (cause) {
+        // DELETE 可能已成功但响应丢失；必须重读确认，不能吞错当成功。
+        if ((await cloudTargets()).some(matches)) throw cause;
+      }
+    }
+    if (targets.length && (await cloudTargets()).some(matches))
+      throw new Error("云端账号仍存在，请重试解绑。");
+  } catch (cause) {
+    throw new Error(
+      `云端解绑尚未确认，${native ? "本机登录状态已保留" : "请重试"}。${cause instanceof Error ? cause.message : "读取云端账号失败。"}`,
+    );
+  }
+  requireSession();
+  publishAccountsChanged();
+  if (native) {
+    try {
+      await removeLocalPublishAccount(owner, account.id);
+    } catch (cause) {
+      // 双窗口可能已清理同一账号，重读本机列表后才能确认完成。
+      try {
+        if (
+          !(await listLocalPublishAccounts(owner)).some(
+            (item) => item.id === account.id,
+          )
+        )
+          return;
+      } catch {
+        // 本机状态不可读仍按未完成处理，保留重试入口。
+      }
+      throw new Error(
+        `云端已解绑，本机清理未完成，请重试。${cause instanceof Error ? cause.message : ""}`,
+      );
+    }
+  }
 }
 
 type CloudLogin = {

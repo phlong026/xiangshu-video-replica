@@ -18,7 +18,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU2RTY3QzAzRDQzQjBBODYKUldTR0NqdlVBM3ptVm9PZzcvU2M0OG03b1ZtdkFaSGIxQlpZdFBnNytQWWVYbjdRSHR5T0phWW0K",
       "endpoints": [
-        "https://video.zszhj.cn/downloads/customer-cloud/stable.json"
+        "https://staging.example.invalid/downloads/customer-cloud/stable.json"
       ]
     }
   }

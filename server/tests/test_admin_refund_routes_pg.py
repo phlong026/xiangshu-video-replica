@@ -128,15 +128,38 @@ def _seed_refund_adjustment(
     credits: int = -500,
     source: str = "REFUND_APPROVAL",
     extra_ref: str = "ZPAY-REFUND-001",
+    source_verified: bool = True,
 ) -> None:
-    """直插账本侧事实：调账行 + REFUND 流水（复刻反向调账的落库形状）。"""
-    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
+    """隔离库合成完整来源链；历史未知来源必须显式选择，不能伪装成已核对。"""
+    with psycopg.connect(_db_dsn()) as conn:
+        order_id, charge_id = str(uuid.uuid4()), str(uuid.uuid4())
+        if source_verified:
+            conn.execute(
+                "INSERT INTO recharge_orders "
+                "(id,user_id,merchant_order_no,provider,status,pricing_scope,"
+                "base_unit_price_fen_snapshot,charged_unit_price_fen_snapshot,"
+                "min_recharge_fen_snapshot,recharge_step_fen_snapshot,amount_fen,credits,"
+                "provider_trade_no,paid_at) VALUES (%s,'customer_u',%s,'zpay','PAID',"
+                "'CUSTOMER_STANDARD',100,100,100,100,100000,1000,%s,now())",
+                (order_id, "ORIGINAL-" + order_id, "SYNTHETIC-" + order_id),
+            )
+            conn.execute(
+                "INSERT INTO wallet_transactions "
+                "(id,user_id,type,available_delta,reserved_delta,recharge_order_id,"
+                "idempotency_key,auth_source) "
+                "VALUES (%s,'customer_u','CHARGE',1000,0,%s,%s,'internal')",
+                (charge_id, order_id, charge_id),
+            )
+            conn.execute(
+                "UPDATE billing_credit_lots SET remaining_credits=remaining_credits+%s WHERE id=%s",
+                (credits, charge_id),
+            )
         conn.execute(
             "INSERT INTO admin_adjustments (id, admin_user_id, target_user_id, "
             "source_document_type, source_document_ref, reason, request_id, "
             "balance_before, balance_after) "
-            "VALUES (%s, 'admin_u', 'customer_u', %s, %s, '测试退款', %s, 800, 300)",
-            (adjustment_id, source, extra_ref, f"req-{adjustment_id}"),
+            "VALUES (%s, 'admin_u', 'customer_u', %s, %s, '测试退款', %s, 1000, %s)",
+            (adjustment_id, source, extra_ref, f"req-{adjustment_id}", 1000 + credits),
         )
         refund_tx = f"admin_adjustment:refund:{adjustment_id}"
         conn.execute(
@@ -145,6 +168,15 @@ def _seed_refund_adjustment(
             "VALUES (%s, 'customer_u', 'REFUND', %s, 0, %s, 'internal')",
             (refund_tx, credits, refund_tx),
         )
+        if source_verified:
+            conn.execute(
+                "INSERT INTO admin_refund_allocations "
+                "(adjustment_id,refund_transaction_id,original_recharge_order_id,credit_lot_id,"
+                "credits,source_credits,source_amount_fen,lot_remaining_before,"
+                "lot_remaining_after) "
+                "VALUES (%s,%s,%s,%s,%s,1000,100000,1000,%s)",
+                (adjustment_id, refund_tx, order_id, charge_id, -credits, 1000 + credits),
+            )
 
 
 def _mark(
@@ -247,3 +279,31 @@ def test_execution_writes_audit_once_and_marks_sensitive(client: TestClient) -> 
             (refund_id,),
         ).fetchall()
     assert [r[0] for r in rows] == ["refund.execution.mark"]
+
+
+def test_historical_unverified_refund_stays_visible_but_cannot_be_newly_executed(client):
+    headers = _admin_session(client)
+    historical = str(uuid.uuid4())
+    _seed_refund_adjustment(adjustment_id=historical, source_verified=False)
+    listed = client.get("/api/control/refunds", headers=headers)
+    assert listed.status_code == 200
+    row = next(item for item in listed.json()["items"] if item["adjustment_id"] == historical)
+    assert row["source_verified"] is False
+    assert row["original_recharge_order_no"] == ""
+    refused = _mark(client, headers, historical)
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "REFUND_SOURCE_REVIEW_REQUIRED"
+    with psycopg.connect(_db_dsn()) as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM refund_executions WHERE adjustment_id=%s", (historical,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM admin_refund_allocations WHERE adjustment_id=%s",
+                (historical,),
+            ).fetchone()[0]
+            == 0
+        )

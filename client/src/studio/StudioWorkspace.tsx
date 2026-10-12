@@ -23,6 +23,7 @@ import {
   getWallet,
   type IndependentCapabilities,
   listMaterials,
+  type OralPrice,
   type Project,
   type ViralCopyBilling,
   type ViralPlatform,
@@ -93,6 +94,11 @@ import {
   WorkbenchPage,
 } from "./MainPages";
 import { PeoplePage, PersonPage } from "./PeoplePages";
+import {
+  isCurrentQuote,
+  isQuoteRejection,
+  watchQuoteExpiry,
+} from "./quoteConfirmation";
 import { constrainReferenceVideoPrompt } from "./referencePrompt";
 import {
   buildOralInput,
@@ -199,7 +205,7 @@ function quoteMatchesInput(
   input: GenerationQuoteInput,
 ): quote is GenerationPriceQuote {
   return Boolean(
-    quote &&
+    isCurrentQuote(quote) &&
       quote.resolution === input.resolution &&
       quote.duration_seconds === input.duration_seconds &&
       quote.quantity === input.quantity &&
@@ -402,6 +408,7 @@ export function StudioWorkspace({
     seconds: number;
     credits: number;
   }>();
+  const [oralQuote, setOralQuote] = useState<OralPrice | null>(null);
   const [oralPriceFen, setOralPriceFen] = useState<number | null>(null);
   const [oralPriceCredits, setOralPriceCredits] = useState<number | null>(null);
   const [oralQuoteStatus, setOralQuoteStatus] = useState<QuoteStatus>("idle");
@@ -806,6 +813,7 @@ export function StudioWorkspace({
   // 获取服务端按秒预算；按实际成功时长结算，最多扣受理时预留的积分。
   useEffect(() => {
     void oralQuoteRevision;
+    setOralQuote(null);
     if (review || generation !== "数字人口播") {
       setOralPriceFen(null);
       setOralQuoteStatus("idle");
@@ -819,6 +827,12 @@ export function StudioWorkspace({
     void getOralPrice({ script_text: state.draft.script.text })
       .then((price) => {
         if (active) {
+          if (!isCurrentQuote(price)) {
+            setOralQuoteStatus("error");
+            setOralQuoteError("口播报价已失效，请重新获取并确认。");
+            return;
+          }
+          setOralQuote(price);
           setOralPriceFen(price.unit_price_fen);
           setOralPriceCredits(price.unit_credits ?? null);
           setOralBudget(
@@ -961,6 +975,26 @@ export function StudioWorkspace({
     [],
   );
 
+  useEffect(
+    () =>
+      watchQuoteExpiry(videoQuote, () => {
+        setVideoQuote(null);
+        setVideoQuoteStatus("error");
+        setVideoQuoteError("视频报价已过期，请重新获取并确认后再提交。");
+      }),
+    [videoQuote],
+  );
+
+  useEffect(
+    () =>
+      watchQuoteExpiry(oralQuote, () => {
+        setOralQuote(null);
+        setOralQuoteStatus("error");
+        setOralQuoteError("口播报价已过期，请重新获取并确认后再提交。");
+      }),
+    [oralQuote],
+  );
+
   const submitOralTask = async () => {
     if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
@@ -970,9 +1004,14 @@ export function StudioWorkspace({
       oralSubmittingRef.current ||
       generationRef.current !== "数字人口播" ||
       oralQuoteStatus !== "ready" ||
-      oralPriceFen === null
+      oralPriceFen === null ||
+      !isCurrentQuote(oralQuote)
     ) {
-      if (!oralSubmittingRef.current) notify("请先取得有效口播报价后再提交。");
+      if (!oralSubmittingRef.current) {
+        setOralQuoteStatus("error");
+        setOralQuoteError("请重新获取并确认口播报价后再提交。");
+        notify("请先取得有效口播报价后再提交。");
+      }
       return;
     }
     const dialogRevision = generationDialogRevisionRef.current;
@@ -1016,6 +1055,8 @@ export function StudioWorkspace({
       const result = await createOralTask({
         ...request,
         idempotencyKey: oralSubmissionRef.current.key,
+        quoteToken: oralQuote.quote_token,
+        maxCredits: oralQuote.max_credits,
       });
       if (!isCurrent()) return;
       oralSubmissionRef.current = null;
@@ -1032,6 +1073,11 @@ export function StudioWorkspace({
         notify(
           customerVisibleErrorMessage(cause, "口播任务提交失败，请稍后重试。"),
         );
+        if (isQuoteRejection(cause)) {
+          setOralQuote(null);
+          setOralQuoteStatus("error");
+          setOralQuoteError("报价已改变或过期，请重新获取并确认后再提交。");
+        }
         // 服务端已给出需要多少积分；把钱包侧栏一并打开，省掉用户自己找入口。
         if (isInsufficientCredits(cause)) openLive("wallet");
       }
@@ -1102,6 +1148,8 @@ export function StudioWorkspace({
       videoQuoteStatus !== "ready" ||
       !quoteMatchesInput(videoQuote, quoteInput)
     ) {
+      setVideoQuoteStatus("error");
+      setVideoQuoteError("请重新获取并确认当前参数的视频报价后再提交。");
       notify("请先取得与当前参数一致的视频报价后再提交。");
       return;
     }
@@ -1152,6 +1200,8 @@ export function StudioWorkspace({
       const result = await createIndependentVideoTask({
         ...request,
         idempotency_key: videoSubmissionRef.current.key,
+        quote_token: videoQuote.quote_token,
+        max_credits: videoQuote.max_credits,
       });
       if (!isCurrent()) return;
       videoSubmissionRef.current = null;
@@ -1168,8 +1218,16 @@ export function StudioWorkspace({
         setVideoSubmitError(message);
         // Validation runs before task creation and billing; transport errors
         // remain uncertain and keep the existing idempotent retry guidance.
+        if (isQuoteRejection(cause)) {
+          setVideoQuote(null);
+          setVideoQuoteStatus("error");
+          setVideoQuoteError("报价已改变或过期，请重新获取并确认后再提交。");
+        }
         setVideoSubmitRejected(
-          cause instanceof Error && "status" in cause && cause.status === 422,
+          isQuoteRejection(cause) ||
+            (cause instanceof Error &&
+              "status" in cause &&
+              cause.status === 422),
         );
       }
     } finally {

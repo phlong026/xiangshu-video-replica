@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261008T1600_support_tickets"
+      "20261012T0300_refund_source_allocations"
     ],
     "parents": {
       "001_core": null,
@@ -182,9 +182,12 @@
       "20261008T1300_viral_homepage_capacity": "20261008T1200_announcements",
       "20261008T1400_publish_stats_flag": "20261008T1300_viral_homepage_capacity",
       "20261008T1500_recharge_package_window": "20261008T1400_publish_stats_flag",
-      "20261008T1600_support_tickets": "20261008T1500_recharge_package_window"
+      "20261008T1600_support_tickets": "20261008T1500_recharge_package_window",
+      "20261012T0100_admin_adjustment_operations": "20261008T1600_support_tickets",
+      "20261012T0200_character_request_keys": "20261012T0100_admin_adjustment_operations",
+      "20261012T0300_refund_source_allocations": "20261012T0200_character_request_keys"
     },
-    "revision_count": 163
+    "revision_count": 166
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -850,6 +853,18 @@
     "20261008T1600_support_tickets": {
       "file": "versions/20261008T1600_support_tickets.py",
       "sha256": "b32b078e5183637739cc333d5549d25f9c75d10a003164316182fd4e108fd5ad"
+    },
+    "20261012T0100_admin_adjustment_operations": {
+      "file": "versions/20261012T0100_admin_adjustment_operations.py",
+      "sha256": "dbb7f0be03b187c7703f8605f88602848ba0d5101b04663adb94766b542b3f84"
+    },
+    "20261012T0200_character_request_keys": {
+      "file": "versions/20261012T0200_character_request_keys.py",
+      "sha256": "0ca8f3ff7e8ee1a1f8966ee7af4503c7c91e5ca4344cda3665e039c50eea22ec"
+    },
+    "20261012T0300_refund_source_allocations": {
+      "file": "versions/20261012T0300_refund_source_allocations.py",
+      "sha256": "2f5633eb7034369321be7e6c179fdeda16e81d11662cc58f04d638f282cb84f6"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

@@ -308,6 +308,9 @@ class PromptContext(BaseModel):
 class GenerationBatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    quote_token: str | None = Field(default=None, min_length=1, max_length=8192)
+    max_credits: int | None = Field(default=None, ge=0, le=2_147_483_647)
+
     quantity: int = Field(ge=1)
     prompt_version_id: str | None = Field(default=None, min_length=1)
     prompt_text: str | None = Field(default=None, min_length=1, max_length=7000)
@@ -334,6 +337,8 @@ class GenerationBatchRequest(BaseModel):
 class PaidRegenerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    quote_token: str | None = Field(default=None, min_length=1, max_length=8192)
+    max_credits: int | None = Field(default=None, ge=0, le=2_147_483_647)
     idempotency_key: str = Field(min_length=1, max_length=128)
     estimated_cost_snapshot: float | None = Field(default=None, ge=0)
     generation_reason: str = Field(min_length=1, max_length=500)
@@ -857,6 +862,9 @@ class GenerationPriceQuote(BaseModel):
     unit_credits: float
     estimated_credits: int
     credit_price_version: int
+    quote_token: str
+    quote_expires_at: int
+    max_credits: int
     # 客户套餐折扣（取更优合并后）；无折扣时为 None（价格保持平台口径）。
     discount_rate: Decimal | None = None
     discount_source: str | None = None
@@ -2022,6 +2030,7 @@ def _reserve_generation_credit(
     task_id: str,
     billing_round: int | None = 1,
     seconds: int = 1,
+    pricing_snapshot: dict[str, Any] | None = None,
 ) -> int:
     try:
         return reserve_internal_billing(
@@ -2030,6 +2039,7 @@ def _reserve_generation_credit(
             task_id=task_id,
             billing_round=billing_round,
             seconds=seconds,
+            pricing_snapshot=pricing_snapshot,
         )
     except InsufficientCreditsError as exc:
         raise generation_error(
@@ -2439,6 +2449,18 @@ def create_generation_batch(
                 "Generation must use the first frame that was used to compile the locked prompt.",
             )
 
+        from app.quote_contracts import validate_quote
+
+        pricing_snapshot = validate_quote(
+            conn,
+            user_id=actor.id,
+            service="video_2k" if request.resolution == "2K" else "video_768p",
+            units=request.output_duration_seconds,
+            quantity=request.quantity,
+            quote_token=request.quote_token,
+            max_credits=request.max_credits,
+        )
+
         request_snapshot = generation_request_snapshot(request, prompt_snapshot)
         request_snapshot["prompt_version_id"] = prompt_version_id
         task_prompt_snapshot = {
@@ -2544,6 +2566,7 @@ def create_generation_batch(
                 user_id=actor.id,
                 task_id=task_id,
                 seconds=request.output_duration_seconds,
+                pricing_snapshot=pricing_snapshot,
             )
         # Pattern D: this batch makes the user a queue participant; the cursor
         # row is upserted in the same transaction so rotation can serve them.
@@ -2578,6 +2601,20 @@ def create_generation_batch(
         metadata={"project_id": project_id, "quantity": request.quantity},
     )
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
+
+
+def _lock_paid_regeneration_admission(
+    conn: BusinessConnection, *, user_id: str, project_id: str | None, key: str
+) -> None:
+    # 会话行/API key锁不覆盖同账号的其它凭证。必须在幂等读取和报价拒绝前
+    # 串行同一受理身份，并持有到外层事务结束；否则QUOTE拒绝可能与另一未提交
+    # 的成功受理并存，客户端会错误地允许新key重来。锁序为凭证→受理key→钱包。
+    # 不锁源批次/任务行，避免与worker的任务→钱包→批次锁序形成环。
+    scope = json.dumps([user_id, project_id, key], ensure_ascii=True, separators=(",", ":"))
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"generation:paid-regeneration:{scope}",),
+    )
 
 
 def regenerate_generation_batch(
@@ -2654,6 +2691,9 @@ def regenerate_generation_batch(
             request_snapshot=request_snapshot,
             prompt_snapshots=prompt_snapshots,
         )
+        _lock_paid_regeneration_admission(
+            conn, user_id=billed_user_id, project_id=project_id, key=request.idempotency_key
+        )
         existing = _find_idempotent_batch(
             conn,
             actor_id=billed_user_id,
@@ -2676,6 +2716,19 @@ def regenerate_generation_batch(
         for provider_name in {str(row["provider"]) for row in source_tasks}:
             require_regeneration_provider_ready(conn, provider_name=provider_name)
 
+        pricing_snapshot = _validate_regeneration_quote(
+            conn,
+            user_id=billed_user_id,
+            request=request,
+            parameters=_regeneration_quote_parameters(
+                actor_id=actor.id,
+                operation_kind="MANUAL_BATCH_REGENERATE",
+                source_batch_id=batch_id,
+                source_task_ids=source_task_ids,
+                request_snapshot=request_snapshot,
+                prompt_snapshots=prompt_snapshots,
+            ),
+        )
         new_batch_id = str(uuid4())
         conn.execute(
             """
@@ -2743,6 +2796,7 @@ def regenerate_generation_batch(
                 user_id=billed_user_id,
                 task_id=replacement_task_id,
                 seconds=_seconds_from_prompt_snapshot(prompt_snapshot),
+                pricing_snapshot=pricing_snapshot,
             )
         insert_audit(
             conn,
@@ -2851,6 +2905,9 @@ def regenerate_generation_task(
             request_snapshot=request_snapshot,
             prompt_snapshots=[prompt_snapshot],
         )
+        _lock_paid_regeneration_admission(
+            conn, user_id=billed_user_id, project_id=project_id, key=request.idempotency_key
+        )
         existing = _find_idempotent_batch(
             conn,
             actor_id=billed_user_id,
@@ -2871,6 +2928,19 @@ def regenerate_generation_task(
         require_task_paid_regeneration_state(source)
         require_regeneration_provider_ready(conn, provider_name=str(source["provider"]))
 
+        pricing_snapshot = _validate_regeneration_quote(
+            conn,
+            user_id=billed_user_id,
+            request=request,
+            parameters=_regeneration_quote_parameters(
+                actor_id=actor.id,
+                operation_kind="TASK_PAID_REGENERATE",
+                source_batch_id=source_batch_id,
+                source_task_ids=[task_id],
+                request_snapshot=request_snapshot,
+                prompt_snapshots=[prompt_snapshot],
+            ),
+        )
         new_batch_id = str(uuid4())
         replacement_task_id = str(uuid4())
         conn.execute(
@@ -2933,6 +3003,7 @@ def regenerate_generation_task(
             user_id=billed_user_id,
             task_id=replacement_task_id,
             seconds=_seconds_from_prompt_snapshot(prompt_snapshot),
+            pricing_snapshot=pricing_snapshot,
         )
         cursor = conn.execute(
             """
@@ -2976,6 +3047,147 @@ def regenerate_generation_task(
         conn.rollback()
         raise
     return get_generation_batch(conn, batch_id=new_batch_id, actor=actor)
+
+
+def _regeneration_quote_parameters(
+    *,
+    actor_id: str,
+    operation_kind: Literal["MANUAL_BATCH_REGENERATE", "TASK_PAID_REGENERATE"],
+    source_batch_id: str,
+    source_task_ids: Sequence[str],
+    request_snapshot: str,
+    prompt_snapshots: Sequence[str],
+) -> dict[str, Any]:
+    if not prompt_snapshots or len(source_task_ids) != len(prompt_snapshots):
+        raise generation_error(409, "SOURCE_BATCH_EMPTY", "原批次缺少可重新生成的冻结任务。")
+    try:
+        request_payload = json.loads(request_snapshot)
+        if not isinstance(request_payload, dict):
+            raise ValueError("原批次冻结参数无效")
+        worker_resolution = request_payload["resolution"]
+        worker_duration = request_payload["output_duration_seconds"]
+        if (
+            worker_resolution not in {"768P", "2K"}
+            or type(worker_duration) is not int
+            or not 4 <= worker_duration <= 15
+        ):
+            raise ValueError("原批次冻结规格无效")
+        specifications = []
+        for snapshot in prompt_snapshots:
+            payload = json.loads(snapshot)
+            if not isinstance(payload, dict):
+                raise ValueError("原任务冻结参数无效")
+            resolution = payload["resolution"]
+            duration = payload["output_duration_seconds"]
+            if type(duration) is not int or (resolution, duration) != (
+                worker_resolution,
+                worker_duration,
+            ):
+                raise ValueError("报价与实际生成冻结规格不一致")
+            specifications.append((resolution, duration))
+    except (ValueError, TypeError, KeyError) as exc:
+        raise generation_error(
+            409,
+            "QUOTE_SPECIFICATION_MISMATCH",
+            "原任务冻结规格缺失或不一致，不能猜测重新生成报价，请重新选择生成参数。",
+        ) from exc
+    if len(set(specifications)) != 1:
+        # 正常批次规格一致；历史混合批次不能用某一条的单价替整批报价。
+        raise generation_error(
+            409,
+            "QUOTE_SPECIFICATION_MISMATCH",
+            "原批次包含不同生成规格，请逐条获取报价并重新生成。",
+        )
+    resolution, duration = specifications[0]
+    return {
+        "resolution": resolution,
+        "duration_seconds": duration,
+        "quantity": len(source_task_ids),
+        "specification": {
+            "operation_kind": operation_kind,
+            "requested_by_user_id": actor_id,
+            "source_batch_id": source_batch_id,
+            "source_task_ids": list(source_task_ids),
+            "request_snapshot_hash": canonical_snapshot_hash(request_snapshot),
+            "prompt_snapshot_hashes": [canonical_snapshot_hash(s) for s in prompt_snapshots],
+        },
+    }
+
+
+def _validate_regeneration_quote(
+    conn: BusinessConnection,
+    *,
+    user_id: str,
+    request: PaidRegenerationRequest,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    from app.quote_contracts import validate_quote
+
+    return validate_quote(
+        conn,
+        user_id=user_id,
+        service="video_2k" if parameters["resolution"] == "2K" else "video_768p",
+        units=parameters["duration_seconds"],
+        quantity=parameters["quantity"],
+        specification=parameters["specification"],
+        quote_token=request.quote_token,
+        max_credits=request.max_credits,
+    )
+
+
+def generation_regeneration_price_quote(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    source_kind: Literal["batch", "task"],
+    source_id: str,
+) -> GenerationPriceQuote:
+    if source_kind == "batch":
+        source = conn.execute(
+            "SELECT id, project_id, created_by_user_id, request_snapshot_json "
+            "FROM generation_batches WHERE id = %s",
+            (source_id,),
+        ).fetchone()
+    else:
+        source = conn.execute(
+            "SELECT task.id, task.batch_id, task.prompt_snapshot_json, "
+            "batch.project_id, batch.created_by_user_id, batch.request_snapshot_json "
+            "FROM generation_tasks AS task "
+            "JOIN generation_batches AS batch ON batch.id = task.batch_id "
+            "WHERE task.id = %s",
+            (source_id,),
+        ).fetchone()
+    if source is None:
+        raise generation_error(
+            404, "BATCH_NOT_FOUND" if source_kind == "batch" else "TASK_NOT_FOUND", "原任务不存在。"
+        )
+    require_batch_access(
+        conn,
+        actor=actor,
+        project_id=None if source["project_id"] is None else str(source["project_id"]),
+        created_by_user_id=str(source["created_by_user_id"]),
+        action=f"generation_{source_kind}.regeneration_quote",
+    )
+    if source_kind == "batch":
+        tasks = conn.execute(
+            "SELECT id, prompt_snapshot_json FROM generation_tasks "
+            "WHERE batch_id = %s ORDER BY created_at, id",
+            (source_id,),
+        ).fetchall()
+    else:
+        tasks = [source]
+    parameters = _regeneration_quote_parameters(
+        actor_id=actor.id,
+        operation_kind="MANUAL_BATCH_REGENERATE"
+        if source_kind == "batch"
+        else "TASK_PAID_REGENERATE",
+        source_batch_id=source_id if source_kind == "batch" else str(source["batch_id"]),
+        source_task_ids=[str(task["id"]) for task in tasks],
+        request_snapshot=required_snapshot_text(source["request_snapshot_json"]),
+        prompt_snapshots=[required_snapshot_text(task["prompt_snapshot_json"]) for task in tasks],
+    )
+    # 运维可代操作，但报价与实际预扣都必须使用原批次付费账号的钱包及折扣。
+    return generation_price_quote(conn, user_id=str(source["created_by_user_id"]), **parameters)
 
 
 def required_snapshot_text(value: Any) -> str:
@@ -3664,6 +3876,71 @@ def _complete_reconcile_operation_in_transaction(
     )
 
 
+def _pre_provider_retry_pricing_snapshot(
+    conn: BusinessConnection,
+    *,
+    user_id: str,
+    task_id: str,
+    seconds: int,
+    prompt_snapshot: str,
+) -> dict[str, Any] | None:
+    from decimal import InvalidOperation
+
+    from app.billing_catalog import amount, credits_from_snapshot
+
+    try:
+        payload = json.loads(prompt_snapshot)
+        if not isinstance(payload, dict):
+            raise ValueError("原任务冻结参数无效")
+        service = (
+            "video_2k" if str(payload.get("resolution", "768P")).upper() == "2K" else "video_768p"
+        )
+        previous = conn.execute(
+            "SELECT user_id, service, state, budget_units, reserved_credits, charged_credits, "
+            "pricing_snapshot_json FROM billing_operations "
+            "WHERE source_id=%s AND user_id=%s AND service=%s "
+            "ORDER BY billing_round DESC LIMIT 1 FOR UPDATE",
+            (task_id, user_id, service),
+        ).fetchone()
+        if previous is not None and previous["state"] == "PENDING":
+            # 原预扣仍有效时，由账务幂等直接回用该轮次，不产生新报价或新预扣。
+            return None
+        if previous is None or previous["state"] not in {"FAILED", "CANCELLED"}:
+            raise ValueError("缺少已释放的原账务记录")
+        snapshot = json.loads(str(previous["pricing_snapshot_json"]))
+        if not isinstance(snapshot, dict):
+            raise ValueError("原账务快照无效")
+        credits = credits_from_snapshot(snapshot, seconds)
+        if (
+            snapshot["service"] != service
+            or snapshot["unit"] != "second"
+            or previous["user_id"] != user_id
+            or amount(previous["budget_units"]) != amount(seconds)
+            or amount(snapshot["units"]) != amount(seconds)
+            or int(str(snapshot["credits"])) != credits
+            or int(str(previous["reserved_credits"])) != credits
+            or int(str(previous["charged_credits"])) != 0
+        ):
+            raise ValueError("原账务用量与冻结任务不一致")
+        if credits and (
+            snapshot.get("quote_actor_user_id") != user_id
+            or not snapshot.get("quote_wallet_owner_id")
+            or int(str(snapshot["quote_quantity"])) < 1
+            or credits * int(str(snapshot["quote_quantity"]))
+            > int(str(snapshot["quote_max_credits"]))
+            or not isinstance(snapshot.get("quote_expires_at"), int)
+        ):
+            raise ValueError("缺少可核验的原报价上限")
+    except (ValueError, TypeError, KeyError, InvalidOperation) as exc:
+        raise generation_error(
+            409,
+            "QUOTE_REQUIRED",
+            "原任务缺少可核验的已确认报价，请获取新报价并选择付费重新生成。",
+        ) from exc
+    # 已受理报价的有效期只管首次受理；安全重试沿用原单价和上限，不能静默取现价。
+    return snapshot
+
+
 def retry_generation_task(
     conn: BusinessConnection,
     *,
@@ -3691,6 +3968,7 @@ def retry_generation_task(
             conn.commit()
             return get_task_result(conn, task_id)
 
+        # 先锁任务再锁原账务，保持取消/完成路径的锁序，并冻结重试所依据的轮次状态。
         row = conn.execute(
             """
             SELECT
@@ -3711,6 +3989,7 @@ def retry_generation_task(
             FROM generation_tasks AS task
             JOIN generation_batches AS batch ON batch.id = task.batch_id
             WHERE task.id = %s
+            FOR UPDATE OF task
             """,
             (task_id,),
         ).fetchone()
@@ -3813,6 +4092,13 @@ def retry_generation_task(
             retry_path = "PRE_PROVIDER"
             audit_action = "generation_task.retry_queued"
             retry_seconds = _seconds_from_prompt_snapshot(row["prompt_snapshot_json"])
+            retry_pricing = _pre_provider_retry_pricing_snapshot(
+                conn,
+                user_id=str(row["created_by_user_id"]),
+                task_id=task_id,
+                seconds=retry_seconds,
+                prompt_snapshot=str(row["prompt_snapshot_json"]),
+            )
             conn.execute(
                 """
                 UPDATE generation_tasks
@@ -3827,6 +4113,7 @@ def retry_generation_task(
                 task_id=task_id,
                 billing_round=None,
                 seconds=retry_seconds,
+                pricing_snapshot=retry_pricing,
             )
             conn.execute(
                 """
@@ -7712,7 +7999,9 @@ def generation_request_snapshot(
 
 
 def idempotency_request_hash(request: GenerationBatchRequest) -> str:
-    payload = request.model_dump(mode="json", exclude={"idempotency_key"})
+    payload = request.model_dump(
+        mode="json", exclude={"idempotency_key", "quote_token", "max_credits"}
+    )
     if request.prompt_version_id is not None:
         for key in ("prompt_text", "prompt_context"):
             payload.pop(key, None)
@@ -7792,13 +8081,23 @@ def generation_price_quote(
     duration_seconds: int,
     quantity: int,
     user_id: str | None = None,
+    specification: dict[str, Any] | None = None,
 ) -> GenerationPriceQuote:
     from decimal import ROUND_CEILING, Decimal
 
-    from app.billing_catalog import retail_snapshot, snapshot_discount_rate
+    from app.billing_catalog import snapshot_discount_rate
+    from app.quote_contracts import issue_quote
 
     subject = "video_2k" if resolution == "2K" else "video_768p"
-    snapshot = retail_snapshot(conn, subject, duration_seconds, user_id=user_id)
+    contract = issue_quote(
+        conn,
+        user_id=user_id or "",
+        service=subject,
+        units=duration_seconds,
+        quantity=quantity,
+        specification=specification,
+    )
+    snapshot = contract["pricing_snapshot"]
     estimated_seconds = duration_seconds * quantity
     estimated_credits = int(str(snapshot["credits"])) * quantity
     if estimated_credits > 2147483647:
@@ -7825,6 +8124,9 @@ def generation_price_quote(
         unit_credits=unit_credits,
         estimated_credits=estimated_credits,
         credit_price_version=price_version,
+        quote_token=contract["quote_token"],
+        quote_expires_at=contract["quote_expires_at"],
+        max_credits=contract["max_credits"],
         discount_rate=snapshot_discount_rate(snapshot),
         discount_source=cast(str | None, snapshot["discount_source"]),
     )

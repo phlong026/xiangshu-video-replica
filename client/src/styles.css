@@ -3516,7 +3516,9 @@ button.activation-generator__submit {
 .admin-orders-page > .admin-metrics > span,
 /* 卡片从纯 span 演进为可点击 button 后，全局 button 样式（金色底/行内排布）
    会压过下方专属样式；此处让两种标签同权，恢复"标签在上、数值在下"的卡片。 */
-.admin-orders-page > .admin-metrics > button {
+  .admin-orders-page
+  > .admin-metrics
+  > button {
   display: grid;
   gap: 12px;
   min-height: 112px;

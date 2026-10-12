@@ -554,6 +554,14 @@ def test_customer_chain_activation_to_direct_task(
         response = client.get(path, headers=_bearer(session_token))
         assert response.status_code == expected_status, f"{path}: {response.text}"
 
+    quote = client.get(
+        "/api/generation/price-quote",
+        headers=_bearer(session_token),
+        params={"resolution": "768P", "duration_seconds": 4, "quantity": 1},
+    )
+    assert quote.status_code == 200, quote.text
+    assert quote.json()["estimated_credits"] == 4
+
     batch = client.post(
         f"{PROJECTS_PATH}/{project_id}/generation-batches",
         headers=_bearer(session_token),
@@ -572,6 +580,8 @@ def test_customer_chain_activation_to_direct_task(
             "resolution": "768P",
             "idempotency_key": "e2e-batch-chain-a",
             "provider": "fake_h3",
+            "quote_token": quote.json()["quote_token"],
+            "max_credits": quote.json()["max_credits"],
         },
     )
     assert batch.status_code == 200, batch.text

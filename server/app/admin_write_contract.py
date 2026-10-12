@@ -125,6 +125,12 @@ def request_hash(route: str, path_params: Mapping[str, str], body: BaseModel) ->
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def business_request_hash(content: Mapping[str, object]) -> str:
+    """业务事实指纹不包含操作者或请求封套，以便跨会话安全重放。"""
+    payload = json.dumps(content, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def idempotency_key_digest(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 

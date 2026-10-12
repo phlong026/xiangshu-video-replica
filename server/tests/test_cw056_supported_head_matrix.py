@@ -101,7 +101,8 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261002T1015_merge_oral_compatibility_alerts 合并 oral 兼容与告警投递两条线；
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上，故链尾为该值。
-HEAD_REVISION = "20261008T1600_support_tickets"
+# 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
+HEAD_REVISION = "20261012T0300_refund_source_allocations"
 
 
 @pytest.mark.pg
@@ -397,24 +398,21 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 仍然会变：它把 `pg_get_constraintdef` 的文本一起哈希，约束体一改就换值。
 # 联合 head 在全新隔离 PG16 中重测：兼容派生表、原始素材外键与主线诊断告警 DDL 同时存在。
 # 已发布链哈希与支持的发行起点保持冻结，不因这次 merge revision 改写。
+# 2026-10-12 在全新隔离 PostgreSQL 16.15 实测：先核原发行 head 的目录和计数
+# 与既有冻结值完全一致，再升级三条追加迁移采集以下新值；不改已发布链指纹。
 HEAD_SCHEMA_COUNTS = {
-    "tables": 127,
-    # 20261006T1200 给 viral_videos 增加 pushed_at 列（+1）；20261008T1000–1600
-    # （ADM 批量开发）：+4 表（refund_executions / announcements /
-    # announcement_reads / support_tickets），+列（runtime_settings.
-    # publish_stats_sync_enabled、viral_runtime_controls.homepage_capacity、
-    # recharge_packages.available_from/to 等）；回填迁移无新约束。
-    "columns": 1427,
+    "tables": 131,
+    "columns": 1450,
     "identity_columns": 0,
     "sequences": 8,
     "jsonb_columns": 11,
-    "timestamptz_columns": 104,
-    "triggers": 55,
+    "timestamptz_columns": 108,
+    "triggers": 61,
     "partial_indexes": 41,
-    "unique_constraints": 40,
-    "check_constraints": 374,
-    "foreign_keys": 208,
-    "primary_keys": 127,
+    "unique_constraints": 42,
+    "check_constraints": 385,
+    "foreign_keys": 216,
+    "primary_keys": 131,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -442,19 +440,22 @@ HEAD_TABLE_NAMES = (
     "activation_code_events",
     "activation_code_exports",
     "activation_codes",
+    "admin_adjustment_operation_keys",
+    "admin_adjustment_operations",
     "admin_adjustments",
     "admin_device_events",
     "admin_password_credentials",
+    "admin_refund_allocations",
     "admin_sessions",
     "admin_write_idempotency",
     "alembic_version",
-    "announcement_reads",
-    "announcements",
     "alert_deliveries",
     "alert_notify_dedup",
     "alert_settings",
     "analysis_task_attempts",
     "analysis_tasks",
+    "announcement_reads",
+    "announcements",
     "assets",
     "audit_logs",
     "billing_attempts",
@@ -467,6 +468,7 @@ HEAD_TABLE_NAMES = (
     "character_generation_tasks",
     "character_personas",
     "character_reference_selections",
+    "character_sheet_task_requests",
     "character_sheet_tasks",
     "character_versions",
     "characters",
@@ -532,8 +534,8 @@ HEAD_TABLE_NAMES = (
     "studio_notification_preferences",
     "studio_saved_scripts",
     "sub_account_permissions",
-    "support_tickets",
     "sub_account_quotas",
+    "support_tickets",
     "task_diagnostic_refs",
     "user_queue_cursors",
     "users",
@@ -665,7 +667,7 @@ HEAD_TABLE_NAMES = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "1e5f691104d011a2dbaffbe6631a71169fc82d603a7be5c24c6aea215182432c"
+HEAD_SCHEMA_DIGEST = "72c9e598ee6d0998581686aa1bbc8142bb022cf5de2467de1861f29bb2edc8f9"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

@@ -27,6 +27,8 @@ const PENDING_ROW = {
   target_username: "jxhjmz",
   target_display_name: "江西合家美宅",
   source_document_ref: "ZPAY-REFUND-001",
+  original_recharge_order_no: "PAY-FIXTURE-001",
+  source_verified: true,
   reason: "客户申请退款",
   created_at: "2026-10-08T07:00:00Z",
   admin_username: "honor",
@@ -49,7 +51,9 @@ it("待退付清单默认视图渲染客户与冲减积分，未执行行可发�
   expect(screen.getByRole("button", { name: "登记退付" })).toBeEnabled();
   // 已执行行的按钮不渲染（readOnly 也不渲染）。
   // 下拉里的"已退付"选项不属于行内状态徽标；用徽标文本精确匹配。
-  expect(screen.queryByText("已退付", { exact: true, selector: "span" })).toBeNull();
+  expect(
+    screen.queryByText("已退付", { exact: true, selector: "span" }),
+  ).toBeNull();
 });
 
 it("登记退付：表单校验单号必填，提交成功后展示回执并刷新列表", async () => {

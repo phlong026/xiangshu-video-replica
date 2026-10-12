@@ -29,7 +29,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import ConfigDict
 
 from app.admin_auth_routes import AdminReader, AdminWriter
-from app.admin_customer_routes import _write_with_idempotency
+from app.admin_customer_routes import _write_with_idempotency, require_customer_target
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
@@ -54,8 +54,7 @@ class CustomerAnnotationUpdateRequest(AdminWriteRequest):
 
 
 def _require_customer(conn: psycopg.Connection, user_id: str) -> None:
-    if conn.execute("SELECT 1 FROM users WHERE id = %s", (user_id,)).fetchone() is None:
-        raise _http(404, "USER_NOT_FOUND", "客户不存在。")
+    require_customer_target(conn, user_id)
 
 
 def _normalize_tags(raw: list[str]) -> list[str]:

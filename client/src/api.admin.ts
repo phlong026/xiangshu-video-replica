@@ -1846,6 +1846,9 @@ export async function updateSupportTicket(input: {
 // 双事实清单：REFUND_APPROVAL 反向调账（账本侧）× 退付执行登记（资金侧）。
 
 export interface RefundListItem {
+  /** 旧服务端缺省时必须按未核对处理，不能据此登记新的退付。 */
+  source_verified?: boolean;
+  original_recharge_order_no?: string;
   adjustment_id: string;
   target_user_id: string;
   target_username: string;
@@ -2869,7 +2872,23 @@ export async function getAdminAnalysisDiagnostics(
 export interface AdjustmentWriteInput {
   sourceDocumentType: string;
   sourceDocumentRef: string;
+  /** 负数调账绑定的原已付款充值订单号，不是审批单号。 */
+  originalRechargeOrderNo?: string;
   credits: number;
+  /** 同一业务操作跨重试、刷新和操作员保持不变。 */
+  operationId?: string;
+}
+
+export interface AdjustmentRefundFunding {
+  original_recharge_order_id: string;
+  original_recharge_order_no: string;
+  credit_lot_id: string;
+  credits: number;
+  source_credits?: number;
+  /** 原充值实付金额依据，不是本次实际退付金额。 */
+  source_amount_fen?: string;
+  lot_remaining_before: number;
+  lot_remaining_after: number;
 }
 
 export interface AdjustmentWriteResult {
@@ -2881,6 +2900,8 @@ export interface AdjustmentWriteResult {
   wallet_balance_after: number;
   source_document_type: string;
   source_document_ref: string;
+  original_recharge_order_no?: string | null;
+  refund_funding?: AdjustmentRefundFunding;
   request_id: string;
 }
 
@@ -2889,7 +2910,8 @@ export interface AdjustmentWriteResult {
  * The write contract (confirm + reason + idempotency key) rides the shared
  * adminWrite path, and the key is preserved across ambiguous retries.
  *
- * POST /api/control/customers/{user_id}/adjustments
+ * 正数：POST /api/control/customers/{user_id}/adjustments
+ * 负数：POST /api/control/customers/{user_id}/source-refunds
  */
 export async function createCustomerAdjustment(
   userId: string,
@@ -2897,17 +2919,56 @@ export async function createCustomerAdjustment(
   reason: string,
   idempotencyKey?: string,
 ): Promise<AdjustmentWriteResult> {
-  return adminWrite<AdjustmentWriteResult>(
-    `/api/control/customers/${encodeURIComponent(userId)}/adjustments`,
+  // 新端点在旧服务端上只会 404；不能回退到可能忽略原充值字段的旧扣减接口。
+  const isRefund = input.credits < 0;
+  const endpoint = isRefund ? "source-refunds" : "adjustments";
+  const result = await adminWrite<AdjustmentWriteResult>(
+    `/api/control/customers/${encodeURIComponent(userId)}/${endpoint}`,
     {
       source_document_type: input.sourceDocumentType,
       source_document_ref: input.sourceDocumentRef,
       credits: input.credits,
+      ...(input.originalRechargeOrderNo !== undefined
+        ? { original_recharge_order_no: input.originalRechargeOrderNo }
+        : {}),
+      ...(input.operationId ? { operation_id: input.operationId } : {}),
     },
     reason,
     "创建后台调账失败",
     idempotencyKey,
   );
+  if (isRefund) {
+    const originalOrderNo = input.originalRechargeOrderNo?.trim();
+    const funding: unknown = result?.refund_funding;
+    // HTTP 成功不能代替来源扣减证明；缺失或不一致时保留原请求供核对和重试。
+    if (
+      !originalOrderNo ||
+      result?.original_recharge_order_no !== originalOrderNo ||
+      !isRecord(funding) ||
+      funding.original_recharge_order_no !== originalOrderNo ||
+      typeof funding.original_recharge_order_id !== "string" ||
+      !funding.original_recharge_order_id.trim() ||
+      typeof funding.credit_lot_id !== "string" ||
+      !funding.credit_lot_id.trim() ||
+      !Number.isSafeInteger(funding.credits) ||
+      funding.credits !== -input.credits ||
+      typeof funding.lot_remaining_before !== "number" ||
+      !Number.isSafeInteger(funding.lot_remaining_before) ||
+      funding.lot_remaining_before < 0 ||
+      typeof funding.lot_remaining_after !== "number" ||
+      !Number.isSafeInteger(funding.lot_remaining_after) ||
+      funding.lot_remaining_after < 0 ||
+      funding.lot_remaining_before - funding.lot_remaining_after !==
+        funding.credits
+    ) {
+      throw new AdminActivationError(
+        "退款扣减结果未确认：原充值扣减证明缺失或不一致，请核对积分流水并交人工核对。",
+        undefined,
+        "REFUND_RESPONSE_UNVERIFIED",
+      );
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

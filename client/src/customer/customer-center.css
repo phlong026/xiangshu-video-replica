@@ -500,17 +500,29 @@
   .uc-tabs {
     gap: 24px;
   }
-}
-@media (max-width: 760px) {
+  /* 导航项整项换行，避免长账号名把按钮压成逐字竖排。 */
   .uc-brandbar {
     flex-wrap: wrap;
-    padding: 16px 20px;
     gap: 12px;
   }
   .uc-brandbar nav {
     width: 100%;
+    flex-wrap: wrap;
     justify-content: space-between;
     gap: 8px;
+  }
+  .uc-brandbar nav > button {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .uc-top-name {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}
+@media (max-width: 760px) {
+  .uc-brandbar {
+    padding: 16px 20px;
   }
   .uc-top-name {
     gap: 7px;

@@ -60,6 +60,7 @@ os.environ.setdefault(
 
 import psycopg
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pg_test_kit import (
@@ -327,6 +328,7 @@ def scene(oral_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Point the app PG pool at the oral database and re-seed for one test."""
     close_pg_pool()
     monkeypatch.setenv(DATABASE_URL_ENV, oral_dsn)
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     _seed_oral(oral_dsn)
     try:
@@ -502,9 +504,42 @@ def _start_voice(**kwargs: Any) -> Any:
         return start_voice_clone(BusinessConnection.postgres(raw), **kwargs)
 
 
+def _oral_quote_fields(
+    conn: BusinessConnection,
+    *,
+    user_id: str,
+    script_text: str | None,
+    audio_asset_id: str | None,
+) -> dict[str, Any]:
+    from app.billing_catalog import oral_budget_units
+    from app.quote_contracts import issue_quote, oral_quote_specification
+
+    quote = issue_quote(
+        conn,
+        user_id=user_id,
+        service="oral",
+        units=oral_budget_units(conn, script_text=script_text, audio_asset_id=audio_asset_id),
+        specification=oral_quote_specification(
+            script_text=script_text, audio_asset_id=audio_asset_id
+        ),
+    )
+    return {"quote_token": quote["quote_token"], "max_credits": quote["max_credits"]}
+
+
 def _create_task(**kwargs: Any) -> Any:
     with pg_transaction() as raw:
-        return create_oral_task(BusinessConnection.postgres(raw), **kwargs)
+        conn = BusinessConnection.postgres(raw)
+        # 生命周期夹具也走真实报价合同，不能为保留旧测试而绕过付费受理门禁。
+        if "quote_token" not in kwargs and "max_credits" not in kwargs:
+            kwargs.update(
+                _oral_quote_fields(
+                    conn,
+                    user_id=kwargs["actor"].id,
+                    script_text=kwargs.get("script_text"),
+                    audio_asset_id=kwargs.get("audio_asset_id"),
+                )
+            )
+        return create_oral_task(conn, **kwargs)
 
 
 def _cancel_task(**kwargs: Any) -> dict[str, Any]:
@@ -1765,6 +1800,13 @@ def test_clone_route_only_enqueues_before_returning_202(
 
 def test_oral_task_route_returns_202_without_vendor_and_cancel_is_idempotent(scene: str) -> None:
     avatar_id, voice_id = _seed_ready_assets()
+    with pg_transaction() as raw:
+        quote_fields = _oral_quote_fields(
+            BusinessConnection.postgres(raw),
+            user_id=actor().id,
+            script_text="文案",
+            audio_asset_id=None,
+        )
 
     db_override, _holder = _make_business_db_override(actor())
     app.dependency_overrides[get_business_db] = db_override
@@ -1782,6 +1824,7 @@ def test_oral_task_route_returns_202_without_vendor_and_cancel_is_idempotent(sce
                 "audio_asset_id": None,
                 "subtitle": None,
                 "idempotency_key": "route-queue-key",
+                **quote_fields,
             },
         )
         first_cancel = client.post(f"/api/oral/tasks/{response.json()['id']}/cancel")

@@ -64,7 +64,7 @@ from typing import Literal, Never, cast
 import psycopg
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import Response as HttpResponse
-from pydantic import BaseModel, ConfigDict, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from app.admin_auth_routes import AdminReader, AdminWriter
 from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE
@@ -77,9 +77,15 @@ from app.admin_customer_metrics import (
     utc_text_timestamp,
 )
 from app.admin_dates import append_admin_date_filters
+from app.admin_refund_funding import (
+    RefundFunding,
+    deduct_refund_source,
+    record_refund_allocation,
+)
 from app.admin_write_contract import (
     AdminWriteActor,
     DeferredHTTPWriteError,
+    business_request_hash,
 )
 from app.admin_write_contract import (
     AdminWriteContract as AdminWriteRequest,
@@ -149,6 +155,23 @@ def _write_with_idempotency(
     )
 
 
+def require_customer_target(conn: psycopg.Connection, user_id: str) -> int:
+    """锁定客户身份后再写，避免客户入口改变团队权限或超级管理员状态。"""
+    row = conn.execute(
+        "SELECT u.is_active, u.role, u.is_super_admin, "
+        "EXISTS (SELECT 1 FROM activation_code_activations a WHERE a.user_id=u.id) "
+        "FROM users u WHERE u.id=%s FOR UPDATE",
+        (user_id,),
+    ).fetchone()
+    if (
+        row is None
+        or int(row[2]) != 0
+        or not (str(row[1]) == "customer" or (str(row[1]) == "employee" and bool(row[3])))
+    ):
+        raise _http(404, "USER_NOT_FOUND", "客户不存在。")
+    return int(row[0])
+
+
 # The frozen source-document enum (来源单类型, revision 039 CHECK constraint).
 SOURCE_DOCUMENT_TYPES = (
     "CS_TICKET",
@@ -171,11 +194,14 @@ REVERSAL_SOURCE_DOCUMENT_TYPES = frozenset({"REFUND_APPROVAL", "LEDGER_CORRECTIO
 #
 # D2（行业惯例：退款只覆盖未消耗部分）：钱包下限仍是 026 的
 # `ck_wallets_available_nonnegative`，**不允许负余额**，也不做透支分支。因此反向
-# 调账的上限就是客户**当前可用余额**；客户已消耗的额度对应已交付服务，账本层面
+# 调账的上限必须同时满足原充值来源的未使用部分及客户**当前可用余额**；已消费部分
 # 不予退回（争议走线下 / 拒付核销通道，不在本任务范围）。SOP §10 第 3 步的
 # 「事后差额为零」因此只在未消耗部分成立——这是口径本身的边界，不是实现缺陷：
 # 若将来业务要求连已消耗部分也能退，那是「允许透支」的另一条方案，需要单独批准，
 # 不要在这里放宽。
+#
+# 2026-10-12：负向调账必须绑定原实付充值；只扣该来源尚未预留/消费的 lot，
+# 赠送/混合套餐/未知历史来源转人工核对，不能用其他充值或钱包总余额替代。
 #
 # D4（退款不产生充值单）：反向调账**不建 `recharge_orders` 行**——`ck_recharge_orders_status`
 # 没有退款态，且 `reconcile_customer_billing` 要求每张 PAID 单恰好对应一条同额
@@ -192,6 +218,9 @@ class AdjustmentRequest(AdminWriteRequest):
     """Shared request shape for every admin adjustment write."""
 
     credits: StrictInt = 0
+    # 省略新字段时保持旧封套指纹，部署前已经提交的请求仍可安全重放。
+    operation_id: str = Field(default="", exclude_if=lambda value: value == "")
+    original_recharge_order_no: str = Field(default="", exclude_if=lambda value: value == "")
     source_document_type: str = ""
     source_document_ref: str = ""
 
@@ -503,6 +532,134 @@ def update_customer_unit_price(
 # ---------------------------------------------------------------------------
 
 
+def _adjustment_identity(
+    user_id: str, source_document_type: str, source_document_ref: str, credits: int
+) -> str:
+    # 同一来源单可覆盖多名客户；正向补记和负向冲减仍是两笔不同的业务事实。
+    return business_request_hash(
+        {
+            "target_user_id": user_id,
+            "source_document_type": source_document_type,
+            "source_document_ref": source_document_ref,
+            "direction": -1 if credits < 0 else 1,
+        }
+    )
+
+
+def _record_adjustment_operation(
+    conn: psycopg.Connection,
+    *,
+    business_identity: str,
+    operation_id: str,
+    fingerprint: str,
+    payload: dict[str, object],
+) -> None:
+    conn.execute(
+        "INSERT INTO admin_adjustment_operations "
+        "(business_identity, request_hash, adjustment_id, response_body) VALUES (%s,%s,%s,%s)",
+        (
+            business_identity,
+            fingerprint,
+            payload["adjustment_id"],
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO admin_adjustment_operation_keys (operation_id, business_identity) "
+        "VALUES (%s,%s)",
+        (operation_id, business_identity),
+    )
+
+
+def _replay_adjustment_operation(
+    conn: psycopg.Connection,
+    *,
+    business_identity: str,
+    operation_id: str,
+    fingerprint: str,
+    user_id: str,
+    source_document_type: str,
+    source_document_ref: str,
+    credits: int,
+    reason: str,
+) -> dict[str, object] | None:
+    # 业务身份不含操作者、页面轮次或请求封套。固定锁顺序同时保护来源和显式操作号。
+    for lock in sorted({"adjustment:source:" + business_identity, "adjustment:id:" + operation_id}):
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock,))
+    rows = conn.execute(
+        "SELECT DISTINCT ao.business_identity, ao.request_hash, ao.response_body "
+        "FROM admin_adjustment_operations ao "
+        "LEFT JOIN admin_adjustment_operation_keys k ON k.business_identity=ao.business_identity "
+        "WHERE k.operation_id=%s OR ao.business_identity=%s",
+        (operation_id, business_identity),
+    ).fetchall()
+    if rows:
+        if len(rows) != 1 or str(rows[0][0]) != business_identity or str(rows[0][1]) != fingerprint:
+            raise _http(
+                409, "ADJUSTMENT_OPERATION_CONFLICT", "操作号或来源单已用于不同的调账内容。"
+            )
+        # 新操作者可能提交新请求号；把它也绑定到原事实，防止以后挪作另一笔调账。
+        conn.execute(
+            "INSERT INTO admin_adjustment_operation_keys (operation_id, business_identity) "
+            "VALUES (%s,%s) ON CONFLICT (operation_id) DO NOTHING",
+            (operation_id, business_identity),
+        )
+        return cast(dict[str, object], json.loads(str(rows[0][2])))
+
+    # 上线前的审计记录不改写；首次遇到旧来源时仅追加身份索引，歧义交人工核对。
+    old = conn.execute(
+        "SELECT aa.id, aa.reason, aa.request_id, aa.balance_after, "
+        "o.id, o.amount_fen, o.pricing_scope, tx.available_delta "
+        "FROM admin_adjustments aa "
+        "LEFT JOIN recharge_orders o ON o.id=aa.recharge_order_id "
+        "LEFT JOIN wallet_transactions tx ON tx.user_id=aa.target_user_id AND "
+        "((tx.id='admin_adjustment:charge:' || aa.recharge_order_id AND tx.type='CHARGE') "
+        "OR (tx.id='admin_adjustment:refund:' || aa.id AND tx.type='REFUND')) "
+        "WHERE aa.target_user_id=%s AND aa.source_document_type=%s "
+        "AND aa.source_document_ref=%s AND "
+        "((%s < 0 AND aa.recharge_order_id IS NULL) OR "
+        "(%s > 0 AND aa.recharge_order_id IS NOT NULL))",
+        (user_id, source_document_type, source_document_ref, credits, credits),
+    ).fetchall()
+    if not old:
+        return None
+    if credits < 0:
+        raise _http(
+            409, "ADJUSTMENT_OPERATION_CONFLICT", "历史负向调账缺少原充值来源证据，请转人工核对。"
+        )
+    if (
+        len(old) != 1
+        or old[0][7] is None
+        or int(old[0][7]) != credits
+        or str(old[0][1]).strip() != reason
+        or old[0][3] is None
+    ):
+        raise _http(
+            409, "ADJUSTMENT_OPERATION_CONFLICT", "来源单已有不同或不完整的历史调账，请先核对。"
+        )
+    row = old[0]
+    payload: dict[str, object] = {
+        "adjustment_id": str(row[0]),
+        "order_id": str(row[4] or ""),
+        "credits": str(credits),
+        "amount_fen": str(row[5] or 0),
+        "pricing_scope": str(row[6] or ""),
+        "wallet_balance_after": int(row[3]),
+        "source_document_type": source_document_type,
+        "source_document_ref": source_document_ref,
+        "request_id": str(row[2]),
+        "operation_id": operation_id,
+    }
+    _record_adjustment_operation(
+        conn,
+        business_identity=business_identity,
+        operation_id=operation_id,
+        fingerprint=fingerprint,
+        payload=payload,
+    )
+    return payload
+
+
 @router.post("/customers/{user_id}/adjustments", status_code=201)
 def create_admin_adjustment(
     user_id: str,
@@ -520,6 +677,16 @@ def create_admin_adjustment(
     (see the module-level D2/D4 notes). The real money refund happens in the
     ZPay back office and is aligned to this row by ``source_document_ref``.
     """
+
+    original_order_no = body.original_recharge_order_no.strip()
+    if body.credits < 0 and not original_order_no:
+        raise _http(
+            422, "REFUND_SOURCE_REQUIRED", "请填写对应原充值订单号，不能仅按钱包总余额退款。"
+        )
+    if len(original_order_no) > 128 or (body.credits >= 0 and original_order_no):
+        raise _http(
+            422, "REFUND_SOURCE_UNVERIFIED", "原充值订单号仅适用于负向退款且不能超过128个字符。"
+        )
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         if user_id == actor.user_id:
@@ -565,6 +732,36 @@ def create_admin_adjustment(
                 "ADJUSTMENT_VALIDATION_FAILED",
                 "source_document_ref must not be blank.",
             )
+
+        business_identity = _adjustment_identity(
+            user_id, source_document_type, source_document_ref, body.credits
+        )
+        operation_id = body.operation_id.strip() or "legacy:" + business_identity
+        if len(operation_id) > 128:
+            raise _http(400, "ADJUSTMENT_VALIDATION_FAILED", "操作号不能超过 128 个字符。")
+        content: dict[str, object] = {
+            "target_user_id": user_id,
+            "source_document_type": source_document_type,
+            "source_document_ref": source_document_ref,
+            "credits": body.credits,
+            "reason": body.reason.strip(),
+        }
+        if body.credits < 0:
+            content["original_recharge_order_no"] = original_order_no
+        fingerprint = business_request_hash(content)
+        replay = _replay_adjustment_operation(
+            conn,
+            business_identity=business_identity,
+            operation_id=operation_id,
+            fingerprint=fingerprint,
+            user_id=user_id,
+            source_document_type=source_document_type,
+            source_document_ref=source_document_ref,
+            credits=body.credits,
+            reason=body.reason.strip(),
+        )
+        if replay is not None:
+            return replay
 
         # Check target user exists
         user_row = conn.execute("SELECT 1 FROM users WHERE id = %s", (user_id,)).fetchone()
@@ -622,7 +819,11 @@ def create_admin_adjustment(
         now = paid_at
 
         order_id: str | None = None
+        refund_funding: RefundFunding | None = None
         if is_reversal:
+            refund_funding = deduct_refund_source(
+                conn, user_id=user_id, order_no=original_order_no, credits=-credits
+            )
             # 反向调账的账本事实：一条 REFUND 流水，不挂订单 / 任务 / 口播任务 /
             # 计费操作 / 计费轮次（20260923T1200 新增的形状分支）。审计行
             # （admin_adjustments.recharge_order_id 为 NULL）与它同事务落库。
@@ -751,6 +952,9 @@ def create_admin_adjustment(
             ),
         )
 
+        if refund_funding is not None:
+            record_refund_allocation(conn, adjustment_id=adjustment_id, funding=refund_funding)
+
         # Log (no sensitive data in logs)
         logger.info(
             "admin adjustment created: adjustment=%s order=%s user=%s "
@@ -767,8 +971,9 @@ def create_admin_adjustment(
         # Return success response. ``order_id`` is "" for reverse adjustments:
         # the field stays a string (no response-shape change) and there is no
         # recharge order to name.
-        return {
+        payload: dict[str, object] = {
             "adjustment_id": adjustment_id,
+            "operation_id": operation_id,
             "order_id": order_id if order_id is not None else "",
             "credits": str(credits),
             "amount_fen": str(amount_fen),
@@ -779,7 +984,33 @@ def create_admin_adjustment(
             "request_id": request_id,
         }
 
+        if refund_funding is not None:
+            payload["original_recharge_order_no"] = original_order_no
+            payload["refund_funding"] = refund_funding.payload()
+        _record_adjustment_operation(
+            conn,
+            business_identity=business_identity,
+            operation_id=operation_id,
+            fingerprint=fingerprint,
+            payload=payload,
+        )
+        return payload
+
     return _write_with_idempotency(request, response, actor, body, business, success_status=201)
+
+
+@router.post("/customers/{user_id}/source-refunds", status_code=201)
+def create_source_refund(
+    user_id: str,
+    body: AdjustmentRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    """独立受理入口使新客户端遇到旧服务端时失败关闭，不能退回旧钱包扣减路径。"""
+    if body.credits >= 0:
+        raise _http(422, "REFUND_SOURCE_REQUIRED", "原充值退款必须是负向积分扣减。")
+    return create_admin_adjustment(user_id, body, request, response, actor)
 
 
 # ---------------------------------------------------------------------------
@@ -1147,12 +1378,8 @@ def suspend_customer(
         reason = body.reason.strip()
         if not reason:
             raise _http(400, "REASON_REQUIRED", "请填写暂停原因。")
-        current = conn.execute(
-            "SELECT u.is_active FROM users u WHERE u.id = %s FOR UPDATE", (user_id,)
-        ).fetchone()
-        if current is None:
-            raise _http(404, "USER_NOT_FOUND", "客户不存在。")
-        if int(current[0]) == 0:
+        current_active = require_customer_target(conn, user_id)
+        if current_active == 0:
             # 幂等语义：重复暂停不算冲突，返回当前状态（写契约层已去重重放）。
             return {
                 "user_id": user_id,
@@ -1238,12 +1465,8 @@ def resume_customer(
         reason = body.reason.strip()
         if not reason:
             raise _http(400, "REASON_REQUIRED", "请填写恢复原因。")
-        current = conn.execute(
-            "SELECT u.is_active FROM users u WHERE u.id = %s FOR UPDATE", (user_id,)
-        ).fetchone()
-        if current is None:
-            raise _http(404, "USER_NOT_FOUND", "客户不存在。")
-        if int(current[0]) == 1:
+        current_active = require_customer_target(conn, user_id)
+        if current_active == 1:
             return {
                 "user_id": user_id,
                 "is_active": 1,

@@ -5,7 +5,7 @@ import {
   cancelLocalPublishLogin,
   canUseLocalPublishAccounts,
   checkLocalPublishLogin,
-  deleteCloudPublishAccount,
+  disconnectPublishAccount,
   exportLocalPublishAccountState,
   focusLocalPublishLogin,
   importCloudPublishAccount,
@@ -14,7 +14,7 @@ import {
   type LocalPublishLoginStatus,
   listCloudPublishAccounts,
   listLocalPublishAccounts,
-  removeLocalPublishAccount,
+  onPublishAccountsChanged,
   startLocalPublishLogin,
 } from "./localPublishAccounts";
 import {
@@ -74,7 +74,9 @@ export function LocalPublishAccountsPanel({
   >({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [syncing, setSyncing] = useState<string | null>(null);
+  const [cloudLoadError, setCloudLoadError] = useState("");
   const currentLogin = useRef<string | null>(null);
+  const cloudWrites = useRef(new Set<string>());
   const loginAccount = useRef<LocalPublishAccount | undefined>(undefined);
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
@@ -85,8 +87,14 @@ export function LocalPublishAccountsPanel({
   // Same reason: auto-degrade calls focus() from inside the poll loop.
   const focusRef = useRef<() => Promise<void>>(async () => {});
   const generation = useRef(0);
+  const currentOwner = useRef(user.id);
+  currentOwner.current = user.id;
   const pending = useRef(false);
   const native = canUseLocalPublishAccounts();
+  useEffect(
+    () => onPublishAccountsChanged(() => setRefresh((value) => value + 1)),
+    [],
+  );
   useEffect(() => {
     void refresh;
     const current = ++generation.current;
@@ -111,13 +119,16 @@ export function LocalPublishAccountsPanel({
       void listCloudPublishAccounts()
         .then((value) => {
           if (generation.current !== current) return;
+          setCloudLoadError("");
           setCloudAccounts(
             Object.fromEntries(value.map((item) => [cloudKey(item), item])),
           );
         })
-        .catch(() => {
-          // The local list still renders; sync status simply shows as unknown.
-          if (generation.current === current) setCloudAccounts({});
+        .catch((cause) => {
+          if (generation.current === current)
+            setCloudLoadError(
+              `云端账号状态暂时无法确认。${errorMessage(cause)}`,
+            );
         });
     return () => {
       generation.current += 1;
@@ -155,6 +166,8 @@ export function LocalPublishAccountsPanel({
     storageState?: unknown,
   ) {
     const key = cloudKey(account);
+    if (pending.current || cloudWrites.current.has(key)) return;
+    cloudWrites.current.add(key);
     setSyncing(key);
     try {
       if (storageState === undefined) {
@@ -173,6 +186,7 @@ export function LocalPublishAccountsPanel({
         [key]: cause instanceof Error ? cause.message : SYNC_FAILED_MESSAGE,
       }));
     } finally {
+      cloudWrites.current.delete(key);
       setSyncing((current) => (current === key ? null : current));
     }
   }
@@ -346,26 +360,29 @@ export function LocalPublishAccountsPanel({
   }
   focusRef.current = focus;
   async function remove() {
-    if (!removing || pending.current) return;
+    if (
+      !removing ||
+      pending.current ||
+      cloudWrites.current.has(cloudKey(removing))
+    )
+      return;
     pending.current = true;
     setBusy(true);
     setError("");
-    const current = generation.current;
+    const owner = user.id;
     try {
-      await removeLocalPublishAccount(user.id, removing.id);
-      if (native) {
-        const cloud = cloudAccounts[cloudKey(removing)];
-        if (cloud) await deleteCloudPublishAccount(cloud.id).catch(() => {});
-      }
-      if (current !== generation.current) return;
+      await disconnectPublishAccount(owner, removing);
+      if (currentOwner.current !== owner) return;
       setRemoving(null);
       setRefresh((value) => value + 1);
-      notify(`已清除该账号的${native ? "本机与服务端" : "云端"}登录状态`);
+      notify(
+        `已确认清除该账号的${native ? "本机与云端" : "云端"}登录状态。在途发布仍需核对发布记录。`,
+      );
     } catch (cause) {
-      if (current === generation.current) setError(errorMessage(cause));
+      if (currentOwner.current === owner) setError(errorMessage(cause));
     } finally {
       pending.current = false;
-      if (current === generation.current) setBusy(false);
+      if (currentOwner.current === owner) setBusy(false);
     }
   }
   return (
@@ -401,6 +418,7 @@ export function LocalPublishAccountsPanel({
           )}
         </p>
       )}
+      {cloudLoadError && <p role="alert">{cloudLoadError}</p>}
       {native && (
         <p>
           桌面端账号的登录状态保存在本机，并在连接时加密同步一份到服务端用于自动发布。
@@ -431,7 +449,9 @@ export function LocalPublishAccountsPanel({
             <small>
               {native ? "本机已连接" : "云端已连接"} · 最后验证{" "}
               {new Date(account.verified_at * 1000).toLocaleString("zh-CN")}
+              {native && cloudLoadError ? " · 云端状态待核对" : null}
               {native &&
+                !cloudLoadError &&
                 (syncErrors[cloudKey(account)]
                   ? " · 服务端未同步"
                   : cloudAccounts[cloudKey(account)]
@@ -469,7 +489,12 @@ export function LocalPublishAccountsPanel({
               验证或重新登录
             </Button>
             <Button
-              disabled={busy || Boolean(loginId) || user.role === "auditor"}
+              disabled={
+                busy ||
+                Boolean(loginId) ||
+                syncing === cloudKey(account) ||
+                user.role === "auditor"
+              }
               onClick={() => setRemoving(account)}
             >
               解绑
@@ -540,9 +565,13 @@ export function LocalPublishAccountsPanel({
           <legend>确认解绑账号</legend>
           <p>
             确认解绑 {removing.username} 并清除该账号的
-            {native ? "本机" : "云端"}登录状态？
+            {native ? "本机与云端" : "云端"}
+            登录状态？尚未开始的云端发布将停止；已经在途的发布可能继续，请核对发布记录。
           </p>
-          <Button disabled={busy} onClick={() => void remove()}>
+          <Button
+            disabled={busy || syncing === cloudKey(removing)}
+            onClick={() => void remove()}
+          >
             确认解绑
           </Button>
           <Button disabled={busy} onClick={() => setRemoving(null)}>

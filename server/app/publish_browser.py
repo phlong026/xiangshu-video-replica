@@ -274,14 +274,28 @@ def save_login(
 
 
 def delete_browser_account(conn: BusinessConnection, owner: str, account_id: str) -> None:
-    if (
-        conn.execute(
-            "DELETE FROM publish_browser_accounts WHERE id=%s AND user_id=%s",
-            (account_id, owner),
-        ).rowcount
-        != 1
-    ):
+    # 与领取端共同锁住账号行，解绑成功之后不能再领取尚未开始的队列项。
+    account = conn.execute(
+        "SELECT id FROM publish_browser_accounts WHERE id=%s AND user_id=%s FOR UPDATE",
+        (account_id, owner),
+    ).fetchone()
+    if account is None:
+        # 不暴露其他用户的账号；调用方通过本人列表确认重复解绑的最终状态。
         raise HTTPException(404, "发布账号不存在。")
+    conn.execute(
+        """
+        UPDATE publish_records
+        SET status = 'cancelled', error_message = '发布账号已解绑，排队任务已停止。',
+            lease_owner = NULL, lease_expires_at = NULL, updated_at = clock_timestamp()
+        WHERE account_id = %s AND user_id = %s AND status = 'queued'
+        """,
+        (account_id, owner),
+    )
+    # publishing 已越过领取边界，无法保证撤回外部动作，保留真实状态供核对。
+    conn.execute(
+        "DELETE FROM publish_browser_accounts WHERE id=%s AND user_id=%s",
+        (account_id, owner),
+    )
 
 
 class BrowserProbeLeaseLostError(RuntimeError):

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  CharacterSheetTaskError,
   type CharacterViewType,
   deleteSimpleCharacterIdentity,
   downloadCharacterAsset,
@@ -45,7 +46,7 @@ export type PendingCharacterState = {
   progress: number;
   sourcePreviewUrl?: string;
   stage: string;
-  status: "working" | "error";
+  status: "working" | "error" | "uncertain";
 };
 
 // 卡片封面取正脸近景（辨识度最高）；没有正脸时退回首张视角图，
@@ -90,6 +91,8 @@ export function CharacterLibrary({
   const [pendingCharacter, setPendingCharacter] =
     useState<PendingCharacterState | null>(null);
   const pendingPreviewUrlRef = useRef("");
+  const [taskRevision, setTaskRevision] = useState(0);
+  const [unresolvedRegenerateId, setUnresolvedRegenerateId] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -265,17 +268,20 @@ export function CharacterLibrary({
     }
   }, []);
 
-  const handleGenerationFailed = useCallback((generationError: string) => {
-    setPendingCharacter((current) =>
-      current
-        ? {
-            ...current,
-            stage: generationError,
-            status: "error",
-          }
-        : current,
-    );
-  }, []);
+  const handleGenerationFailed = useCallback(
+    (generationError: string, recoveryRequired = false) => {
+      setPendingCharacter((current) =>
+        current
+          ? {
+              ...current,
+              stage: generationError,
+              status: recoveryRequired ? "uncertain" : "error",
+            }
+          : current,
+      );
+    },
+    [],
+  );
 
   const clearPendingGeneration = useCallback(() => {
     releasePendingPreview();
@@ -307,6 +313,7 @@ export function CharacterLibrary({
     let active = true;
     void (async () => {
       try {
+        void taskRevision;
         const task = await getLatestCharacterSheetTask();
         if (!active || !task) {
           return;
@@ -315,6 +322,7 @@ export function CharacterLibrary({
         // 场景五视图不能冒充人物基准五视图。
         const taskNoun = task.operation === "SCENE" ? "场景造型" : "人物五视图";
         if (task.status === "SUCCEEDED") {
+          setUnresolvedRegenerateId("");
           clearPendingGeneration();
           setMessage(
             task.operation === "SCENE"
@@ -330,15 +338,22 @@ export function CharacterLibrary({
           task.status === "FAILED" ||
           task.status === "SUBMISSION_UNCERTAIN"
         ) {
+          setUnresolvedRegenerateId(
+            task.status === "SUBMISSION_UNCERTAIN" &&
+              task.operation === "REGENERATE"
+              ? (task.identity_id ?? "")
+              : "",
+          );
           setPendingCharacter({
             displayName: task.display_name,
             progress: task.status === "FAILED" ? 100 : 72,
             stage:
               task.error_message ??
               (task.status === "SUBMISSION_UNCERTAIN"
-                ? "云端提交结果暂时无法确认，请稍后重试。"
+                ? "云端结果待核对，请联系管理员；核对前不会重新提交。"
                 : `${taskNoun}生成失败，请重新提交。`),
-            status: "error",
+            status:
+              task.status === "SUBMISSION_UNCERTAIN" ? "uncertain" : "error",
           });
           return;
         }
@@ -367,7 +382,9 @@ export function CharacterLibrary({
       } catch (recoveryError) {
         if (active) {
           handleGenerationFailed(
-            errorMessage(recoveryError, "人物生成失败，请重新提交。"),
+            errorMessage(recoveryError, "人物生成状态暂不可读，请核对原任务。"),
+            !(recoveryError instanceof CharacterSheetTaskError) ||
+              recoveryError.recoveryRequired,
           );
         }
       }
@@ -375,7 +392,12 @@ export function CharacterLibrary({
     return () => {
       active = false;
     };
-  }, [clearPendingGeneration, handleGenerationFailed, loadLibrary]);
+  }, [
+    clearPendingGeneration,
+    handleGenerationFailed,
+    loadLibrary,
+    taskRevision,
+  ]);
 
   useEffect(
     () => () => {
@@ -503,12 +525,19 @@ export function CharacterLibrary({
     setMessage("");
     try {
       const result = await regenerateContactSheet(entry.identity_id);
+      setUnresolvedRegenerateId("");
       setMessage(
         `人物“${entry.display_name}”的五视图已重新生成（V${result.version_number}）。`,
       );
       await loadLibrary();
       onChanged?.();
     } catch (regenerateError) {
+      if (
+        regenerateError instanceof CharacterSheetTaskError &&
+        regenerateError.recoveryRequired
+      )
+        setUnresolvedRegenerateId(entry.identity_id);
+      else setUnresolvedRegenerateId("");
       setError(
         errorMessage(regenerateError, "重新生成五视图失败，请稍后重试。"),
       );
@@ -605,6 +634,7 @@ export function CharacterLibrary({
     <section aria-label="人物库" className="character-library-simple">
       {canManage ? (
         <SimpleCharacterUpload
+          recoveryBlocked={pendingCharacter?.status === "uncertain"}
           onGenerationFailed={handleGenerationFailed}
           onGenerationProgress={handleGenerationProgress}
           onGenerationStarted={handleGenerationStarted}
@@ -677,6 +707,7 @@ export function CharacterLibrary({
               <PendingCharacterCard
                 character={pendingCharacter}
                 onClear={clearPendingGeneration}
+                onRecover={() => setTaskRevision((value) => value + 1)}
               />
             ) : null}
             {entries.map((entry) => {
@@ -796,13 +827,19 @@ export function CharacterLibrary({
                             <button
                               aria-label={`重新生成人物 ${entry.display_name} 的五视图`}
                               className="secondary-button"
-                              disabled={busyRegenerateId !== ""}
+                              disabled={
+                                busyRegenerateId !== "" ||
+                                (Boolean(unresolvedRegenerateId) &&
+                                  unresolvedRegenerateId !== entry.identity_id)
+                              }
                               onClick={() => void handleRegenerate(entry)}
                               type="button"
                             >
                               {busyRegenerateId === entry.identity_id
                                 ? "正在重新生成…"
-                                : "重新生成五视图"}
+                                : unresolvedRegenerateId === entry.identity_id
+                                  ? "核对上次生成状态"
+                                  : "重新生成五视图"}
                             </button>
                           ) : null}
                           {canDelete(entry) ? (
@@ -972,9 +1009,11 @@ export function CharacterLibrary({
 export function PendingCharacterCard({
   character,
   onClear,
+  onRecover,
 }: {
   character: PendingCharacterState;
   onClear: () => void;
+  onRecover?: () => void;
 }) {
   return (
     <li
@@ -992,7 +1031,7 @@ export function PendingCharacterCard({
         )}
         <div className="character-generation-card__overlay">
           <strong>
-            {character.status === "error"
+            {character.status !== "working"
               ? "生成未完成"
               : `${character.progress}%`}
           </strong>
@@ -1005,7 +1044,11 @@ export function PendingCharacterCard({
             {character.displayName}
           </span>
           <span className="status-badge">
-            {character.status === "error" ? "失败" : "生成中"}
+            {character.status === "uncertain"
+              ? "待核对"
+              : character.status === "error"
+                ? "失败"
+                : "生成中"}
           </span>
         </div>
         <progress
@@ -1014,10 +1057,21 @@ export function PendingCharacterCard({
           value={character.progress}
         />
         <p className="character-generation-card__note">
-          {character.status === "error"
-            ? "请检查提示后重新提交。"
-            : "预计需要 1–3 分钟，可离开当前页面，任务会在后台继续。"}
+          {character.status === "uncertain"
+            ? "结果尚未确认，请核对原任务或联系管理员，不要重复生成。"
+            : character.status === "error"
+              ? "请检查提示后重新提交。"
+              : "预计需要 1–3 分钟，可离开当前页面，任务会在后台继续。"}
         </p>
+        {character.status === "uncertain" && onRecover ? (
+          <button
+            className="secondary-button"
+            onClick={onRecover}
+            type="button"
+          >
+            核对人物任务状态
+          </button>
+        ) : null}
         {character.status === "error" ? (
           <button className="secondary-button" onClick={onClear} type="button">
             移除失败任务

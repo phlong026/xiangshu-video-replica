@@ -497,3 +497,165 @@ def test_macos_tauri_overlay_builds_dmg_without_distribution_signing() -> None:
     assert config["bundle"]["macOS"]["signingIdentity"] == "-"
     assert config["bundle"]["icon"] == ["icons/icon.icns"]
     assert config["bundle"]["resources"] == []
+
+
+def test_desktop_release_is_tag_only_and_build_has_no_write_token() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/desktop-build.yml").read_text()
+    build, release = workflow.split("\n  release:\n", 1)
+    assert "contents: write" not in build
+    assert "gh release" not in build
+    assert "needs: build" in release
+    assert "github.event_name == 'push' && github.ref_type == 'tag'" in release
+    assert "startsWith(github.ref, 'refs/tags/v')" in release
+    assert "always()" not in release
+    assert "--clobber" not in workflow
+    assert "merge-multiple: false" in release
+    assert "scripts/ffmpeg-minimal/build.sh" in build
+    assert "gh release download" not in build
+
+
+def _release_module(name: str) -> dict:
+    import runpy
+
+    return runpy.run_path(str(REPO_ROOT / "scripts/release" / name))
+
+
+@pytest.mark.parametrize("fault", [None, "missing", "digest", "source", "channel"])
+def test_release_packaging_rejects_incomplete_or_untrusted_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    import zipfile
+
+    module = _release_module("prepare-desktop-release.py")
+    monkeypatch.chdir(REPO_ROOT)
+    version = json.loads((REPO_ROOT / "package.json").read_text())["version"]
+    sha = "a" * 40
+    monkeypatch.setenv("GITHUB_SHA", sha)
+    monkeypatch.setenv("GITHUB_REF", f"refs/tags/v{version}")
+    source, output = tmp_path / "in", tmp_path / "out"
+    source.mkdir()
+    for platform, (suffix, signature) in module["PLATFORMS"].items():
+        folder = source / f"desktop-{platform}"
+        folder.mkdir()
+        content = platform.encode()
+        artifact = "installer" + suffix
+        digest = hashlib.sha256(content).hexdigest()
+        (folder / artifact).write_bytes(content)
+        (folder / "SHA256SUMS.txt").write_text(f"{digest}  {artifact}\n")
+        (folder / "RELEASE-CHANNEL.txt").write_text("internal-test-unsigned\n")
+        (folder / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "version": version,
+                    "platform": platform,
+                    "source_sha": sha,
+                    "signature": signature,
+                    "artifact": artifact,
+                    "sha256": digest,
+                    "api_base_url": "https://staging.example.invalid",
+                }
+            )
+        )
+    if fault == "missing":
+        (folder / artifact).unlink()
+    elif fault == "digest":
+        (folder / artifact).write_bytes(b"tampered")
+    elif fault == "source":
+        monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+    elif fault == "channel":
+        (folder / "RELEASE-CHANNEL.txt").write_text("stable\n")
+    if fault:
+        with pytest.raises((ValueError, FileNotFoundError)):
+            module["prepare"](source, output)
+        assert not output.exists()
+    else:
+        module["prepare"](source, output)
+        assert len(list(output.glob("*.zip"))) == 3
+        for archive in output.glob("*.zip"):
+            with zipfile.ZipFile(archive) as z:
+                assert len(z.namelist()) == 4
+                assert len({Path(n).parts[0] for n in z.namelist()}) == 1
+
+
+@pytest.mark.parametrize(
+    "event,ref_type,ref",
+    [
+        ("workflow_dispatch", "tag", "refs/tags/v2.6.1"),
+        ("push", "branch", "refs/heads/main"),
+        ("push", "tag", "refs/tags/preview"),
+    ],
+)
+def test_release_publisher_rejects_nonrelease_events_before_gh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    ref_type: str,
+    ref: str,
+) -> None:
+    module = _release_module("publish-desktop-release.py")
+    monkeypatch.chdir(REPO_ROOT)
+    for key, value in {
+        "GITHUB_EVENT_NAME": event,
+        "GITHUB_REF_TYPE": ref_type,
+        "GITHUB_REF": ref,
+        "GITHUB_SHA": "a" * 40,
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    def forbidden(*args: str) -> str:
+        pytest.fail("拒绝的事件不得调用 GitHub")
+
+    module["publish"].__globals__["gh"] = forbidden
+    with pytest.raises(ValueError, match="只允许"):
+        module["publish"](tmp_path)
+
+
+@pytest.mark.parametrize("existing,mismatch", [(False, False), (True, False), (True, True)])
+def test_release_publish_is_idempotent_and_never_clobbers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool, mismatch: bool
+) -> None:
+    module = _release_module("publish-desktop-release.py")
+    monkeypatch.chdir(REPO_ROOT)
+    version = json.loads((REPO_ROOT / "package.json").read_text())["version"]
+    tag = f"v{version}"
+    for key, value in {
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF_TYPE": "tag",
+        "GITHUB_REF": f"refs/tags/{tag}",
+        "GITHUB_SHA": "a" * 40,
+        "GITHUB_REPOSITORY": "fixture/repo",
+    }.items():
+        monkeypatch.setenv(key, value)
+    names = [f"desktop-{tag}-{p}.zip" for p in ("windows-x86_64", "macos-arm64", "macos-x86_64")]
+    for name in names:
+        (tmp_path / name).write_bytes(b"verified fixture")
+    calls = []
+
+    def fake_gh(*args: str) -> str:
+        calls.append(args)
+        assert "--clobber" not in args
+        if args[1] == "list":
+            return json.dumps([{"tagName": tag}] if existing else [])
+        if args[1] == "view":
+            return json.dumps(
+                {
+                    "tagName": tag,
+                    "targetCommitish": "a" * 40,
+                    "isPrerelease": True,
+                    "isDraft": False,
+                    "assets": [{"name": n} for n in names] if existing else [],
+                }
+            )
+        if args[1] == "download":
+            target = Path(args[args.index("--dir") + 1]) / args[args.index("--pattern") + 1]
+            target.write_bytes(b"wrong" if mismatch else b"verified fixture")
+        return ""
+
+    module["publish"].__globals__["gh"] = fake_gh
+    if mismatch:
+        with pytest.raises(ValueError, match="拒绝覆盖"):
+            module["publish"](tmp_path)
+    else:
+        module["publish"](tmp_path)
+    writes = [a[1] for a in calls if a[1] in ("create", "upload")]
+    assert writes == ([] if existing else ["create", "upload"])

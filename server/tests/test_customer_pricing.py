@@ -345,6 +345,8 @@ def test_admin_price_publication_drives_authenticated_api_billing(pricing_client
         "quantity": 1,
         "provider": "fake_h3",
         "idempotency_key": str(uuid4()),
+        "quote_token": quote.json()["quote_token"],
+        "max_credits": quote.json()["max_credits"],
     }
     created = client.post("/api/independent/video-tasks", headers=token_headers(key), json=request)
     assert created.status_code == 201, created.text

@@ -487,6 +487,37 @@ def enqueue_first_frame_task(
     return cast(sqlite3.Row, row)
 
 
+def _bind_character_sheet_request(
+    conn: BusinessConnection,
+    *,
+    owner_id: str,
+    idempotency_key: str,
+    request_hash: str,
+    task_id: str,
+) -> None:
+    # 合并受理的其他窗口也必须留下持久 key；否则原任务完成后丢响应重试会新收费。
+    conn.execute(
+        """
+        INSERT INTO character_sheet_task_requests
+            (created_by_user_id, idempotency_key, request_hash, task_id)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (created_by_user_id, idempotency_key) DO NOTHING
+        """,
+        (owner_id, idempotency_key, request_hash, task_id),
+    )
+    bound = conn.execute(
+        """
+        SELECT request_hash, task_id FROM character_sheet_task_requests
+        WHERE created_by_user_id = %s AND idempotency_key = %s
+        """,
+        (owner_id, idempotency_key),
+    ).fetchone()
+    if bound is None or bound["request_hash"] != request_hash or bound["task_id"] != task_id:
+        raise _task_error(
+            409, "CHARACTER_SHEET_TASK_IDEMPOTENCY_CONFLICT", "人物生成参数已经变化，请重新提交。"
+        )
+
+
 def enqueue_character_sheet_task(
     conn: BusinessConnection,
     *,
@@ -526,13 +557,29 @@ def enqueue_character_sheet_task(
             "scope": "character_multiview",
         }
     request_hash = canonical_request_hash(request_payload)
+    # 同一用户的同语义请求必须在一个事务内完成核对和预算预留。
+    # 双窗口即使带不同 key，也不能绕过结果未知的旧任务。
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+        (f"character-sheet:{actor.id}:{request_hash}",),
+    )
     replay = conn.execute(
         """
-        SELECT * FROM character_sheet_tasks
-        WHERE created_by_user_id = %s AND idempotency_key = %s
+        SELECT t.* FROM character_sheet_task_requests k
+        JOIN character_sheet_tasks t ON t.id = k.task_id
+        WHERE k.created_by_user_id = %s AND k.idempotency_key = %s
         """,
         (actor.id, idempotency_key),
     ).fetchone()
+    if replay is None:
+        # 升级前的主 key 仍可恢复；不要求重写旧任务或其成本证据。
+        replay = conn.execute(
+            """
+            SELECT * FROM character_sheet_tasks
+            WHERE created_by_user_id = %s AND idempotency_key = %s
+            """,
+            (actor.id, idempotency_key),
+        ).fetchone()
     if replay is not None:
         if str(replay["request_hash"]) != request_hash:
             raise _task_error(
@@ -540,17 +587,26 @@ def enqueue_character_sheet_task(
                 "CHARACTER_SHEET_TASK_IDEMPOTENCY_CONFLICT",
                 "人物生成参数已经变化，请重新提交。",
             )
+        conn.commit()
         return cast(sqlite3.Row, replay)
     active = conn.execute(
         """
         SELECT * FROM character_sheet_tasks
         WHERE created_by_user_id = %s AND request_hash = %s
-          AND status IN ('PENDING','RUNNING')
+          AND status IN ('PENDING','RUNNING','SUBMISSION_UNCERTAIN')
         ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         (actor.id, request_hash),
     ).fetchone()
     if active is not None:
+        _bind_character_sheet_request(
+            conn,
+            owner_id=actor.id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            task_id=str(active["id"]),
+        )
+        conn.commit()
         return cast(sqlite3.Row, active)
     task_id = str(uuid4())
     conn.execute(
@@ -583,13 +639,20 @@ def enqueue_character_sheet_task(
             """
             SELECT * FROM character_sheet_tasks
             WHERE created_by_user_id = %s AND request_hash = %s
-              AND status IN ('PENDING','RUNNING')
+              AND status IN ('PENDING','RUNNING','SUBMISSION_UNCERTAIN')
             ORDER BY created_at DESC, id DESC LIMIT 1
             """,
             (actor.id, request_hash),
         ).fetchone()
     if row is None:
         raise _task_error(409, "CHARACTER_SHEET_TASK_ENQUEUE_CONFLICT", "任务状态已变化，请重试。")
+    _bind_character_sheet_request(
+        conn,
+        owner_id=actor.id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        task_id=str(row["id"]),
+    )
     from app.usage_billing import accept_operation
 
     if image_consent_version is not None and str(row["id"]) == task_id:
@@ -1503,7 +1566,8 @@ def latest_base_character_sheet_task(
             """
             SELECT * FROM character_sheet_tasks
             WHERE created_by_user_id = %s AND operation IN ('CREATE','REGENERATE')
-            ORDER BY CASE WHEN status IN ('PENDING','RUNNING') THEN 0 ELSE 1 END,
+            ORDER BY CASE WHEN status IN ('PENDING','RUNNING','SUBMISSION_UNCERTAIN')
+                          THEN 0 ELSE 1 END,
                      created_at DESC, id DESC LIMIT 1
             """,
             (owner_id,),

@@ -424,9 +424,14 @@ def test_discount_uses_master_wallet_owner_for_sub_account(
     assert operation is not None and int(operation[0]) == 720
 
 
-def test_generation_price_quote_is_discounted(pg_dsn: str, pg_conn: BusinessConnection) -> None:
+def test_generation_price_quote_is_discounted(
+    pg_dsn: str, pg_conn: BusinessConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cryptography.fernet import Fernet
+
     from app.generation import generation_price_quote
 
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
     user_id = _new_user("quote")
     _seed_customer(pg_dsn, user_id)
     _seed_package_with_discount(pg_conn, user_id=user_id, rate="0.9")

@@ -1,6 +1,10 @@
 import { useRef, useState } from "react";
 
-import { type SimpleCharacterResult, uploadSimpleCharacter } from "./api";
+import {
+  CharacterSheetTaskError,
+  type SimpleCharacterResult,
+  uploadSimpleCharacter,
+} from "./api";
 import { StudioDialog } from "./studio/ui";
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -42,12 +46,14 @@ export function SimpleCharacterUpload({
   onGenerationProgress,
   onGenerationStarted,
   projectId = null,
+  recoveryBlocked = false,
 }: {
   onCreated: (result: SimpleCharacterResult, displayName: string) => void;
-  onGenerationFailed?: (message: string) => void;
+  onGenerationFailed?: (message: string, recoveryRequired?: boolean) => void;
   onGenerationProgress?: (progress: number, stage: string) => void;
   onGenerationStarted?: (file: File, displayName: string) => void;
   projectId?: string | null;
+  recoveryBlocked?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -61,6 +67,7 @@ export function SimpleCharacterUpload({
   }>();
   const [authorizationAccepted, setAuthorizationAccepted] = useState(false);
   const submittingRef = useRef(false);
+  const [recovery, setRecovery] = useState<{ file: File; name: string }>();
 
   function pickFile(file: File | undefined) {
     setAuthorization(undefined);
@@ -101,9 +108,14 @@ export function SimpleCharacterUpload({
   }
 
   async function confirmAndSubmit() {
-    if (!authorization || !authorizationAccepted || submittingRef.current)
+    const submitted = recovery ?? authorization;
+    if (
+      !submitted ||
+      (!recovery && !authorizationAccepted) ||
+      submittingRef.current
+    )
       return;
-    const { file, name } = authorization;
+    const { file, name } = submitted;
     submittingRef.current = true;
     setAuthorization(undefined);
     setAuthorizationAccepted(false);
@@ -134,6 +146,7 @@ export function SimpleCharacterUpload({
         "",
         "2026-09-14-v1",
       );
+      setRecovery(undefined);
       onGenerationProgress?.(100, "多视角拼合图已生成");
       setMessage(`人物“${name}”五视图拼合图已生成，可在下方预览与下载。`);
       setDisplayName("");
@@ -148,7 +161,11 @@ export function SimpleCharacterUpload({
           ? requestError.message
           : "一键创建人物失败，请重试。";
       setError(requestMessage);
-      onGenerationFailed?.(requestMessage);
+      const recoveryRequired =
+        requestError instanceof CharacterSheetTaskError &&
+        requestError.recoveryRequired;
+      setRecovery(recoveryRequired ? { file, name } : undefined);
+      onGenerationFailed?.(requestMessage, recoveryRequired);
     } finally {
       window.clearInterval(progressTimer);
       setBusy(false);
@@ -171,6 +188,7 @@ export function SimpleCharacterUpload({
         <label>
           人物名称
           <input
+            disabled={busy || Boolean(recovery) || recoveryBlocked}
             onChange={(event) => setDisplayName(event.target.value)}
             placeholder="例如：荣哥"
             type="text"
@@ -188,7 +206,7 @@ export function SimpleCharacterUpload({
           />
           <button
             className="secondary-button"
-            disabled={busy}
+            disabled={busy || Boolean(recovery) || recoveryBlocked}
             onClick={() => fileInputRef.current?.click()}
             type="button"
           >
@@ -200,11 +218,17 @@ export function SimpleCharacterUpload({
         </div>
         <button
           className="simple-character-upload__submit"
-          disabled={busy}
-          onClick={submit}
+          disabled={busy || (recoveryBlocked && !recovery)}
+          onClick={recovery ? () => void confirmAndSubmit() : submit}
           type="button"
         >
-          {busy ? "正在生成拼合图（约 1~3 分钟）…" : "一键生成五视图拼合图"}
+          {busy
+            ? "正在读取或生成拼合图…"
+            : recovery
+              ? "核对上次生成状态"
+              : recoveryBlocked
+                ? "请先核对未完成任务"
+                : "一键生成五视图拼合图"}
         </button>
       </div>
       {error ? (

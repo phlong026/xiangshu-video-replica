@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AdminActivationError,
   listRefunds,
   markRefundExecution,
   type RefundListItem,
@@ -15,11 +16,19 @@ import { formatDateTime } from "./ui/vocabulary";
 /**
  * M1 退款管理最小版（ADM-08）：双事实对齐清单。
  *
- * 账本侧（REFUND_APPROVAL 反向调账冲积分）在「人工调整」页发起；本页收口
- * 资金侧——ZPay 后台人工退付完成后回到这里登记执行结果（渠道 + 第三方
+ * 账本侧（REFUND_APPROVAL 反向调账冲积分）在客户详情发起；本页收口
+ * 资金侧：支付后台人工退付完成后回到这里登记执行结果（渠道 + 第三方
  * 退款单号），未登记的行就是每天要清的「已冲积分、待退付」队列。
  */
 const PAGE_SIZE = 20;
+const SOURCE_REVIEW_MESSAGE = "未核对原充值来源，需人工核对";
+
+function hasVerifiedSource(item: RefundListItem): boolean {
+  return (
+    item.source_verified === true &&
+    Boolean(item.original_recharge_order_no?.trim())
+  );
+}
 
 type ExecutedFilter = "" | "pending" | "done";
 
@@ -51,6 +60,7 @@ export function RefundsPage({
   const [providerRef, setProviderRef] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const inFlight = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -75,8 +85,28 @@ export function RefundsPage({
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (readOnly) setPendingMark(null);
+  }, [readOnly]);
+
   async function confirmMark(reason: string) {
-    if (!pendingMark) return;
+    if (!pendingMark || inFlight.current || readOnly) return;
+    const current = items.find(
+      (item) => item.adjustment_id === pendingMark.adjustment_id,
+    );
+    if (
+      !hasVerifiedSource(pendingMark) ||
+      !current ||
+      !hasVerifiedSource(current) ||
+      current.executed ||
+      current.original_recharge_order_no !==
+        pendingMark.original_recharge_order_no
+    ) {
+      setError(SOURCE_REVIEW_MESSAGE);
+      setPendingMark(null);
+      return;
+    }
+    inFlight.current = true;
     setSaving(true);
     setError("");
     try {
@@ -95,8 +125,22 @@ export function RefundsPage({
       setNote("");
       await load();
     } catch (cause) {
+      if (
+        cause instanceof AdminActivationError &&
+        cause.code === "REFUND_SOURCE_REVIEW_REQUIRED"
+      ) {
+        setItems((rows) =>
+          rows.map((item) =>
+            item.adjustment_id === pendingMark.adjustment_id
+              ? { ...item, source_verified: false }
+              : item,
+          ),
+        );
+        setPendingMark(null);
+      }
       setError(cause instanceof Error ? cause.message : "登记退付执行失败");
     } finally {
+      inFlight.current = false;
       setSaving(false);
     }
   }
@@ -106,9 +150,9 @@ export function RefundsPage({
       <header>
         <h3>退款管理</h3>
         <p className="admin-hint">
-          账本侧冲减积分在「人工调整」发起（退款审批，负向）；退付在支付后台
-          人工办理后回此登记，双事实对齐后该笔退款才算闭环。仅退未消耗部分，
-          不允许负余额。
+          账本侧扣减在客户详情发起，只能扣回对应原已付款充值的未用积分。
+          退付在支付后台人工办理后回此登记。未核对原充值来源的记录需人工核对，
+          不能登记新的退付；历史已执行记录保留原退付事实。
         </p>
       </header>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
@@ -159,6 +203,7 @@ export function RefundsPage({
             <>
               <th>客户</th>
               <th>冲减积分</th>
+              <th>原充值来源</th>
               <th>调账时间 / 经办</th>
               <th>退付状态</th>
               <th>退付渠道 / 单号 / 时间</th>
@@ -178,6 +223,16 @@ export function RefundsPage({
               </td>
               <td>-{item.credits_deducted} 积分</td>
               <td>
+                {hasVerifiedSource(item) ? (
+                  <>
+                    <code>{item.original_recharge_order_no}</code>
+                    <div>已核对原充值来源</div>
+                  </>
+                ) : (
+                  <StatusBadge tone="warn">{SOURCE_REVIEW_MESSAGE}</StatusBadge>
+                )}
+              </td>
+              <td>
                 {formatDateTime(item.created_at)} · {item.admin_username}
               </td>
               <td>
@@ -196,8 +251,20 @@ export function RefundsPage({
                 ) : (
                   <button
                     type="button"
-                    disabled={saving}
+                    disabled={saving || !hasVerifiedSource(item)}
+                    title={
+                      hasVerifiedSource(item)
+                        ? undefined
+                        : SOURCE_REVIEW_MESSAGE
+                    }
                     onClick={() => {
+                      if (
+                        inFlight.current ||
+                        !hasVerifiedSource(item) ||
+                        readOnly
+                      )
+                        return;
+                      setError("");
                       setChannel("wechat_manual");
                       setProviderRef("");
                       setNote("");
@@ -219,23 +286,24 @@ export function RefundsPage({
         onPageChange={setOffset}
       />
       <ConfirmDialog
-        open={pendingMark !== null}
+        open={pendingMark !== null && !readOnly}
         title="登记退付执行"
         confirmLabel="确认登记"
         description={
           pendingMark
-            ? `${pendingMark.target_username} · 冲减 ${pendingMark.credits_deducted} 积分。请填写支付后台实际退付的渠道与第三方退款单号；登记后不可重填，如需更正走调账更正流程。`
+            ? `${pendingMark.target_username} · 冲减 ${pendingMark.credits_deducted} 积分。原充值订单号：${pendingMark.original_recharge_order_no}。请填写支付后台实际退付的渠道与第三方退款单号；登记后不可重填，如需更正走调账更正流程。`
             : ""
         }
         busy={saving}
         error={error}
         level="reason"
-        onClose={() => !saving && setPendingMark(null)}
+        onClose={() => !inFlight.current && setPendingMark(null)}
         onConfirm={(reason) => void confirmMark(reason)}
       >
         <label>
           退付渠道
           <select
+            disabled={saving}
             value={channel}
             onChange={(event) =>
               setChannel(
@@ -254,6 +322,7 @@ export function RefundsPage({
         <label>
           第三方退款单号
           <input
+            disabled={saving}
             value={providerRef}
             onChange={(event) => setProviderRef(event.target.value)}
             placeholder="支付后台的退款单号，必填"
@@ -263,6 +332,7 @@ export function RefundsPage({
         <label>
           备注（可选）
           <input
+            disabled={saving}
             value={note}
             onChange={(event) => setNote(event.target.value)}
             placeholder="如部分退回说明"

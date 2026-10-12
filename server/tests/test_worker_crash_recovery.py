@@ -418,9 +418,9 @@ def test_expired_archive_retry_lease_audited_and_reset(fair_state: str) -> None:
     assert _cursor_count(fair_state, "u1") == 0  # GREATEST guard: no-op is safe
 
 
-@pytest.mark.parametrize("claim_after_read", [False, True])
+@pytest.mark.parametrize("claim_before_task_lock", [False, True])
 def test_archive_retry_cannot_clear_active_recovery_lease(
-    fair_state: str, monkeypatch: pytest.MonkeyPatch, claim_after_read: bool
+    fair_state: str, monkeypatch: pytest.MonkeyPatch, claim_before_task_lock: bool
 ) -> None:
     _seed(fair_state, user_ids=["u1"], tasks_per_user=1)
     _seed_reserved(fair_state, task_id="task-u1-0", available_credits=999, reserved_credits=1)
@@ -430,20 +430,21 @@ def test_archive_retry_cannot_clear_active_recovery_lease(
             "provider_task_id='saved-paid-result', "
             "provider_result_url='https://example.com/result.mp4'"
         )
-    lease = None if claim_after_read else _acquire(fair_state, "archive-recovery")
+    lease = None if claim_before_task_lock else _acquire(fair_state, "archive-recovery")
     with pytest.raises(HTTPException) as rejected:
         with pg_transaction() as raw:
             conn = BusinessConnection.postgres(raw)
             execute = conn.execute
 
-            def claim_before_retry_update(sql: str, params: Any = ()) -> Any:
+            def claim_before_retry_lock(sql: str, params: Any = ()) -> Any:
                 nonlocal lease
-                if claim_after_read and "retry_requested_by_user_id = %s" in sql:
+                # 行锁收紧后，worker 只能在重试取得任务锁之前赢得领取。
+                if claim_before_task_lock and "FOR UPDATE OF task" in sql:
                     lease = _acquire(fair_state, "archive-recovery")
                     assert lease is not None
                 return execute(sql, params)
 
-            monkeypatch.setattr(conn, "execute", claim_before_retry_update)
+            monkeypatch.setattr(conn, "execute", claim_before_retry_lock)
             retry_generation_task(
                 conn,
                 task_id="task-u1-0",
@@ -480,6 +481,89 @@ def test_archive_retry_cannot_clear_active_recovery_lease(
     _run_pg_generation_step(
         lease=cast(dict[str, Any], lease), storage=storage, first_frame_storage=storage
     )
+    assert _cursor_count(fair_state, "u1") == 0
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
+
+
+def test_archive_retry_task_lock_prevents_concurrent_recovery_claim(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1)
+    _seed_reserved(fair_state, task_id="task-u1-0", available_credits=999, reserved_credits=1)
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE generation_tasks SET status='SUCCEEDED', archive_status='ARCHIVE_FAILED', "
+            "provider_task_id='saved-paid-result', "
+            "provider_result_url='https://example.com/result.mp4'"
+        )
+    claim_attempts = 0
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        execute = conn.execute
+
+        def claim_before_retry_update(sql: str, params: Any = ()) -> Any:
+            nonlocal claim_attempts
+            if "retry_requested_by_user_id = %s" in sql:
+                claim_attempts += 1
+                # 用独立 PG 连接证明行锁实际生效，不能仅凭 worker 没找到任务推断。
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    with psycopg.connect(fair_state) as competing:
+                        assert competing.info.backend_pid != raw.info.backend_pid
+                        competing.execute(
+                            "SELECT id FROM generation_tasks WHERE id=%s FOR UPDATE NOWAIT",
+                            ("task-u1-0",),
+                        )
+                assert _acquire(fair_state, "competing-recovery") is None
+                assert _cursor_count(fair_state, "u1") == 0
+            return execute(sql, params)
+
+        monkeypatch.setattr(conn, "execute", claim_before_retry_update)
+        result = retry_generation_task(
+            conn,
+            task_id="task-u1-0",
+            actor=CurrentUser("u1", "u1", "User One", "employee"),
+            request=GenerationTaskRetryRequest(
+                idempotency_key="locked-archive-retry", retry_reason="Retry saved result"
+            ),
+        )
+    assert claim_attempts == 1
+    assert (result.status, result.archive_status) == ("SUCCEEDED", "ARCHIVE_FAILED")
+    with psycopg.connect(fair_state) as pg:
+        assert pg.execute(
+            "SELECT status, archive_status, locked_by, locked_until, archive_retry_count "
+            "FROM generation_tasks WHERE id='task-u1-0'"
+        ).fetchone() == ("SUCCEEDED", "ARCHIVE_FAILED", None, None, 0)
+        assert pg.execute("SELECT count(*) FROM generation_task_operations").fetchone() == (1,)
+        assert pg.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id='u1'"
+        ).fetchone() == (999, 1)
+    assert _cursor_count(fair_state, "u1") == 0
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1)]
+    assert _audit_actions(fair_state) == [
+        ("generation_task.archive_retry_queued", "u1", "task-u1-0")
+    ]
+
+    # 提交后才能领取同一任务；只恢复已有成片，不能再次触达付费服务或预扣。
+    lease = _acquire(fair_state, "archive-recovery")
+    assert lease is not None and str(lease["id"]) == "task-u1-0"
+    assert _cursor_count(fair_state, "u1") == 1
+
+    def reject_provider(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("archive recovery must never contact a provider")
+
+    monkeypatch.setattr("app.generation_worker.h3_provider_for_task", reject_provider)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    _run_pg_generation_step(
+        lease=cast(dict[str, Any], lease), storage=storage, first_frame_storage=storage
+    )
+    with psycopg.connect(fair_state) as pg:
+        assert pg.execute(
+            "SELECT status, archive_status, locked_by, locked_until "
+            "FROM generation_tasks WHERE id='task-u1-0'"
+        ).fetchone() == ("SUCCEEDED", "DIRECT", None, None)
+        assert pg.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id='u1'"
+        ).fetchone() == (999, 0)
     assert _cursor_count(fair_state, "u1") == 0
     assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
 
@@ -533,8 +617,9 @@ def test_archive_retry_replay_preserves_claim_and_safe_retry_still_completes(
     assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
 
 
+@pytest.mark.parametrize("complete_before_retry", [False, True])
 def test_archive_retry_cannot_reopen_concurrently_completed_result(
-    fair_state: str, monkeypatch: pytest.MonkeyPatch
+    fair_state: str, monkeypatch: pytest.MonkeyPatch, complete_before_retry: bool
 ) -> None:
     _seed(fair_state, user_ids=["u1"], tasks_per_user=1)
     _seed_reserved(fair_state, task_id="task-u1-0", available_credits=999, reserved_credits=1)
@@ -544,24 +629,29 @@ def test_archive_retry_cannot_reopen_concurrently_completed_result(
             "provider_task_id='saved-paid-result', "
             "provider_result_url='https://example.com/result.mp4'"
         )
+
+    def complete_recovery() -> None:
+        lease = _acquire(fair_state, "archive-recovery")
+        assert lease is not None
+        storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+        _run_pg_generation_step(
+            lease=cast(dict[str, Any], lease), storage=storage, first_frame_storage=storage
+        )
+
+    if complete_before_retry:
+        complete_recovery()
     with pytest.raises(HTTPException) as rejected:
         with pg_transaction() as raw:
             conn = BusinessConnection.postgres(raw)
             execute = conn.execute
 
-            def finish_before_retry_update(sql: str, params: Any = ()) -> Any:
-                if "retry_requested_by_user_id = %s" in sql:
-                    lease = _acquire(fair_state, "archive-recovery")
-                    assert lease is not None
-                    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
-                    _run_pg_generation_step(
-                        lease=cast(dict[str, Any], lease),
-                        storage=storage,
-                        first_frame_storage=storage,
-                    )
+            def finish_before_retry_lock(sql: str, params: Any = ()) -> Any:
+                # 已完成和抢先完成都须拒绝重开；持锁后的竞争另由上面的用例证明。
+                if not complete_before_retry and "FOR UPDATE OF task" in sql:
+                    complete_recovery()
                 return execute(sql, params)
 
-            monkeypatch.setattr(conn, "execute", finish_before_retry_update)
+            monkeypatch.setattr(conn, "execute", finish_before_retry_lock)
             retry_generation_task(
                 conn,
                 task_id="task-u1-0",

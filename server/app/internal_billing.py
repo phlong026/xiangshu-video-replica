@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -170,6 +170,7 @@ def reserve_internal_billing(
     task_id: str,
     billing_round: int | None = None,
     seconds: int = 1,
+    pricing_snapshot: dict[str, Any] | None = None,
 ) -> int:
     from app.usage_billing import accept_operation
 
@@ -209,6 +210,7 @@ def reserve_internal_billing(
             source_id=task_id,
             units=seconds,
             billing_round=billing_round,
+            pricing_snapshot=pricing_snapshot,
         )
     except HTTPException as exc:
         if exc.status_code == 402:
@@ -223,6 +225,7 @@ def reserve_oral_billing(
     user_id: str,
     oral_task_id: str,
     billing_round: int = 1,
+    pricing_snapshot: dict[str, Any] | None = None,
 ) -> int:
     from app.usage_billing import accept_operation
 
@@ -246,6 +249,7 @@ def reserve_oral_billing(
         source_id=oral_task_id,
         units=seconds,
         billing_round=billing_round,
+        pricing_snapshot=pricing_snapshot,
     )
     conn.execute(
         "UPDATE oral_tasks SET billing_round=%s WHERE id=%s", (billing_round, oral_task_id)

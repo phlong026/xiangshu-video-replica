@@ -294,7 +294,8 @@ def create_record(
     )
     moment = now or _now()
     account = conn.execute(
-        "SELECT id, platform, status FROM publish_browser_accounts WHERE id = %s AND user_id = %s",
+        "SELECT id, platform, status FROM publish_browser_accounts "
+        "WHERE id = %s AND user_id = %s FOR UPDATE",
         (request.account_id, actor.id),
     ).fetchone()
     if account is None:
@@ -600,7 +601,7 @@ _PUBLISH_CANDIDATE_SQL = """
       )
     ORDER BY COALESCE(r.scheduled_at, r.created_at), r.id
     LIMIT 1
-    FOR UPDATE OF r SKIP LOCKED
+    FOR UPDATE OF r, a SKIP LOCKED
 """
 
 

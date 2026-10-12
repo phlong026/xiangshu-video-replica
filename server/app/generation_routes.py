@@ -51,6 +51,7 @@ from app.generation import (
     create_script_version,
     enqueue_generation_reconcile_operation,
     generation_price_quote,
+    generation_regeneration_price_quote,
     generation_runtime_limits,
     get_generation_batch,
     get_task_result,
@@ -103,7 +104,6 @@ from app.script_rewrite import (
     validated_script_rewrite_request,
 )
 from app.storage import StorageBackendUnavailable
-from app.usage_billing import resolve_wallet_owner
 
 router = APIRouter(prefix="/api", tags=["generation"])
 GENERATION_RESULT_MAX_DURATION_SECONDS = 60
@@ -710,6 +710,18 @@ def delete_generation_batch_record(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get(
+    "/generation-batches/{batch_id}/regeneration-quote",
+    response_model=GenerationPriceQuote,
+)
+def read_batch_regeneration_quote(
+    batch_id: str, conn: Database, actor: AuthenticatedUser
+) -> GenerationPriceQuote:
+    return generation_regeneration_price_quote(
+        conn, actor=actor, source_kind="batch", source_id=batch_id
+    )
+
+
 @router.post(
     "/generation-batches/{batch_id}/regenerate",
     response_model=BatchResult,
@@ -775,7 +787,7 @@ def read_generation_price_quote(
         resolution=resolution,
         duration_seconds=duration_seconds,
         quantity=quantity,
-        user_id=resolve_wallet_owner(conn, actor.id),
+        user_id=actor.id,
     )
 
 
@@ -978,6 +990,18 @@ def retry_task(
         if request is None:
             raise HTTPException(status_code=422, detail={"code": "RETRY_REQUEST_REQUIRED"})
         return retry_generation_task(conn, task_id=task_id, actor=actor, request=request)
+
+
+@router.get(
+    "/generation-tasks/{task_id}/regeneration-quote",
+    response_model=GenerationPriceQuote,
+)
+def read_task_regeneration_quote(
+    task_id: str, conn: Database, actor: AuthenticatedUser
+) -> GenerationPriceQuote:
+    return generation_regeneration_price_quote(
+        conn, actor=actor, source_kind="task", source_id=task_id
+    )
 
 
 @router.post(
