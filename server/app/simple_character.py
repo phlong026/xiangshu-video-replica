@@ -1949,6 +1949,60 @@ def delete_simple_character_identity(
             "人物存在进行中的生成任务，请等待任务结束后再删除。",
         )
 
+    # 硬删除会经 DB 级 ON DELETE CASCADE 抹掉 character_sheet_tasks，并显式删除
+    # character_generation_tasks（T38）。若对应的人物计费仍留有未知供应商轮次或
+    # 未闭合预留，删除会让预留失去常规核对入口，必须在同一事务内拒绝；终态已
+    # 收口的任务不受影响（账本行独立存在，不依赖任务行）。
+    unsettled_billing = conn.execute(
+        """
+        SELECT 1 WHERE EXISTS(
+            SELECT 1 FROM character_sheet_tasks
+            WHERE identity_id = %s AND status = 'SUBMISSION_UNCERTAIN'
+        ) OR EXISTS(
+            SELECT 1 FROM billing_operations AS op
+            WHERE op.service = 'character' AND op.state = 'PENDING'
+              AND (op.source_id IN (
+                      SELECT sheet.id FROM character_sheet_tasks AS sheet
+                      WHERE sheet.identity_id = %s
+                  ) OR op.source_id IN (
+                      SELECT gen.id
+                      FROM character_generation_tasks AS gen
+                      JOIN character_versions AS version
+                        ON version.id = gen.character_version_id
+                      JOIN character_personas AS persona
+                        ON persona.id = version.persona_id
+                      WHERE persona.identity_id = %s
+                  ))
+        ) OR EXISTS(
+            SELECT 1
+            FROM billing_attempts AS att
+            JOIN billing_operations AS op ON op.id = att.operation_id
+            WHERE op.service = 'character' AND att.state = 'UNKNOWN'
+              AND (op.source_id IN (
+                      SELECT sheet.id FROM character_sheet_tasks AS sheet
+                      WHERE sheet.identity_id = %s
+                  ) OR op.source_id IN (
+                      SELECT gen.id
+                      FROM character_generation_tasks AS gen
+                      JOIN character_versions AS version
+                        ON version.id = gen.character_version_id
+                      JOIN character_personas AS persona
+                        ON persona.id = version.persona_id
+                      WHERE persona.identity_id = %s
+                  ))
+        )
+        LIMIT 1
+        """,
+        (identity_id, identity_id, identity_id, identity_id, identity_id),
+    ).fetchone()
+    if unsettled_billing is not None:
+        raise character_error(
+            409,
+            "IDENTITY_DELETE_HAS_UNSETTLED_BILLING",
+            "人物存在未核对完成的积分预留或未知供应商轮次，为保留对账证据暂不可删除；"
+            "请先等待任务核对收口，再删除人物。",
+        )
+
     # Project character selections reference versions with ON DELETE RESTRICT;
     # removing a character a project still relies on must stay explicit. With
     # remove_project_refs the deletion carries that explicitness itself, but

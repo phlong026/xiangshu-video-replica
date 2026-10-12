@@ -547,6 +547,119 @@ def _reconcile_first_frame_auxiliary_costs(conn: BusinessConnection, *, limit: i
     )
 
 
+def _reconcile_table_for(service: str) -> str | None:
+    return {
+        "analysis": "analysis_tasks",
+        "rewrite": "script_rewrite_tasks",
+        "asr": "script_from_audio_tasks",
+        "character": "character_sheet_tasks",
+        "first_frame": "first_frame_tasks",
+        "avatar_clone": "oral_avatars",
+        "voice_clone": "oral_voices",
+        "link_resolution": "viral_link_resolution_receipts",
+        "prompt_optimize": "prompt_optimization_receipts",
+        "quality_inspection": "source_frame_tasks",
+    }.get(service)
+
+
+def finalize_pending_operation(
+    conn: BusinessConnection,
+    *,
+    operation_id: str,
+    service: str,
+    source_id: str,
+) -> bool:
+    """按任务现状把一条 PENDING 计费推进到终态，返回本轮是否落了终态。
+
+    reconcile 主扫描与卡单核对队列（T40）共用这一段：视频/口播走 internal_billing
+    的交付证据门禁（成功缺时长、缺归档证据时保持 PENDING），其余服务按任务状态
+    直接结算或释放；first_frame 的交付数只在发布事务内定，这里永不代答。单条
+    操作包在独立 SAVEPOINT 里，一条异常不拖垮整批扫描。
+    """
+    conn.execute("SAVEPOINT billing_reconcile_item")
+    try:
+        if service in {"video_768p", "video_2k", "oral"}:
+            from app.internal_billing import finalize_internal_billing, finalize_oral_billing
+
+            if service == "oral":
+                result = finalize_oral_billing(conn, oral_task_id=source_id)
+                return result.transaction_type is not None
+            status = conn.execute(
+                "SELECT status FROM generation_tasks WHERE id=%s", (source_id,)
+            ).fetchone()
+            if status is None:
+                return False
+            task_status = str(status[0])
+            result = finalize_internal_billing(
+                conn,
+                task_id=source_id,
+                outcome="success"
+                if task_status == "SUCCEEDED"
+                else "cancelled"
+                if task_status == "CANCELLED"
+                else "failed",
+            )
+            return result.transaction_type is not None
+        table = _reconcile_table_for(service)
+        if table is None:
+            return False
+        task = conn.execute(
+            f"SELECT * FROM {table} WHERE id=%s FOR UPDATE",
+            (source_id,),  # noqa: S608 - fixed table map
+        ).fetchone()
+        if task is None and service == "character":
+            task = conn.execute(
+                "SELECT * FROM character_generation_tasks WHERE id=%s FOR UPDATE", (source_id,)
+            ).fetchone()
+        if task is None:
+            return False
+        status = str(task["status"])
+        if (
+            service in {"avatar_clone", "voice_clone"}
+            and task["submission_state"] == "SUBMISSION_UNKNOWN"
+        ):
+            conn.execute(
+                f"UPDATE {table} SET status='FAILED',lease_owner=NULL,lease_expires_at=NULL, "
+                "next_attempt_at=NULL WHERE id=%s",
+                (source_id,),
+            )  # noqa: S608 - fixed clone table map
+            status = "FAILED"
+        if status in {
+            "FAILED",
+            "CANCELLED",
+            "SUBMISSION_UNCERTAIN",
+            "FAILED_SAFE",
+            "UNCERTAIN",
+            "NEEDS_INPUT",
+        }:
+            finish_operation(
+                conn,
+                operation_id=operation_id,
+                units=0,
+                succeeded=False,
+                cancelled=status == "CANCELLED",
+            )
+            return True
+        if status in {"SUCCEEDED", "READY"}:
+            units: float | int = 1
+            if service == "asr":
+                payload = json.loads(str(task["result_json"] or "{}"))
+                if payload.get("duration_sec") is None:
+                    return False
+                units = float(payload["duration_sec"])
+            elif service == "first_frame":
+                # Delivery count is finalized in the same publication transaction.
+                return False
+            finish_operation(conn, operation_id=operation_id, units=units, succeeded=True)
+            return True
+        return False
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT billing_reconcile_item")
+        return False
+    finally:
+        conn.execute("RELEASE SAVEPOINT billing_reconcile_item")
+
+
 def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
     """Recover finalization after terminal task writes, including worker crashes.
 
@@ -642,94 +755,12 @@ def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
         (limit,),
     ).fetchall()
     settled = len(stale) + len(searches)
-    tables = {
-        "analysis": "analysis_tasks",
-        "rewrite": "script_rewrite_tasks",
-        "asr": "script_from_audio_tasks",
-        "character": "character_sheet_tasks",
-        "first_frame": "first_frame_tasks",
-        "avatar_clone": "oral_avatars",
-        "voice_clone": "oral_voices",
-        "link_resolution": "viral_link_resolution_receipts",
-        "prompt_optimize": "prompt_optimization_receipts",
-        "quality_inspection": "source_frame_tasks",
-    }
     for operation in operations:
-        service = str(operation["service"])
-        source = str(operation["source_id"])
-        if service in {"video_768p", "video_2k", "oral"}:
-            from app.internal_billing import finalize_internal_billing, finalize_oral_billing
-
-            conn.execute("SAVEPOINT usage_reconcile")
-            try:
-                if service == "oral":
-                    result = finalize_oral_billing(conn, oral_task_id=source)
-                else:
-                    status = conn.execute(
-                        "SELECT status FROM generation_tasks WHERE id=%s", (source,)
-                    ).fetchone()[0]
-                    result = finalize_internal_billing(
-                        conn,
-                        task_id=source,
-                        outcome="success"
-                        if status == "SUCCEEDED"
-                        else "cancelled"
-                        if status == "CANCELLED"
-                        else "failed",
-                    )
-                settled += int(result.transaction_type is not None)
-            except Exception:
-                conn.execute("ROLLBACK TO SAVEPOINT usage_reconcile")
-            finally:
-                conn.execute("RELEASE SAVEPOINT usage_reconcile")
-            continue
-        table = tables.get(service)
-        if table is None:
-            continue
-        task = conn.execute(f"SELECT * FROM {table} WHERE id=%s FOR UPDATE", (source,)).fetchone()  # noqa: S608 - fixed table map
-        if task is None and service == "character":
-            task = conn.execute(
-                "SELECT * FROM character_generation_tasks WHERE id=%s FOR UPDATE", (source,)
-            ).fetchone()
-        if task is None:
-            continue
-        status = str(task["status"])
-        if (
-            service in {"avatar_clone", "voice_clone"}
-            and task["submission_state"] == "SUBMISSION_UNKNOWN"
+        if finalize_pending_operation(
+            conn,
+            operation_id=str(operation["id"]),
+            service=str(operation["service"]),
+            source_id=str(operation["source_id"]),
         ):
-            conn.execute(
-                f"UPDATE {table} SET status='FAILED',lease_owner=NULL,lease_expires_at=NULL, "
-                "next_attempt_at=NULL WHERE id=%s",
-                (source,),
-            )  # noqa: S608 - fixed clone table map
-            status = "FAILED"
-        if status in {
-            "FAILED",
-            "CANCELLED",
-            "SUBMISSION_UNCERTAIN",
-            "FAILED_SAFE",
-            "UNCERTAIN",
-            "NEEDS_INPUT",
-        }:
-            finish_operation(
-                conn,
-                operation_id=str(operation["id"]),
-                units=0,
-                succeeded=False,
-                cancelled=status == "CANCELLED",
-            )
-            settled += 1
-        elif status in {"SUCCEEDED", "READY"}:
-            units: float | int = 1
-            if service == "asr":
-                payload = json.loads(str(task["result_json"] or "{}"))
-                if payload.get("duration_sec") is None:
-                    continue
-                units = float(payload["duration_sec"])
-            elif service == "first_frame":
-                # Delivery count is finalized in the same publication transaction.
-                continue
-            finish_operation(conn, operation_id=str(operation["id"]), units=units, succeeded=True)
             settled += 1
     return settled

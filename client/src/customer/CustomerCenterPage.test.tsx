@@ -439,7 +439,7 @@ test("暂扣中、累计消费与累计退回从首屏挪进消费记录页签�
   const totals = await screen.findByRole("region", { name: "流水总额" });
   // 消费、退回、暂扣中三个数并排：只看到扣钱、看不到退回是最常见的误解。
   expect(totals).toHaveTextContent("暂扣中");
-  expect(totals).toHaveTextContent("累计消费");
+  expect(totals).toHaveTextContent("净花费（已结算）");
   expect(totals).toHaveTextContent("累计退回");
   // 数字本身来自 summary（reserved 10 / consumed 22 / returned 34）
   expect(totals).toHaveTextContent("10");
@@ -797,12 +797,12 @@ test("merges one billing cycle into a single entry and expands to the itemised r
   fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
 
   const table = await screen.findByRole("table", { name: "消费记录列表" });
-  // 三笔只剩一行：资金去向讲清暂扣 → 实扣 → 退回，本次实际花费是整组的净额。
-  expect(await within(table).findByText("暂扣 5")).toBeVisible();
-  expect(within(table).getByText("实扣 3")).toBeVisible();
+  // 三笔只剩一行：资金去向讲清扣除 → 退回 → 净花费，本次实际花费是整组的净额。
+  expect(await within(table).findByText("扣除 5")).toBeVisible();
   expect(within(table).getByText("退回 +2")).toBeVisible();
-  expect(within(table).getByText("部分成功")).toBeVisible();
-  expect(within(table).getByText("-3 积分")).toBeVisible();
+  expect(within(table).getByText("净花费 3")).toBeVisible();
+  expect(within(table).getByText("按实际用量结算")).toBeVisible();
+  expect(within(table).getByText("净花费 3 积分")).toBeVisible();
   expect(within(table).getByText("已退回 2")).toBeVisible();
   expect(within(table).queryByRole("table", { name: "逐笔明细" })).toBeNull();
 
@@ -816,7 +816,7 @@ test("merges one billing cycle into a single entry and expands to the itemised r
       .getAllByRole("row")
       .slice(1)
       .map((row) => row.children[1].textContent),
-  ).toEqual(["暂扣", "实扣", "退回"]);
+  ).toEqual(["扣除", "实扣", "退回"]);
   expect(within(itemised).getByText("-5 积分")).toBeVisible();
   expect(within(itemised).getByText("+2 积分")).toBeVisible();
 });

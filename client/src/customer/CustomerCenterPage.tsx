@@ -852,8 +852,10 @@ export function CustomerCenterPage({
             信息，挪到看账的页签里更合适。这里并排放消费、退回与暂扣中三个数：
             用户只看到扣钱、看不到退回，是这块最常见的误解。 */}
         <section className="uc-record-totals" aria-label="流水总额">
+          {/* T41 口径：累计消费就是净花费（按实扣结算），不可读成「累计扣除」；
+              暂扣中的部分结束后按用量结算，多余的自动退回，不重复计费。 */}
           <span>
-            累计消费{" "}
+            净花费（已结算）{" "}
             <b>
               {summary?.total_consumed_credits.toLocaleString("zh-CN") ?? "—"}
             </b>{" "}
@@ -1021,8 +1023,9 @@ export function CustomerCenterPage({
       {tab === "consumption" && (
         <>
           <p className="uc-footnote">
-            暂扣与退回不计入累计消费，累计消费只统计实扣；历史未记录 Token
-            来源的消费仅计入账号总额。
+            净花费按实际结算口径统计：暂扣的任务结束后按用量结算，多余暂扣自动退回，
+            不会被重复计费；退回已单列，不冲抵净花费。任务是否成功以任务详情为准，
+            这里的结果只描述计费。历史未记录 Token 来源的消费仅计入账号总额。
           </p>
           <Pagination
             disabled={recordsBusy}

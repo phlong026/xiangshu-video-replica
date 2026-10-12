@@ -568,9 +568,18 @@ export function StudioWorkspace({
   }, []);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
+  // 云端草稿的服务端 revision（T35）：读取、保存、放弃都会刷新它；每次写入
+  // 携带它做围栏，放弃后迟到的旧写在服务端必然错位 409。队列串行写入，所以
+  // 这里在写入执行时（而非入队时）读取，天然取到前一次写入推进后的版本。
+  const lastDraftRevisionRef = useRef<number | undefined>(undefined);
 
   const [cloudDraftQueue] = useState(() =>
-    createCloudDraftQueue(persistCloudDraft),
+    createCloudDraftQueue((draft: StudioDraft) => {
+      const record = persistCloudDraft(draft, lastDraftRevisionRef.current);
+      return record.then((saved) => {
+        lastDraftRevisionRef.current = saved.revision;
+      });
+    }),
   );
   const saveOperationRef = useRef(0);
   const saveMountedRef = useRef(false);
@@ -614,6 +623,7 @@ export function StudioWorkspace({
       cloudDraftQueue.persist(
         savedDraftScope(accountId, draft),
         draft,
+        accountId,
         isCurrent,
       ),
     [cloudDraftQueue],
@@ -645,7 +655,7 @@ export function StudioWorkspace({
               accountId === saveAccountRef.current &&
               expectedScope === saveScopeRef.current,
           ),
-        ).catch(() => {
+        ).catch((cause: unknown) => {
           if (
             saveMountedRef.current &&
             currentUserRoleRef.current !== "auditor" &&
@@ -653,8 +663,22 @@ export function StudioWorkspace({
             operation === saveOperationRef.current &&
             accountId === saveAccountRef.current &&
             expectedScope === saveScopeRef.current
-          )
+          ) {
+            const code = (cause as { code?: string } | null)?.code;
+            if (code === "STUDIO_DRAFT_TOMBSTONED") {
+              // 云端刚被放弃（T35 墓碑围栏）：本窗口停止自动保存，内容留在本机，
+              // 不再对每次编辑重复撞 409。
+              saveOperationRef.current += 1;
+              notify("云端草稿刚被放弃，本次修改只保留在本机。");
+              return;
+            }
+            if (code === "STUDIO_DRAFT_CONFLICT") {
+              saveOperationRef.current += 1;
+              notify("云端草稿已在其他窗口更新，本窗口暂停自动保存。");
+              return;
+            }
             notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
+          }
         });
       }, DRAFT_AUTOSAVE_DELAY_MS);
     },
@@ -734,6 +758,8 @@ export function StudioWorkspace({
       .then(async (restore) => {
         const saved = await loadSavedScriptList().catch(() => []);
         if (!active) return;
+        // 记下服务端版本号（T35）：本窗口之后的保存/放弃都按它围栏。
+        lastDraftRevisionRef.current = restore ? restore.revision : undefined;
         if (saved.length)
           setState((previous) => ({ ...previous, savedScripts: saved }));
         if (restore && !draftTouchedRef.current && shouldPromptRestore(restore))
@@ -755,12 +781,17 @@ export function StudioWorkspace({
     saveOperationRef.current += 1;
   }, []);
 
-  /** 放弃上次内容：云端那一行与本地未保存文本一起清。 */
+  /** 放弃上次内容：云端那一行与本地未保存文本一起清。
+   * T35：DELETE 返回墓碑版本号后才有资格作废排队中的写入——放弃失败时保留
+   * 自动保存能力（用户被告知重试），放弃成功后在途/排队的旧写全部静默吞掉，
+   * 不再把旧内容写回服务端（真正的写回由服务端墓碑围栏兜底拒绝）。 */
   const discardStoredDraft = useCallback(async () => {
     cancelPendingDraftSave();
-    await discardCloudDraft();
+    const revision = await discardCloudDraft();
+    cloudDraftQueue.discard(currentUser.id);
+    lastDraftRevisionRef.current = revision;
     clearCreationDraftResidue(currentUser.id);
-  }, [cancelPendingDraftSave, currentUser.id]);
+  }, [cancelPendingDraftSave, cloudDraftQueue, currentUser.id]);
 
   /** 页面级重来入口（复刻页「开始新的复刻」等）用的放弃：即发即忘，
    * 失败只提示，不阻塞页面自己的清空动作。 */
@@ -778,6 +809,7 @@ export function StudioWorkspace({
     if (!restore) return;
     setPendingRestore(null);
     setRestoreError("");
+    lastDraftRevisionRef.current = restore.revision;
     latestDraftRef.current = restore.draft;
     setState((previous) => {
       const page: StudioState["page"] =
@@ -1503,6 +1535,7 @@ export function StudioWorkspace({
     if (options?.persistNow && !review) {
       const accountId = currentUser.id;
       const permissionGeneration = permissionGenerationRef.current;
+      const operation = saveOperationRef.current;
       const draft = next;
       window.clearTimeout(draftSaveTimerRef.current);
       draftSaveTimerRef.current = undefined;
@@ -1510,7 +1543,10 @@ export function StudioWorkspace({
         Boolean(
           saveMountedRef.current &&
             currentUserRoleRef.current !== "auditor" &&
-            permissionGenerationRef.current === permissionGeneration,
+            permissionGenerationRef.current === permissionGeneration &&
+            // 放弃草稿会递增 saveOperationRef（T35）：立即落库的跳转保存
+            // 同样不能在放弃之后把旧稿写回云端。
+            operation === saveOperationRef.current,
         ),
       ).catch(() => {
         if (mountedRef.current)
@@ -1600,19 +1636,21 @@ export function StudioWorkspace({
               if (!restorationStillCurrent()) return;
               if (claimed) {
                 deliveredExtractionTasksRef.current.add(deliveryKey);
-                const restored = patchStudioDraft(current, {
+                // 回执后重读最新草稿（T44）：claim 挂起期间用户可能已输入新的
+                // 二创或做了手动保存，旧快照做基线会把编辑覆盖掉。函数式最小
+                // 字段合并——original 归本次请求；text/resultKind 只在用户尚无
+                // 二创时才落提取结果，已有编辑原样保留。
+                const latest = latestDraftRef.current;
+                const preservedCopy = hasCopyResult(latest.script);
+                const restored = patchStudioDraft(latest, {
                   sourceId: extractionAssetId,
                   projectId: extractionProjectId,
                   sourceAssetId: extractionAssetId,
                   script: {
-                    ...current.script,
+                    ...latest.script,
                     original: claimed,
-                    text: hasCopyResult(current.script)
-                      ? current.script.text
-                      : "",
-                    resultKind: hasCopyResult(current.script)
-                      ? "manual"
-                      : "extracted",
+                    text: preservedCopy ? latest.script.text : "",
+                    resultKind: preservedCopy ? "manual" : "extracted",
                     confirmed: false,
                   },
                   scriptEdited: true,
@@ -1621,7 +1659,11 @@ export function StudioWorkspace({
                 latestDraftRef.current = restored;
                 setState((previous) => ({ ...previous, draft: restored }));
                 setWalletRevision((value) => value + 1);
-                notify("文案提取已完成，已恢复到当前草稿。");
+                notify(
+                  preservedCopy
+                    ? "文案提取已完成，已保留你的编辑并补回来源原文。"
+                    : "文案提取已完成，已恢复到当前草稿。",
+                );
                 return;
               }
             } catch (cause: unknown) {

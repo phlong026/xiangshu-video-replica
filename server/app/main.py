@@ -17,6 +17,7 @@ from app.activation_code_routes import router as customer_activation_router
 from app.admin_activation_routes import router as admin_activation_router
 from app.admin_audit_routes import router as admin_audit_router
 from app.admin_auth_routes import router as admin_auth_router
+from app.admin_billing_reconciliation_routes import router as admin_billing_reconciliation_router
 from app.admin_customer_annotation_routes import router as admin_customer_annotation_router
 from app.admin_customer_benefit_routes import router as admin_customer_benefit_router
 from app.admin_customer_lifecycle_routes import router as customer_lifecycle_router
@@ -396,6 +397,7 @@ app.include_router(rbac_router)
 app.include_router(payment_router)
 app.include_router(control_router)
 app.include_router(admin_auth_router)
+app.include_router(admin_billing_reconciliation_router)
 app.include_router(admin_dashboard_router)
 app.include_router(admin_customer_router)
 app.include_router(customer_lifecycle_router)

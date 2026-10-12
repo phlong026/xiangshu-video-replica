@@ -110,7 +110,15 @@ const live = vi.hoisted(() => ({
   })),
   loadSavedScriptList: vi.fn(async (): Promise<unknown[]> => []),
   loadLatestScriptFromUpload: vi.fn(async (): Promise<unknown> => null),
-  persistCloudDraft: vi.fn(async (_draft: unknown): Promise<void> => {}),
+  // T35：保存回执带服务端 revision，写包装据此推进本地围栏版本号。
+  persistCloudDraft: vi.fn(
+    async (
+      _draft: unknown,
+      _expectedRevision?: number,
+    ): Promise<{ revision: number }> => ({
+      revision: 1,
+    }),
+  ),
   persistSavedScript: vi.fn(
     async (_script: unknown, _sourceProjectId?: string): Promise<void> => {},
   ),
@@ -1525,7 +1533,7 @@ describe("V1.4 workspace integration", () => {
     it("自动保存已在途时显式保存排队补写终态草稿", async () => {
       let resolveAutosave: (() => void) | undefined;
       live.persistCloudDraft.mockReturnValueOnce(
-        new Promise<void>((resolve) => {
+        new Promise<{ revision: number }>((resolve) => {
           resolveAutosave = resolve;
         }),
       );
@@ -1547,7 +1555,7 @@ describe("V1.4 workspace integration", () => {
         await act(async () => Promise.resolve());
         expect(live.persistSavedScript).toHaveBeenCalledTimes(1);
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
-        await act(async () => resolveAutosave?.());
+        await act(async () => resolveAutosave?.({ revision: 1 }));
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
         expect(screen.getAllByText(/已保存到我的文案/)).toHaveLength(1);
       } finally {
@@ -1560,12 +1568,12 @@ describe("V1.4 workspace integration", () => {
       let resolveFinalDraft: (() => void) | undefined;
       live.persistCloudDraft
         .mockReturnValueOnce(
-          new Promise<void>((resolve) => {
+          new Promise<{ revision: number }>((resolve) => {
             resolveAutosave = resolve;
           }),
         )
         .mockReturnValueOnce(
-          new Promise<void>((resolve) => {
+          new Promise<{ revision: number }>((resolve) => {
             resolveFinalDraft = resolve;
           }),
         );
@@ -1597,7 +1605,7 @@ describe("V1.4 workspace integration", () => {
       );
       expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
 
-      await act(async () => resolveAutosave?.());
+      await act(async () => resolveAutosave?.({ revision: 1 }));
       await waitFor(() =>
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(2),
       );
@@ -1614,7 +1622,7 @@ describe("V1.4 workspace integration", () => {
         },
       });
 
-      await act(async () => resolveFinalDraft?.());
+      await act(async () => resolveFinalDraft?.({ revision: 1 }));
       expect(await screen.findAllByText(/换设备登录也能找回/)).toHaveLength(1);
     });
 
@@ -1649,6 +1657,7 @@ describe("V1.4 workspace integration", () => {
         storedDraft = structuredClone(
           draft as ReturnType<typeof restoredDraft>,
         );
+        return { revision: 1 };
       });
       live.loadCloudDraft.mockImplementation(async () =>
         storedDraft
@@ -1721,12 +1730,12 @@ describe("V1.4 workspace integration", () => {
       let resolveSecond: (() => void) | undefined;
       live.persistCloudDraft
         .mockReturnValueOnce(
-          new Promise<void>((resolve) => {
+          new Promise<{ revision: number }>((resolve) => {
             resolveFirst = resolve;
           }),
         )
         .mockReturnValueOnce(
-          new Promise<void>((resolve) => {
+          new Promise<{ revision: number }>((resolve) => {
             resolveSecond = resolve;
           }),
         );
@@ -1761,7 +1770,7 @@ describe("V1.4 workspace integration", () => {
         });
         await act(async () => {
           await vi.advanceTimersByTimeAsync(2_000);
-          resolveFirst?.();
+          resolveFirst?.({ revision: 1 });
           await Promise.resolve();
         });
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
@@ -1775,7 +1784,7 @@ describe("V1.4 workspace integration", () => {
               "账号B待写版本",
           ),
         ).toBe(false);
-        await act(async () => resolveSecond?.());
+        await act(async () => resolveSecond?.({ revision: 1 }));
       } finally {
         vi.useRealTimers();
       }
@@ -1868,7 +1877,7 @@ describe("V1.4 workspace integration", () => {
           }),
         )
         .mockRejectedValueOnce(new Error("final draft offline"))
-        .mockResolvedValueOnce(undefined);
+        .mockResolvedValueOnce({ revision: 1 });
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
       const state = createState("copy");
@@ -2017,13 +2026,14 @@ describe("V1.4 workspace integration", () => {
           ipId: "identity-1",
           scriptEdited: false,
         }),
+        undefined,
       );
     });
 
     it("StrictMode下慢云写成功后仅写一次草稿并通知一次", async () => {
       let resolveCloud: (() => void) | undefined;
       live.persistCloudDraft.mockReturnValueOnce(
-        new Promise<void>((resolve) => {
+        new Promise<{ revision: number }>((resolve) => {
           resolveCloud = resolve;
         }),
       );
@@ -2049,7 +2059,7 @@ describe("V1.4 workspace integration", () => {
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
         await act(async () => {
           await vi.advanceTimersByTimeAsync(2_000);
-          resolveCloud?.();
+          resolveCloud?.({ revision: 1 });
           await Promise.resolve();
           await vi.advanceTimersByTimeAsync(2_000);
         });
@@ -2063,7 +2073,7 @@ describe("V1.4 workspace integration", () => {
     it("显式草稿云写等待期间卸载后保持静默且不追加写入", async () => {
       let resolveCloud: (() => void) | undefined;
       live.persistCloudDraft.mockReturnValueOnce(
-        new Promise<void>((resolve) => {
+        new Promise<{ revision: number }>((resolve) => {
           resolveCloud = resolve;
         }),
       );
@@ -2082,7 +2092,7 @@ describe("V1.4 workspace integration", () => {
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(1),
       );
       view.unmount();
-      await act(async () => resolveCloud?.());
+      await act(async () => resolveCloud?.({ revision: 1 }));
       expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
     });
 
@@ -2744,6 +2754,7 @@ describe("V1.4 workspace integration", () => {
                 sourceId: "viral-new",
                 script: expect.objectContaining({ original: "新视频原文" }),
               }),
+              undefined,
             ),
           { timeout: 4000 },
         );
@@ -3015,6 +3026,67 @@ describe("V1.4 workspace integration", () => {
       fireEvent.click(screen.getByRole("button", { name: "文案工坊" }));
       expect(screen.getByLabelText("来源原文")).toHaveValue(
         "claim 回执取回的爆款文案",
+      );
+    });
+
+    it("T44：claim 挂起期间的新二创不被旧快照覆盖，回填只补来源原文", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      live.loadLatestScriptFromUpload.mockResolvedValueOnce({
+        id: "asr-viral-t44",
+        status: "SUCCEEDED",
+        result: { text: null },
+        sourceAssetId: "asset-1",
+        copyClaimRequired: true,
+        viralSource: { platform: "douyin", videoId: "v-native-t44" },
+      });
+      // claim 挂起：模拟服务端领取慢，等待期间用户开始写自己的二创。
+      let resolveClaim!: (value: string) => void;
+      live.claimExtractedViralCopy.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveClaim = resolve;
+          }),
+      );
+      const state = createState("workbench");
+      state.draft.projectId = "project-1";
+      state.draft.sourceAssetId = "asset-1";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      // 等待 claim 真正发起（恢复轮询命中 SUCCEEDED 任务后才会调 claim）。
+      await waitFor(() =>
+        expect(live.claimExtractedViralCopy).toHaveBeenCalledTimes(1),
+      );
+      // 挂起期间用户切到文案工坊，输入新的二创。
+      await openCopyPage();
+      fireEvent.change(screen.getByLabelText("二创文案"), {
+        target: { value: "等待期间写的新二创" },
+      });
+      await act(async () => resolveClaim("claim 回执的爆款原文"));
+
+      // 新二创保留（不被旧快照基线覆盖），来源原文补回，业务结果按 manual。
+      expect(screen.getByLabelText("二创文案")).toHaveValue(
+        "等待期间写的新二创",
+      );
+      expect(screen.getByLabelText("来源原文")).toHaveValue(
+        "claim 回执的爆款原文",
+      );
+      expect(
+        await screen.findByText(/已保留你的编辑并补回来源原文/),
+      ).toBeInTheDocument();
+      await waitFor(
+        () => {
+          expect(live.persistCloudDraft).toHaveBeenCalledWith(
+            expect.objectContaining({
+              script: expect.objectContaining({
+                text: "等待期间写的新二创",
+                original: "claim 回执的爆款原文",
+              }),
+            }),
+            undefined,
+          );
+        },
+        { timeout: 4000 },
       );
     });
 

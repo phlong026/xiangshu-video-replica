@@ -61,6 +61,7 @@ import {
   resolveMaterials,
   retryOralTaskArchive,
   type SimpleLibraryEntry,
+  type StudioDraftCloudRecord,
   type StudioDraftKind,
   type StudioSavedScriptInput,
   saveStudioDraft,
@@ -1424,6 +1425,8 @@ export type CloudDraftRestore = {
   draft: StudioDraft;
   /** 服务端记录的最后更新时间，恢复提示据此判断草稿是否已经太旧。 */
   updatedAt: string;
+  /** 服务端 revision：后续保存与放弃都按它围栏（T35），迟到旧写写不回来。 */
+  revision: number;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1513,15 +1516,18 @@ export async function loadCloudDraft(): Promise<CloudDraftRestore | undefined> {
   const draft = draftFromPayload(record.payload);
   if (!draft) return undefined;
   draft.script.confirmed = record.script_confirmed;
-  return { draft, updatedAt: record.updated_at };
+  return { draft, updatedAt: record.updated_at, revision: record.revision };
 }
 
 /** 放弃云端工作草稿。草稿已不存在（404）也算放弃成功——用户要的是「这次
  * 别再给我恢复」，服务端那行在不在不影响结论；其余错误抛给调用方提示，
- * 否则会出现「点了放弃、下次打开又回来」的静默失败。 */
-export async function discardCloudDraft(): Promise<void> {
+ * 否则会出现「点了放弃、下次打开又回来」的静默失败。
+ * 返回放弃后的墓碑版本号（T35）：后续保存携带它，服务端才能区分真正的新稿
+ * 与放弃前发出的迟到旧写。 */
+export async function discardCloudDraft(): Promise<number> {
   try {
-    await deleteStudioDraft("copy" satisfies StudioDraftKind);
+    const record = await deleteStudioDraft("copy" satisfies StudioDraftKind);
+    return record.revision;
   } catch (cause: unknown) {
     if (
       cause &&
@@ -1529,19 +1535,23 @@ export async function discardCloudDraft(): Promise<void> {
       "status" in cause &&
       (cause as { status?: number }).status === 404
     ) {
-      return;
+      return 0;
     }
     throw cause;
   }
 }
 
-/** 云端草稿自动保存（last-write-wins）。整个 StudioDraft 序列化上送，
- * 服务端按 (user, kind) 单行 upsert。 */
-export async function persistCloudDraft(draft: StudioDraft): Promise<void> {
-  await saveStudioDraft(
+/** 云端草稿自动保存。携带 expectedRevision 做版本围栏（T35）：放弃后的迟到
+ * 旧写在服务端必然错位 409，真正的新稿凭墓碑版本号复活。 */
+export async function persistCloudDraft(
+  draft: StudioDraft,
+  expectedRevision?: number,
+): Promise<StudioDraftCloudRecord> {
+  return saveStudioDraft(
     "copy" satisfies StudioDraftKind,
     draft as unknown as Record<string, unknown>,
     draft.script.confirmed,
+    expectedRevision,
   );
 }
 

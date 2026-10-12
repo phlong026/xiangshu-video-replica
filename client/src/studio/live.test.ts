@@ -575,20 +575,20 @@ describe("真实 Studio 只读适配器", () => {
     expect(restored?.updatedAt).toBe("2026-09-07T10:00:00+08:00");
   });
 
-  it("放弃云端草稿调用 DELETE", async () => {
-    api.deleteStudioDraft.mockResolvedValue(undefined);
+  it("放弃云端草稿调用 DELETE，返回墓碑版本号", async () => {
+    api.deleteStudioDraft.mockResolvedValue({ deleted: true, revision: 7 });
 
-    await discardCloudDraft();
+    await expect(discardCloudDraft()).resolves.toBe(7);
 
     expect(api.deleteStudioDraft).toHaveBeenCalledWith("copy");
   });
 
-  it("草稿已不存在（404）视为放弃成功，不打断调用方", async () => {
+  it("草稿已不存在（404）视为放弃成功（版本号 0），不打断调用方", async () => {
     api.deleteStudioDraft.mockRejectedValue(
       Object.assign(new Error("not found"), { status: 404 }),
     );
 
-    await expect(discardCloudDraft()).resolves.toBeUndefined();
+    await expect(discardCloudDraft()).resolves.toBe(0);
   });
 
   it("放弃失败（非 404）把错误抛给调用方提示", async () => {

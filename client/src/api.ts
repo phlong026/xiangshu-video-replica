@@ -911,8 +911,10 @@ export async function saveStudioDraft(
 }
 
 /** 放弃云端工作草稿：DELETE /api/studio/drafts/{kind}。 */
-export async function deleteStudioDraft(kind: StudioDraftKind): Promise<void> {
-  await requestApiJson<{ deleted: boolean }>(
+export async function deleteStudioDraft(
+  kind: StudioDraftKind,
+): Promise<{ deleted: boolean; revision: number }> {
+  return requestApiJson<{ deleted: boolean; revision: number }>(
     `/api/studio/drafts/${encodeURIComponent(kind)}`,
     "删除云端草稿失败",
     { method: "DELETE" },
@@ -7728,7 +7730,7 @@ export type CustomerWalletTransactionPage = WalletTransactionPage & {
 export type WalletLedgerEntry = components["schemas"]["WalletLedgerEntry"];
 export type WalletLedgerOutcome = WalletLedgerEntry["outcome"];
 export type WalletLedgerPage = components["schemas"]["WalletLedgerPage"];
-/** 结果筛选：`refunded` 含部分成功与整笔退回，`posted` 是入账 / 转换 / 调账。 */
+/** 结果筛选：`refunded` 含按实际用量结算（有退回）与整笔退回，`posted` 是入账 / 转换 / 调账。 */
 export type WalletLedgerOutcomeFilter =
   | "pending"
   | "completed"

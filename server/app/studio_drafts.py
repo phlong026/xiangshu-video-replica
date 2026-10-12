@@ -11,6 +11,7 @@ versions via ``/projects/{id}/scripts``; this module never does.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
@@ -30,6 +31,24 @@ DRAFT_KINDS: tuple[str, ...] = ("copy", "oral", "replica", "publishing")
 MAX_DRAFT_PAYLOAD_BYTES = 512_000
 MAX_SAVED_SCRIPT_TEXT_CHARS = 100_000
 MAX_SAVED_SCRIPTS_PER_USER = 50
+
+# 墓碑拒绝窗（T35）：物理删除改成墓碑后，删除后一小段时间内的无版本盲写
+# （旧客户端的 last-write-wins PUT）一律 409，挡住「在途旧 PUT 复活已放弃草稿」；
+# 窗口过后放行盲写，让未升级的旧客户端仍能开始真正的新稿。窗口只影响盲写；
+# 带 expected_revision 的写入永远按 revision 判定，与本窗口无关。
+_TOMBSTONE_WINDOW_ENV = "VIDEO_REPLICA_DRAFT_TOMBSTONE_WINDOW_SECONDS"
+_DEFAULT_TOMBSTONE_WINDOW_SECONDS = 600.0
+
+
+def _tombstone_window_seconds() -> float:
+    raw = os.environ.get(_TOMBSTONE_WINDOW_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_TOMBSTONE_WINDOW_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_TOMBSTONE_WINDOW_SECONDS
+    return value if value >= 0 else _DEFAULT_TOMBSTONE_WINDOW_SECONDS
 
 
 _UTC_NOW_LOCK = threading.Lock()
@@ -114,6 +133,41 @@ def _draft_not_found() -> HTTPException:
     )
 
 
+def _draft_tombstoned(revision: int) -> HTTPException:
+    """放弃围栏（T35）：墓碑行拒绝旧写回流，附带当前版本号供新稿续写。"""
+    return HTTPException(
+        409,
+        detail={
+            "code": "STUDIO_DRAFT_TOMBSTONED",
+            "message": "云端草稿刚被放弃，本次内容不再写回；重新开始的内容可直接保存。",
+            "current_revision": revision,
+        },
+    )
+
+
+def _draft_conflict(row: sqlite3.Row | None) -> HTTPException:
+    revision = 0 if row is None else int(row["revision"])
+    return HTTPException(
+        409,
+        detail={
+            "code": "STUDIO_DRAFT_CONFLICT",
+            "message": "云端草稿已在其他窗口更新，请重新加载后再保存。",
+            "current_revision": revision,
+        },
+    )
+
+
+def _tombstone_recent(deleted_at: str | None) -> bool:
+    if not deleted_at:
+        return False
+    try:
+        deleted = datetime.strptime(deleted_at, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=UTC)
+    except ValueError:
+        # 时间戳解析不了的存量行按「刚放弃」处理，宁严勿漏。
+        return True
+    return (datetime.now(UTC) - deleted).total_seconds() < _tombstone_window_seconds()
+
+
 def _validate_draft_kind(kind: str) -> None:
     if kind not in DRAFT_KINDS:
         raise HTTPException(
@@ -134,7 +188,7 @@ def load_studio_draft(
     row = conn.execute(
         """
         SELECT * FROM studio_drafts
-        WHERE user_id = %s AND draft_kind = %s
+        WHERE user_id = %s AND draft_kind = %s AND deleted_at IS NULL
         """,
         (actor_id, kind),
     ).fetchone()
@@ -186,22 +240,35 @@ def save_studio_draft(
                 (str(uuid4()), actor.id, kind, payload_text, confirmed_flag),
             ).fetchone()
         else:
+            # 命中 revision 即写入：活行是普通保存，墓碑行是「知道放弃后版本号的
+            # 真正新稿」复活（T35）。旧版本号的迟到写在版本推进后必然错位 409。
             row = conn.execute(
                 """UPDATE studio_drafts SET payload = %s, script_confirmed = %s,
-                revision = revision + 1, updated_at = CURRENT_TIMESTAMP
+                revision = revision + 1, deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE user_id = %s AND draft_kind = %s AND revision = %s RETURNING *""",
                 (payload_text, confirmed_flag, actor.id, kind, request.expected_revision),
             ).fetchone()
         if row is None:
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "STUDIO_DRAFT_CONFLICT",
-                    "message": "云端草稿已在其他窗口更新，请重新加载后再保存。",
-                },
-            )
+            current = conn.execute(
+                """SELECT revision, deleted_at FROM studio_drafts
+                WHERE user_id = %s AND draft_kind = %s""",
+                (actor.id, kind),
+            ).fetchone()
+            if current is not None and current["deleted_at"] is not None:
+                raise _draft_tombstoned(int(current["revision"]))
+            raise _draft_conflict(current)
         conn.commit()
         return _draft_response(row)
+    existing = conn.execute(
+        """SELECT revision, deleted_at FROM studio_drafts
+        WHERE user_id = %s AND draft_kind = %s""",
+        (actor.id, kind),
+    ).fetchone()
+    if existing is not None and existing["deleted_at"] is not None:
+        # 盲写撞上新鲜墓碑：这极可能是放弃前发出的在途旧 PUT（T35 的
+        # PUT→DELETE 竞态），拒绝写回；窗口过后视为旧客户端开真正的新稿。
+        if _tombstone_recent(str(existing["deleted_at"])):
+            raise _draft_tombstoned(int(existing["revision"]))
     conn.execute(
         """
         INSERT INTO studio_drafts (
@@ -211,6 +278,7 @@ def save_studio_draft(
             payload = excluded.payload,
             script_confirmed = excluded.script_confirmed,
             revision = studio_drafts.revision + 1,
+            deleted_at = NULL,
             updated_at = CURRENT_TIMESTAMP
         """,
         (str(uuid4()), actor.id, kind, payload_text, confirmed_flag),
@@ -230,7 +298,13 @@ def delete_studio_draft(
     *,
     actor: CurrentUser,
     kind: str,
-) -> None:
+) -> int:
+    """放弃云端草稿：物理行保留为墓碑（清空内容、版本推进），返回新版本号。
+
+    墓碑让删除之后迟到的旧写无所遁形：带旧 revision 的条件写必然错位 409，
+    盲写在拒绝窗内同样 409（T35）。重复放弃视为成功，返回当前墓碑版本——
+    客户端「已不存在也算放弃成功」的既有语义不变。
+    """
     require_not_auditor(
         conn,
         actor=actor,
@@ -239,13 +313,26 @@ def delete_studio_draft(
         entity_id=kind,
     )
     _validate_draft_kind(kind)
-    cursor = conn.execute(
-        "DELETE FROM studio_drafts WHERE user_id = %s AND draft_kind = %s",
+    row = conn.execute(
+        """
+        UPDATE studio_drafts SET deleted_at = %s, payload = %s,
+            revision = revision + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = %s AND draft_kind = %s AND deleted_at IS NULL
+        RETURNING revision
+        """,
+        (_utc_now_text(), "{}", actor.id, kind),
+    ).fetchone()
+    if row is not None:
+        conn.commit()
+        return int(row["revision"])
+    tombstone = conn.execute(
+        """SELECT revision FROM studio_drafts
+        WHERE user_id = %s AND draft_kind = %s AND deleted_at IS NOT NULL""",
         (actor.id, kind),
-    )
-    if getattr(cursor, "rowcount", 0) == 0:
-        raise _draft_not_found()
-    conn.commit()
+    ).fetchone()
+    if tombstone is not None:
+        return int(tombstone["revision"])
+    raise _draft_not_found()
 
 
 def list_saved_scripts(

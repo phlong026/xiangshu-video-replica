@@ -140,7 +140,7 @@ class WalletLedgerCounts(BaseModel):
     total: int
     pending: int
     completed: int
-    # 部分成功 + 整笔退回。
+    # 有退回的结算（含按实际用量结算）+ 整笔退回。
     refunded: int
     posted: int
 

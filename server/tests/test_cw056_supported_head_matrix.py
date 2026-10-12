@@ -102,7 +102,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上，故链尾为该值。
 # 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
-HEAD_REVISION = "20261012T0600_viral_copy_upload_receipts"
+HEAD_REVISION = "20261013T1010_studio_draft_tombstones"
 
 
 @pytest.mark.pg
@@ -401,17 +401,21 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 2026-10-12 在全新隔离 PostgreSQL 16.15 实测：先核原发行 head 的目录和计数
 # 与既有冻结值完全一致，再升级追加迁移采集以下新值；不改已发布链指纹。
 # 0600 追加上传暂存回执表；以下计数、表名和摘要已在新建 PG16 中重测。
+# 2026-10-13 T40/T35 追加：billing_reconciliation_items（20 列 + state CHECK +
+# OPEN 部分唯一索引）与 studio_drafts.deleted_at（文本列），tables/primary_keys
+# +1、columns +21、check_constraints +1、jsonb_columns +1、partial_indexes +1、
+# timestamptz_columns +5；digest 由 --print-schema 在全新 PG16 探针库重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 386,
-    "columns": 1464,
+    "check_constraints": 387,
+    "columns": 1485,
     "foreign_keys": 216,
     "identity_columns": 0,
-    "jsonb_columns": 11,
-    "partial_indexes": 42,
-    "primary_keys": 132,
+    "jsonb_columns": 12,
+    "partial_indexes": 43,
+    "primary_keys": 133,
     "sequences": 8,
-    "tables": 132,
-    "timestamptz_columns": 112,
+    "tables": 133,
+    "timestamptz_columns": 117,
     "triggers": 61,
     "unique_constraints": 43,
 }
@@ -463,6 +467,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "billing_credit_lots",
     "billing_evidence",
     "billing_operations",
+    "billing_reconciliation_items",
     "billing_tariffs",
     "character_asset_reviews",
     "character_assets",
@@ -669,7 +674,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "446f69da56b8d610d28042946f4baa7371f0320c7769e1b480e60482504240a8"
+HEAD_SCHEMA_DIGEST = "620c97a7520824cf1bac6f447c4f8033d0bf1459986a8e04848112e0041a490a"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

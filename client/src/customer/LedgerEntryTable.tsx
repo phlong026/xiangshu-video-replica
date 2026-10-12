@@ -19,14 +19,16 @@ import {
 import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
 import "./ledger-entries.css";
 
-/** 一条任务在结果列里的说法。整笔退回不叫「失败」：取消任务同样会整笔退回。 */
+/** 一条任务的计费结果在结果列里的说法。这里只陈述计费事实，不冒充业务结果
+ * （T41）：任务有没有做成要看任务详情；PARTIAL 说明「按实际用量结算并退回
+ * 多余暂扣」，不等于业务部分成功；整笔退回不叫「失败」：取消任务同样会整笔退回。 */
 const OUTCOME_BADGE: Record<
   WalletLedgerEntry["outcome"],
   { tone: string; text: string }
 > = {
-  PENDING: { tone: "pending", text: "处理中" },
-  COMPLETED: { tone: "done", text: "已完成" },
-  PARTIAL: { tone: "refunded", text: "部分成功" },
+  PENDING: { tone: "pending", text: "处理中 · 已暂扣" },
+  COMPLETED: { tone: "done", text: "已结算" },
+  PARTIAL: { tone: "refunded", text: "按实际用量结算" },
   FAILED: { tone: "refunded", text: "未成功 · 已全额退回" },
   POSTED: { tone: "posted", text: "入账 / 调整" },
 };
@@ -71,27 +73,28 @@ function Flow({ entry }: { entry: WalletLedgerEntry }) {
   if (entry.outcome === "PENDING") {
     return (
       <div className="le-flow">
-        <Step tone="hold">{`${LEDGER_TERMS.hold} ${entry.reserved_credits}`}</Step>
+        <Step tone="hold">{`暂扣 ${entry.reserved_credits}`}</Step>
         <span className="le-arrow">→</span>
-        <span className="le-wait">任务结束后多退少补</span>
+        <span className="le-wait">
+          任务结束后按实际用量结算，多余暂扣自动退回
+        </span>
       </div>
     );
   }
+  // 折叠后的资金去向只讲三个数（T41）：暂扣多少、退回多少、净花费多少。
+  // SETTLE 不再单独展示成一次「实扣」——净花费就是结算结果，摆出来会被
+  // 读成扣了两次；明细表里仍按单笔如实叫「实扣」。
   return (
     <div className="le-flow">
       <Step tone="hold">{`${LEDGER_TERMS.hold} ${entry.reserved_credits}`}</Step>
-      {entry.charged_credits > 0 && (
-        <>
-          <span className="le-arrow">→</span>
-          <Step tone="charge">{`${LEDGER_TERMS.charge} ${entry.charged_credits}`}</Step>
-        </>
-      )}
       {entry.refunded_credits > 0 && (
         <>
           <span className="le-arrow">→</span>
           <Step tone="refund">{`${LEDGER_TERMS.refund} +${entry.refunded_credits}`}</Step>
         </>
       )}
+      <span className="le-arrow">→</span>
+      <Step tone="charge">{`${LEDGER_TERMS.net} ${entry.charged_credits}`}</Step>
     </div>
   );
 }
@@ -111,9 +114,9 @@ function Amount({ entry }: { entry: WalletLedgerEntry }) {
       return (
         <>
           <span className="le-amount le-amount--pending">
-            {`${LEDGER_TERMS.hold} ${entry.reserved_credits} 积分`}
+            {`暂扣 ${entry.reserved_credits} 积分`}
           </span>
-          <small className="le-sub">结算后多退少补</small>
+          <small className="le-sub">结算后按实际用量扣，多余自动退回</small>
         </>
       );
     case "FAILED":
@@ -128,7 +131,7 @@ function Amount({ entry }: { entry: WalletLedgerEntry }) {
     case "PARTIAL":
       return (
         <>
-          <span className="le-amount">{`-${entry.charged_credits} 积分`}</span>
+          <span className="le-amount">{`净花费 ${entry.charged_credits} 积分`}</span>
           <small className="le-sub le-sub--good">
             {`已退回 ${entry.refunded_credits}`}
           </small>
@@ -136,7 +139,7 @@ function Amount({ entry }: { entry: WalletLedgerEntry }) {
       );
     default:
       return (
-        <span className="le-amount">{`-${entry.charged_credits} 积分`}</span>
+        <span className="le-amount">{`净花费 ${entry.charged_credits} 积分`}</span>
       );
   }
 }
@@ -339,8 +342,10 @@ export function LedgerEntryTable({
       </div>
       <p className="le-legend">
         <Step tone="hold">{LEDGER_TERMS.hold}</Step>
-        <Step tone="charge">{LEDGER_TERMS.charge}</Step>
+        <span className="le-arrow">→</span>
         <Step tone="refund">{LEDGER_TERMS.refund}</Step>
+        <span className="le-arrow">→</span>
+        <Step tone="charge">{LEDGER_TERMS.net}</Step>
         {HOLD_EXPLANATION}
       </p>
     </div>

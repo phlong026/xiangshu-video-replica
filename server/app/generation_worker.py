@@ -1247,6 +1247,16 @@ def run_pg_worker_once(
                     (_RECONCILE_LOCK_NAMESPACE,),
                 ).fetchone()[0]:
                     reconcile_operations(reconcile_conn)
+                    # 卡单核对队列（T40）：reconcile 资格条件之外的悬留预留
+                    # （成功缺时长、未知超时、孤儿源）在这里入队、重查与升级；
+                    # 与主扫描共用节流和 advisory lock，避免双跑。
+                    from app.billing_reconciliation import (
+                        enqueue_stuck_billing_operations,
+                        process_reconciliation_items,
+                    )
+
+                    enqueue_stuck_billing_operations(reconcile_conn)
+                    process_reconciliation_items(reconcile_conn)
         processed_round = False
         from app.prompt_optimizer import run_prompt_task
 

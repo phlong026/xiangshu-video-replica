@@ -266,6 +266,15 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # (test_registration_bonus_settings.py), migrated to alembic head
         # and truncated per test.
         "registration_bonus_settings_test",
+        # REMEDIATION-B3-20261013 卡单核对队列 + 人物删除积分保护 + 草稿墓碑：
+        # dedicated databases for the T40 计费核对队列矩阵
+        # (test_billing_reconciliation_pg.py)、T38 人物删除未结算守卫矩阵
+        # (test_character_delete_billing_guard_pg.py) 与 T35 草稿墓碑围栏矩阵
+        # (test_studio_draft_tombstone_pg.py), migrated to alembic head and
+        # truncated per test.
+        "billing_reconcile_test",
+        "character_delete_guard_test",
+        "studio_draft_tombstone_test",
     }
 )
 

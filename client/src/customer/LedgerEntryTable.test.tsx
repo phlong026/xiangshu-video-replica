@@ -75,8 +75,9 @@ test("整笔退回：结果、去向、花费都在一行里说清，不出现�
   render(<LedgerEntryTable empty="空" entries={[FAILED]} />);
   const table = screen.getByRole("table", { name: "消费记录列表" });
   expect(within(table).getByText("未成功 · 已全额退回")).toBeVisible();
-  expect(within(table).getByText("暂扣 8")).toBeVisible();
+  expect(within(table).getByText("扣除 8")).toBeVisible();
   expect(within(table).getByText("退回 +8")).toBeVisible();
+  expect(within(table).getByText("净花费 0")).toBeVisible();
   expect(within(table).getByText("0 积分")).toBeVisible();
   expect(within(table).getByText("已退回 8，余额已恢复")).toBeVisible();
   expect(within(table).queryByText("-8 积分")).toBeNull();
@@ -84,20 +85,22 @@ test("整笔退回：结果、去向、花费都在一行里说清，不出现�
   expect(table.querySelector("tr.le-row--refund")).not.toBeNull();
 });
 
-test("处理中的任务只说暂扣，并交代结束后多退少补", () => {
+test("处理中的任务只说暂扣，并交代结束后按实际用量结算", () => {
   render(
     <LedgerEntryTable
       empty="空"
       entries={[cycle({ outcome: "PENDING", net_available_delta: -8 })]}
     />,
   );
-  expect(screen.getByText("处理中")).toBeVisible();
-  expect(screen.getByText("任务结束后多退少补")).toBeVisible();
+  expect(screen.getByText("处理中 · 已暂扣")).toBeVisible();
+  expect(
+    screen.getByText("任务结束后按实际用量结算，多余暂扣自动退回"),
+  ).toBeVisible();
   expect(screen.getByText("暂扣 8 积分")).toBeVisible();
-  expect(screen.getByText("结算后多退少补")).toBeVisible();
+  expect(screen.getByText("结算后按实际用量扣，多余自动退回")).toBeVisible();
 });
 
-test("已完成的任务显示实扣金额，没有退回就不出现退回芯片", () => {
+test("已结算的任务显示扣除与净花费，没有退回就不出现退回芯片", () => {
   render(
     <LedgerEntryTable
       empty="空"
@@ -110,9 +113,10 @@ test("已完成的任务显示实扣金额，没有退回就不出现退回芯�
       ]}
     />,
   );
-  expect(screen.getByText("已完成")).toBeVisible();
-  expect(screen.getByText("实扣 8")).toBeVisible();
-  expect(screen.getByText("-8 积分")).toBeVisible();
+  expect(screen.getByText("已结算")).toBeVisible();
+  expect(screen.getByText("扣除 8")).toBeVisible();
+  expect(screen.getByText("净花费 8")).toBeVisible();
+  expect(screen.getByText("净花费 8 积分")).toBeVisible();
   expect(screen.queryByText(/^退回 \+/)).toBeNull();
 });
 
@@ -127,15 +131,15 @@ test("展开逐笔明细：按暂扣 → 实扣 → 退回，收起后消失", (
       .getAllByRole("row")
       .slice(1)
       .map((tr) => tr.children[1].textContent),
-  ).toEqual(["暂扣", "退回"]);
-  // 每一笔都同时带「可用」与「暂扣中」两列：暂扣是 -8 / +8，退回是 +8 / -8。
+  ).toEqual(["扣除", "退回"]);
+  // 每一笔都同时带「可用」与「暂扣中」两列：扣除是 -8 / +8，退回是 +8 / -8。
   expect(
     within(detail)
       .getAllByRole("row")
       .slice(1)
       .map((tr) => [1, 2, 3].map((i) => tr.children[i].textContent)),
   ).toEqual([
-    ["暂扣", "-8 积分", "+8 积分"],
+    ["扣除", "-8 积分", "+8 积分"],
     ["退回", "+8 积分", "-8 积分"],
   ]);
   expect(screen.getByRole("button", { name: "收起明细" })).toHaveAttribute(
@@ -247,12 +251,12 @@ test("查看任务只在提供回调且这条任务带任务编号时出现，�
   expect(screen.queryByRole("button", { name: "查看任务" })).toBeNull();
 });
 
-test("没有条目时显示空态文案，并始终附带三个词的说明", () => {
+test("没有条目时显示空态文案，并始终附带扣除 → 退回 → 净花费的说明", () => {
   render(<LedgerEntryTable empty="暂无额度流水" entries={[]} />);
   expect(screen.getByText("暂无额度流水")).toBeVisible();
   const legend = screen.getByText(/失败的任务会全额退回/);
   expect(legend).toBeVisible();
-  expect(legend).toHaveTextContent("暂扣");
-  expect(legend).toHaveTextContent("实扣");
+  expect(legend).toHaveTextContent("扣除");
   expect(legend).toHaveTextContent("退回");
+  expect(legend).toHaveTextContent("净花费");
 });

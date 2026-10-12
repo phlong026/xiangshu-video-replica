@@ -30,6 +30,9 @@ class StudioDraftDeleteResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deleted: bool
+    # 放弃后的墓碑版本号（T35）：客户端后续保存携带它即可区分「真正的新稿」
+    # 与「放弃前发出的迟到旧写」。
+    revision: int
 
 
 class SavedScriptDeleteResponse(BaseModel):
@@ -63,8 +66,8 @@ def remove_studio_draft(
     db: BusinessDbDep,
 ) -> StudioDraftDeleteResponse:
     with db.write() as (conn, actor):
-        delete_studio_draft(conn, actor=actor, kind=draft_kind)
-    return StudioDraftDeleteResponse(deleted=True)
+        revision = delete_studio_draft(conn, actor=actor, kind=draft_kind)
+    return StudioDraftDeleteResponse(deleted=True, revision=revision)
 
 
 @router.get("/saved-scripts", response_model=SavedScriptListResponse)

@@ -478,11 +478,11 @@ describe("CustomerWalletPanel", () => {
       <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
     );
 
-    // 合并：三笔只剩一行，资金去向讲清暂扣 → 实扣 → 退回，花费是整组净额。
-    expect(await screen.findByText("暂扣 5")).toBeVisible();
-    expect(screen.getByText("实扣 3")).toBeVisible();
+    // 合并：三笔只剩一行，资金去向讲清扣除 → 退回 → 净花费，花费是整组净额。
+    expect(await screen.findByText("扣除 5")).toBeVisible();
     expect(screen.getByText("退回 +2")).toBeVisible();
-    expect(screen.getByText("-3 积分")).toBeVisible();
+    expect(screen.getByText("净花费 3")).toBeVisible();
+    expect(screen.getByText("净花费 3 积分")).toBeVisible();
     expect(screen.queryByRole("table", { name: "逐笔明细" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /查看 3 笔明细/ }));
@@ -492,7 +492,7 @@ describe("CustomerWalletPanel", () => {
         .getAllByRole("row")
         .slice(1)
         .map((row) => row.children[1].textContent),
-    ).toEqual(["暂扣", "实扣", "退回"]);
+    ).toEqual(["扣除", "实扣", "退回"]);
     expect(within(itemised).getByText("+2 积分")).toBeVisible();
   });
 
