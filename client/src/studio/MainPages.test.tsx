@@ -715,6 +715,64 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(updateData).not.toHaveBeenCalled();
   });
 
+  it("部分完成的生成批次在详情页照常加载已成功的成片（FIX-01）", async () => {
+    const partial: StudioTask = {
+      ...taskA,
+      type: "视频生成",
+      backendKind: "generation_batch",
+      backendId: taskA.id,
+      status: "partial",
+      deliverableCount: 3,
+    };
+    loadStudioTaskDetail.mockResolvedValue(partial);
+    loadTaskPreview.mockReturnValue(new Promise(() => {}));
+    useStudio.mockReturnValue(
+      studio(taskA.id, {
+        state: {
+          ...createState("task-detail"),
+          selectedTaskId: taskA.id,
+          selectedTaskKind: "generation_batch",
+          selectedTaskBackendId: taskA.id,
+        },
+        data: data([partial]),
+      }),
+    );
+    render(<TaskDetailPage />);
+
+    await waitFor(() => expect(loadTaskPreview).toHaveBeenCalled());
+    expect(screen.getByText("部分完成")).toBeInTheDocument();
+    expect(
+      screen.getByText(/本批已有 3 条成片可查看，其余未生成成功/),
+    ).toBeInTheDocument();
+  });
+
+  it("没有成功成片的待核对批次不请求预览，也不显示为失败", async () => {
+    const uncertain: StudioTask = {
+      ...taskA,
+      type: "视频生成",
+      backendKind: "generation_batch",
+      backendId: taskA.id,
+      status: "uncertain",
+      deliverableCount: 0,
+    };
+    loadStudioTaskDetail.mockResolvedValue(uncertain);
+    useStudio.mockReturnValue(
+      studio(taskA.id, {
+        state: {
+          ...createState("task-detail"),
+          selectedTaskId: taskA.id,
+          selectedTaskKind: "generation_batch",
+          selectedTaskBackendId: taskA.id,
+        },
+        data: data([uncertain]),
+      }),
+    );
+    render(<TaskDetailPage />);
+
+    expect(await screen.findByText("状态待确认")).toBeInTheDocument();
+    expect(loadTaskPreview).not.toHaveBeenCalled();
+  });
+
   it("审核示例不请求真实预览接口", () => {
     useStudio.mockReturnValue(studio(taskA.id, { review: true }));
     render(<TaskDetailPage />);

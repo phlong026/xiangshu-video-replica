@@ -806,16 +806,39 @@ export async function loadMorePeople(cursor: string) {
   return loadPeopleEntries(page.items, page.next_cursor, page.total);
 }
 
-function studioTaskStatus(
-  batch: Pick<GenerationBatchListItem, "status" | "needs_attention_count">,
-): StudioTask["status"] {
+type BatchStatusView = Pick<GenerationBatchListItem, "status" | "progress"> & {
+  needs_attention_count?: number;
+};
+
+/** 已可交付的成片条数：服务端只把「已归档 / 直链可用」的成功任务计入 succeeded。 */
+function batchDeliverableCount(
+  batch: Pick<GenerationBatchListItem, "progress">,
+) {
+  return batch.progress.counts.succeeded ?? 0;
+}
+
+/** 批次状态 → 任务中心展示态。
+ *
+ * 列表与详情共用服务端 progress 计数（needs_attention 已排除被付费重生成替代的
+ * 子任务、也不含普通失败），保证同一批次在两处显示一致。
+ * - 提交结果不确定 / 付费成片未能入库：积分冻结待核对，显示「待核对」而不是
+ *   「失败」，避免用户误以为失败而重复提交、再次预扣。
+ * - 部分子任务成功、其余失败：显示「部分完成」，成功的成片照常可看。 */
+export function studioTaskStatus(batch: BatchStatusView): StudioTask["status"] {
   const status = batch.status.toUpperCase();
-  if (status === "SUBMISSION_UNCERTAIN") return "uncertain";
   if (status === "CANCELLED") return "cancelled";
-  if (batch.needs_attention_count > 0) return "failed";
+  if (
+    status === "SUBMISSION_UNCERTAIN" ||
+    status === "NEEDS_ATTENTION" ||
+    (batch.progress.counts.needs_attention ??
+      batch.needs_attention_count ??
+      0) > 0
+  )
+    return "uncertain";
   if (status === "SUCCEEDED") return "completed";
-  if (status === "COMPLETED_WITH_FAILURES") return "failed";
-  if (status === "NEEDS_ATTENTION" || status === "FAILED") return "failed";
+  if (status === "COMPLETED_WITH_FAILURES")
+    return batchDeliverableCount(batch) > 0 ? "partial" : "failed";
+  if (status === "FAILED") return "failed";
   if (status === "PENDING" || status === "QUEUED") return "queued";
   return "running";
 }
@@ -841,6 +864,7 @@ export function sameTasks(a: StudioTask[], b: StudioTask[]): boolean {
       task.title === other.title &&
       task.status === other.status &&
       task.progress === other.progress &&
+      task.deliverableCount === other.deliverableCount &&
       task.submitted === other.submitted &&
       // 退回金额可能比状态晚一拍落账；不比较它，轮询会一直沿用旧引用，
       // 失败卡片就永远停在「还没退」。
@@ -870,6 +894,7 @@ function studioTask(batch: GenerationBatchListItem): StudioTask {
     title: batch.display_name?.trim() || batch.project_name || batch.id,
     type: CREATION_KIND_LABELS[batch.creation_kind] ?? "视频生成",
     status: studioTaskStatus(batch),
+    deliverableCount: batchDeliverableCount(batch),
     credits: taskCredits(batch.credits),
     progress: batch.progress.progress_percent,
     submitted: batch.created_at,
@@ -880,11 +905,6 @@ function studioTask(batch: GenerationBatchListItem): StudioTask {
 }
 
 function studioTaskFromBatch(batch: GenerationBatch): StudioTask {
-  const needsAttention = batch.tasks.filter((task) =>
-    ["FAILED", "NEEDS_ATTENTION", "SUBMISSION_UNCERTAIN"].includes(
-      task.status.toUpperCase(),
-    ),
-  ).length;
   return {
     id: batch.id,
     backendKind: "generation_batch",
@@ -894,10 +914,8 @@ function studioTaskFromBatch(batch: GenerationBatch): StudioTask {
     projectId: batch.project_id,
     title: batch.display_name?.trim() || batch.project_name || batch.id,
     type: CREATION_KIND_LABELS[batch.creation_kind] ?? "视频生成",
-    status: studioTaskStatus({
-      status: batch.status,
-      needs_attention_count: needsAttention,
-    }),
+    status: studioTaskStatus(batch),
+    deliverableCount: batchDeliverableCount(batch),
     credits: taskCredits(batch.credits),
     progress: batch.progress.progress_percent,
     submitted:
@@ -1006,9 +1024,7 @@ export async function uploadWorkbenchSourceVideo(
   analysisTaskId?: string;
   analysisTaskStatus?: string;
 }> {
-  const base = file.name
-    .replace(/\.(mp4|mov|m4a|mp3|wav|aac)$/i, "")
-    .trim();
+  const base = file.name.replace(/\.(mp4|mov|m4a|mp3|wav|aac)$/i, "").trim();
   const project = await createProject((base || file.name).slice(0, 120));
   try {
     const intent = await createVideoUploadIntent(project.id, file, purpose);

@@ -109,6 +109,7 @@ import {
   validateReferences,
 } from "./state";
 import { cancelledTaskCreditsNote, failedTaskCreditsNote } from "./taskCredits";
+import { taskHasDeliverable } from "./taskResults";
 import type {
   AssetKind,
   StudioAsset,
@@ -3630,8 +3631,13 @@ function formatElapsed(from: string): string {
 function VideoProgressView({ task }: { task: StudioTask }) {
   const [copyIndex, setCopyIndex] = useState(0);
   const [, setTick] = useState(0);
-  const failed = task.status === "failed" || task.status === "uncertain";
-  const completed = task.status === "completed";
+  const deliverable = (task.deliverableCount ?? 0) > 0;
+  // 部分完成、或待核对但已有成功成片的批次按「已出片」展示，不能整批说成失败。
+  const failed =
+    task.status === "failed" || (task.status === "uncertain" && !deliverable);
+  const partial =
+    task.status === "partial" || (task.status === "uncertain" && deliverable);
+  const completed = task.status === "completed" || partial;
   const cancelled = task.status === "cancelled";
 
   useEffect(() => {
@@ -3679,8 +3685,9 @@ function VideoProgressView({ task }: { task: StudioTask }) {
     );
   }
 
-  const stageIndex = videoStageIndex(task.status);
+  const stageIndex = completed ? 3 : videoStageIndex(task.status);
   const progress = task.progress ?? 0;
+  const partialNote = partial ? failedTaskCreditsNote(task) : null;
 
   return (
     <div className="creation-progress" aria-live="polite">
@@ -3704,19 +3711,28 @@ function VideoProgressView({ task }: { task: StudioTask }) {
         aria-label="生成进度"
         className="creation-progress-bar"
         max={100}
-        value={task.status === "completed" ? 100 : progress}
+        value={completed ? 100 : progress}
       />
       <div className="creation-progress-meta">
-        <span>{task.status === "completed" ? "生成完成" : `${progress}%`}</span>
+        <span>{completed ? "生成完成" : `${progress}%`}</span>
         {!completed && formatElapsed(task.submitted) ? (
           <span>已等待 {formatElapsed(task.submitted)}</span>
         ) : null}
       </div>
       <p className="creation-progress-copy">
-        {completed
-          ? "成片已生成，可以查看、播放或下载。"
-          : REASSURANCE_COPY[copyIndex]}
+        {partial
+          ? `已生成 ${task.deliverableCount} 条成片，可以查看、播放或下载；其余${
+              task.status === "uncertain" ? "任务状态待确认" : "未生成成功"
+            }。`
+          : completed
+            ? "成片已生成，可以查看、播放或下载。"
+            : REASSURANCE_COPY[copyIndex]}
       </p>
+      {partialNote ? (
+        <p className={`creation-progress-credits is-${partialNote.tone}`}>
+          {partialNote.text}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -5242,7 +5258,7 @@ export function VideoPage() {
           ) : videoTask ? (
             <>
               <VideoProgressView task={videoTask} />
-              {videoTask.status === "completed" ? (
+              {taskHasDeliverable(videoTask) ? (
                 <Button
                   variant="primary"
                   onClick={() =>

@@ -183,8 +183,12 @@ export type StudioTask = {
     | "queued"
     | "failed"
     | "completed"
+    /** 批次已结束，部分成片可交付、其余失败（失败部分已自动退回积分）。 */
+    | "partial"
     | "uncertain"
     | "cancelled";
+  /** 生成批次中已可交付（已归档或直链可用）的成片条数；口播任务不填。 */
+  deliverableCount?: number;
   progress?: number;
   submitted: string;
   poster?: string;
