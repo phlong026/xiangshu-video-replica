@@ -27,6 +27,7 @@ import {
   packageBonusCredits,
   yuanInputToFen,
 } from "../rechargePackageDisplay";
+import { SUB_ACCOUNT_RECHARGE_NOTICE } from "./accountType";
 import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { LedgerEntryTable } from "./LedgerEntryTable";
 import { HELD_CREDITS_LABEL } from "./ledgerVocabulary";
@@ -45,10 +46,13 @@ export function CustomerWalletPanel({
   store,
   onSessionExpired,
   onRechargeRequested,
+  isSubAccount = false,
 }: {
   store: CustomerCredentialStore;
   onSessionExpired: () => void;
   onRechargeRequested?: (amountYuan: number, packageId?: string) => void;
+  /** 子账号共用母账号钱包但无权充值：只展示余额与流水。 */
+  isSubAccount?: boolean;
 }) {
   const [wallet, setWallet] = useState<WalletSnapshot | null>(null);
   const [packages, setPackages] = useState<CustomerRechargePackage[]>([]);
@@ -547,226 +551,241 @@ export function CustomerWalletPanel({
         </article>
       </div>
 
-      <section className="wallet-section" aria-labelledby="recharge-title">
-        <div className="wallet-section__heading">
-          <div>
-            <h2 id="recharge-title">充值积分</h2>
-            <p>
-              {formatFen(wallet.min_recharge_fen)}起充，按
-              {formatFen(wallet.recharge_step_fen)}递增。
-            </p>
-          </div>
-        </div>
-        {packages.length ? (
-          <div className="recharge-presets recharge-presets--packages">
-            {packages.map((pkg) => {
-              const benefit = packageBenefitLabel(pkg);
-              const bonus = packageBonusCredits(wallet, pkg);
-              // 低于生效起充额的档位后端必 422：客户端先行置灰并说明原因。
-              const belowMinimum = packageBelowMinimum(pkg, wallet);
-              return (
-                <button
-                  aria-label={`购买套餐${pkg.name}`}
-                  disabled={isCreating || belowMinimum}
-                  key={pkg.id}
-                  onClick={() => void startPackageRecharge(pkg)}
-                  type="button"
-                >
-                  <strong>{pkg.name}</strong>
-                  <span>
-                    {formatFen(pkg.amount_fen)} → {pkg.credits} 积分
-                  </span>
-                  {bonus !== null ? <span>含赠送 {bonus} 积分</span> : null}
-                  {benefit ? <span>{benefit}</span> : null}
-                  {belowMinimum ? (
-                    <span>
-                      低于起充金额 {formatFen(wallet.min_recharge_fen)}
-                      ，暂不可购
-                    </span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-        ) : packageError ? (
-          <p role="status">{packageError}</p>
-        ) : null}
-        <form
-          className="custom-recharge-form"
-          noValidate
-          onSubmit={submitCustomAmount}
-        >
-          <label>
-            自定义充值金额（元）
-            <input
-              inputMode="numeric"
-              min={wallet.min_recharge_fen / 100}
-              step={wallet.recharge_step_fen / 100}
-              type="number"
-              value={customAmount}
-              onChange={(event) => setCustomAmount(event.target.value)}
-            />
-          </label>
-          <button disabled={isCreating} type="submit">
-            {isCreating ? "正在创建订单" : "确认充值"}
-          </button>
-        </form>
-        {matchingPackagesForAmount(packages, Number(customAmount) * 100)
-          .length ? (
-          <p role="status">
-            该金额有对应套餐（含赠送/折扣）；选择上方套餐可享受套餐到账与权益，
-            自定义金额按基础汇率到账。
-          </p>
-        ) : null}
-        {error || pollingError ? (
-          <p className="settings-error" role="alert">
-            {error || pollingError}
-          </p>
-        ) : null}
-        {notice ? (
-          <p className="wallet-notice" role="status">
-            {notice}
-          </p>
-        ) : null}
-      </section>
-
-      <section className="wallet-section" aria-labelledby="orders-title">
-        <div className="wallet-section__heading">
-          <h2 id="orders-title">最近充值订单</h2>
-          <button
-            className="secondary-button"
-            onClick={() => {
-              const nextVisible = !showOrderHistory;
-              showOrderHistoryRef.current = nextVisible;
-              setShowOrderHistory(nextVisible);
-              if (nextVisible) {
-                orderHistoryOffsetRef.current = 0;
-                void loadOrderHistory(0);
-              } else {
-                orderHistoryRequestIdRef.current += 1;
-              }
-            }}
-            type="button"
-          >
-            {showOrderHistory ? "收起全部充值记录" : "查看全部充值记录"}
-          </button>
-        </div>
-        {summaryError ? (
-          <div className="settings-error" role="alert">
-            <span>{summaryError}</span>
-            <RetryButton
-              label="重新加载钱包和最近订单"
-              onClick={() => void loadSummary().catch(() => undefined)}
-            />
-          </div>
-        ) : null}
-        <div className="table-scroll">
-          <table className="internal-table">
-            <thead>
-              <tr>
-                <th>订单号</th>
-                <th>金额</th>
-                <th>到账积分</th>
-                <th>状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.length ? (
-                orders.map((order) => (
-                  <tr key={order.order_no}>
-                    <td>{order.order_no}</td>
-                    <td>{formatFen(order.amount_fen)}</td>
-                    <td>{order.credits}</td>
-                    <td>{orderStatusLabel(order.status)}</td>
-                    <td>
-                      {order.status === "PENDING" ? (
-                        <button
-                          className="table-action-button table-action-button--danger"
-                          disabled={closingOrderNo === order.order_no}
-                          onClick={() => void closePendingOrder(order.order_no)}
-                          type="button"
-                        >
-                          {closingOrderNo === order.order_no
-                            ? "正在删除"
-                            : "删除待支付订单"}
-                        </button>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5}>暂无充值订单</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {showOrderHistory ? (
-        <section
-          className="wallet-section"
-          aria-labelledby="order-history-title"
-        >
-          <h2 id="order-history-title">充值订单历史</h2>
-          <div className="table-scroll">
-            <table className="internal-table">
-              <thead>
-                <tr>
-                  <th>订单号</th>
-                  <th>金额</th>
-                  <th>到账积分</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orderHistoryPage?.items.length ? (
-                  orderHistoryPage.items.map((order) => (
-                    <tr key={order.order_no}>
-                      <td>{order.order_no}</td>
-                      <td>{formatFen(order.amount_fen)}</td>
-                      <td>{order.credits}</td>
-                      <td>{orderStatusLabel(order.status)}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={4}>
-                      {isOrderHistoryLoading
-                        ? "正在读取充值记录"
-                        : "暂无充值记录"}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          {orderHistoryError ? (
-            <div className="settings-error" role="alert">
-              <span>{orderHistoryError}</span>
-              <RetryButton
-                label="重试加载充值记录"
-                onClick={() =>
-                  void loadOrderHistory(
-                    failedOrderHistoryOffset ?? orderHistoryPage?.offset ?? 0,
-                  )
-                }
-              />
-            </div>
-          ) : null}
-          <Pagination
-            disabled={isOrderHistoryLoading}
-            limit={orderHistoryPage?.limit ?? HISTORY_PAGE_SIZE}
-            offset={orderHistoryPage?.offset ?? 0}
-            onPageChange={(nextOffset) => void loadOrderHistory(nextOffset)}
-            total={orderHistoryPage?.total ?? 0}
-          />
+      {isSubAccount ? (
+        <section className="wallet-section" aria-labelledby="recharge-title">
+          <h2 id="recharge-title">充值积分</h2>
+          {/* 服务端只允许母账号建充值单（MASTER_ACCOUNT_REQUIRED）；子账号
+              被「余额不足」引导到这里时，告诉他该找谁，而不是给一个必失败的按钮。 */}
+          <p role="note">{SUB_ACCOUNT_RECHARGE_NOTICE}</p>
         </section>
-      ) : null}
+      ) : (
+        <>
+          <section className="wallet-section" aria-labelledby="recharge-title">
+            <div className="wallet-section__heading">
+              <div>
+                <h2 id="recharge-title">充值积分</h2>
+                <p>
+                  {formatFen(wallet.min_recharge_fen)}起充，按
+                  {formatFen(wallet.recharge_step_fen)}递增。
+                </p>
+              </div>
+            </div>
+            {packages.length ? (
+              <div className="recharge-presets recharge-presets--packages">
+                {packages.map((pkg) => {
+                  const benefit = packageBenefitLabel(pkg);
+                  const bonus = packageBonusCredits(wallet, pkg);
+                  // 低于生效起充额的档位后端必 422：客户端先行置灰并说明原因。
+                  const belowMinimum = packageBelowMinimum(pkg, wallet);
+                  return (
+                    <button
+                      aria-label={`购买套餐${pkg.name}`}
+                      disabled={isCreating || belowMinimum}
+                      key={pkg.id}
+                      onClick={() => void startPackageRecharge(pkg)}
+                      type="button"
+                    >
+                      <strong>{pkg.name}</strong>
+                      <span>
+                        {formatFen(pkg.amount_fen)} → {pkg.credits} 积分
+                      </span>
+                      {bonus !== null ? <span>含赠送 {bonus} 积分</span> : null}
+                      {benefit ? <span>{benefit}</span> : null}
+                      {belowMinimum ? (
+                        <span>
+                          低于起充金额 {formatFen(wallet.min_recharge_fen)}
+                          ，暂不可购
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : packageError ? (
+              <p role="status">{packageError}</p>
+            ) : null}
+            <form
+              className="custom-recharge-form"
+              noValidate
+              onSubmit={submitCustomAmount}
+            >
+              <label>
+                自定义充值金额（元）
+                <input
+                  inputMode="numeric"
+                  min={wallet.min_recharge_fen / 100}
+                  step={wallet.recharge_step_fen / 100}
+                  type="number"
+                  value={customAmount}
+                  onChange={(event) => setCustomAmount(event.target.value)}
+                />
+              </label>
+              <button disabled={isCreating} type="submit">
+                {isCreating ? "正在创建订单" : "确认充值"}
+              </button>
+            </form>
+            {matchingPackagesForAmount(packages, Number(customAmount) * 100)
+              .length ? (
+              <p role="status">
+                该金额有对应套餐（含赠送/折扣）；选择上方套餐可享受套餐到账与权益，
+                自定义金额按基础汇率到账。
+              </p>
+            ) : null}
+            {error || pollingError ? (
+              <p className="settings-error" role="alert">
+                {error || pollingError}
+              </p>
+            ) : null}
+            {notice ? (
+              <p className="wallet-notice" role="status">
+                {notice}
+              </p>
+            ) : null}
+          </section>
+
+          <section className="wallet-section" aria-labelledby="orders-title">
+            <div className="wallet-section__heading">
+              <h2 id="orders-title">最近充值订单</h2>
+              <button
+                className="secondary-button"
+                onClick={() => {
+                  const nextVisible = !showOrderHistory;
+                  showOrderHistoryRef.current = nextVisible;
+                  setShowOrderHistory(nextVisible);
+                  if (nextVisible) {
+                    orderHistoryOffsetRef.current = 0;
+                    void loadOrderHistory(0);
+                  } else {
+                    orderHistoryRequestIdRef.current += 1;
+                  }
+                }}
+                type="button"
+              >
+                {showOrderHistory ? "收起全部充值记录" : "查看全部充值记录"}
+              </button>
+            </div>
+            {summaryError ? (
+              <div className="settings-error" role="alert">
+                <span>{summaryError}</span>
+                <RetryButton
+                  label="重新加载钱包和最近订单"
+                  onClick={() => void loadSummary().catch(() => undefined)}
+                />
+              </div>
+            ) : null}
+            <div className="table-scroll">
+              <table className="internal-table">
+                <thead>
+                  <tr>
+                    <th>订单号</th>
+                    <th>金额</th>
+                    <th>到账积分</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orders.length ? (
+                    orders.map((order) => (
+                      <tr key={order.order_no}>
+                        <td>{order.order_no}</td>
+                        <td>{formatFen(order.amount_fen)}</td>
+                        <td>{order.credits}</td>
+                        <td>{orderStatusLabel(order.status)}</td>
+                        <td>
+                          {order.status === "PENDING" ? (
+                            <button
+                              className="table-action-button table-action-button--danger"
+                              disabled={closingOrderNo === order.order_no}
+                              onClick={() =>
+                                void closePendingOrder(order.order_no)
+                              }
+                              type="button"
+                            >
+                              {closingOrderNo === order.order_no
+                                ? "正在删除"
+                                : "删除待支付订单"}
+                            </button>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5}>暂无充值订单</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {showOrderHistory ? (
+            <section
+              className="wallet-section"
+              aria-labelledby="order-history-title"
+            >
+              <h2 id="order-history-title">充值订单历史</h2>
+              <div className="table-scroll">
+                <table className="internal-table">
+                  <thead>
+                    <tr>
+                      <th>订单号</th>
+                      <th>金额</th>
+                      <th>到账积分</th>
+                      <th>状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orderHistoryPage?.items.length ? (
+                      orderHistoryPage.items.map((order) => (
+                        <tr key={order.order_no}>
+                          <td>{order.order_no}</td>
+                          <td>{formatFen(order.amount_fen)}</td>
+                          <td>{order.credits}</td>
+                          <td>{orderStatusLabel(order.status)}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={4}>
+                          {isOrderHistoryLoading
+                            ? "正在读取充值记录"
+                            : "暂无充值记录"}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {orderHistoryError ? (
+                <div className="settings-error" role="alert">
+                  <span>{orderHistoryError}</span>
+                  <RetryButton
+                    label="重试加载充值记录"
+                    onClick={() =>
+                      void loadOrderHistory(
+                        failedOrderHistoryOffset ??
+                          orderHistoryPage?.offset ??
+                          0,
+                      )
+                    }
+                  />
+                </div>
+              ) : null}
+              <Pagination
+                disabled={isOrderHistoryLoading}
+                limit={orderHistoryPage?.limit ?? HISTORY_PAGE_SIZE}
+                offset={orderHistoryPage?.offset ?? 0}
+                onPageChange={(nextOffset) => void loadOrderHistory(nextOffset)}
+                total={orderHistoryPage?.total ?? 0}
+              />
+            </section>
+          ) : null}
+        </>
+      )}
 
       <section className="wallet-section" aria-labelledby="ledger-title">
         <h2 id="ledger-title">额度流水</h2>

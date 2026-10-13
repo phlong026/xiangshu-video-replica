@@ -37,6 +37,11 @@ import { PublishAccountsPanel } from "../studio/MainPages";
 import { Icon } from "../studio/ui";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { AccountPasswordSetup } from "./AccountPasswordSetup";
+import {
+  isSubAccountType,
+  resolveAccountType,
+  SUB_ACCOUNT_RECHARGE_NOTICE,
+} from "./accountType";
 import { useAppUpdate } from "./appUpdate";
 import { BUSINESS_LABEL } from "./businessLabels";
 import { useCustomerConfirm } from "./CustomerConfirmDialog";
@@ -88,23 +93,6 @@ const date = (value: string | null) =>
 // 记录错误对象本身（分类提示要用它的 status/code），文案照旧由调用方决定。
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请稍后重试。";
-
-/** 服务端把账号身份收敛为 MASTER/SUB/SUB_ADMIN。 */
-type AccountType = "MASTER" | "SUB" | "SUB_ADMIN";
-
-/**
- * 身份解析：`profile.account_type` 是权威副本（服务端必返、默认 MASTER），
- * 凭据库里的缓存身份只在 profile 到达前兜底——重启恢复的先头帧可能拿不到身份。
- * 两者都没有时返回 null，界面保持沉默，而不是替用户猜一个「母账号」。
- */
-function resolveAccountType(
-  profileType: string | null | undefined,
-  identity: CustomerStoredIdentity | null,
-): AccountType | null {
-  const raw = profileType ?? identity?.accountType ?? null;
-  if (!raw) return null;
-  return raw === "SUB" || raw === "SUB_ADMIN" ? raw : "MASTER";
-}
 
 /** 消费记录筛选变化后等多久再发请求（P1#16：避免连续切换打出一串请求）。 */
 const LEDGER_FILTER_DEBOUNCE_MS = 300;
@@ -280,7 +268,7 @@ export function CustomerCenterPage({
   const accountType = resolveAccountType(profile?.account_type, cachedIdentity);
   const isMasterAccount = accountType === "MASTER";
   // SUB_ADMIN 也归子账号：它有母账号、受额度约束，只是额外获授权管子账号。
-  const isSubAccount = accountType === "SUB" || accountType === "SUB_ADMIN";
+  const isSubAccount = isSubAccountType(accountType);
   // 子账号管理页签：服务端只放行母账号与获授权的 SUB_ADMIN，普通 SUB 一律 403，
   // 所以只对「确认是 SUB」的会话隐藏（产品判断：组织管理，Web 与桌面都出现——
   // 它跟 devices 那种端专属能力不同，没有设备依赖；要改成端专属只需动这一行）。
@@ -1183,13 +1171,18 @@ export function CustomerCenterPage({
                     : "—"}
               </strong>
               <span>积分</span>
-              <button
-                type="button"
-                className="uc-primary"
-                onClick={() => setRecharge(true)}
-              >
-                充值积分
-              </button>
+              {/* 子账号充值必被服务端拒绝（仅限母账号），不给一个注定失败的入口。 */}
+              {isSubAccount ? (
+                <small role="note">{SUB_ACCOUNT_RECHARGE_NOTICE}</small>
+              ) : (
+                <button
+                  type="button"
+                  className="uc-primary"
+                  onClick={() => setRecharge(true)}
+                >
+                  充值积分
+                </button>
+              )}
             </div>
           </div>
         </section>

@@ -207,6 +207,38 @@ describe("CustomerWalletPanel", () => {
     expect(packageCard).toHaveTextContent("视频生成 9折");
   });
 
+  it("子账号只看余额与流水，不出现必被服务端拒绝的充值入口（FIX-04）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/api/generation/price-quote")) {
+          return Promise.reject(new Error("生成单价暂不可用，请稍后重试。"));
+        }
+        if (url.endsWith("/api/customer/wallet")) return jsonResponse(wallet);
+        if (url.endsWith("/api/customer/recharge-packages")) {
+          return jsonResponse({ items: [basicPackage] });
+        }
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }),
+    );
+    render(
+      <CustomerWalletPanel
+        store={fakeStore()}
+        onSessionExpired={vi.fn()}
+        isSubAccount
+      />,
+    );
+    expect(await screen.findByText(/充值需由母账号操作/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "购买套餐标准档" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "确认充值" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("最近充值订单")).not.toBeInTheDocument();
+    expect(screen.getByText("额度流水")).toBeInTheDocument();
+  });
+
   it("disables packages priced below the effective minimum recharge amount", async () => {
     // 管理端可配任意档位（含 50 元档），但起充额 100 元时低于它的档位不可下单：
     // 下单会被后端 422 RECHARGE_PACKAGE_BELOW_MINIMUM 拒绝，前端必须先行置灰。
