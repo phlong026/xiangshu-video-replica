@@ -1367,7 +1367,16 @@ describe("AdminApp", () => {
       window.history.replaceState(null, "", "#admin/externalCalls");
       installFetch({ session: "valid", role, isSuperAdmin: false });
       render(<AdminApp />);
-      await screen.findByText("此功能仅超级管理员可用。");
+      const banner = await screen.findByText("此功能仅超级管理员可用。");
+      // 页面内容（含无权提示）必须排在页面标题之后，不能把标题顶到下方。
+      const heading = screen.getByRole("heading", {
+        level: 1,
+        name: "接口调用日志",
+      });
+      expect(
+        heading.compareDocumentPosition(banner) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
       expect(screen.queryByRole("button", { name: "接口调用日志" })).toBeNull();
       expect(
         vi
@@ -1376,6 +1385,21 @@ describe("AdminApp", () => {
       ).toBe(false);
     },
   );
+
+  it("每个导航入口的图标互不重复", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1280,
+    });
+    installFetch({ session: "valid" });
+    render(<AdminApp />);
+    const nav = await screen.findByRole("navigation", { name: "管理端导航" });
+    const icons = [
+      ...nav.querySelectorAll<HTMLImageElement>(".admin-navigation-icon"),
+    ].map((icon) => icon.getAttribute("src"));
+    expect(icons.length).toBeGreaterThan(20);
+    expect(new Set(icons).size).toBe(icons.length);
+  });
 
   it("groups admin navigation and lets compact layouts collapse and reopen it", async () => {
     Object.defineProperty(window, "innerWidth", {

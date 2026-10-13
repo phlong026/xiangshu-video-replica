@@ -45,12 +45,26 @@ import {
   recoverAdminPassword,
 } from "./api.admin";
 import zhongshuBrandLogo from "./assets/brand/zhongshu-logo-mark.svg";
+import activityIcon from "./assets/icons/activity.svg";
 import chartIcon from "./assets/icons/chart-no-axes-combined.svg";
+import chartPieIcon from "./assets/icons/chart-pie.svg";
 import clapperboardIcon from "./assets/icons/clapperboard.svg";
+import fileSpreadsheetIcon from "./assets/icons/file-spreadsheet.svg";
 import gaugeIcon from "./assets/icons/gauge.svg";
+import houseIcon from "./assets/icons/house.svg";
+import dashboardIcon from "./assets/icons/layout-dashboard.svg";
+import listVideoIcon from "./assets/icons/list-video.svg";
+import megaphoneIcon from "./assets/icons/megaphone.svg";
+import ticketIcon from "./assets/icons/message-square-warning.svg";
+import radarIcon from "./assets/icons/radar.svg";
+import scrollIcon from "./assets/icons/scroll-text.svg";
+import searchCheckIcon from "./assets/icons/search-check.svg";
+import serverCogIcon from "./assets/icons/server-cog.svg";
 import settingsIcon from "./assets/icons/settings.svg";
-import shieldIcon from "./assets/icons/shield-check.svg";
-import megaphoneIcon from "./assets/icons/user-round.svg";
+import collectionSettingsIcon from "./assets/icons/settings-2.svg";
+import smartphoneIcon from "./assets/icons/smartphone.svg";
+import alertIcon from "./assets/icons/triangle-alert.svg";
+import userCogIcon from "./assets/icons/user-cog.svg";
 import usersIcon from "./assets/icons/users-round.svg";
 import walletIcon from "./assets/icons/wallet.svg";
 
@@ -270,28 +284,30 @@ const tabPageTitles: Record<AdminTab, string> = {
 };
 
 const compactNavigationBreakpoint = 1024;
+// 每个入口一枚语义唯一的图标：此前 chart / clapperboard 各复用 5～6 次，
+// 公告与工单还误用了人像图标，侧边栏靠图标定位时无从区分。
 const navigationIcons: Record<AdminTab, string> = {
-  overview: gaugeIcon,
+  overview: dashboardIcon,
   analytics: chartIcon,
-  costReview: chartIcon,
-  reports: chartIcon,
+  costReview: chartPieIcon,
+  reports: fileSpreadsheetIcon,
   funds: walletIcon,
   customersMgmt: usersIcon,
-  customerLifecycle: usersIcon,
+  customerLifecycle: userCogIcon,
   announcements: megaphoneIcon,
-  publishStats: chartIcon,
-  supportTickets: megaphoneIcon,
-  sessions: shieldIcon,
+  publishStats: radarIcon,
+  supportTickets: ticketIcon,
+  sessions: smartphoneIcon,
   generationRecords: clapperboardIcon,
-  generationFailures: clapperboardIcon,
-  workerObservations: gaugeIcon,
-  externalCalls: clapperboardIcon,
-  viralOverview: chartIcon,
-  viralHomepage: clapperboardIcon,
-  viralCollection: settingsIcon,
-  viralVideos: clapperboardIcon,
-  viralDiscoveries: clapperboardIcon,
-  auditCenter: shieldIcon,
+  generationFailures: alertIcon,
+  workerObservations: activityIcon,
+  externalCalls: serverCogIcon,
+  viralOverview: gaugeIcon,
+  viralHomepage: houseIcon,
+  viralCollection: collectionSettingsIcon,
+  viralVideos: listVideoIcon,
+  viralDiscoveries: searchCheckIcon,
+  auditCenter: scrollIcon,
   systemSettings: settingsIcon,
 };
 
@@ -982,13 +998,6 @@ export function AdminApp() {
         </aside>
 
         <div className="admin-workspace">
-          {activeTab === "externalCalls" ? (
-            actor.role === "admin" && actor.is_super_admin ? (
-              <ExternalCallsPage />
-            ) : (
-              <PageBanner tone="error">此功能仅超级管理员可用。</PageBanner>
-            )
-          ) : null}
           {error ? <PageBanner tone="error">{error}</PageBanner> : null}
           {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
@@ -997,6 +1006,15 @@ export function AdminApp() {
             <h1>{activePageTitle}</h1>
             <p>{activeTabMeta?.helper ?? "运营核心视图"}</p>
           </header>
+
+          {/* 与其它页面同一渲染顺序：此前它挂在标题之前，页面内容会把标题顶到下方。 */}
+          {activeTab === "externalCalls" ? (
+            actor.role === "admin" && actor.is_super_admin ? (
+              <ExternalCallsPage />
+            ) : (
+              <PageBanner tone="error">此功能仅超级管理员可用。</PageBanner>
+            )
+          ) : null}
 
           {activeTab === "overview" ? (
             <>
