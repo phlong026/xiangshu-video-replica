@@ -3,7 +3,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { CustomerAnnouncementCenter } from "./CustomerAnnouncementCenter";
 
-const CREDENTIAL = { kind: "session" as const, token: "session-token" };
+// 假凭据刻意短于 8 字符：verify_no_secrets.sh 只放行这种长度，值本身不参与断言。
+const CREDENTIAL = { kind: "session" as const, token: "tok-1" };
 
 vi.mock("../api", () => ({
   customerListAnnouncements: vi.fn(async () => [

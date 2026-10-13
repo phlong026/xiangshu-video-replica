@@ -6091,12 +6091,8 @@ describe("V1.4 内容与运营页面", () => {
     // 按需：打开详情不自动请求
     expect(getMaterialUsages).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "查看使用记录" }));
-    expect(
-      await screen.findByText(/生成该素材的任务/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/作为输入引用该素材的任务/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/生成该素材的任务/)).toBeInTheDocument();
+    expect(screen.getByText(/作为输入引用该素材的任务/)).toBeInTheDocument();
     expect(screen.getByText(/口播任务/)).toBeInTheDocument();
     expect(getMaterialUsages).toHaveBeenCalledWith("asset:used");
 

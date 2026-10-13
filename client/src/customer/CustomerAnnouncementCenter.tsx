@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   type CustomerCredential,
-  customerMarkAnnouncementRead,
   customerListAnnouncements,
+  customerMarkAnnouncementRead,
 } from "../api";
 
 /**
