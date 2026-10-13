@@ -10,7 +10,6 @@ import type {
   MaterialTagItem,
   MaterialUsageSection,
   MaterialUsagesResponse,
-  ViralDetailBilling,
   ViralImportPurpose,
   ViralImportTask,
   ViralPlatform,
@@ -2107,10 +2106,9 @@ export function ViralDetailPage() {
   const [detailAvailability, setDetailAvailability] =
     useState<ViralVideoItem["availability"]>("available");
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
-  // 「查看详情」计费回执：进入详情即调一次（服务端按付费账号去重，重复查看免费），
-  // 详情与互动统计字段在同一响应里返回，因此只算一次费用。
-  const [detailBilling, setDetailBilling] = useState<ViralDetailBilling>();
-  const [detailBillingError, setDetailBillingError] = useState<string>();
+  // 查看详情免费（2026-10-13 拍板）：进入详情读一次服务端权威数据（含互动统计），
+  // 不再展示计费回执；失败时只透传原因。
+  const [detailError, setDetailError] = useState<string>();
   const detailAccountRef = useRef(accountId);
   const detailRequestRef = useRef(0);
   detailAccountRef.current = accountId;
@@ -2124,8 +2122,7 @@ export function ViralDetailPage() {
     setDetailFavorite(undefined);
     setDetailAvailability("available");
     setDetailStatus("idle");
-    setDetailBilling(undefined);
-    setDetailBillingError(undefined);
+    setDetailError(undefined);
   }, [accountId]);
 
   useEffect(() => {
@@ -2145,13 +2142,12 @@ export function ViralDetailPage() {
       detailRequestRef.current === requestId;
     setDetailStatus("loading");
     void openViralVideoDetail(detailParams.platform, detailParams.videoId)
-      .then(({ item, billing }) => {
+      .then(({ item }) => {
         if (!isCurrent()) return;
         const restored = studioVideoFromViral(item);
         setDetailAvailability(item.availability ?? "available");
         setDetailFavorite(Boolean(item.isFavorite));
-        setDetailBilling(billing);
-        setDetailBillingError(undefined);
+        setDetailError(undefined);
         setRemoteVideo(restored);
         setDetailStatus("idle");
         updateData((current) => ({
@@ -2171,7 +2167,7 @@ export function ViralDetailPage() {
         // 条目仍可阅读（这些字段浏览列表本就免费可见）。
         const message =
           cause instanceof Error ? cause.message : "查看详情失败，请重试。";
-        setDetailBillingError(message);
+        setDetailError(message);
       });
     return () => {
       if (detailRequestRef.current === requestId) {
@@ -2441,18 +2437,9 @@ export function ViralDetailPage() {
             <span>时长 {video.duration}</span>
           </div>
           <ViralStatisticsNote video={video} />
-          {detailBilling && (
-            <p className="viral-media-status is-ready" role="status">
-              {detailBilling.billable === false
-                ? "该视频当前不可用，本次查看详情未计费。"
-                : detailBilling.deduped
-                  ? "该视频此前已购买过详情，本次查看不再扣积分。"
-                  : `本次查看详情扣除 ${detailBilling.charged} 积分（含互动统计，再次查看不再扣费）。`}
-            </p>
-          )}
-          {detailBillingError && (
+          {detailError && (
             <p className="viral-media-status is-error" role="status">
-              {detailBillingError}
+              {detailError}
             </p>
           )}
           {refreshNotice && (

@@ -3569,13 +3569,12 @@ describe("V1.4 内容与运营页面", () => {
       await screen.findByRole("heading", { name: "刷新恢复的视频" }),
     ).toBeInTheDocument();
     expect(openViralVideoDetail).toHaveBeenCalledWith("douyin", "native-dy-1");
-    // 详情与互动统计同批返回：本次扣一次费，页面给出计费回执。
-    expect(
-      await screen.findByText(/本次查看详情扣除 2 积分/),
-    ).toBeInTheDocument();
+    // 查看详情免费：即便旧服务端回执里带了扣费数字，页面也不再展示计费回执。
+    expect(screen.queryByText(/查看详情扣除/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/积分/)).not.toBeInTheDocument();
   });
 
-  it("此前已购买过的视频再次查看详情时给出免费回执", async () => {
+  it("已下架视频仍可查看详情，页面不出现任何计费回执", async () => {
     window.history.replaceState(
       null,
       "",
@@ -3583,10 +3582,14 @@ describe("V1.4 内容与运营页面", () => {
     );
     const base = studio();
     openViralVideoDetail.mockResolvedValue(
-      viralDetailView(viralItem(1, { title: "此前已购买的视频" }), {
-        charged: 0,
-        deduped: true,
-      }),
+      viralDetailView(
+        viralItem(1, { title: "已下架的视频", availability: "hidden" }),
+        {
+          charged: 0,
+          deduped: false,
+          billable: false,
+        },
+      ),
     );
     useStudio.mockReturnValue(
       studio({
@@ -3598,39 +3601,9 @@ describe("V1.4 内容与运营页面", () => {
     render(<ViralDetailPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "此前已购买的视频" }),
+      await screen.findByRole("heading", { name: "已下架的视频" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("该视频此前已购买过详情，本次查看不再扣积分。"),
-    ).toBeInTheDocument();
-  });
-
-  it("已下架视频仍可查看详情但不计费，回执明确说明未扣费", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/?viralPlatform=douyin&viralVideoId=native-dy-1#studio/viral-detail",
-    );
-    const base = studio();
-    openViralVideoDetail.mockResolvedValue(
-      viralDetailView(viralItem(1, { availability: "hidden" }), {
-        charged: 0,
-        deduped: false,
-        billable: false,
-      }),
-    );
-    useStudio.mockReturnValue(
-      studio({
-        review: false,
-        data: { ...base.data, videos: [] },
-        state: { ...base.state, page: "viral-detail" },
-      }),
-    );
-    render(<ViralDetailPage />);
-
-    expect(
-      await screen.findByText("该视频当前不可用，本次查看详情未计费。"),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/未计费|扣积分|扣除/)).not.toBeInTheDocument();
   });
 
   it("查看详情失败时不展示计费回执，只提示失败原因", async () => {

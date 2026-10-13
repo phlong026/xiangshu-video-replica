@@ -21,6 +21,9 @@ from test_customer_pricing import (  # noqa: F401
     route_state,
 )
 
+from app.db_portable import BusinessConnection
+from app.usage_billing import accept_operation, finish_source
+
 _DETAIL_SERVICE = "viral_detail"
 _COPY_SERVICE = "viral_copy"
 _COPY_TEXT = "别人转写好的共享文案"
@@ -149,58 +152,39 @@ def test_viral_detail_service_registered_in_billing_catalog() -> None:
     assert SERVICE_INTERFACE["viral_detail"] in INTERFACE_KEYS
 
 
-def test_detail_charges_once_then_replays_free(detail_client, route_state) -> None:
-    """首次查看扣一次费（详情与统计字段同批返回），再次查看复用购买不再扣费."""
+def test_detail_is_free_and_replays_free(detail_client, route_state) -> None:
+    """查看详情免费（2026-10-13 拍板）：首次与重复查看都不扣费、不落台账."""
     headers, uid = account(detail_client, "detail_first")
     with psycopg.connect(route_state) as raw:
         _seed_detail_video(raw, uid, video_id="v-detail-first")
-    prepared = detail_client.post(
-        "/api/viral/videos/detail",
-        headers=headers,
-        json={"platform": "douyin", "videoId": "v-detail-first"},
-    )
-    assert prepared.status_code == 200, prepared.text
-    body = prepared.json()
-    assert body["billing"] == {
-        "charged": 2,
-        "unit": "call",
-        "deduped": False,
-        "billable": True,
-    }
-    assert body["item"]["detailCharged"] is True
-    # 交互统计字段与详情在同一个响应里下发，所以只算一次「查看详情」。
-    assert body["item"]["comments"] == 3
-    assert body["item"]["shares"] == 4
-    assert body["item"]["collects"] == 5
-    replay = detail_client.post(
-        "/api/viral/videos/detail",
-        headers=headers,
-        json={"platform": "douyin", "videoId": "v-detail-first"},
-    )
-    assert replay.status_code == 200, replay.text
-    assert replay.json()["billing"] == {
-        "charged": 0,
-        "unit": "call",
-        "deduped": True,
-        "billable": True,
-    }
-    assert replay.json()["item"]["detailCharged"] is True
+    for _ in range(2):
+        response = _open_detail(detail_client, headers, video_id="v-detail-first")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["billing"] == {
+            "charged": 0,
+            "unit": "call",
+            "deduped": False,
+            "billable": False,
+        }
+        assert body["item"]["detailCharged"] is False
+        # 交互统计字段随详情一并下发。
+        assert body["item"]["comments"] == 3
+        assert body["item"]["shares"] == 4
+        assert body["item"]["collects"] == 5
     with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (48, 0)
-        assert _detail_operations(raw, f"viral-detail:{uid}:douyin:v-detail-first") == [
-            ("SUCCEEDED", 2)
-        ]
+        assert _wallet(raw, uid) == (50, 0)
+        assert _detail_operations(raw, f"viral-detail:{uid}:douyin:v-detail-first") == []
 
 
-def test_detail_is_fail_closed_without_tariff(detail_client, route_state) -> None:
-    """资费未配置 → 503 且不扣费、台账不落行（与搜索/直链同一 fail-closed 口径）."""
+def test_detail_stays_open_without_tariff(detail_client, route_state) -> None:
+    """资费停用 / 未配置不再让详情页 503：免费口径下详情与资费配置解耦."""
     headers, uid = account(detail_client, "detail_unpriced")
     with psycopg.connect(route_state) as raw:
         _seed_detail_video(raw, uid, video_id="v-detail-unpriced", tariff=None)
     response = _open_detail(detail_client, headers, video_id="v-detail-unpriced")
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "VIRAL_DETAIL_UNPRICED"
-    assert "尚未配置" in response.json()["detail"]["message"]
+    assert response.status_code == 200, response.text
+    assert response.json()["billing"]["charged"] == 0
     with psycopg.connect(route_state) as raw:
         assert _wallet(raw, uid) == (50, 0)
         assert (
@@ -254,8 +238,8 @@ def test_detail_rejects_unknown_video_and_platform_without_charge(
         )
 
 
-def test_detail_purchase_is_shared_across_sub_account(detail_client, route_state) -> None:
-    """去重键是付费账号而不是操作者：子账号买过，母账号再看不再扣费."""
+def test_detail_history_purchase_still_reported(detail_client, route_state) -> None:
+    """口径翻转前的历史购买仍按付费账号回填（子账号买过，母账号看到 deduped），但不再扣费."""
     master_headers, master_id = account(detail_client, "detail_master")
     child_headers, child_id = account(detail_client, "detail_child")
     source_id = f"viral-detail:{master_id}:douyin:v-detail-shared"
@@ -264,26 +248,31 @@ def test_detail_purchase_is_shared_across_sub_account(detail_client, route_state
             "UPDATE users SET account_type='SUB', parent_user_id=%s WHERE id=%s",
             (master_id, child_id),
         )
-        raw.execute(
-            "UPDATE wallets SET available_credits=0, reserved_credits=0 WHERE user_id=%s",
-            (child_id,),
-        )
         _seed_detail_video(raw, master_id, video_id="v-detail-shared")
-    child_view = _open_detail(detail_client, child_headers, video_id="v-detail-shared")
-    assert child_view.status_code == 200, child_view.text
-    assert child_view.json()["billing"]["charged"] == 2
-    master_view = _open_detail(detail_client, master_headers, video_id="v-detail-shared")
-    assert master_view.status_code == 200, master_view.text
-    assert master_view.json()["billing"] == {
-        "charged": 0,
-        "unit": "call",
-        "deduped": True,
-        "billable": True,
-    }
+        # 口径翻转前的真实购买路径：预留 + 结算，扣母账号 2 积分。
+        business = BusinessConnection.postgres(raw)
+        accept_operation(
+            business,
+            user_id=master_id,
+            service=_DETAIL_SERVICE,
+            source_id=source_id,
+            units=1,
+            request_fingerprint="douyin:v-detail-shared",
+        )
+        finish_source(business, source_id, units=1, succeeded=True, service=_DETAIL_SERVICE)
+    for headers in (child_headers, master_headers):
+        view = _open_detail(detail_client, headers, video_id="v-detail-shared")
+        assert view.status_code == 200, view.text
+        assert view.json()["billing"] == {
+            "charged": 0,
+            "unit": "call",
+            "deduped": True,
+            "billable": False,
+        }
+        assert view.json()["item"]["detailCharged"] is True
     with psycopg.connect(route_state) as raw:
-        # 扣的是母账号钱包；子账号自己的余额保持为 0。
+        # 只有历史那一次扣费，打开详情没有再扣。
         assert _wallet(raw, master_id) == (48, 0)
-        assert _wallet(raw, child_id) == (0, 0)
         assert _detail_operations(raw, source_id) == [("SUCCEEDED", 2)]
 
 
@@ -337,8 +326,8 @@ def _seed_featured_video(raw, *, video_id: str) -> None:
     )
 
 
-def test_list_and_free_detail_backfill_detail_charged(detail_client, route_state) -> None:
-    """卡片状态回填：已购详情的视频在列表与免费详情里都带 detailCharged=true."""
+def test_list_and_free_detail_never_mark_charged(detail_client, route_state) -> None:
+    """免费口径下打开详情不会让列表 / 详情的 detailCharged 变成 true."""
     headers, uid = account(detail_client, "detail_backfill")
     with psycopg.connect(route_state) as raw:
         _seed_detail_video(raw, uid, video_id="v-detail-bought")
@@ -353,16 +342,14 @@ def test_list_and_free_detail_backfill_detail_charged(detail_client, route_state
     )
     assert listing.status_code == 200, listing.text
     flags = {item["videoId"]: item["detailCharged"] for item in listing.json()["items"]}
-    assert flags == {"v-detail-bought": True, "v-detail-fresh": False}
+    # 查看详情已免费：打开详情不再形成「已购」标记，也不落台账。
+    assert flags == {"v-detail-bought": False, "v-detail-fresh": False}
     free_detail = detail_client.get("/api/viral/videos/douyin/v-detail-bought", headers=headers)
     assert free_detail.status_code == 200, free_detail.text
-    assert free_detail.json()["detailCharged"] is True
-    # 免费读取口径不产生费用：只有首次「查看详情」那一行台账。
+    assert free_detail.json()["detailCharged"] is False
     with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (48, 0)
-        assert _detail_operations(raw, f"viral-detail:{uid}:douyin:v-detail-bought") == [
-            ("SUCCEEDED", 2)
-        ]
+        assert _wallet(raw, uid) == (50, 0)
+        assert _detail_operations(raw, f"viral-detail:{uid}:douyin:v-detail-bought") == []
 
 
 def test_cache_reclaim_returns_server_side_truth(detail_client, route_state) -> None:
