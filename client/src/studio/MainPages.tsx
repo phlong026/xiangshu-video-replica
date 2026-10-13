@@ -31,6 +31,7 @@ import {
 import { PlatformLogo } from "./PlatformLogo";
 import { readPageCache, writePageCache } from "./pageCache";
 import { draftFromTask } from "./state";
+import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioData, StudioTask, StudioVideo } from "./types";
 import {
   Button,
@@ -58,6 +59,7 @@ const statusNames: Record<StudioTask["status"], string> = {
   queued: "排队中",
   failed: "待处理",
   completed: "已完成",
+  partial: "部分完成",
   uncertain: "状态待确认",
   cancelled: "已取消",
 };
@@ -76,6 +78,7 @@ function taskDetailPatch(task: StudioTask, returnTo: "workbench" | "tasks") {
 const statusHints: Partial<Record<StudioTask["status"], string>> = {
   queued: "等待开始",
   failed: "生成失败",
+  partial: "部分成片未生成成功",
   uncertain: "状态待确认",
 };
 
@@ -85,6 +88,7 @@ const statusIcons: Record<StudioTask["status"], string> = {
   failed: "warning",
   uncertain: "warning",
   completed: "check",
+  partial: "check",
   cancelled: "close",
 };
 
@@ -1154,7 +1158,7 @@ export function TasksPage() {
       ? ["running", "queued"].includes(task.status)
       : status === "attention"
         ? ["failed", "uncertain"].includes(task.status)
-        : task.status === "completed");
+        : ["completed", "partial"].includes(task.status));
   const tasks = data.tasks.filter(
     (task) => matchesStatus(task) && (kind === "全部" || kind === task.type),
   );
@@ -1446,7 +1450,7 @@ export function TasksPage() {
                           )
                         }
                       >
-                        {task.status === "completed" ? "查看结果" : "查看详情"}
+                        {taskHasDeliverable(task) ? "查看结果" : "查看详情"}
                       </Button>
                     )}
                     {/* 两类任务都有账号级隐藏接口：仅从列表移除，不取消任务。 */}
@@ -1699,8 +1703,7 @@ export function TaskDetailPage() {
   const previewStatus =
     previewLoad.key === previewContextKey ? previewLoad.status : "idle";
   const previewResult = useCallback(async () => {
-    if (!task || !taskIsVerified || review || task.status !== "completed")
-      return;
+    if (!task || !taskIsVerified || review || !taskHasDeliverable(task)) return;
     const requestedTask = task;
     const requestedContext = previewContextKey;
     const requestId = ++previewRequestRef.current;
@@ -1744,11 +1747,14 @@ export function TaskDetailPage() {
         setPreviewLoad({ key: requestedContext, status: "error" });
     }
   }, [task, taskIsVerified, review, previewContextKey, updateData]);
+  // 部分完成 / 待核对的批次里已成功的成片同样可看、可存、可发布，
+  // 不能只认「已完成」，否则已付费的成片在详情页不可见。
+  const taskDeliverable = task ? taskHasDeliverable(task) : false;
   useEffect(() => {
     if (
       !review &&
       taskIsVerified &&
-      task?.status === "completed" &&
+      taskDeliverable &&
       !result?.url &&
       previewStatus === "idle"
     )
@@ -1756,7 +1762,7 @@ export function TaskDetailPage() {
   }, [
     review,
     taskIsVerified,
-    task?.status,
+    taskDeliverable,
     result?.url,
     previewStatus,
     previewResult,
@@ -1928,15 +1934,19 @@ export function TaskDetailPage() {
         <Status task={task} />
       </header>
       <p>
-        {task.status === "completed"
-          ? "作品已生成完成，可查看与管理生成结果"
-          : "任务状态实时以服务端记录为准"}
+        {task.status === "partial"
+          ? `本批已有 ${task.deliverableCount ?? 0} 条成片可查看，其余未生成成功，失败部分暂扣的积分会自动退回。`
+          : task.status === "uncertain" && taskDeliverable
+            ? "已生成的成片可正常查看；其余任务的提交结果待核对，暂扣的积分会在核对后结算或退回。"
+            : taskDeliverable
+              ? "作品已生成完成，可查看与管理生成结果"
+              : "任务状态实时以服务端记录为准"}
       </p>
       <div className="studio-result-grid">
         <Media
           asset={
-            (task.status === "completed" && result) ||
-            (task.status === "completed" && task.poster
+            (taskDeliverable && result) ||
+            (taskDeliverable && task.poster
               ? {
                   id: task.id,
                   name: task.title,
@@ -1949,9 +1959,7 @@ export function TaskDetailPage() {
               : undefined)
           }
           alt={
-            task.status === "completed"
-              ? task.title
-              : "任务处理中或待核对，尚无可预览成片"
+            taskDeliverable ? task.title : "任务处理中或待核对，尚无可预览成片"
           }
           className="studio-result-preview"
           onError={(failedUrl) => {
@@ -1991,7 +1999,7 @@ export function TaskDetailPage() {
               </Button>
             )}
             {!review &&
-              task.status === "completed" &&
+              taskDeliverable &&
               (!result?.url || previewStatus === "error") && (
                 <Button
                   variant="primary"
@@ -2010,15 +2018,13 @@ export function TaskDetailPage() {
               )}
             <Button
               onClick={() => void downloadResult()}
-              disabled={
-                task.status !== "completed" || actionBusy === "download"
-              }
+              disabled={!taskDeliverable || actionBusy === "download"}
             >
               <Icon name="download" />
               {actionBusy === "download" ? "正在下载…" : "下载成片"}
             </Button>
             <Button
-              disabled={!result?.saved || task.status !== "completed"}
+              disabled={!result?.saved || !taskDeliverable}
               onClick={() =>
                 navigate("materials", {
                   selectedAssetId: result?.id,
@@ -2031,7 +2037,7 @@ export function TaskDetailPage() {
             </Button>
             <Button
               variant="primary"
-              disabled={!result?.saved || task.status !== "completed"}
+              disabled={!result?.saved || !taskDeliverable}
               onClick={() =>
                 navigate("publishing", { selectedAssetId: result?.id })
               }
@@ -2049,7 +2055,7 @@ export function TaskDetailPage() {
               保存到素材库后可复用和创建发布草稿，保存不会重新生成或扣积分。
             </Hint>
           )}
-          {!review && task.status === "completed" && (
+          {!review && taskDeliverable && (
             <Hint>
               预览仅展示首个可用结果；完整结果与下载请进入“历史任务与下载”。
             </Hint>

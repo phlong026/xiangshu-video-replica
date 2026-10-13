@@ -106,8 +106,68 @@ import {
   removeStudioGenerationTask,
   retryStudioTask,
   sameTasks,
+  studioTaskStatus,
 } from "./live";
 import type { StudioTask } from "./types";
+
+describe("studioTaskStatus（FIX-01 批次展示态）", () => {
+  const progress = (counts: Record<string, number>) => ({
+    total_count: 4,
+    terminal_count: 4,
+    progress_percent: 100,
+    counts,
+  });
+
+  it("部分成功、其余失败 → 部分完成；全部失败 → 失败", () => {
+    expect(
+      studioTaskStatus({
+        status: "COMPLETED_WITH_FAILURES",
+        progress: progress({ succeeded: 3, failed: 1, needs_attention: 0 }),
+      }),
+    ).toBe("partial");
+    expect(
+      studioTaskStatus({
+        status: "COMPLETED_WITH_FAILURES",
+        progress: progress({ succeeded: 0, failed: 4, needs_attention: 0 }),
+      }),
+    ).toBe("failed");
+  });
+
+  it("提交结果不确定 / 成片未入库的批次是待核对，不是失败", () => {
+    expect(
+      studioTaskStatus({
+        status: "NEEDS_ATTENTION",
+        progress: progress({ succeeded: 2, needs_attention: 1 }),
+      }),
+    ).toBe("uncertain");
+    // 旧服务端只给 needs_attention_count 时同样识别。
+    expect(
+      studioTaskStatus({
+        status: "RUNNING",
+        progress: progress({}),
+        needs_attention_count: 1,
+      }),
+    ).toBe("uncertain");
+  });
+
+  it("运行中的批次里有子任务失败，仍按服务端状态显示生成中", () => {
+    expect(
+      studioTaskStatus({
+        status: "RUNNING",
+        progress: progress({ running: 2, failed: 1, needs_attention: 0 }),
+      }),
+    ).toBe("running");
+    expect(studioTaskStatus({ status: "QUEUED", progress: progress({}) })).toBe(
+      "queued",
+    );
+    expect(
+      studioTaskStatus({ status: "SUCCEEDED", progress: progress({}) }),
+    ).toBe("completed");
+    expect(
+      studioTaskStatus({ status: "CANCELLED", progress: progress({}) }),
+    ).toBe("cancelled");
+  });
+});
 
 it("sameTasks 判定任务清单是否无实质变化（P1-3）", () => {
   const task = {
@@ -123,6 +183,7 @@ it("sameTasks 判定任务清单是否无实质变化（P1-3）", () => {
     false,
   );
   expect(sameTasks([task], [{ ...task, progress: 60 }])).toBe(false);
+  expect(sameTasks([task], [{ ...task, deliverableCount: 1 }])).toBe(false);
   expect(sameTasks([task], [{ ...task, title: "已重命名视频" }])).toBe(false);
   expect(sameTasks([task], [])).toBe(false);
   // 退回金额可能比状态晚一拍落账：它变了就不能沿用旧引用，否则失败卡片永远停在「还没退」。
@@ -1243,20 +1304,20 @@ describe("真实 Studio 只读适配器", () => {
     );
   });
 
-  it("部分成功且仍需处理的批次不会冒充已完成", async () => {
+  it("部分成功的批次显示为部分完成并带出可交付条数，不冒充已完成也不整批判失败", async () => {
     api.listGenerationBatches.mockResolvedValue({
       ...batchPage,
       items: [
         {
           ...batchPage.items[0],
           status: "COMPLETED_WITH_FAILURES",
-          needs_attention_count: 1,
+          needs_attention_count: 0,
           has_results: true,
           progress: {
             total_count: 2,
             terminal_count: 2,
             progress_percent: 100,
-            counts: { SUCCEEDED: 1, FAILED: 1 },
+            counts: { succeeded: 1, failed: 1, needs_attention: 0 },
           },
           tasks: [
             {
@@ -1298,7 +1359,8 @@ describe("真实 Studio 只读适配器", () => {
     expect(data.tasks).toEqual([
       expect.objectContaining({
         id: "batch-1",
-        status: "failed",
+        status: "partial",
+        deliverableCount: 1,
         progress: 100,
         resultId: "result-1",
       }),

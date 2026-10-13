@@ -76,6 +76,7 @@ import {
 } from "./localPublishAccounts";
 import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
 import { PublishRecordsPanel } from "./PublishRecordsPanel";
+import { taskHasDeliverable } from "./taskResults";
 import type {
   StudioAsset,
   StudioContextValue,
@@ -5087,7 +5088,7 @@ export function PublishPage() {
   notifyRef.current = notify;
   const completedResultIds = new Set(
     data.tasks
-      .filter((task) => task.status === "completed" && task.resultId)
+      .filter((task) => taskHasDeliverable(task) && task.resultId)
       .map((task) => task.resultId),
   );
   const [cloudRevision, setCloudRevision] = useState<number | null>(
