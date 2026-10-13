@@ -1138,76 +1138,32 @@ def get_viral_video_detail(
 def open_viral_video_detail(
     payload: ViralDetailRequest, db: BusinessDbDep
 ) -> ViralDetailViewResponse:
-    """打开爆款视频详情：读内容池 + 按次计费（同一付费账号同一条视频只扣一次）.
+    """打开爆款视频详情：读内容池，**不计费**（2026-10-13 拍板：查看详情免费）.
 
-    计费口径（已拍板）：详情与统计字段在同一个响应里返回，因此只算一次「查看详情」；
-    浏览、缓存、播放都不在本端点计费。预留在 ``accept_operation``、结算在
-    ``finish_source``，两者与内容读取同处一个事务——内容读不到（404/409）或事务
-    回滚时预留一并消失，**失败不扣费**。
-
-    免费分支有三类，客户端据 ``billing`` 区分：已购买（``deduped``）、已下架 /
-    不可用（``billable=false``）、以及审核账号读取**已购买**内容（不产生新扣费）。
-    审核账号不得产生新的客户扣费，所以首次购买前先过 ``require_not_auditor``；
-    这与 ``/videos/source`` 等计费端点同一口径。
+    早先这里按 ``viral_detail`` 科目首次查看扣一次费，并对资费缺失 fail-closed；
+    口径翻转后若仍保留那套逻辑，运营把资费停用或置 0 时详情页会整体 503。所以
+    本端点只读内容，不再触碰资费与钱包。``billing`` 回执保留字段形状以兼容旧客户端：
+    恒为 ``charged=0, billable=false``；``deduped`` 与 ``detailCharged`` 只反映历史
+    上是否购买过（老账单仍可对上号），不代表本次扣费。
     """
     if payload.platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
             detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
         )
-    # 循环导入：viral_search_routes 反向依赖本模块的 ViralVideoItem，只能延迟导入。
-    from app.viral_search_routes import require_priced_viral_service
-
+    # 只读内容 + 记录一次客户读取观测；不调用资费与钱包，故不会因资费配置失败。
     with db.write() as (conn, actor):
         with conn:
             video = _require_stored_video(conn, platform=payload.platform, video_id=payload.videoId)
             availability = viral_video_availability(
                 conn, platform=payload.platform, video_id=payload.videoId
             )
-            source_id = _detail_source_id(
-                resolve_wallet_owner(conn, actor.id), payload.platform, payload.videoId
+            previously_purchased = _detail_purchased(
+                conn,
+                _detail_source_id(
+                    resolve_wallet_owner(conn, actor.id), payload.platform, payload.videoId
+                ),
             )
-            billable = availability == "available"
-            charged = 0
-            deduped = billable and _detail_purchased(conn, source_id)
-            if billable and not deduped:
-                require_not_auditor(
-                    conn,
-                    actor=actor,
-                    action="viral.detail",
-                    entity_type="viral_video",
-                    entity_id=payload.videoId,
-                )
-                require_priced_viral_service(
-                    conn, VIRAL_DETAIL_SERVICE, error_code="VIRAL_DETAIL_UNPRICED"
-                )
-                # 与 accept_operation 同一把用户锁：并发的首次查看在这里排队，
-                # 后到者看到已购买行即走免费分支，不会各扣一次。
-                conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
-                    ("billing:user:" + actor.id,),
-                )
-                if _detail_purchased(conn, source_id):
-                    deduped = True
-                else:
-                    accept_operation(
-                        conn,
-                        user_id=actor.id,
-                        service=VIRAL_DETAIL_SERVICE,
-                        source_id=source_id,
-                        units=1,
-                        request_fingerprint=f"{payload.platform}:{payload.videoId}",
-                    )
-                    charged = int(
-                        finish_source(
-                            conn,
-                            source_id,
-                            units=1,
-                            succeeded=True,
-                            service=VIRAL_DETAIL_SERVICE,
-                        )
-                        or 0
-                    )
             item = _item(
                 video,
                 is_favorite=is_viral_favorite(
@@ -1221,7 +1177,7 @@ def open_viral_video_detail(
                     conn, platform=payload.platform, video_id=payload.videoId
                 )
                 is not None,
-                detail_charged=deduped or charged > 0,
+                detail_charged=previously_purchased,
             )
             from app.viral_content_observations import record_customer_read
 
@@ -1235,10 +1191,10 @@ def open_viral_video_detail(
     return ViralDetailViewResponse(
         item=item,
         billing=ViralDetailBilling(
-            charged=charged,
+            charged=0,
             unit=SERVICES[VIRAL_DETAIL_SERVICE].unit,
-            deduped=deduped,
-            billable=billable,
+            deduped=previously_purchased,
+            billable=False,
         ),
     )
 
