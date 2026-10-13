@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from typing import Any
 
 import psycopg
 from fastapi import APIRouter, Request, Response
@@ -32,7 +33,11 @@ from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.db_portable import BusinessConnection
-from app.usage_billing import accept_platform_operation, finish_source
+from app.usage_billing import (
+    accept_platform_operation,
+    finish_source,
+    next_platform_billing_round,
+)
 from app.viral_tikhub import viral_source_client_from_settings
 
 router = APIRouter(prefix="/api/control", tags=["admin-publish-stats"])
@@ -170,6 +175,95 @@ def toggle_publish_stats(
     )
 
 
+def canonical_publish_stats(matched: Any) -> dict[str, Any]:
+    """上游指标 → 规范统计键（T26）。
+
+    客户汇总与面板只认 ``*_count`` 键；旧的 likes/comments/shares/collects
+    是第一版写入的别名，读取侧兼容。上游缺失的指标显式落 null——未知不等于
+    零，绝不能把「没拿到」画成「0 播放」。
+    """
+
+    def value(number: Any) -> int | None:
+        return None if number is None else int(number)
+
+    return {
+        "like_count": value(getattr(matched, "likes", None)),
+        "comment_count": value(getattr(matched, "comments", None)),
+        "share_count": value(getattr(matched, "shares", None)),
+        "collect_count": value(getattr(matched, "collects", None)),
+    }
+
+
+def refresh_published_record_stats(
+    conn: BusinessConnection, *, record_id: str
+) -> tuple[dict[str, Any], str]:
+    """刷新一条已发布记录的平台互动数据（T25/T26/T27 共享核心）。
+
+    管理端手动同步与 worker 自动消费共用：每次有意刷新冻结独立的计费轮次
+    （同一次网络重试由幂等层直接重放，不产生第二轮）；上游失败释放成本、
+    上游缺失不记账。返回 (规范统计, 计费操作号)。
+    """
+    # 双通道入口（HTTP 业务事务与 worker 短事务）传的是不同连接包装，
+    # 这里直接读开关值，不经过面向 psycopg 连接的 _flag。
+    enabled = conn.execute(
+        "SELECT COALESCE(publish_stats_sync_enabled, 0) FROM runtime_settings WHERE id = 1"
+    ).fetchone()
+    if enabled is None or int(enabled[0]) != 1:
+        raise _http(
+            409,
+            "PUBLISH_STATS_SYNC_DISABLED",
+            "发布效果回流未开启：开启前需确认客户发布内容的采集授权口径。",
+        )
+    row = conn.execute(
+        "SELECT platform, platform_item_id FROM publish_records WHERE id=%s AND status='published'",
+        (record_id,),
+    ).fetchone()
+    if row is None:
+        raise _http(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在或未发布。")
+    platform, item_id = str(row[0]), str(row[1] or "")
+    if platform != "douyin":
+        raise _http(
+            422,
+            "PUBLISH_STATS_PLATFORM_UNSUPPORTED",
+            "暂仅支持抖音发布记录的效果同步。",
+        )
+    if not item_id:
+        raise _http(422, "PUBLISH_STATS_ITEM_MISSING", "该记录缺少平台内容编号。")
+    source_id = f"publish_stats:{record_id}"
+    billing_round = next_platform_billing_round(conn, service="viral_data", source_id=source_id)
+    operation_id = accept_platform_operation(
+        conn,
+        service="viral_data",
+        source_id=source_id,
+        api_metadata={"kind": "publish_stats_sync", "platform": platform},
+        billing_round=billing_round,
+    )
+    client = viral_source_client_from_settings(conn)
+    try:
+        videos = client.douyin_refresh(platform="douyin", video_id=item_id)
+        matched = next((video for video in videos if video.video_id == item_id), None)
+        if matched is None:
+            raise _http(
+                503,
+                "PUBLISH_STATS_UPSTREAM_MISS",
+                "上游未返回该条内容的数据，未记账成本请稍后重试。",
+            )
+    except _HTTPError:
+        raise
+    except Exception as exc:
+        logger.warning("publish stats sync failed record=%s: %s", record_id, exc)
+        finish_source(
+            conn,
+            source_id,
+            units=0,
+            succeeded=False,
+            service="viral_data",
+        )
+        raise _http(503, "PUBLISH_STATS_UPSTREAM_FAILED", "上游数据服务异常，请稍后重试。") from exc
+    finish_source(conn, source_id, units=1, succeeded=True, service="viral_data")
+    return canonical_publish_stats(matched), operation_id
+
+
 @router.post("/publish-stats/{record_id}/sync")
 def sync_publish_stats(
     record_id: str,
@@ -179,75 +273,12 @@ def sync_publish_stats(
     body: AdminWriteRequest,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        if not _flag(conn):
-            raise _http(
-                409,
-                "PUBLISH_STATS_SYNC_DISABLED",
-                "发布效果回流未开启：开启前需确认客户发布内容的采集授权口径。",
-            )
-        row = conn.execute(
-            "SELECT platform, platform_item_id FROM publish_records "
-            "WHERE id=%s AND status='published'",
-            (record_id,),
-        ).fetchone()
-        if row is None:
-            raise _http(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在或未发布。")
-        platform, item_id = str(row[0]), str(row[1] or "")
-        if platform != "douyin":
-            raise _http(
-                422,
-                "PUBLISH_STATS_PLATFORM_UNSUPPORTED",
-                "暂仅支持抖音发布记录的效果同步。",
-            )
-        if not item_id:
-            raise _http(422, "PUBLISH_STATS_ITEM_MISSING", "该记录缺少平台内容编号。")
-        source_id = f"publish_stats:{record_id}"
-        operation_id = accept_platform_operation(
-            BusinessConnection.postgres(conn),
-            service="viral_data",
-            source_id=source_id,
-            api_metadata={"kind": "publish_stats_sync", "platform": platform},
+        stats, operation_id = refresh_published_record_stats(
+            BusinessConnection.postgres(conn), record_id=record_id
         )
-        client = viral_source_client_from_settings(BusinessConnection.postgres(conn))
-        try:
-            videos = client.douyin_refresh(platform="douyin", video_id=item_id)
-            matched = next((video for video in videos if video.video_id == item_id), None)
-            if matched is None:
-                raise _http(
-                    503,
-                    "PUBLISH_STATS_UPSTREAM_MISS",
-                    "上游未返回该条内容的数据，未记账成本请稍后重试。",
-                )
-        except _HTTPError:
-            raise
-        except Exception as exc:
-            logger.warning("publish stats sync failed record=%s: %s", record_id, exc)
-            finish_source(
-                BusinessConnection.postgres(conn),
-                source_id,
-                units=0,
-                succeeded=False,
-                service="viral_data",
-            )
-            raise _http(
-                503, "PUBLISH_STATS_UPSTREAM_FAILED", "上游数据服务异常，请稍后重试。"
-            ) from exc
-        finish_source(
-            BusinessConnection.postgres(conn),
-            source_id,
-            units=1,
-            succeeded=True,
-            service="viral_data",
-        )
-        stats = {
-            "likes": matched.likes,
-            "comments": matched.comments,
-            "shares": matched.shares,
-            "collects": matched.collects,
-        }
         conn.execute(
             "UPDATE publish_records SET stats=%s::jsonb, stats_synced_at=now(), "
-            "sync_requested=0, updated_at=now() WHERE id=%s",
+            "sync_requested=0, updated_at=now() WHERE id=%s AND status='published'",
             (json.dumps(stats, ensure_ascii=False), record_id),
         )
         conn.execute(

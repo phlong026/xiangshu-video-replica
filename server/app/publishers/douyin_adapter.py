@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .base import PublishResult
+from .base import PublishResult, classify_delivery_failure
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +68,17 @@ def publish_to_douyin(
     tags: list[str],
     cover_path: Path | None,
     visibility: int = 0,
+    submission_key: str | None = None,
 ) -> PublishResult:
     """Deliver one video; account_invalid marks the stored login state dead.
 
     ``visibility`` follows the creator page: 0 public / 1 friends / 2 private.
+    ``submission_key``（T23）是本次外部提交的稳定请求标识：vendor 协议暂无
+    透传字段（平台是否自带去重须另验），先随结果日志落库，供人工到平台核对
+    时对账。
     """
+    if submission_key:
+        logger.info("douyin publish submission_key=%s", submission_key)
     try:
         from .vendor.douyin_publisher import publish_options
 
@@ -97,11 +103,7 @@ def publish_to_douyin(
         data = publisher.publish(video_path, options, cover_path=cover_path)
     except Exception as exc:  # noqa: BLE001 - delivery boundary
         logger.warning("douyin publish failed: %s", type(exc).__name__)
-        return PublishResult(
-            platform=PLATFORM,
-            status="failed",
-            message=_summarize(exc),
-        )
+        return classify_delivery_failure(exc, platform=PLATFORM, message=_summarize(exc))
     item_id = data.get("item_id") or data.get("data", {}).get("item_id")
     return PublishResult(
         platform=PLATFORM,

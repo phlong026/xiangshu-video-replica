@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .base import PublishResult
+from .base import PublishResult, classify_delivery_failure
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,12 @@ def publish_to_channels(
     description: str,
     tags: list[str],
     cover_path: Path | None,
+    submission_key: str | None = None,
 ) -> PublishResult:
+    """``submission_key``（T23）：稳定外部请求标识，vendor 暂无透传字段，
+    随日志落库供人工核对；平台是否自带去重须另验。"""
+    if submission_key:
+        logger.info("channels publish submission_key=%s", submission_key)
     try:
         publisher = _load_publisher(cookie)
         ok, message = probe_channels(cookie)
@@ -78,10 +83,8 @@ def publish_to_channels(
     except Exception as exc:  # noqa: BLE001 - delivery boundary
         logger.warning("channels publish failed: %s", type(exc).__name__)
         head = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
-        return PublishResult(
-            platform=PLATFORM,
-            status="failed",
-            message=f"视频号发布失败：{head[:300]}",
+        return classify_delivery_failure(
+            exc, platform=PLATFORM, message=f"视频号发布失败：{head[:300]}"
         )
     export_id = data.get("exportId")
     return PublishResult(

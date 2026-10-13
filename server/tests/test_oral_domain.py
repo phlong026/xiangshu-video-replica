@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -5015,3 +5016,187 @@ def test_audio_oral_recycled_asset_rejects_before_reservation(
     assert _wallet("employee_1") == before
     assert _count("SELECT COUNT(*) FROM oral_tasks WHERE idempotency_key='recycled-audio'") == 0
     assert _count("SELECT COUNT(*) FROM wallet_transactions WHERE type='RESERVE'") == 0
+
+
+# ---------------------------------------------------------------------------
+# T24：已删除分身/声音不得被新任务引用（创建过滤 + 行锁 + worker 提交过滤）
+# ---------------------------------------------------------------------------
+
+
+def _soft_delete_clone(table: str, clone_id: str) -> None:
+    _exec(
+        f"UPDATE {table} SET deleted_at = clock_timestamp(), "
+        f"deleted_by_user_id = 'employee_1' WHERE id = %s",  # noqa: S608 - 白名单表
+        (clone_id,),
+    )
+
+
+def test_create_rejects_deleted_avatar_without_task_or_reservation(
+    scene: str, fake_source_storage: FakeSourceStorage
+) -> None:
+    avatar_id, voice_id = _seed_ready_assets()
+    _soft_delete_clone("oral_avatars", avatar_id)
+    vendor, transport = make_vendor()
+
+    with pytest.raises(OralDomainError, match="请选择已就绪的口播分身"):
+        _create_task(
+            actor=actor(),
+            identity_id="ident-1",
+            avatar_id=avatar_id,
+            voice_id=voice_id,
+            mode="TTS",
+            title="乡墅口播",
+            script_text="大家好。",
+            audio_asset_id=None,
+            subtitle=None,
+            idempotency_key="t24-deleted-avatar",
+            vendor=vendor,
+        )
+    # 无任务、无预留、无外部调用。
+    assert transport.calls == []
+    assert _wallet("employee_1") == (20, 0)
+    assert (
+        _fetch("SELECT count(*) FROM oral_tasks WHERE idempotency_key = 't24-deleted-avatar'")[
+            "count"
+        ]
+        == 0
+    )
+
+
+def test_create_rejects_deleted_voice_without_task_or_reservation(
+    scene: str, fake_source_storage: FakeSourceStorage
+) -> None:
+    avatar_id, voice_id = _seed_ready_assets()
+    _soft_delete_clone("oral_voices", voice_id)
+    vendor, transport = make_vendor()
+
+    with pytest.raises(OralDomainError, match="请选择已就绪的声音"):
+        _create_task(
+            actor=actor(),
+            identity_id="ident-1",
+            avatar_id=avatar_id,
+            voice_id=voice_id,
+            mode="TTS",
+            title="乡墅口播",
+            script_text="大家好。",
+            audio_asset_id=None,
+            subtitle=None,
+            idempotency_key="t24-deleted-voice",
+            vendor=vendor,
+        )
+    assert transport.calls == []
+    assert _wallet("employee_1") == (20, 0)
+
+
+def test_delete_and_create_race_admits_exactly_one_winner(
+    scene: str, fake_source_storage: FakeSourceStorage
+) -> None:
+    """删除与创建并发：行锁串行化，只有一方成功，绝不出现「用已删分身建任务」。"""
+    avatar_id, voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+
+    barrier = threading.Barrier(2)
+    outcome: dict[str, str] = {}
+
+    def do_create() -> None:
+        barrier.wait()
+        try:
+            created = _create_task(
+                actor=actor(),
+                identity_id="ident-1",
+                avatar_id=avatar_id,
+                voice_id=voice_id,
+                mode="TTS",
+                title="乡墅口播",
+                script_text="竞态创建。",
+                audio_asset_id=None,
+                subtitle=None,
+                idempotency_key="t24-race-create",
+                vendor=vendor,
+            )
+            outcome["create"] = created.task_id
+        except Exception as exc:  # noqa: BLE001 - 竞态双方都可能输
+            outcome["create"] = f"{type(exc).__name__}"
+
+    def do_delete() -> None:
+        barrier.wait()
+        try:
+            with pg_transaction() as raw:
+                delete_avatar_clone(
+                    BusinessConnection.postgres(raw),
+                    avatar_id=avatar_id,
+                    actor=actor(),
+                )
+            outcome["delete"] = "deleted"
+        except Exception as exc:  # noqa: BLE001
+            outcome["delete"] = f"{type(exc).__name__}"
+
+    threads = [threading.Thread(target=do_create), threading.Thread(target=do_delete)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # 一方成功、一方被拒；不存在「删除成功且任务创建成功」的组合。
+    create_ok = not outcome["create"].endswith("Error") and outcome["create"] != "deleted"
+    delete_ok = outcome["delete"] == "deleted"
+    assert create_ok != delete_ok or (
+        # 创建成功 + 删除成功不可能同时成立（守卫会拒绝删有在制任务的分身）。
+        outcome["delete"].endswith("Error") or create_ok is False
+    )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        task_count = conn.execute(
+            "SELECT count(*) FROM oral_tasks WHERE idempotency_key = 't24-race-create' "
+            "AND status NOT IN ('CANCELLED')"
+        ).fetchone()[0]
+        deleted = conn.execute(
+            "SELECT deleted_at IS NOT NULL FROM oral_avatars WHERE id = %s", (avatar_id,)
+        ).fetchone()[0]
+    if delete_ok:
+        # 删除成功 ⇒ 创建必然被拒（守卫或行锁），任务行不存在。
+        assert task_count == 0
+        assert create_ok is False
+    else:
+        # 创建成功 ⇒ 分身仍在（删除被在制任务守卫或行锁序拒绝）。
+        assert task_count == 1
+        assert deleted is False
+
+
+def test_worker_submit_query_skips_task_whose_avatar_was_deleted_after_enqueue(
+    scene: str, fake_source_storage: FakeSourceStorage
+) -> None:
+    """任务排队期间分身被删：worker 的提交查询必须查不到行（租约隔离兜底），
+    绝不拿已删克隆的 vendor id 继续付费提交。"""
+    avatar_id, voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+    created = _create_task(
+        actor=actor(),
+        identity_id="ident-1",
+        avatar_id=avatar_id,
+        voice_id=voice_id,
+        mode="TTS",
+        title="乡墅口播",
+        script_text="排队期间删除。",
+        audio_asset_id=None,
+        subtitle=None,
+        idempotency_key="t24-midqueue-delete",
+        vendor=vendor,
+    )
+    _soft_delete_clone("oral_avatars", avatar_id)
+    # 与 oral_worker.prepare_oral_work 的 task_submit 查询同构（含 T24 过滤）。
+    row = _fetch(
+        """
+        SELECT task.id
+        FROM oral_tasks AS task
+        JOIN oral_avatars AS avatar ON avatar.id = task.avatar_id
+        LEFT JOIN oral_voices AS voice ON voice.id = task.voice_id
+        WHERE task.id = %s
+          AND avatar.deleted_at IS NULL
+          AND (voice.id IS NULL OR voice.deleted_at IS NULL)
+        """,
+        (created.task_id,),
+    )
+    assert row is None
+    # 分身被删后 worker 从未发起外部调用。
+    assert transport.calls == []

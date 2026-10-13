@@ -16,6 +16,7 @@ export const PUBLISH_RECORDS_POLL_MS = 15_000;
 export const publishStatusNames: Record<PublishRecordStatus, string> = {
   queued: "排队中",
   publishing: "发布中",
+  submission_unknown: "结果待核对",
   published: "已发布",
   failed: "发布失败",
   cancelled: "已取消",
@@ -24,6 +25,7 @@ export const publishStatusNames: Record<PublishRecordStatus, string> = {
 const statusClass: Record<PublishRecordStatus, string> = {
   queued: "queued",
   publishing: "running",
+  submission_unknown: "failed",
   published: "completed",
   failed: "failed",
   cancelled: "cancelled",
@@ -34,7 +36,21 @@ const statNames: Array<[string, string]> = [
   ["like_count", "点赞"],
   ["comment_count", "评论"],
   ["share_count", "分享"],
+  ["collect_count", "收藏"],
 ];
+
+/** 旧版同步写入的别名键（T26）：读取时按规范键 → 旧键回退，两类行混存一致。 */
+const legacyStatKeys: Record<string, string> = {
+  like_count: "likes",
+  comment_count: "comments",
+  share_count: "shares",
+  collect_count: "collects",
+};
+
+function statValue(stats: Record<string, unknown>, key: string): number | null {
+  const value = stats[key] ?? stats[legacyStatKeys[key] ?? ""];
+  return typeof value === "number" ? value : null;
+}
 
 function scheduleLabel(record: PublishRecordItem): string {
   if (record.status === "published" && record.published_at)
@@ -144,7 +160,7 @@ export function PublishRecordsPanel({
       {records?.map((record) => {
         const stats = record.stats ?? {};
         const numbers = statNames.filter(
-          ([key]) => typeof stats[key] === "number",
+          ([key]) => statValue(stats, key) !== null,
         );
         const busy = disabled || busyId === record.id;
         return (
@@ -182,12 +198,18 @@ export function PublishRecordsPanel({
               {numbers.length > 0 && (
                 <small className="content-publish-record-stats">
                   {numbers
-                    .map(([key, label]) => `${label} ${String(stats[key])}`)
+                    .map(([key, label]) => `${label} ${statValue(stats, key)}`)
                     .join(" · ")}
                   {record.stats_synced_at &&
                     ` · 同步于 ${formatTaskTime(record.stats_synced_at)}`}
                 </small>
               )}
+              {record.stats_synced_at &&
+                numbers.every(([key]) => key !== "play_count") && (
+                  <small className="content-publish-record-stats">
+                    播放数据平台暂未返回（未知，不按 0 计）
+                  </small>
+                )}
               {record.error_message && (
                 <p role="alert">{record.error_message}</p>
               )}
@@ -215,14 +237,15 @@ export function PublishRecordsPanel({
                   重试
                 </Button>
               )}
-              {record.status === "published" && (
-                <Button
-                  disabled={busy || record.sync_requested}
-                  onClick={() => void act(record, syncPublishRecord)}
-                >
-                  同步数据
-                </Button>
-              )}
+              {record.status === "published" &&
+                record.platform === "douyin" && (
+                  <Button
+                    disabled={busy || record.sync_requested}
+                    onClick={() => void act(record, syncPublishRecord)}
+                  >
+                    同步数据
+                  </Button>
+                )}
               {(record.status === "published" ||
                 record.status === "failed" ||
                 record.status === "cancelled") && (

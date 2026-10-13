@@ -116,6 +116,7 @@ def deliver_via_api(
     description: str,
     tags: list[str],
     options: dict[str, Any],
+    submission_key: str | None = None,
 ) -> PublishResult:
     if platform == "douyin":
         from app.publishers import douyin_adapter
@@ -129,6 +130,7 @@ def deliver_via_api(
             tags=tags,
             cover_path=cover_path,
             visibility=int(options.get("visibility", 0) or 0),
+            submission_key=submission_key,
         )
     if platform == "wechat_channels":
         from app.publishers import channels_adapter
@@ -140,6 +142,7 @@ def deliver_via_api(
             description=description,
             tags=tags,
             cover_path=cover_path,
+            submission_key=submission_key,
         )
     return PublishResult(platform=platform, status="failed", message="该平台暂不支持自动发布")
 
@@ -172,6 +175,7 @@ def deliver(
     description: str,
     tags: list[str],
     options: dict[str, Any] | None = None,
+    submission_key: str | None = None,
 ) -> DeliveryOutcome:
     opts = options or {}
     try:
@@ -192,8 +196,14 @@ def deliver(
         description=description,
         tags=tags,
         options=opts,
+        submission_key=submission_key,
     )
-    if api_result.status == "published" or api_result.account_invalid:
+    # unknown（T23）：提交可能已到达平台，浏览器兜底等于第二次投递，必须停。
+    if (
+        api_result.status == "published"
+        or api_result.status == "unknown"
+        or api_result.account_invalid
+    ):
         return DeliveryOutcome(api_result, "api")
     if not browser_fallback_enabled():
         return DeliveryOutcome(api_result, "api")

@@ -1311,9 +1311,21 @@ def run_pg_worker_once(
         with pg_transaction() as raw_conn:
             oral_lease = claim_oral_work(BusinessConnection.postgres(raw_conn), worker_id=worker_id)
         if oral_lease is not None:
+            # T24：分身/声音在排队期间被删时，提交准备会按租约丢失抛出。这里
+            # 只放弃本条（隔离交给租约到期兜底），不让一条孤儿任务顶穿整轮。
+            try:
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    prepared_oral = prepare_oral_work(conn, oral_lease)
+            except OralLeaseLostError:
+                logger.warning(
+                    "oral work lost before preparation: %s (%s)",
+                    oral_lease.record_id,
+                    oral_lease.kind,
+                )
+                continue
             with pg_transaction() as raw_conn:
                 conn = BusinessConnection.postgres(raw_conn)
-                prepared_oral = prepare_oral_work(conn, oral_lease)
                 try:
                     resolved_oral_vendor = oral_vendor or hifly_client_from_settings(conn)
                 except HiflySettingsUnavailable:

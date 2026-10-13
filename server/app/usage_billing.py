@@ -230,20 +230,28 @@ def accept_platform_operation(
     source_id: str,
     collection_batch_id: str | None = None,
     api_metadata: dict[str, str] | None = None,
+    billing_round: int = 1,
 ) -> str:
-    """Capture shared background expenditure without assigning it to a customer."""
+    """Capture shared background expenditure without assigning it to a customer.
+
+    ``billing_round``（T25）：同一 source_id 的每次「有意」重复操作必须递增轮次，
+    否则会撞平台操作的部分唯一索引（service, source_id, billing_round）——
+    那正是「同一作品第二次刷新统计报唯一约束」的根因。同一次网络重试不落这
+    里（幂等层直接重放），不产生第二轮。
+    """
     snapshot = retail_snapshot(conn, service, 1)
     snapshot.update(enabled=False, credits=0, free_reason="platform_service")
     operation_id = str(uuid4())
     conn.execute(
-        "INSERT INTO billing_operations(id,service,module,source_id,unit,budget_units,"
-        "pricing_snapshot_json,collection_batch_id,api_metadata) "
-        "VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s)",
+        "INSERT INTO billing_operations(id,service,module,source_id,billing_round,unit,"
+        "budget_units,pricing_snapshot_json,collection_batch_id,api_metadata) "
+        "VALUES (%s,%s,%s,%s,%s,%s,1,%s,%s,%s)",
         (
             operation_id,
             service,
             "viral" if collection_batch_id else "platform",
             source_id,
+            max(1, int(billing_round)),
             SERVICES[service].unit,
             json.dumps(snapshot),
             collection_batch_id,
@@ -251,6 +259,16 @@ def accept_platform_operation(
         ),
     )
     return operation_id
+
+
+def next_platform_billing_round(conn: BusinessConnection, *, service: str, source_id: str) -> int:
+    """该平台操作的下一个轮次号（T25）：有意刷新各自冻结独立轮次。"""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(billing_round), 0) + 1 FROM billing_operations "
+        "WHERE service = %s AND source_id = %s AND user_id IS NULL",
+        (service, source_id),
+    ).fetchone()
+    return int(row[0])
 
 
 def _ledger(

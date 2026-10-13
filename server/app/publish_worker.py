@@ -46,7 +46,14 @@ from app.publish_browser import (
     claim_browser_probe_work,
     finalize_browser_probe,
 )
-from app.publish_records import PublishWork, claim_publish_work, finalize_publish_work
+from app.publish_records import (
+    PUBLISH_LEASE_SECONDS,
+    PublishWork,
+    claim_publish_work,
+    finalize_publish_work,
+    mark_record_submitted,
+    renew_publish_lease,
+)
 from app.publishers.base import PublishResult
 from app.settings import fernet_from_environment
 from app.worker_identity import new_worker_instance_id
@@ -130,6 +137,7 @@ def _perform_publish(
                 description=str(row["description"] or ""),
                 tags=tags,
                 options=options,
+                submission_key=(str(row["submission_key"]) if row.get("submission_key") else None),
             )
     except Exception as exc:  # noqa: BLE001 - delivery boundary
         logger.warning("publish delivery preparation failed: %s", type(exc).__name__)
@@ -216,6 +224,27 @@ def run_publish_round(
         work = claim_publish_work(conn, worker_id=worker_id)
     if work is not None:
         processed += 1
+        # T23：平台 I/O 起跳前先打提交标记并续租（独立短事务）。标记是
+        # 「提交前可安全重排 / 提交后只能人工核对」的分界；续租避免大文件
+        # 慢投递被误判超租约。标记丢失（租约已被隔离）就放弃本次投递。
+        try:
+            with open_txn() as conn:
+                marked = mark_record_submitted(
+                    conn, record_id=work.record_id, lease_token=work.lease_token
+                )
+                if marked:
+                    renew_publish_lease(
+                        conn,
+                        record_id=work.record_id,
+                        lease_token=work.lease_token,
+                        lease_seconds=PUBLISH_LEASE_SECONDS,
+                    )
+        except Exception as exc:  # noqa: BLE001 - 标记失败按未提交处理（安全侧）
+            logger.warning("publish submit marker failed: %s", type(exc).__name__)
+            marked = False
+        if not marked:
+            logger.warning("publish lease lost before submission: %s", work.record_id)
+            return processed
         result, mode = _perform_publish(open_txn, work=work, key=key)
         try:
             with open_txn() as conn:
@@ -223,7 +252,61 @@ def run_publish_round(
             logger.info("publish record %s -> %s", work.record_id, outcome)
         except PublishLeaseLostError:
             logger.warning("publish finalize lost lease: %s", work.record_id)
+
+    # T27：客户统计同步的实际消费者。置旗（request_sync）只是请求，真正拉取
+    # 上游、冻结平台成本轮次并写回统计的是这里；失败按租约退避重试，超限
+    # 自动放弃并保留错误可见。回流总开关关闭时整段跳过（不动队列）。
+    from app.admin_publish_stats_routes import refresh_published_record_stats
+    from app.publish_records import claim_stats_sync_work, finalize_stats_sync
+
+    with open_txn() as conn:
+        enabled = conn.execute(
+            "SELECT COALESCE(publish_stats_sync_enabled, 0) FROM runtime_settings WHERE id = 1"
+        ).fetchone()
+        if enabled is None or int(enabled[0]) != 1:
+            return processed
+    with open_txn() as conn:
+        sync_work = claim_stats_sync_work(conn, worker_id=worker_id)
+    if sync_work is not None:
+        processed += 1
+        stats: dict[str, Any] | None = None
+        failure: str | None = None
+        try:
+            with open_txn() as conn:
+                stats, _operation = refresh_published_record_stats(
+                    conn, record_id=sync_work.record_id
+                )
+        except PublishLeaseLostError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 同步失败转为可见的重试/放弃
+            failure = _summarize_sync_error(exc)
+            logger.warning(
+                "publish stats sync failed record=%s: %s",
+                sync_work.record_id,
+                type(exc).__name__,
+            )
+        try:
+            with open_txn() as conn:
+                outcome = finalize_stats_sync(
+                    conn,
+                    record_id=sync_work.record_id,
+                    lease_token=sync_work.lease_token,
+                    stats=stats,
+                    error=failure,
+                )
+            logger.info("publish stats sync %s -> %s", sync_work.record_id, outcome)
+        except PublishLeaseLostError:
+            logger.warning("stats sync finalize lost lease: %s", sync_work.record_id)
     return processed
+
+
+def _summarize_sync_error(exc: Exception) -> str:
+    """把同步异常压成一条客户可见的中文短句（detail 信封里取 message）。"""
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict) and detail.get("message"):
+        return str(detail["message"])
+    text = str(exc).strip()
+    return text.splitlines()[0][:300] if text else type(exc).__name__
 
 
 # CW-030 移除了 Worker 的 SQLite 业务入口，CW-060 的反向消费者注册表把历史

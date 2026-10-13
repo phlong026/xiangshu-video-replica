@@ -26,6 +26,7 @@ from app.admin_dashboard_routes import router as admin_dashboard_router
 from app.admin_device_routes import router as admin_device_router
 from app.admin_first_frame_routes import router as admin_first_frame_router
 from app.admin_generation_routes import router as admin_generation_router
+from app.admin_publish_reconcile_routes import router as admin_publish_reconcile_router
 from app.admin_publish_stats_routes import router as publish_stats_router
 from app.admin_refund_routes import router as admin_refund_router
 from app.admin_runtime_routes import router as admin_runtime_router
@@ -407,6 +408,7 @@ app.include_router(admin_refund_router)
 app.include_router(announcement_router)
 app.include_router(worker_observation_router)
 app.include_router(publish_stats_router)
+app.include_router(admin_publish_reconcile_router)
 app.include_router(support_ticket_router)
 app.include_router(admin_session_router)
 app.include_router(admin_team_router)

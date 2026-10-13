@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261013T1010_studio_draft_tombstones"
+      "20261013T1020_publish_submission_safety"
     ],
     "parents": {
       "001_core": null,
@@ -189,9 +189,10 @@
       "20261012T0500_nullable_viral_metrics": "20261012T0300_refund_source_allocations",
       "20261012T0600_viral_copy_upload_receipts": "20261012T0500_nullable_viral_metrics",
       "20261013T1000_billing_reconciliation_items": "20261012T0600_viral_copy_upload_receipts",
-      "20261013T1010_studio_draft_tombstones": "20261013T1000_billing_reconciliation_items"
+      "20261013T1010_studio_draft_tombstones": "20261013T1000_billing_reconciliation_items",
+      "20261013T1020_publish_submission_safety": "20261013T1010_studio_draft_tombstones"
     },
-    "revision_count": 170
+    "revision_count": 171
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -885,6 +886,10 @@
     "20261013T1010_studio_draft_tombstones": {
       "file": "versions/20261013T1010_studio_draft_tombstones.py",
       "sha256": "bf3cb1d83dc8748bed67806ceea82d63bef9e51641034b03cddbfa96749e0e19"
+    },
+    "20261013T1020_publish_submission_safety": {
+      "file": "versions/20261013T1020_publish_submission_safety.py",
+      "sha256": "59fd4eb7dcfacb7dfb8cb45762ce7a967cd05180f51b2ce626f9723af8ac6220"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

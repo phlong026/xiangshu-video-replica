@@ -9077,6 +9077,7 @@ export async function customerResetPassword(input: {
 export type PublishRecordStatus =
   | "queued"
   | "publishing"
+  | "submission_unknown"
   | "published"
   | "failed"
   | "cancelled";
@@ -9103,6 +9104,8 @@ export type PublishRecordItem = {
   error_message: string | null;
   published_at: string | null;
   attempt_count: number;
+  /** T23：本次外部提交的稳定请求标识，结果未知时凭它与平台核对。 */
+  submission_key: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -9111,6 +9114,8 @@ export type PublishSummary = {
   published_total: number;
   queued_total: number;
   failed_total: number;
+  /** T23：结果未知（提交已发出但未确认），等待人工核对，不计入成败。 */
+  unknown_total: number;
   play_total: number;
   like_total: number;
 };

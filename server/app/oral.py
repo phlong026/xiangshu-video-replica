@@ -784,11 +784,15 @@ def create_oral_task(
             replayed=True,
         )
 
+    # T24：已删除（软删打标）的分身不得再被新任务引用，且读取与删除走同一
+    # 行锁——「先查后删」或「先删后读到旧快照」的竞态只有一方能成功。
     avatar = conn.execute(
         """
         SELECT id, status, identity_id, source_kind, source_asset_id,
                original_source_asset_id, consent_id
-        FROM oral_avatars WHERE id = %s AND owner_user_id = %s
+        FROM oral_avatars
+        WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL
+        FOR UPDATE
         """,
         (avatar_id, actor.id),
     ).fetchone()
@@ -835,7 +839,9 @@ def create_oral_task(
             """
             SELECT id, status, identity_id, confirmed, demo_asset_id,
                    source_asset_id, consent_id
-            FROM oral_voices WHERE id = %s AND owner_user_id = %s
+            FROM oral_voices
+            WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL
+            FOR UPDATE
             """,
             (effective_voice, actor.id),
         ).fetchone()

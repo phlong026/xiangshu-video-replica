@@ -13,6 +13,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -38,6 +39,7 @@ from test_publish_accounts import (
 
 from app import publish_delivery
 from app import publish_worker as worker_mod
+from app.auth import CurrentUser
 from app.db_pg import close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.publish import PublishLeaseLostError
@@ -45,11 +47,17 @@ from app.publish_records import (
     ACCOUNT_GONE_MESSAGE,
     MAX_ATTEMPTS,
     QUARANTINE_MESSAGE,
+    STATS_SYNC_MAX_ATTEMPTS,
     PublishWork,
     claim_publish_work,
     finalize_publish_work,
+    list_submission_unknown_records,
+    mark_record_submitted,
+    reconcile_submission_unknown,
+    renew_publish_lease,
+    retry_record,
 )
-from app.publishers.base import PublishResult
+from app.publishers.base import PublishResult, classify_delivery_failure
 
 __all__ = ["_clear_dependency_overrides", "client", "holder", "lane_env"]
 
@@ -444,6 +452,7 @@ def test_summary_counts_and_stat_totals(client: TestClient, pg: psycopg.Connecti
         "published_total": 2,
         "queued_total": 2,
         "failed_total": 1,
+        "unknown_total": 0,
         "play_total": 120,
         "like_total": 7,
     }
@@ -620,9 +629,10 @@ def test_finalize_account_invalid_marks_account_and_fails_record(
     assert record_row(pg, sibling, "status, error_message") == ("failed", ACCOUNT_GONE_MESSAGE)
 
 
-def test_expired_publishing_lease_is_requeued_and_unbound_records_fail(
+def test_expired_publishing_before_submit_is_requeued_and_unbound_records_fail(
     pg: psycopg.Connection, lane_env: str
 ) -> None:
+    """T23：没打提交标记的超租约 = worker 死在平台 I/O 之前，安全重排。"""
     account = seed_account(pg)
     stuck = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="publishing")
     pg.execute(
@@ -647,12 +657,42 @@ def test_expired_publishing_lease_is_requeued_and_unbound_records_fail(
         None,
         QUARANTINE_MESSAGE,
     )
+    # 安全重排同时清掉上一次领取的提交痕迹（新领取会签发新的请求标识）。
+    assert pg.execute(
+        "SELECT submitted_at IS NULL, submission_key IS NULL FROM publish_records WHERE id=%s",
+        (stuck,),
+    ).fetchone() == (True, True)
     assert record_row(pg, live, "status, lease_owner") == ("publishing", "alive")
     assert record_row(pg, orphan, "status, account_id, error_message") == (
         "failed",
         None,
         ACCOUNT_GONE_MESSAGE,
     )
+
+
+def test_expired_publishing_after_submit_goes_submission_unknown(
+    pg: psycopg.Connection, lane_env: str
+) -> None:
+    """T23：打过提交标记的超租约 = 平台可能已接收，转未知绝不重投。"""
+    account = seed_account(pg)
+    stuck = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="publishing")
+    pg.execute(
+        "UPDATE publish_records SET lease_owner='dead', submission_key='sk-crash-1', "
+        "submitted_at=clock_timestamp() - interval '20 minutes', "
+        "lease_expires_at=clock_timestamp() - interval '1 minute' WHERE id=%s",
+        (stuck,),
+    )
+    with open_txn() as conn:
+        assert claim_publish_work(conn, worker_id="w1") is None
+    status, message, key = record_row(pg, stuck, "status, error_message, submission_key")
+    assert status == "submission_unknown"
+    assert "重复发表" in message and "sk-crash-1" in message
+    # 请求标识保留：人工到平台核对时对账用。
+    assert key == "sk-crash-1"
+    # 未知行不会被 claim 再领取，也不会被下一轮隔离改动。
+    with open_txn() as conn:
+        assert claim_publish_work(conn, worker_id="w2") is None
+    assert record_row(pg, stuck, "status") == ("submission_unknown",)
 
 
 # --------------------------------------------------------------------------- #
@@ -764,6 +804,269 @@ def test_run_publish_round_storage_outage_requeues(
     assert message == "存储服务暂不可用，稍后自动重试（将自动重试）"
 
 
+def test_deliver_unknown_result_finalizes_to_submission_unknown(
+    pg: psycopg.Connection, lane_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T23 故障一：平台已接收但响应丢失（读超时）→ 未知终态，只投一次。"""
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg))
+    calls: list[str] = []
+    import app.media_routes as media_routes
+
+    monkeypatch.setattr(
+        media_routes,
+        "storage_for_asset",
+        lambda conn, uri: _FakeStorage(),
+    )
+
+    def unknown_deliver(platform: str, storage_state: dict[str, Any], **kwargs: Any) -> Any:
+        calls.append(kwargs.get("submission_key") or "")
+        return publish_delivery.DeliveryOutcome(
+            PublishResult(
+                platform=platform,
+                status="unknown",
+                message="读超时；平台可能已接收本次发布，请人工核对",
+            ),
+            "api",
+        )
+
+    monkeypatch.setattr(publish_delivery, "deliver", unknown_deliver)
+    assert (
+        worker_mod.run_publish_round(open_txn, worker_id="w1", fernet=Fernet(_TEST_KEY.encode()))
+        == 1
+    )
+    status, message, key = record_row(pg, record, "status, error_message, submission_key")
+    assert status == "submission_unknown"
+    assert "人工核对" in message
+    # 交付层透传了本次的稳定请求标识。
+    assert len(calls) == 1 and key and calls[0] == key
+    # 未知终态不被 worker 再领取：外部投稿计数停在 1。
+    assert (
+        worker_mod.run_publish_round(open_txn, worker_id="w1", fernet=Fernet(_TEST_KEY.encode()))
+        == 0
+    )
+
+
+def test_worker_marks_submitted_before_io_and_renews_lease(
+    pg: psycopg.Connection, lane_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T23：worker 在平台 I/O 前打提交标记并续租；崩溃后走未知而非重投。"""
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg))
+    seen: dict[str, Any] = {}
+    import app.media_routes as media_routes
+
+    monkeypatch.setattr(
+        media_routes,
+        "storage_for_asset",
+        lambda conn, uri: _FakeStorage(),
+    )
+
+    def observing_deliver(platform: str, storage_state: dict[str, Any], **kwargs: Any) -> Any:
+        # 交付时提交标记必须已落库（独立短事务先于 I/O 提交）。
+        with psycopg.connect(lane_env) as probe:
+            # 续租后应还有≈整个租期：留 1 分钟时钟偏移余量断言「已拉满」。
+            seen["submitted"] = probe.execute(
+                "SELECT submitted_at IS NOT NULL, lease_expires_at > clock_timestamp() + "
+                "interval '14 minutes' FROM publish_records WHERE id=%s",
+                (record,),
+            ).fetchone()
+        seen["key"] = kwargs.get("submission_key")
+        return publish_delivery.DeliveryOutcome(
+            PublishResult(platform=platform, status="published", item_id="item-ok"), "api"
+        )
+
+    monkeypatch.setattr(publish_delivery, "deliver", observing_deliver)
+    assert (
+        worker_mod.run_publish_round(open_txn, worker_id="w1", fernet=Fernet(_TEST_KEY.encode()))
+        == 1
+    )
+    assert seen["submitted"] == (True, True)
+    assert seen["key"]
+    assert record_row(pg, record, "status") == ("published",)
+
+
+def test_worker_crash_after_submit_before_writeback_converges_via_reconcile(
+    pg: psycopg.Connection, lane_env: str
+) -> None:
+    """T23 故障二：回写前崩溃——标记已打、结果未知，人工核对收敛为已发表。
+
+    外部投递只发生一次（本用例直接模拟交付后的崩溃状态，不重跑 worker），
+    平台侧计数为 1，队列经 reconcile 收敛到终态。
+    """
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="publishing")
+    pg.execute(
+        "UPDATE publish_records SET lease_owner='dead', submission_key='sk-crash-2', "
+        "submitted_at=clock_timestamp(), "
+        "lease_expires_at=clock_timestamp() - interval '1 minute' WHERE id=%s",
+        (record,),
+    )
+    # 下一轮 claim 触发隔离：打过提交标记的超租约转未知。
+    with open_txn() as conn:
+        assert claim_publish_work(conn, worker_id="w1") is None
+    actor = CurrentUser(id="employee_1", username="employee_1", display_name="E", role="employee")
+    with open_txn() as conn:
+        rows = list_submission_unknown_records(conn, limit=10, offset=0)
+    assert [str(r["id"]) for r in rows] == [record]
+    # 未给作品 ID 不能标记已发表（对账必须有证据）。
+    with pytest.raises(Exception) as missing:
+        with open_txn() as conn:
+            reconcile_submission_unknown(
+                conn,
+                record_id=record,
+                actor=actor,
+                outcome="published",
+                platform_item_id=None,
+            )
+    assert "作品 ID" in str(missing.value)
+    with open_txn() as conn:
+        row = reconcile_submission_unknown(
+            conn,
+            record_id=record,
+            actor=actor,
+            outcome="published",
+            platform_item_id="item-from-manual-check",
+        )
+    assert row.status == "published"
+    assert record_row(pg, record, "status, platform_item_id") == (
+        "published",
+        "item-from-manual-check",
+    )
+    # 已收敛的记录再次核对被围栏拒绝。
+    with pytest.raises(Exception) as repeat:
+        with open_txn() as conn:
+            reconcile_submission_unknown(
+                conn,
+                record_id=record,
+                actor=actor,
+                outcome="failed",
+                note="再来一次",
+            )
+    assert "人工核对" in str(repeat.value)
+
+
+def test_reconcile_failed_lets_user_retry_as_new_intent(
+    pg: psycopg.Connection, lane_env: str
+) -> None:
+    """T23 故障三的收敛出口：核对为未发表 → failed → 用户重试=全新提交意图。"""
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="publishing")
+    pg.execute(
+        "UPDATE publish_records SET lease_owner='dead', submission_key='sk-crash-3', "
+        "submitted_at=clock_timestamp(), "
+        "lease_expires_at=clock_timestamp() - interval '1 minute' WHERE id=%s",
+        (record,),
+    )
+    with open_txn() as conn:
+        assert claim_publish_work(conn, worker_id="w1") is None
+    actor = CurrentUser(id="employee_1", username="employee_1", display_name="E", role="employee")
+    with open_txn() as conn:
+        row = reconcile_submission_unknown(
+            conn, record_id=record, actor=actor, outcome="failed", note="平台查无此作品"
+        )
+    assert row.status == "failed"
+    # 用户重试 = 全新提交意图：failed→queued 且清零尝试预算（既有 retry 语义）。
+    with open_txn() as conn:
+        retried = retry_record(conn, actor=actor, record_id=record)
+    assert retried.status == "queued"
+    with open_txn() as conn:
+        work = claim_publish_work(conn, worker_id="w1")
+    assert work is not None
+    # 重试是全新提交意图：新请求标识、提交标记清零、外部投递从零计数。
+    assert work.row["submission_key"] not in (None, "sk-crash-3")
+    assert work.attempt_count == 1
+    with psycopg.connect(lane_env) as probe:
+        assert probe.execute(
+            "SELECT submitted_at IS NULL FROM publish_records WHERE id=%s", (record,)
+        ).fetchone() == (True,)
+
+
+def test_attempt_budget_bounds_pre_submit_requeues(pg: psycopg.Connection, lane_env: str) -> None:
+    """T23 有界重试：worker 反复死在提交前的记录最终落明确终态，不无限重排。"""
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="publishing")
+    pg.execute(
+        "UPDATE publish_records SET lease_owner='dead', "
+        "attempt_count=%s, "
+        "lease_expires_at=clock_timestamp() - interval '1 minute' WHERE id=%s",
+        (MAX_ATTEMPTS, record),
+    )
+    with open_txn() as conn:
+        work = claim_publish_work(conn, worker_id="w1")
+    assert work is None
+    status, message = record_row(pg, record, "status, error_message")
+    assert status == "failed"
+    assert "预算" in message
+
+
+def test_mark_and_renew_are_fenced_to_lease_owner(pg: psycopg.Connection, lane_env: str) -> None:
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg))
+    with open_txn() as conn:
+        work = claim_publish_work(conn, worker_id="w1")
+    assert work is not None
+    with open_txn() as conn:
+        assert mark_record_submitted(conn, record_id=record, lease_token="someone-else") is False
+        assert renew_publish_lease(conn, record_id=record, lease_token="someone-else") is False
+        assert mark_record_submitted(conn, record_id=record, lease_token=work.lease_token) is True
+        assert renew_publish_lease(conn, record_id=record, lease_token=work.lease_token) is True
+    with psycopg.connect(lane_env) as probe:
+        assert probe.execute(
+            "SELECT submitted_at IS NOT NULL, "
+            "lease_expires_at > clock_timestamp() + interval '14 minutes' "
+            "FROM publish_records WHERE id=%s",
+            (record,),
+        ).fetchone() == (True, True)
+
+
+def test_classify_delivery_failure_splits_pre_and_post_submit(
+    pg: psycopg.Connection, lane_env: str
+) -> None:
+    """T23：连接超时=提交前（可重试）；读超时/连接中断=提交后（未知）。
+
+    抖音 vendor 默认跑 curl_cffi，其异常家族与 requests 无继承关系——两个
+    家族都必须命中（漏掉 curl 家族会让生产主路径退化为自动重投）。"""
+    import requests
+    from curl_cffi import CurlError
+    from curl_cffi.requests import exceptions as curl_exc
+
+    pre_send = (
+        requests.exceptions.ConnectTimeout("connect timeout"),
+        curl_exc.ConnectTimeout("curl connect timeout"),
+    )
+    post_send = (
+        requests.exceptions.ReadTimeout("read timeout"),
+        requests.exceptions.ConnectionError("connection aborted"),
+        curl_exc.ReadTimeout("curl read timeout"),
+        curl_exc.ConnectionError("curl connection aborted"),
+    )
+    for exc in pre_send:
+        assert classify_delivery_failure(exc, platform="douyin", message="x").status == "failed"
+    for exc in post_send:
+        assert classify_delivery_failure(exc, platform="douyin", message="x").status == "unknown"
+    # 非 curl 非 requests 的普通异常维持 failed（可重试）。
+    assert (
+        classify_delivery_failure(
+            RuntimeError("platform said no"), platform="douyin", message="x"
+        ).status
+        == "failed"
+    )
+    # 裸 CurlError 按错误码：连接建立类确定未发送；传输类保守未知。
+    assert (
+        classify_delivery_failure(
+            CurlError("couldn't connect", code=7), platform="douyin", message="x"
+        ).status
+        == "failed"
+    )
+    assert (
+        classify_delivery_failure(
+            CurlError("operation timed out", code=28), platform="douyin", message="x"
+        ).status
+        == "unknown"
+    )
+
+
 def test_finalize_after_lease_loss_is_reported_not_written(
     pg: psycopg.Connection, lane_env: str
 ) -> None:
@@ -821,3 +1124,198 @@ def test_claim_skips_account_locked_by_unbind(pg: psycopg.Connection, lane_env: 
         with open_txn() as claiming:
             assert claim_publish_work(claiming, worker_id="racing-unbind") is None
     assert record_row(pg, queued, "status, attempt_count") == ("queued", 0)
+
+
+# --------------------------------------------------------------------------- #
+# T25/T26/T27：统计刷新轮次、新旧键汇总兼容、客户同步的实际消费者
+# ---------------------------------------------------------------------------
+
+
+class _FakeViralClient:
+    """douyin_refresh 的脚本化假客户端；matched 形状与 viral_tikhub 一致。"""
+
+    def __init__(self, likes: int | None, play: int | None = None) -> None:
+        self._likes = likes
+        self._play = play
+
+    def douyin_refresh(self, *, platform: str, video_id: str) -> list[Any]:
+        video = SimpleNamespace(
+            video_id=video_id,
+            likes=self._likes,
+            comments=None,
+            shares=None,
+            collects=None,
+            play_count=self._play,
+        )
+        return [video]
+
+
+def _enable_stats_sync(pg: psycopg.Connection) -> None:
+    pg.execute(
+        "INSERT INTO runtime_settings (id, publish_stats_sync_enabled) VALUES (1, 1) "
+        "ON CONFLICT (id) DO UPDATE SET publish_stats_sync_enabled = 1"
+    )
+
+
+def test_stats_refresh_freezes_independent_billing_rounds(
+    pg: psycopg.Connection,
+    lane_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T25：同一作品三次有意刷新各自冻结独立轮次；同 key 网络重试由幂等层
+    重放（不进这里），不再撞平台操作唯一索引。"""
+    import app.admin_publish_stats_routes as stats_routes
+
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="published")
+    pg.execute("UPDATE publish_records SET platform_item_id='item-25' WHERE id=%s", (record,))
+    _enable_stats_sync(pg)
+    monkeypatch.setattr(
+        stats_routes,
+        "viral_source_client_from_settings",
+        lambda conn: _FakeViralClient(likes=5),
+    )
+    for _ in range(3):
+        with open_txn() as conn:
+            stats_routes.refresh_published_record_stats(
+                BusinessConnection.postgres(conn), record_id=record
+            )
+    with psycopg.connect(lane_env) as probe:
+        rounds = [
+            int(r[0])
+            for r in probe.execute(
+                "SELECT billing_round FROM billing_operations "
+                "WHERE service='viral_data' AND source_id=%s AND user_id IS NULL "
+                "ORDER BY billing_round",
+                (f"publish_stats:{record}",),
+            ).fetchall()
+        ]
+    assert rounds == [1, 2, 3]
+    # 每轮各冻结一条平台成本事实（保留独立物理请求计量）。
+    with psycopg.connect(lane_env) as probe:
+        states = [
+            r[0]
+            for r in probe.execute(
+                "SELECT state FROM billing_operations "
+                "WHERE service='viral_data' AND source_id=%s AND user_id IS NULL "
+                "ORDER BY billing_round",
+                (f"publish_stats:{record}",),
+            ).fetchall()
+        ]
+    assert states == ["SUCCEEDED", "SUCCEEDED", "SUCCEEDED"]
+
+
+def test_summary_mixes_legacy_and_canonical_like_keys(
+    client: TestClient, pg: psycopg.Connection
+) -> None:
+    """T26：17（旧键 likes）+ 23（新键 like_count）汇总 40；未知播放不按 0 计。"""
+    account = seed_account(pg)
+    legacy = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="published")
+    pg.execute(
+        "UPDATE publish_records SET stats=%s::jsonb WHERE id=%s",
+        ('{"likes": 17, "comments": 2, "shares": 1, "collects": 3}', legacy),
+    )
+    modern = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="published")
+    # 新键写入但播放缺失（上游未返回）：播放未知，不得计 0。
+    pg.execute(
+        "UPDATE publish_records SET stats=%s::jsonb WHERE id=%s",
+        ('{"like_count": 23, "comment_count": null, "play_count": null}', modern),
+    )
+    body = client.get(f"{BASE}/summary").json()
+    assert body["like_total"] == 40
+    assert body["play_total"] == 0
+
+
+def test_worker_consumes_stats_sync_request(
+    pg: psycopg.Connection,
+    lane_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T27：置旗后由 worker 实际消费——拉上游、冻结成本、写回统计并清旗。"""
+    import app.admin_publish_stats_routes as stats_routes
+
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="published")
+    pg.execute(
+        "UPDATE publish_records SET platform='douyin', platform_item_id='item-27', "
+        "stats=%s::jsonb, sync_requested=1 WHERE id=%s",
+        ('{"play_count": 1}', record),
+    )
+    _enable_stats_sync(pg)
+    monkeypatch.setattr(
+        stats_routes,
+        "viral_source_client_from_settings",
+        lambda conn: _FakeViralClient(likes=88),
+    )
+    assert (
+        worker_mod.run_publish_round(open_txn, worker_id="w1", fernet=Fernet(_TEST_KEY.encode()))
+        == 1
+    )
+    status, stats, requested = record_row(pg, record, "status, stats, sync_requested")
+    assert status == "published"
+    assert stats["like_count"] == 88
+    # 上游未返回播放：不写入 play_count（未知不落 0），面板会显示「暂未返回」。
+    assert "play_count" not in stats
+    assert requested == 0
+
+
+def test_stats_sync_failure_backs_off_then_abandons(
+    pg: psycopg.Connection,
+    lane_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T27：失败按租约退避，超过预算自动放弃且错误对客户可见。"""
+    import app.admin_publish_stats_routes as stats_routes
+
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="published")
+    pg.execute(
+        "UPDATE publish_records SET platform='douyin', platform_item_id='item-bad', "
+        "sync_requested=1 WHERE id=%s",
+        (record,),
+    )
+    _enable_stats_sync(pg)
+
+    def failing_client(conn: Any) -> Any:
+        class _Broken:
+            def douyin_refresh(self, *, platform: str, video_id: str) -> list[Any]:
+                raise RuntimeError("upstream down")
+
+        return _Broken()
+
+    monkeypatch.setattr(stats_routes, "viral_source_client_from_settings", failing_client)
+    for _ in range(STATS_SYNC_MAX_ATTEMPTS):
+        assert (
+            worker_mod.run_publish_round(
+                open_txn, worker_id="w1", fernet=Fernet(_TEST_KEY.encode())
+            )
+            == 1
+        )
+        # 失败收口会把租约改成 5 分钟退避闸门；测试里手动到点，验证下一轮重试。
+        pg.execute(
+            "UPDATE publish_records SET lease_expires_at = clock_timestamp() "
+            "- interval '1 minute' WHERE id=%s",
+            (record,),
+        )
+    status, requested, message = record_row(pg, record, "status, sync_requested, error_message")
+    assert status == "published"
+    assert requested == 0
+    assert "自动同步已停止" in message
+
+
+def test_request_sync_rejects_unsupported_platform(
+    client: TestClient, pg: psycopg.Connection
+) -> None:
+    """T27：未实现同步的平台置旗即 422，按钮语义与后端一致。"""
+    account = seed_account(pg)
+    record = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="published")
+    pg.execute(
+        "UPDATE publish_records SET platform='wechat_channels' WHERE id=%s",
+        (record,),
+    )
+    response = client.post(f"{BASE}/{record}/sync")
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "PUBLISH_STATS_PLATFORM_UNSUPPORTED"
+    assert pg.execute(
+        "SELECT sync_requested FROM publish_records WHERE id=%s", (record,)
+    ).fetchone() == (0,)

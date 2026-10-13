@@ -102,7 +102,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上，故链尾为该值。
 # 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
-HEAD_REVISION = "20261013T1010_studio_draft_tombstones"
+HEAD_REVISION = "20261013T1020_publish_submission_safety"
 
 
 @pytest.mark.pg
@@ -405,17 +405,21 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # OPEN 部分唯一索引）与 studio_drafts.deleted_at（文本列），tables/primary_keys
 # +1、columns +21、check_constraints +1、jsonb_columns +1、partial_indexes +1、
 # timestamptz_columns +5；digest 由 --print-schema 在全新 PG16 探针库重算。
+# 2026-10-13 T23/T27 追加：publish_records 状态 CHECK 扩 submission_unknown、
+# submitted_at/submission_key/sync_attempts 三列 + sync_attempts CHECK +
+# submission_unknown 部分索引；columns +3、check_constraints +1、
+# timestamptz_columns +1、partial_indexes +1；digest 在全新 PG16 探针库重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 387,
-    "columns": 1485,
+    "check_constraints": 388,
+    "columns": 1488,
     "foreign_keys": 216,
     "identity_columns": 0,
     "jsonb_columns": 12,
-    "partial_indexes": 43,
+    "partial_indexes": 44,
     "primary_keys": 133,
     "sequences": 8,
     "tables": 133,
-    "timestamptz_columns": 117,
+    "timestamptz_columns": 118,
     "triggers": 61,
     "unique_constraints": 43,
 }
@@ -674,7 +678,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "620c97a7520824cf1bac6f447c4f8033d0bf1459986a8e04848112e0041a490a"
+HEAD_SCHEMA_DIGEST = "114772521601786be9f73e73c229c1cf313b82be08d57c89e7234920cc817391"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

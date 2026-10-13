@@ -753,6 +753,10 @@ def prepare_oral_work(conn: BusinessConnection, lease: OralWorkLease) -> OralWor
                       ON ref.task_type = 'ORAL_VIDEO' AND ref.task_id = task.id
                     WHERE task.id = %s AND task.lease_owner = %s
                       AND task.attempt_count = %s
+                      -- T24：分身/声音在任务排队期间被删除时，租约到期会查不到
+                      -- 行 → 任务按租约丢失处理进隔离，绝不会拿已删克隆继续付费提交。
+                      AND avatar.deleted_at IS NULL
+                      AND (voice.id IS NULL OR voice.deleted_at IS NULL)
                 """,
             "avatar_poll": (
                 "SELECT * FROM oral_avatars WHERE id = %s AND lease_owner = %s "
