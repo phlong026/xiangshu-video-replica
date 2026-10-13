@@ -44,6 +44,7 @@ function record(overrides: Partial<PublishRecordItem>): PublishRecordItem {
     stats: null,
     stats_synced_at: null,
     sync_requested: false,
+    submission_key: null,
     error_message: null,
     published_at: null,
     attempt_count: 0,

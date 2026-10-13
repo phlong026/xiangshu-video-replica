@@ -9,6 +9,7 @@ import { useCallback, useLayoutEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   MaterialItem,
+  MaterialUsagesResponse,
   ViralDetailViewResponse,
   ViralVideoItem,
 } from "../api";
@@ -112,19 +113,9 @@ const {
   getMaterialBatchPreviews: vi.fn(),
   getMaterialCachedPreview: vi.fn(),
   getMaterialUsages: vi.fn(
-    async (
-      _materialId: string,
-    ): Promise<{
-      total: number;
-      items: {
-        task_id: string;
-        kind: string;
-        status: string;
-        created_at: string;
-      }[];
-    }> => ({
-      total: 0,
-      items: [],
+    async (_materialId: string): Promise<MaterialUsagesResponse> => ({
+      producer: { total: 0, items: [] },
+      reference: { total: 0, items: [] },
     }),
   ),
   getMaterialCacheUsage: vi.fn(),
@@ -827,7 +818,10 @@ describe("V1.4 内容与运营页面", () => {
           return { previews, thumbnails: {} };
         },
       );
-    getMaterialUsages.mockReset().mockResolvedValue({ total: 0, items: [] });
+    getMaterialUsages.mockReset().mockResolvedValue({
+      producer: { total: 0, items: [] },
+      reference: { total: 0, items: [] },
+    });
     getMaterialCacheUsage.mockReset().mockResolvedValue({
       bytes: 0,
       limitBytes: 256 * 1024 * 1024,

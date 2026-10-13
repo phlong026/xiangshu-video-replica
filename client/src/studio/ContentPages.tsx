@@ -8,6 +8,7 @@ import type {
   MaterialPage,
   MaterialSort,
   MaterialTagItem,
+  MaterialUsageSection,
   MaterialUsagesResponse,
   ViralDetailBilling,
   ViralImportPurpose,
@@ -76,7 +77,6 @@ import {
 import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
 import { PublishRecordsPanel } from "./PublishRecordsPanel";
 import type {
-  MaterialUsageSection,
   StudioAsset,
   StudioContextValue,
   StudioPublishDraft,

@@ -1531,7 +1531,7 @@ describe("V1.4 workspace integration", () => {
     });
 
     it("自动保存已在途时显式保存排队补写终态草稿", async () => {
-      let resolveAutosave: (() => void) | undefined;
+      let resolveAutosave: ((record: { revision: number }) => void) | undefined;
       live.persistCloudDraft.mockReturnValueOnce(
         new Promise<{ revision: number }>((resolve) => {
           resolveAutosave = resolve;
@@ -1564,8 +1564,10 @@ describe("V1.4 workspace integration", () => {
     });
 
     it("自动保存进行中连续两次显式保存仍发送最新终态草稿", async () => {
-      let resolveAutosave: (() => void) | undefined;
-      let resolveFinalDraft: (() => void) | undefined;
+      let resolveAutosave: ((record: { revision: number }) => void) | undefined;
+      let resolveFinalDraft:
+        | ((record: { revision: number }) => void)
+        | undefined;
       live.persistCloudDraft
         .mockReturnValueOnce(
           new Promise<{ revision: number }>((resolve) => {
@@ -1726,8 +1728,8 @@ describe("V1.4 workspace integration", () => {
     });
 
     it("账号切换期间串行写入并只保留尚未开始的最新草稿", async () => {
-      let resolveFirst: (() => void) | undefined;
-      let resolveSecond: (() => void) | undefined;
+      let resolveFirst: ((record: { revision: number }) => void) | undefined;
+      let resolveSecond: ((record: { revision: number }) => void) | undefined;
       live.persistCloudDraft
         .mockReturnValueOnce(
           new Promise<{ revision: number }>((resolve) => {
@@ -1794,11 +1796,11 @@ describe("V1.4 workspace integration", () => {
       let rejectA: ((cause: Error) => void) | undefined;
       live.persistCloudDraft
         .mockReturnValueOnce(
-          new Promise<void>((_resolve, reject) => {
+          new Promise<{ revision: number }>((_resolve, reject) => {
             rejectA = reject;
           }),
         )
-        .mockResolvedValueOnce(undefined);
+        .mockResolvedValueOnce({ revision: 1 });
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
       const accountA = { ...reviewUser, id: "failed-account-a" };
@@ -1836,11 +1838,11 @@ describe("V1.4 workspace integration", () => {
       let rejectAutosave: ((cause: Error) => void) | undefined;
       live.persistCloudDraft
         .mockReturnValueOnce(
-          new Promise<void>((_resolve, reject) => {
+          new Promise<{ revision: number }>((_resolve, reject) => {
             rejectAutosave = reject;
           }),
         )
-        .mockResolvedValueOnce(undefined);
+        .mockResolvedValueOnce({ revision: 1 });
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
       render(<StudioWorkspace currentUser={reviewUser} />);
@@ -1872,7 +1874,7 @@ describe("V1.4 workspace integration", () => {
       let rejectAutosave: ((cause: Error) => void) | undefined;
       live.persistCloudDraft
         .mockReturnValueOnce(
-          new Promise<void>((_resolve, reject) => {
+          new Promise<{ revision: number }>((_resolve, reject) => {
             rejectAutosave = reject;
           }),
         )
@@ -2031,7 +2033,7 @@ describe("V1.4 workspace integration", () => {
     });
 
     it("StrictMode下慢云写成功后仅写一次草稿并通知一次", async () => {
-      let resolveCloud: (() => void) | undefined;
+      let resolveCloud: ((record: { revision: number }) => void) | undefined;
       live.persistCloudDraft.mockReturnValueOnce(
         new Promise<{ revision: number }>((resolve) => {
           resolveCloud = resolve;
@@ -2071,7 +2073,7 @@ describe("V1.4 workspace integration", () => {
     });
 
     it("显式草稿云写等待期间卸载后保持静默且不追加写入", async () => {
-      let resolveCloud: (() => void) | undefined;
+      let resolveCloud: ((record: { revision: number }) => void) | undefined;
       live.persistCloudDraft.mockReturnValueOnce(
         new Promise<{ revision: number }>((resolve) => {
           resolveCloud = resolve;
