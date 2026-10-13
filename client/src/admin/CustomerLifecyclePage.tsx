@@ -185,12 +185,27 @@ export function CustomerLifecyclePage({
   useEffect(() => {
     void load();
   }, [load]);
-  // ADM-23 留存矩阵独立加载：失败不打扰主清单。
-  useEffect(() => {
-    void readCustomerRetention()
-      .then(setRetention)
-      .catch(() => setRetention(null));
+  // ADM-23 留存矩阵独立加载：失败不打扰主清单，但必须可见可重试（T32）
+  // ——静默置 null 会让「无数据」与「查询失败」不可分辨。
+  const [retentionLoading, setRetentionLoading] = useState(false);
+  const [retentionError, setRetentionError] = useState("");
+  const loadRetention = useCallback(async () => {
+    setRetentionLoading(true);
+    setRetentionError("");
+    try {
+      setRetention(await readCustomerRetention());
+    } catch (cause) {
+      setRetention(null);
+      setRetentionError(
+        cause instanceof Error ? cause.message : "留存查询失败",
+      );
+    } finally {
+      setRetentionLoading(false);
+    }
   }, []);
+  useEffect(() => {
+    void loadRetention();
+  }, [loadRetention]);
 
   function toggle(user_id: string) {
     setSelected((previous) => {
@@ -373,7 +388,11 @@ export function CustomerLifecyclePage({
           分层
           <select
             value={stage}
-            onChange={(event) => setStage(event.target.value)}
+            onChange={(event) => {
+              setStage(event.target.value);
+              // T30：分层变了，旧页码指向的窗口已不存在，必须回到第一页。
+              setOffset(0);
+            }}
           >
             {STAGE_FILTERS.map((value) => (
               <option key={value} value={value}>
@@ -458,11 +477,25 @@ export function CustomerLifecyclePage({
       )}
       {data ? (
         <Pagination
-          total={data.items.length + offset}
+          // T30：后端已下发真实 total，不再用「本页行数+offset」伪造
+          // （满一页时恒为 20 条、无法翻页）。
+          total={data.total ?? data.items.length + offset}
           limit={PAGE_SIZE}
           offset={offset}
           onPageChange={setOffset}
         />
+      ) : null}
+      {retentionError ? (
+        <div role="alert" className="uc-error">
+          {retentionError}
+          <button
+            type="button"
+            disabled={retentionLoading}
+            onClick={() => void loadRetention()}
+          >
+            {retentionLoading ? "重试中…" : "重试"}
+          </button>
+        </div>
       ) : null}
       {retention?.cohorts?.length ? (
         <section aria-label="客户队列留存">

@@ -283,15 +283,22 @@ def _ledger(
     *,
     actor_user_id: str,
 ) -> None:
-    """Append one wallet entry: ``user_id`` is the wallet owner, the actor is
-    the operator that caused it (T2.10 — a sub-account's entry sits on the
-    master's wallet with ``actor_user_id`` naming the sub)."""
+    """Append one wallet entry (T29 归属修正).
+
+    ``user_id`` 参数是钱包 owner（余额/lot 记账的口径，T2.10）；但流水行的
+    归属受 ``fk_wallet_api_key_owner`` 约束——凡操作带 API Key，行必须落在
+    **key 归属者**名下（子 key → 子账号），否则写入即违反复合外键。读侧
+    （customer_ledger / center-summary）按组织范围并集读取两代形状。
+    """
+    # 行归属：有 key 用 key owner（外键要求），无 key 用钱包 owner。
     conn.execute(
         "INSERT INTO wallet_transactions(id,user_id,type,available_delta,reserved_delta,"
         "billing_operation_id,"
         "billing_round,idempotency_key,pricing_snapshot_json,api_key_id,auth_source,task_id,"
         "oral_task_id,actor_user_id,discount_rate) "
-        "SELECT %s,%s,%s,%s,%s,id,%s,%s,%s,api_key_id,auth_source, "
+        "SELECT %s,COALESCE((SELECT k.user_id FROM customer_api_keys k "
+        "WHERE k.id = billing_operations.api_key_id), %s),"
+        "%s,%s,%s,id,%s,%s,%s,api_key_id,auth_source, "
         "CASE WHEN service IN ('video_768p','video_2k') THEN source_id END, "
         "CASE WHEN service='oral' THEN source_id END,%s,%s FROM billing_operations "
         "WHERE id=%s",

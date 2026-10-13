@@ -45,11 +45,19 @@ export function ConfirmDialog({
   const reasonInputRef = useRef<HTMLInputElement | null>(null);
   const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLFormElement | null>(null);
+  // 关闭后焦点返回触发元素（T33）：键盘用户按 Esc 关掉对话框后，焦点落回
+  // 打开它的那个按钮，而不是丢到 body 从头 Tab。
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const composingRef = useRef(false);
 
   useLayoutEffect(() => {
     if (!open) {
       return;
     }
+    returnFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     // 打开前清掉旧输入；被动 effect 可能晚于首次输入，导致新原因被清空。
     setReason("");
     setAcknowledged(false);
@@ -59,6 +67,9 @@ export function ConfirmDialog({
     } else {
       reasonInputRef.current?.focus();
     }
+    return () => {
+      returnFocusRef.current?.focus();
+    };
   }, [level, open]);
 
   useEffect(() => {
@@ -66,6 +77,11 @@ export function ConfirmDialog({
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
+      // T33/P1：中文输入法组合期按 Esc 是「取消候选词」，keydown 照常派发到
+      // window（macOS），不豁免会把正在输原因的对话框整个关掉。
+      if (event.isComposing) {
+        return;
+      }
       if (event.key === "Escape" && !busy) {
         onClose();
       }
@@ -103,6 +119,12 @@ export function ConfirmDialog({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // T33：中文输入法组合期按 Enter 是「确认候选词」，不是提交表单。
+    // composingRef 由原因输入框的组合事件维护；children 里的额外输入框
+    // 组合期回车在 Chrome 本就不触发 submit，此处保底。
+    if (composingRef.current) {
+      return;
+    }
     if (busy) {
       return;
     }
@@ -140,6 +162,10 @@ export function ConfirmDialog({
         className="admin-dialog"
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
+          // T33：此前对所有按键无条件 stopPropagation，焦点在表单内（打开即
+          // 聚焦输入框）时 Esc 永远到不了 window 监听器——输入区 Esc 关不掉。
+          // 只拦需要圈闭的 Tab，Esc 放行给统一的关闭监听。
+          if (event.key !== "Tab") return;
           event.stopPropagation();
           trapFocus(event);
         }}
@@ -161,6 +187,12 @@ export function ConfirmDialog({
               ref={reasonInputRef}
               value={reason}
               onChange={(event) => setReason(event.target.value)}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+              }}
             />
           </label>
         ) : null}

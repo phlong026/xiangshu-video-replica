@@ -6,6 +6,7 @@ import { AdjustmentsPage } from "./AdjustmentsPage";
 import { FundsOverview } from "./FundsOverview";
 import { OrdersPage } from "./OrdersPage";
 import { ReconciliationPage } from "./ReconciliationPage";
+import { BillingReconciliationQueue } from "./BillingReconciliationQueue";
 import { RefundsPage } from "./RefundsPage";
 import { TabBar } from "./ui/TabBar";
 
@@ -16,6 +17,7 @@ const tabs = [
   { id: "adjustments", label: "人工调整" },
   { id: "refunds", label: "退款管理" },
   { id: "reconciliation", label: "对账异常" },
+  { id: "billingQueue", label: "卡单核对" },
 ];
 
 export type FundsTab =
@@ -24,7 +26,8 @@ export type FundsTab =
   | "transactions"
   | "adjustments"
   | "refunds"
-  | "reconciliation";
+  | "reconciliation"
+  | "billingQueue";
 
 /**
  * 资金中心（方案 P1）：从「资金流水」两页签扩为五个，财务月度对账不离开
@@ -109,6 +112,9 @@ export function FundsPage({
           readOnly={readOnly}
           initialAnomaly={anomaly}
         />
+      )}
+      {tab === "billingQueue" && (
+        <BillingReconciliationQueue readOnly={readOnly} />
       )}
     </div>
   );

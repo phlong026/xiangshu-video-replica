@@ -76,6 +76,9 @@ class ApiKeyRecordResponse(BaseModel):
     credential_version: int = 1
     is_default: bool = False
     total_consumed_credits: int = 0
+    # T29 组织视图：key 归属者（本人视图=自己）。
+    owner_user_id: str = ""
+    owner_label: str = ""
 
 
 class CreatedApiKeyResponse(ApiKeyRecordResponse):
@@ -381,7 +384,17 @@ def list_customer_api_keys(request: Request, response: Response) -> ApiKeyListRe
     response.headers["Cache-Control"] = "no-store"
     snapshot = _require_customer_snapshot(request)
     with fenced_pg_transaction(snapshot) as (conn, ctx):
-        records = list_api_keys(conn, user_id=ctx.user_id)
+        # T29：母账号开组织视图（一并列出直接子账号的 key），子账号仍只看自己
+        # ——不能让子账号反查母账号或其他分支的 key。
+        has_children = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE parent_user_id = %s)",
+            (ctx.user_id,),
+        ).fetchone()
+        records = list_api_keys(
+            conn,
+            user_id=ctx.user_id,
+            include_children=bool(has_children and has_children[0]),
+        )
     return ApiKeyListResponse(
         items=[_record_response(record) for record in records],
         total=len(records),

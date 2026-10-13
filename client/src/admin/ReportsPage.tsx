@@ -8,14 +8,19 @@ import { PageBanner } from "./ui/PageBanner";
  * 老板看数不再逐页找导出按钮：选定月份（默认本月）一键出经营/资金月报与
  * 账务明细；客户清单、调账、审计三类底稿附在下方说明各自入口。
  */
-function monthBounds(month: string): { start: string; end: string } {
+
+/** 严格的 YYYY-MM 校验（T31）：返回 null 表示尚不是合法月份。
+ *  此前空串/半成品会在渲染期走 `Date.UTC(0, NaN)` → Invalid Date →
+ *  `toISOString()` 抛 RangeError，直接卸载整棵管理端树。 */
+function parseMonth(month: string): { start: string; end: string } | null {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return null;
   const [year, mon] = month.split("-").map(Number);
   const first = new Date(Date.UTC(year, mon - 1, 1));
   const last = new Date(Date.UTC(year, mon, 0));
-  return {
-    start: first.toISOString().slice(0, 10),
-    end: last.toISOString().slice(0, 10),
-  };
+  const start = first.toISOString().slice(0, 10);
+  const end = last.toISOString().slice(0, 10);
+  if (!start.startsWith(month)) return null; // 双保险：构造出的月份必须回读一致
+  return { start, end };
 }
 
 export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
@@ -37,7 +42,8 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const range = monthBounds(month);
+  const range = parseMonth(month);
+  const monthInvalid = range === null;
   const items: Array<{
     key: string;
     title: string;
@@ -51,8 +57,8 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
       run: () =>
         exportSummaryReportCsv({
           kind: "business",
-          start_date: range.start,
-          end_date: range.end,
+          start_date: range?.start ?? "",
+          end_date: range?.end ?? "",
         }),
     },
     {
@@ -62,8 +68,8 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
       run: () =>
         exportSummaryReportCsv({
           kind: "funds",
-          start_date: range.start,
-          end_date: range.end,
+          start_date: range?.start ?? "",
+          end_date: range?.end ?? "",
         }),
     },
     {
@@ -72,14 +78,14 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
       hint: "按客户×业务的积分流水与成本明细（最长 90 天）",
       run: () =>
         exportBillingReportCsv({
-          start_date: range.start,
-          end_date: range.end,
+          start_date: range?.start ?? "",
+          end_date: range?.end ?? "",
         }),
     },
   ];
 
   async function download(item: (typeof items)[number]) {
-    if (readOnly || busy) return;
+    if (readOnly || busy || !range) return;
     setBusy(item.key);
     setError("");
     try {
@@ -115,8 +121,14 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
             type="month"
             value={month}
             onChange={(event) => setMonth(event.target.value)}
+            aria-invalid={monthInvalid}
           />
         </label>
+        {monthInvalid ? (
+          <small role="alert" className="admin-hint">
+            月份格式不完整：请选择完整的「年-月」后再导出。
+          </small>
+        ) : null}
       </form>
       <div className="admin-viral-tiles">
         {items.map((item) => (
@@ -125,7 +137,7 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
             <dd>
               <button
                 type="button"
-                disabled={readOnly || busy !== "" || !month}
+                disabled={readOnly || busy !== "" || monthInvalid}
                 onClick={() => void download(item)}
               >
                 {busy === item.key ? "正在导出…" : "导出 CSV"}

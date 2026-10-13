@@ -42,7 +42,10 @@ class ReconciliationResolveRequest(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
 
 
-@router.get("/items")
+# 路径用 /queue 而非 /items：control_routes 的旧「三类对账异常清单」已占用
+# GET /billing-reconciliation/items（anomaly 必填），且在 main.py 先注册；
+# 同路径的队列版会被遮蔽成运行时不可达（T36 评审发现）。
+@router.get("/queue")
 def list_items(
     actor: AdminReader,
     state: str | None = None,

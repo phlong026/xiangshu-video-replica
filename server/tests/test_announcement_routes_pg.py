@@ -324,3 +324,45 @@ def test_support_ticket_lifecycle_and_publish_stats_guard(client: TestClient) ->
         headers={**headers, IDEMPOTENCY_KEY_HEADER: f"tk-{uuid.uuid4()}"},
     )
     assert guarded.status_code == 409
+
+
+def test_customer_retention_sql_runs_and_buckets(client: TestClient) -> None:
+    """T32 端点级回归：留存 SQL 曾因未 join 的 aca 别名 100% 抛错且被前端
+    静默吞掉。修复后必须 200、且带激活记录的客户按激活月分桶。"""
+    headers = _admin_session(client)
+    # 激活码方案已退役（2026-09-19）：在役客户普遍没有 aca 行，留存必须走
+    # 「无激活记录 → 回退注册月」这条主路径——旧实现的两种崩溃（UndefinedTable
+    # / text 列直喂 date_trunc）都发生在这条路径上。
+    response = client.get("/api/control/customers/retention", headers=headers, params={"months": 3})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["months"] == 3
+    assert isinstance(body["cohorts"], list)
+    assert len(body["cohorts"]) >= 1
+    current = [c for c in body["cohorts"] if c["cohort"].startswith("20")]
+    assert current, "至少应有一个队列"
+    # 队列 size 与活跃矩阵都来自同一批用户，size 不得小于活跃数。
+    for cohort in body["cohorts"]:
+        active_total = sum(cohort["activeByMonth"].values())
+        assert cohort["size"] >= active_total
+
+
+def test_billing_reconciliation_queue_route_is_registered(client: TestClient) -> None:
+    """T36 路由遮蔽回归：T40 队列的 /queue 路径必须在旧三类清单
+    （/items，anomaly 必填）之外独立可达——此前同路径被遮蔽成运行时不可达。
+    未带管理会话时应是认证失败（401/403），而不是 404/422 路径不存在。"""
+    # 本测试文件的 client 只挂了公告/生命周期路由；把 T40 队列路由并进来，
+    # 与生产 main.py 同样处于 control 前缀之下。
+    from app.admin_billing_reconciliation_routes import (
+        router as billing_reconciliation_router,
+    )
+
+    if not any(
+        getattr(route, "path", "").endswith("/billing-reconciliation/queue")
+        for route in client.app.routes
+    ):
+        client.app.include_router(billing_reconciliation_router)
+    response = client.get("/api/control/billing-reconciliation/queue")
+    assert response.status_code in (401, 403), (
+        f"queue route missing or shadowed: {response.status_code} {response.text[:200]}"
+    )

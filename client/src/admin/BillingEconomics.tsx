@@ -516,7 +516,7 @@ export function BillingEconomics({
               客户累计用量（含免费）：{usage(report.totals.seconds ?? 0)} 秒 /{" "}
               {usage(report.totals.images ?? 0)} 张 /{" "}
               {usage(report.totals.calls ?? 0)} 次。平台承担的已确认成本：
-              {money(report.totals.platform_cost_fen ?? 0)}。
+              {money(report.totals.platform_cost_fen)}。
             </p>
             {(report.totals.legacy_cost_count ?? 0) +
               (report.totals.legacy_settlement_count ?? 0) >
@@ -530,17 +530,14 @@ export function BillingEconomics({
             <div className="economics-kpis economics-kpis--four">
               {(costView
                 ? [
-                    ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
-                    [
-                      "平台承担成本",
-                      money(report.totals.platform_cost_fen ?? 0),
-                    ],
+                    ["已确认成本", money(report.totals.known_cost_fen)],
+                    ["平台承担成本", money(report.totals.platform_cost_fen)],
                     ["待核对成本", `${report.totals.unknown_cost_count} 项`],
                     ["生成次数", `${report.totals.operation_count} 次`],
                   ]
                 : [
-                    ["确认收入", money(report.totals.known_revenue_fen ?? 0)],
-                    ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
+                    ["确认收入", money(report.totals.known_revenue_fen)],
+                    ["已确认成本", money(report.totals.known_cost_fen)],
                     ["利润", money(report.totals.profit_fen)],
                     ["净扣积分", String(report.totals.charged_credits ?? 0)],
                   ]
@@ -581,15 +578,11 @@ export function BillingEconomics({
                           ? `${usage(row.seconds ?? 0)} / ${usage(row.images ?? 0)} / ${usage(row.calls ?? 0)}`
                           : row.charged_credits}
                       </td>
-                      {!costView && (
-                        <td>{money(row.known_revenue_fen ?? 0)}</td>
-                      )}
-                      <td>{money(row.known_cost_fen ?? 0)}</td>
+                      {!costView && <td>{money(row.known_revenue_fen)}</td>}
+                      <td>{money(row.known_cost_fen)}</td>
                       <td>
                         {money(
-                          costView
-                            ? (row.platform_cost_fen ?? 0)
-                            : row.profit_fen,
+                          costView ? row.platform_cost_fen : row.profit_fen,
                         )}
                       </td>
                     </tr>

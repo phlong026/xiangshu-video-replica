@@ -1,40 +1,69 @@
+// T34：公告中心复用共享客户请求器；已读回执成功才移除公告。
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { CustomerAnnouncementCenter } from "./CustomerAnnouncementCenter";
 
-afterEach(() => vi.unstubAllGlobals());
+const CREDENTIAL = { kind: "session" as const, token: "session-token" };
 
-it("公告使用原生按钮展开，关闭仍只提交已读回执", async () => {
-  const body = "合成公告正文".repeat(20);
-  const fetcher = vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({
-      items: [
-        { id: "a1", title: "测试公告", body, tone: "info", pinned: false },
-      ],
-    }),
+vi.mock("../api", () => ({
+  customerListAnnouncements: vi.fn(async () => [
+    {
+      id: "a1",
+      title: "维护通知",
+      body: "周日 02:00-04:00 系统维护",
+      tone: "maintenance",
+      pinned: true,
+      read: false,
+    },
+  ]),
+  customerMarkAnnouncementRead: vi.fn(async () => undefined),
+}));
+
+import { customerMarkAnnouncementRead } from "../api";
+
+beforeEach(() => {
+  vi.mocked(customerMarkAnnouncementRead).mockClear();
+});
+
+test("点「知道了」后等回执成功才移除公告", async () => {
+  render(<CustomerAnnouncementCenter credential={CREDENTIAL} />);
+  const button = await screen.findByRole("button", {
+    name: "关闭公告 维护通知",
   });
-  vi.stubGlobal("fetch", fetcher);
-  render(<CustomerAnnouncementCenter token="fixture" />);
-  expect(
-    await screen.findByRole("region", { name: "平台公告" }),
-  ).toBeInTheDocument();
-  const expand = screen.getByRole("button", { name: /点击展开/ });
-  expect(expand.tagName).toBe("BUTTON");
-  expect(expand).toHaveAttribute("aria-expanded", "false");
-  fireEvent.click(expand);
-  expect(screen.getByRole("button", { name: body })).toHaveAttribute(
-    "aria-expanded",
-    "true",
+  fireEvent.click(button);
+  await waitFor(() =>
+    expect(customerMarkAnnouncementRead).toHaveBeenCalledWith(CREDENTIAL, "a1"),
   );
-  fireEvent.click(screen.getByRole("button", { name: "关闭公告 测试公告" }));
   await waitFor(() =>
     expect(
-      screen.queryByRole("region", { name: "平台公告" }),
-    ).not.toBeInTheDocument(),
+      screen.queryByRole("button", { name: "关闭公告 维护通知" }),
+    ).toBeNull(),
   );
-  expect(fetcher.mock.calls.at(-1)?.[0]).toMatch(
-    /\/api\/announcements\/a1\/read$/,
+});
+
+test("已读回执失败：公告保留原位并提示可重试", async () => {
+  vi.mocked(customerMarkAnnouncementRead).mockRejectedValueOnce(
+    new Error("网络断开"),
   );
-  expect(fetcher.mock.calls.at(-1)?.[1]).toMatchObject({ method: "POST" });
+  render(<CustomerAnnouncementCenter credential={CREDENTIAL} />);
+  const button = await screen.findByRole("button", {
+    name: "关闭公告 维护通知",
+  });
+  fireEvent.click(button);
+  await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+  // 公告仍在原位，可再次点击。
+  expect(
+    screen.getByRole("button", { name: "关闭公告 维护通知" }),
+  ).toBeInTheDocument();
+});
+
+test("列表读取失败：显示可重试的失败态而不是静默为空", async () => {
+  const { customerListAnnouncements } = await import("../api");
+  vi.mocked(customerListAnnouncements).mockRejectedValueOnce(
+    new Error("公告服务暂不可用"),
+  );
+  render(<CustomerAnnouncementCenter credential={CREDENTIAL} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "公告服务暂不可用",
+  );
 });

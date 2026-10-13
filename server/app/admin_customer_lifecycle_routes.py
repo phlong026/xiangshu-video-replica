@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import psycopg
 from fastapi import APIRouter
 
 from app.admin_auth_routes import AdminReader
@@ -114,6 +115,30 @@ def list_customer_lifecycle(
                 """,
                 (*row_params, bounded_limit, bounded_offset),
             ).fetchall()
+            # T30：真实总数。此前响应没有 total，前端只能拿「本页行数+offset」
+            # 伪造——满一页时永远显示 20 条、无法翻页。
+            total = conn.execute(
+                CUSTOMER_FACTS_CTE
+                + f"""
+                SELECT count(*) FROM (
+                  SELECT u.id, {_STAGE_SQL} AS stage
+                  FROM users u
+                  LEFT JOIN wallets w ON w.user_id = u.id
+                  LEFT JOIN LATERAL (
+                    SELECT COALESCE(SUM(ro.amount_fen), 0) AS total_fen,
+                           MAX({utc_text_timestamp("ro.paid_at")}) AS last_at
+                    FROM recharge_orders ro
+                    WHERE ro.user_id = u.id AND ro.status = 'PAID'
+                      AND {CASH_ORDER_ELIGIBLE}
+                  ) recharge ON TRUE
+                  {CUSTOMER_METRICS_JOINS}
+                  WHERE u.role = 'customer' AND u.is_active = 1
+                ) staged
+                {row_filter}
+                """,
+                tuple(row_params),
+            ).fetchone()
+            total_count = int(total[0]) if total is not None else 0
             distribution = conn.execute(
                 CUSTOMER_FACTS_CTE
                 + f"""
@@ -140,6 +165,7 @@ def list_customer_lifecycle(
         ) from exc
     return {
         "items": _lifecycle_rows(rows),
+        "total": total_count,
         "distribution": [
             {"stage": str(r[0]), "count": int(r[1]), "min_score": int(r[2]), "max_score": int(r[3])}
             for r in distribution
@@ -188,22 +214,31 @@ def read_customer_retention(actor: AdminReader, months: int = 6) -> dict[str, ob
             rows = conn.execute(
                 CUSTOMER_FACTS_CTE
                 # CUSTOMER_FACTS_CTE 已以 WITH 开头：链式 CTE 用逗号续接。
-                + f"""
+                # CUSTOMER_FACTS_CTE 以右括号收尾、无尾逗号：链式 CTE 必须
+                # 自带逗号（缺失会让整段 SQL 在 PG 报 syntax error）。
+                + f""",
                 cohorts AS (
                   SELECT u.id,
                          date_trunc('month',
-                           COALESCE(aca.activated_at, {utc_text_timestamp("u.created_at")}))
-                           AS cohort_month
+                           COALESCE(
+                             {utc_text_timestamp("aca.activated_at")},
+                             {utc_text_timestamp("u.created_at")}
+                           )) AS cohort_month
                   FROM users u
+                  -- T32 修复：此前引用了从未 join 的别名 aca（UndefinedTable）；
+                  -- 修复 join 后又暴露第二层问题——created_at/activated_at 都是
+                  -- text 列，date_trunc 前必须转 timestamptz，否则 UndefinedFunction。
+                  LEFT JOIN activation_code_activations aca ON aca.user_id = u.id
                   LEFT JOIN wallets w ON w.user_id = u.id
                   {CUSTOMER_METRICS_JOINS}
                   WHERE u.role = 'customer' AND u.is_active = 1
                 ), activity_months AS (
+                  -- customer_activity_facts 的 created_at 在 CTE 内已是
+                  -- timestamptz，不能再走 text→timestamptz 转换（运算符不存在）。
                   SELECT user_id,
-                         date_trunc('month', {utc_text_timestamp("created_at")}) AS m
+                         date_trunc('month', created_at) AS m
                   FROM customer_activity_facts
-                  WHERE {utc_text_timestamp("created_at")}
-                    >= date_trunc('month', now()) - make_interval(months => %s)
+                  WHERE created_at >= date_trunc('month', now()) - make_interval(months => %s)
                 )
                 SELECT c.cohort_month, am.m AS active_month, count(DISTINCT c.id)
                 FROM cohorts c
@@ -217,9 +252,13 @@ def read_customer_retention(actor: AdminReader, months: int = 6) -> dict[str, ob
                 CUSTOMER_FACTS_CTE
                 + f"""
                 SELECT date_trunc('month',
-                         COALESCE(aca.activated_at, {utc_text_timestamp("u.created_at")})),
+                         COALESCE(
+                           {utc_text_timestamp("aca.activated_at")},
+                           {utc_text_timestamp("u.created_at")}
+                         )),
                        count(*)
                 FROM users u
+                LEFT JOIN activation_code_activations aca ON aca.user_id = u.id
                 LEFT JOIN wallets w ON w.user_id = u.id
                 {CUSTOMER_METRICS_JOINS}
                 WHERE u.role = 'customer' AND u.is_active = 1
@@ -229,6 +268,11 @@ def read_customer_retention(actor: AdminReader, months: int = 6) -> dict[str, ob
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(
             503, "CUSTOMER_RETENTION_UNAVAILABLE", "客户留存分析需要 PostgreSQL 运行时。"
+        ) from exc
+    except psycopg.ProgrammingError as exc:
+        # T32：SQL 结构错误必须显式 503（带错误码），不能裸 500 被前端静默吞掉。
+        raise _http(
+            503, "CUSTOMER_RETENTION_UNAVAILABLE", "留存查询暂不可用，请稍后重试。"
         ) from exc
     sizes = {str(r[0])[:7]: int(r[1]) for r in cohort_sizes}
     active: dict[str, dict[str, int]] = {}

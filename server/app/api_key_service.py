@@ -78,6 +78,10 @@ class ApiKeyRecord:
     credential_version: int = 1
     is_default: bool = False
     total_consumed_credits: int = 0
+    # T29：key 归属者及其显示名。母账号开组织视图时会看到子账号的 key，
+    # 下拉里必须能分清这把 key 是谁的；本人视图两字段恒为本人。
+    owner_user_id: str = ""
+    owner_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -260,8 +264,22 @@ def create_api_key(
     return generated.plaintext, record
 
 
-def list_api_keys(conn: psycopg.Connection, *, user_id: str) -> list[ApiKeyRecord]:
-    """Latest credential in each logical group, including fully revoked groups."""
+def list_api_keys(
+    conn: psycopg.Connection, *, user_id: str, include_children: bool = False
+) -> list[ApiKeyRecord]:
+    """Latest credential in each logical group, including fully revoked groups.
+
+    ``include_children``（T29 组织视图）：母账号可一并看到其直接子账号的
+    key——否则母账号既筛不了子 key 的账单、也看不出子账号消费挂在哪把
+    key 上。只读；吊销/轮换仍严格按 key 本人归属，不因组织视图放宽。
+    """
+    owner_scope = "user_id = %s"
+    params: list[object] = [user_id]
+    if include_children:
+        owner_scope = (
+            "(user_id = %s OR user_id IN (SELECT id FROM users WHERE parent_user_id = %s))"
+        )
+        params = [user_id, user_id]
     rows = conn.execute(
         "SELECT k.id, k.key_prefix, k.label, k.scopes, k.created_at, "
         "(SELECT max(v.last_used_at) FROM customer_api_keys v "
@@ -269,12 +287,16 @@ def list_api_keys(conn: psycopg.Connection, *, user_id: str) -> list[ApiKeyRecor
         "k.revoked_at, k.token_group_id, k.credential_version, k.is_default, "
         "(SELECT COALESCE(SUM(-wt.reserved_delta), 0) FROM wallet_transactions wt "
         "JOIN customer_api_keys v ON v.id = wt.api_key_id "
+        "JOIN users key_owner ON key_owner.id = v.user_id "
         "WHERE v.token_group_id = k.token_group_id "
-        "AND wt.user_id = k.user_id AND wt.type = 'SETTLE') "
+        "AND wt.user_id = key_owner.id "
+        "AND wt.type = 'SETTLE'), "
+        "k.user_id, "
+        "(SELECT display_name FROM users WHERE id = k.user_id) "
         "FROM (SELECT DISTINCT ON (token_group_id) * FROM customer_api_keys "
-        "WHERE user_id = %s ORDER BY token_group_id, credential_version DESC) k "
+        f"WHERE {owner_scope} ORDER BY token_group_id, credential_version DESC) k "
         "ORDER BY k.created_at DESC, k.id DESC",
-        (user_id,),
+        tuple(params),
     ).fetchall()
     return [
         ApiKeyRecord(
@@ -289,6 +311,8 @@ def list_api_keys(conn: psycopg.Connection, *, user_id: str) -> list[ApiKeyRecor
             credential_version=int(r[8]),
             is_default=bool(r[9]),
             total_consumed_credits=int(r[10]),
+            owner_user_id=str(r[11]),
+            owner_label=str(r[12] or r[11]),
         )
         for r in rows
     ]

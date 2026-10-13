@@ -243,23 +243,43 @@ class MaterialTagItem(BaseModel):
 
 
 class MaterialUsage(BaseModel):
-    """MATERIAL-UX-10：引用该素材的一个任务。"""
+    """素材与任务的一段关系（T28）。
+
+    ``role="producer"``：该任务产出了这个素材（result_asset_id 指向它）；
+    ``role="consumer"``：该任务把这个素材当输入用掉了（首帧/尾帧/参考/口播
+    音频，读取任务冻结的输入快照）。两者是不同的事实，此前混在
+    「被引用次数」一个数里，用户没法据此判断后续使用关系。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     task_id: str
     kind: Literal["generation", "oral"]
+    role: Literal["producer", "consumer"]
     status: str
     created_at: str
 
 
-class MaterialUsagesResponse(BaseModel):
-    """MATERIAL-UX-10：单素材按需的使用记录（不做列表批量聚合）。"""
-
+class MaterialUsageSection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     total: int
     items: list[MaterialUsage]
+
+
+class MaterialUsagesResponse(BaseModel):
+    """MATERIAL-UX-10 / T28：单素材按需使用记录，生产与消费分节（不做批量聚合）。
+
+    状态口径（显式）：两节都不按任务状态过滤——生成来源含失败/取消的尝试
+    （它们确实产出过这个 asset_id 的尝试记录），输入引用含冻结了该输入的
+    全部任务（输入在提交时即被消耗，任务成败不改变引用事实）；每行都带
+    status 由界面如实展示。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    producer: MaterialUsageSection
+    reference: MaterialUsageSection
 
 
 class MaterialGroupsResponse(BaseModel):
@@ -1125,23 +1145,46 @@ def list_material_tags(
     return [MaterialTagItem(tag=str(row["tag"]), count=int(row["count"])) for row in rows]
 
 
+_USAGE_LIMIT = 20
+
+
+def _usage_section(rows: list[Any], role: Literal["producer", "consumer"]) -> MaterialUsageSection:
+    items = [
+        MaterialUsage(
+            task_id=str(row["task_id"]),
+            kind=cast(Literal["generation", "oral"], row["kind"]),
+            role=role,
+            status=str(row["status"]),
+            created_at=str(row["created_at"]),
+        )
+        for row in rows
+    ]
+    total = int(rows[0]["total_count"]) if rows else 0
+    return MaterialUsageSection(total=total, items=items)
+
+
 def list_material_usages(
     conn: BusinessConnection,
     *,
     actor: CurrentUser,
     material_id: str,
 ) -> MaterialUsagesResponse:
-    """MATERIAL-UX-10：按需查询单个素材被哪些任务引用。
+    """MATERIAL-UX-10 / T28：生产来源与真实输入引用分开统计。
 
-    只对 asset 来源素材有意义（直出成片本身就是任务产物，无“被引用”概念）；
-    owner 围栏：generation 任务经 batch 归属校验，oral 任务按 owner 直属。
-    最多返回 20 条（total 用窗口计数给出全量），避免详情面板长列表。
+    两节各自 owner 围栏：generation 经 batch 归属，oral 按 owner 直属；同任务
+    多路径引用同一素材只计一次（引用节 DISTINCT task）。输入关系读任务冻结
+    的快照（generation_batches.request_snapshot_json 的首帧/尾帧/参考清单，
+    文本列转 jsonb）与 oral_tasks.audio_asset_id——不读可变的页面状态，提交
+    之后输入关系不会漂移。每节 LIMIT 20（total 用窗口计数给全量）。
     """
     require_material(conn, actor=actor, material_id=material_id)
     source_type, source_id = parse_material_id(material_id)
     if source_type == "generation":
-        return MaterialUsagesResponse(total=0, items=[])
-    rows = conn.execute(
+        # 直出成片本身就是任务产物：生产节为空，也不存在「再被当输入」的
+        # 独立事实可查（虚拟素材没有 assets 行）。
+        empty = MaterialUsageSection(total=0, items=[])
+        return MaterialUsagesResponse(producer=empty, reference=empty)
+    producer_rows = conn.execute(
         """
         SELECT usage.kind, usage.task_id, usage.status, usage.created_at,
                COUNT(*) OVER () AS total_count
@@ -1158,21 +1201,64 @@ def list_material_usages(
             WHERE oral.result_asset_id = %s AND oral.owner_user_id = %s
         ) AS usage
         ORDER BY usage.created_at DESC
-        LIMIT 20
+        LIMIT %s
         """,
-        (source_id, actor.id, source_id, actor.id),
+        (source_id, actor.id, source_id, actor.id, _USAGE_LIMIT),
     ).fetchall()
-    items = [
-        MaterialUsage(
-            task_id=str(row["task_id"]),
-            kind=cast(Literal["generation", "oral"], row["kind"]),
-            status=str(row["status"]),
-            created_at=str(row["created_at"]),
-        )
-        for row in rows
-    ]
-    total = int(rows[0]["total_count"]) if rows else 0
-    return MaterialUsagesResponse(total=total, items=items)
+    reference_rows = conn.execute(
+        """
+        SELECT usage.kind, usage.task_id, usage.status, usage.created_at,
+               COUNT(*) OVER () AS total_count
+        FROM (
+            -- generation 输入引用：batch 快照冻结的首帧/尾帧/参考清单。
+            SELECT DISTINCT 'generation' AS kind, task.id AS task_id,
+                   task.status AS status, task.created_at AS created_at
+            FROM generation_tasks task
+            JOIN generation_batches batch ON batch.id = task.batch_id
+            WHERE batch.created_by_user_id = %s
+              AND (
+                  batch.request_snapshot_json::jsonb ->> 'first_frame_asset_id' = %s
+                  OR batch.request_snapshot_json::jsonb ->> 'last_frame_asset_id' = %s
+                  OR EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements_text(
+                          CASE
+                              WHEN jsonb_typeof(
+                                  batch.request_snapshot_json::jsonb
+                                      -> 'reference_asset_ids'
+                              ) = 'array'
+                              THEN batch.request_snapshot_json::jsonb
+                                       -> 'reference_asset_ids'
+                              ELSE '[]'::jsonb
+                          END
+                      ) AS reference(reference_id)
+                      WHERE reference.reference_id = %s
+                  )
+              )
+            UNION ALL
+            -- oral 输入引用：音频驱动任务的 audio_asset_id（冻结直列）。
+            SELECT 'oral' AS kind, oral.id AS task_id, oral.status AS status,
+                   oral.created_at AS created_at
+            FROM oral_tasks oral
+            WHERE oral.owner_user_id = %s AND oral.audio_asset_id = %s
+        ) AS usage
+        ORDER BY usage.created_at DESC
+        LIMIT %s
+        """,
+        (
+            actor.id,
+            source_id,
+            source_id,
+            source_id,
+            actor.id,
+            source_id,
+            _USAGE_LIMIT,
+        ),
+    ).fetchall()
+    return MaterialUsagesResponse(
+        producer=_usage_section(producer_rows, "producer"),
+        reference=_usage_section(reference_rows, "consumer"),
+    )
 
 
 def resolve_materials(

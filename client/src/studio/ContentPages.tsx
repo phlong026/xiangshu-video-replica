@@ -76,6 +76,7 @@ import {
 import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
 import { PublishRecordsPanel } from "./PublishRecordsPanel";
 import type {
+  MaterialUsageSection,
   StudioAsset,
   StudioContextValue,
   StudioPublishDraft,
@@ -159,6 +160,43 @@ function assetKindLabel(kind: StudioAsset["kind"]) {
 }
 
 // MATERIAL-UX-03：详情面板“文件大小”行人读化；无存档直出成片无大小返回 undefined。
+/** T28：使用记录分节。生成来源与输入引用是不同事实，标题与提示分开说，
+ * 计数如实给全量（超出 20 条的余量单独一行）。 */
+function UsageSection({
+  title,
+  hint,
+  section,
+}: {
+  title: string;
+  hint: string;
+  section: MaterialUsageSection;
+}) {
+  if (section.total === 0) return null;
+  return (
+    <section className="content-usage-section">
+      <p>
+        <b>{title}</b>
+        <small className="le-sub">{` ${section.total} 个任务 · ${hint}`}</small>
+      </p>
+      <ul>
+        {section.items.map((usage) => (
+          <li key={`${usage.role}:${usage.task_id}`}>
+            <span>
+              {usage.kind === "oral" ? "口播任务" : "视频生成"}
+              {" · "}
+              {usage.status}
+            </span>
+            <span>{formatTaskTime(usage.created_at)}</span>
+          </li>
+        ))}
+      </ul>
+      {section.total > section.items.length ? (
+        <p>还有 {section.total - section.items.length} 条未显示</p>
+      ) : null}
+    </section>
+  );
+}
+
 function formatMaterialSize(bytes?: number): string | undefined {
   if (bytes === undefined || bytes === null || bytes < 0) return undefined;
   if (bytes < 1024) return `${bytes} B`;
@@ -4722,30 +4760,22 @@ function MaterialsPageContent() {
                     {usagesLoading ? "读取中…" : "查看使用记录"}
                   </Button>
                   {usages ? (
-                    usages.total === 0 ? (
+                    usages.producer.total === 0 &&
+                    usages.reference.total === 0 ? (
                       <p className="content-usage-panel__empty">未被使用</p>
                     ) : (
                       <div className="content-usage-panel__list">
-                        <p>被 {usages.total} 个任务引用</p>
-                        <ul>
-                          {usages.items.map((usage) => (
-                            <li key={usage.task_id}>
-                              <span>
-                                {usage.kind === "oral"
-                                  ? "口播任务"
-                                  : "视频生成"}
-                                {" · "}
-                                {usage.status}
-                              </span>
-                              <span>{formatTaskTime(usage.created_at)}</span>
-                            </li>
-                          ))}
-                        </ul>
-                        {usages.total > usages.items.length ? (
-                          <p>
-                            还有 {usages.total - usages.items.length} 条未显示
-                          </p>
-                        ) : null}
+                        {/* T28：生成来源与真实输入引用是两回事，分节如实展示。 */}
+                        <UsageSection
+                          title="生成该素材的任务"
+                          hint="这些任务的产出就是这个素材"
+                          section={usages.producer}
+                        />
+                        <UsageSection
+                          title="作为输入引用该素材的任务"
+                          hint="这些任务把素材用作首帧、参考或口播音频"
+                          section={usages.reference}
+                        />
                       </div>
                     )
                   ) : null}

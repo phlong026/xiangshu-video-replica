@@ -60,9 +60,17 @@ LedgerBusiness = Literal[
 ]
 
 # 逐笔流水行的读取口径：旧的逐笔列表与新的合并列表共用，两边字段不会漂移。
+# T29：子账号 key 的消费记在母钱包（wt.user_id=母 / actor_user_id=子 /
+# api_key_id=子的 key），按 `k.user_id = wt.user_id` 关联永远失配——标签、
+# token 过滤全空。改为组织归属：key 的 owner 是钱包 owner 本人或其直接子账号。
+LEDGER_KEY_ORG_MATCH = (
+    "(k.user_id = wt.user_id OR EXISTS (SELECT 1 FROM users sub "
+    "WHERE sub.id = k.user_id AND sub.parent_user_id = wt.user_id))"
+)
+
 LEDGER_ROW_FROM = (
     " FROM wallet_transactions wt LEFT JOIN customer_api_keys k ON k.id = "
-    "wt.api_key_id AND k.user_id = wt.user_id "
+    "wt.api_key_id AND " + LEDGER_KEY_ORG_MATCH + " "
     "LEFT JOIN billing_operations op ON op.id=wt.billing_operation_id "
     "AND (op.user_id=wt.user_id OR op.user_id=wt.actor_user_id) "
     "LEFT JOIN recharge_orders credit_order ON credit_order.id = wt.recharge_order_id "
@@ -125,8 +133,12 @@ def ledger_filter_clauses(
     时间上界一边开区间一边闭区间。客户看到的现象是「界面有行、导出的 CSV 只有表头」。
     共用一份是唯一能让两边不漂移的写法——新增筛选项只需要改这里一处。
     """
-    clauses = ["wt.user_id = %s"]
-    params: list[object] = [wallet_owner_id]
+    # T29 组织范围：子 key 的归属行落在子账号名下（fk_wallet_api_key_owner），
+    # 母账号的账单必须是「本人 ∪ 直接子账号」的并集，否则子 key 行全部隐身。
+    clauses = [
+        "(wt.user_id = %s OR wt.user_id IN (SELECT id FROM users WHERE parent_user_id = %s))"
+    ]
+    params: list[object] = [wallet_owner_id, wallet_owner_id]
     if sub_account_id:
         clauses.append("wt.actor_user_id = %s")
         params.append(sub_account_id)
@@ -240,7 +252,7 @@ def entry_key_of(row: WalletTransactionResponse) -> tuple[bool, str]:
 
 _KEYED_FROM = (
     " FROM wallet_transactions wt "
-    "LEFT JOIN customer_api_keys k ON k.id = wt.api_key_id AND k.user_id = wt.user_id "
+    "LEFT JOIN customer_api_keys k ON k.id = wt.api_key_id AND " + LEDGER_KEY_ORG_MATCH + " "
     "LEFT JOIN billing_operations op ON op.id = wt.billing_operation_id "
     "AND (op.user_id = wt.user_id OR op.user_id = wt.actor_user_id) WHERE "
 )
@@ -460,14 +472,19 @@ def read_ledger_page(
             row_params.extend(row_keys)
         # 取整组而不是「命中筛选的那几行」：一条任务的暂扣与退回可能一个在筛选范围内、
         # 一个在范围外，只取一半就又回到了逐行看账的老问题。
+        # T29：整组装配同样按组织范围（本人 ∪ 直接子账号），否则子 key 命中的
+        # 条目在装配时被 user_id 单归属过滤清空——出现「计数 2、明细 0 行」。
         rows = conn.execute(
             LEDGER_ROW_SELECT
             + LEDGER_ROW_FROM
-            + "wt.user_id = %s AND ("
+            + "(wt.user_id = %s OR wt.user_id IN "
+            + "(SELECT id FROM users WHERE parent_user_id = %s)) AND ("
             + " OR ".join(branches)
             + ") ORDER BY (wt.ledger_sequence IS NULL), wt.ledger_sequence ASC, "
             "wt.created_at ASC, wt.id ASC",
-            row_params,
+            # row_params 的首位本就是旧「单 owner」占位的参数，恰好复用为
+            # 组织范围的第一个 owner 参数。
+            [wallet_owner_id, *row_params],
         ).fetchall()
         items = assemble_entries(page, [ledger_row_response(row) for row in rows])
 

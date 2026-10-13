@@ -366,7 +366,9 @@ export function CustomerWorkspace({
       {confirmDialog}
       {appUpdate.dialog}
       {currentCredential ? (
-        <CustomerAnnouncementCenter token={currentCredential.token} />
+        <CustomerAnnouncementCenter
+          credential={{ kind: "session", token: currentCredential.token }}
+        />
       ) : null}
       {currentCredential ? (
         <StudioWorkspace

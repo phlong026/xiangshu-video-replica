@@ -6048,26 +6048,39 @@ describe("V1.4 内容与运营页面", () => {
       page_size: 24,
       total: 2,
     });
+    // T28 双节契约：producer=产出该素材的任务；reference=把它当输入的任务。
     getMaterialUsages.mockImplementation(async (materialId: string) =>
       materialId === "asset:used"
         ? {
-            total: 2,
-            items: [
-              {
-                task_id: "ux10-gtask",
-                kind: "generation" as const,
-                status: "SUCCEEDED",
-                created_at: "2026-09-08 10:00:00",
-              },
-              {
-                task_id: "ux10-otask",
-                kind: "oral" as const,
-                status: "SUCCEEDED",
-                created_at: "2026-09-09 10:00:00",
-              },
-            ],
+            producer: {
+              total: 1,
+              items: [
+                {
+                  task_id: "ux10-gtask",
+                  kind: "generation" as const,
+                  role: "producer" as const,
+                  status: "SUCCEEDED",
+                  created_at: "2026-09-08 10:00:00",
+                },
+              ],
+            },
+            reference: {
+              total: 1,
+              items: [
+                {
+                  task_id: "ux10-otask",
+                  kind: "oral" as const,
+                  role: "consumer" as const,
+                  status: "SUCCEEDED",
+                  created_at: "2026-09-09 10:00:00",
+                },
+              ],
+            },
           }
-        : { total: 0, items: [] },
+        : {
+            producer: { total: 0, items: [] },
+            reference: { total: 0, items: [] },
+          },
     );
     useStudio.mockReturnValue(studio({ review: false }));
     render(<MaterialsPage />);
@@ -6078,7 +6091,12 @@ describe("V1.4 内容与运营页面", () => {
     // 按需：打开详情不自动请求
     expect(getMaterialUsages).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "查看使用记录" }));
-    expect(await screen.findByText("被 2 个任务引用")).toBeInTheDocument();
+    expect(
+      await screen.findByText(/生成该素材的任务/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/作为输入引用该素材的任务/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/口播任务/)).toBeInTheDocument();
     expect(getMaterialUsages).toHaveBeenCalledWith("asset:used");
 

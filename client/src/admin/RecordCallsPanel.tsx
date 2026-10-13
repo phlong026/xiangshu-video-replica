@@ -27,6 +27,26 @@ function readableJson(text: string): string {
   }
 }
 
+// T36：失败环节与责任侧的业务说法（后端 failure_category/failure_owner
+// 一直是内部英文码）。放在操作列最上方，运营不读异常类型也能判断该找谁。
+const FAILURE_CATEGORY_LABELS: Record<string, string> = {
+  auth: "账号鉴权失败",
+  config: "服务配置缺失",
+  network: "网络连接失败",
+  timeout: "平台响应超时",
+  rate_limit: "平台限流",
+  platform_error: "平台返回错误",
+  parse: "响应解析失败",
+  upload: "素材上传失败",
+  internal: "我方服务内部错误",
+};
+const FAILURE_OWNER_LABELS: Record<string, string> = {
+  platform: "平台侧",
+  our_service: "我方服务",
+  config: "运营配置",
+  user_content: "客户素材",
+};
+
 function formatCallOutcome(call: AdminExternalCall): string {
   if (!call.outcome) return call.provider_error_code ?? "—";
   const label = labelFrom(EXTERNAL_CALL_OUTCOME_LABELS, call.outcome);
@@ -246,6 +266,16 @@ export function RecordCallsPanel({
                           value={call.request_id}
                           label="我方请求编号"
                         />
+                      </p>
+                    ) : null}
+                    {call.failure_category ? (
+                      <p>
+                        <b>失败环节：</b>
+                        {FAILURE_CATEGORY_LABELS[call.failure_category] ??
+                          call.failure_category}
+                        {call.failure_owner
+                          ? `（责任侧：${FAILURE_OWNER_LABELS[call.failure_owner] ?? call.failure_owner}）`
+                          : ""}
                       </p>
                     ) : null}
                     {call.exception_type ? (

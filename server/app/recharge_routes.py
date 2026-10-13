@@ -1435,11 +1435,15 @@ def export_customer_wallet_transactions_csv(
             disable_jit(conn)
             outcome_sql, outcome_args = outcome_placeholders(outcome)
             entry_prefix = entry_ctes(clauses)
+            # T29：整组取行同样按组织范围——classified 已按「本人∪子账号」
+            # 选条目，这里仍单认 wallet owner 会把子 key 命中条目的明细清空。
             where_sql = (
-                f"wt.user_id = %s AND ({ENTRY_KEY_SQL}) IN "
+                "(wt.user_id = %s OR wt.user_id IN "
+                "(SELECT id FROM users WHERE parent_user_id = %s)) "
+                f"AND ({ENTRY_KEY_SQL}) IN "
                 "(SELECT entry_key FROM classified WHERE " + outcome_sql + ")"
             )
-            entry_params = [*params, wallet_owner_id, *outcome_args]
+            entry_params = [*params, wallet_owner_id, wallet_owner_id, *outcome_args]
             params = []
         sql = entry_prefix + (
             # 「金额」不再是单列：SETTLE 行的金额记在 reserved_delta 上（available_delta
@@ -1448,7 +1452,11 @@ def export_customer_wallet_transactions_csv(
             "op.service, k.label, wt.task_id, k.credential_version, wt.auth_source, "
             "(SELECT u.display_name FROM users u WHERE u.id=wt.actor_user_id) as actor_name "
             "FROM wallet_transactions wt "
-            "LEFT JOIN customer_api_keys k ON k.id = wt.api_key_id "
+            "LEFT JOIN customer_api_keys k ON k.id = wt.api_key_id AND "
+            # T29：与列表同款组织归属条件（key 属钱包 owner 或其子账号），
+            # 否则子 key 行的标签在 CSV 与列表两侧不一致。
+            "(k.user_id = wt.user_id OR EXISTS (SELECT 1 FROM users sub "
+            "WHERE sub.id = k.user_id AND sub.parent_user_id = wt.user_id)) "
             # 别名必须是 op：共用筛选子句里写的是 op.service（列表侧一直用的别名）。
             "LEFT JOIN billing_operations op ON op.id=wt.billing_operation_id "
             "WHERE " + where_sql + " ORDER BY wt.created_at DESC LIMIT %s OFFSET %s"
@@ -1522,11 +1530,14 @@ def customer_consumption_by_business(
             "COALESCE(SUM(-wt.reserved_delta), 0) AS credits "
             "FROM wallet_transactions wt "
             "LEFT JOIN billing_operations op ON op.id = wt.billing_operation_id "
-            "WHERE wt.user_id = %s AND wt.type = 'SETTLE' "
+            # T29 组织范围：子 key 归属行落在子账号名下，不并入会漏计。
+            "WHERE (wt.user_id = %s OR wt.user_id IN "
+            "(SELECT id FROM users WHERE parent_user_id = %s)) "
+            "AND wt.type = 'SETTLE' "
             "AND wt.created_at::timestamptz >= now() - make_interval(days => %s) "
             "GROUP BY 1 HAVING COALESCE(SUM(-wt.reserved_delta), 0) > 0 "
             "ORDER BY 2 DESC",
-            (wallet_owner_id, days),
+            (wallet_owner_id, wallet_owner_id, days),
         ).fetchall()
     # 合并在 Python 侧做：SERVICE_FEATURE 是既有唯一权威的科目→业务映射，在 SQL 里
     # 再写一份 CASE 就等于又开了一处会漂移的口径。科目数是个位数量级，代价可忽略。
@@ -1685,15 +1696,24 @@ def read_customer_center_summary(
         # reservation, consumed total and tokens all belong to the master's
         # wallet (T2.10). The response keeps naming the caller.
         wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), ctx.user_id)
+        # T29 组织范围：子 key 归属行落在子账号名下，累计按「本人 ∪ 直接子账号」。
+        org_scope = "(user_id = %s OR user_id IN (SELECT id FROM users WHERE parent_user_id = %s))"
         row = conn.execute(
             "SELECT available_credits, reserved_credits, "
-            "(SELECT COALESCE(SUM(-reserved_delta), 0) FROM wallet_transactions "
-            "WHERE user_id = %s AND type = 'SETTLE'), "
+            "(SELECT COALESCE(SUM(-wt.reserved_delta), 0) FROM wallet_transactions wt "
+            f"WHERE {org_scope} AND wt.type = 'SETTLE'), "
             "(SELECT COUNT(*) FROM customer_api_keys WHERE user_id = %s AND revoked_at IS NULL), "
-            "(SELECT COALESCE(SUM(available_delta), 0) FROM wallet_transactions "
-            "WHERE user_id = %s AND type = 'RELEASE') "
+            "(SELECT COALESCE(SUM(wt.available_delta), 0) FROM wallet_transactions wt "
+            f"WHERE {org_scope} AND wt.type = 'RELEASE') "
             "FROM wallets WHERE user_id = %s",
-            (wallet_owner_id, wallet_owner_id, wallet_owner_id, wallet_owner_id),
+            (
+                wallet_owner_id,
+                wallet_owner_id,
+                wallet_owner_id,
+                wallet_owner_id,
+                wallet_owner_id,
+                wallet_owner_id,
+            ),
         ).fetchone()
         if row is None:
             raise HTTPException(

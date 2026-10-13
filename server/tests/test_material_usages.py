@@ -1,14 +1,15 @@
-"""MATERIAL-UX-10 — 使用记录（单素材按需查询）PG 矩阵.
+"""MATERIAL-UX-10 / T28 — 使用记录（生产来源与输入引用分节）PG 矩阵.
 
-任务卡 docs/素材库改进工作任务清单-2026-09-22.md §3「使用记录」。本模块钉住：
+本模块钉住 ``GET /api/studio/materials/{id}/usages`` 的 T28 新语义：
 
-- ``GET /api/studio/materials/{id}/usages``：返回引用该素材的任务
-  （generation 经 batch 归属、oral 直属 owner），按创建时间倒序；
-  ``total`` 为全量计数（LIMIT 20 截断时仍准确）。
-- owner 围栏：他人素材 404（require_material 路径）。
-- 跨用户任务引用场景不在本矩阵：候选集语义本就排除“被任何任务引用的
-  upload 资产”，与任务归属无关（业务上任务只引用本人素材）。
-- 无引用素材返回 ``{"total": 0, "items": []}``（前端显示“未被使用”）。
+- ``producer`` 节：产出该素材的任务（result_asset_id 指向它）——原「被引用
+  次数」的真实含义，名称改准确；
+- ``reference`` 节：把该素材当输入的任务，读冻结输入关系（generation batch
+  快照的首帧/尾帧/参考清单 + oral_tasks.audio_asset_id），同一任务多路径
+  引用只计一次（DISTINCT task）；
+- 两节各自 owner 围栏、各自全量 total（LIMIT 20 截断仍准确）；失败/取消
+  任务不过滤但逐行带 status（口径在响应模型 docstring 显式声明）。
+- owner 围栏：他人素材 404；跨组织引用（他人 batch 引用我的素材）不可见。
 
 PG 约束（沿 CW-031 / CW-078 / UX-03）：共享库 ``customer_v3_test``；模块级
 ``shared_suite_lock``；数据用 ``ux10-`` 前缀；绝不 TRUNCATE；CW-007 硬门。
@@ -170,6 +171,7 @@ def _seed_generation_reference(
     task_id: str,
     batch_id: str,
     asset_id: str,
+    snapshot: str = "{}",
 ) -> None:
     conn.execute(
         "INSERT INTO generation_batches (id, created_by_user_id, idempotency_key, "
@@ -180,7 +182,7 @@ def _seed_generation_reference(
             owner,
             f"ux10-idem-{batch_id}",
             f"ux10-hash-{batch_id}",
-            "{}",
+            snapshot,
         ),
     )
     conn.execute(
@@ -197,26 +199,54 @@ def _usages(client: TestClient, asset_id: str) -> dict[str, Any]:
     return cast(dict[str, Any], response.json())
 
 
-def test_unused_material_reports_zero(pg: psycopg.Connection, client: TestClient) -> None:
+def test_unused_material_reports_empty_sections(pg: psycopg.Connection, client: TestClient) -> None:
     _seed_material_asset(pg, f"{UX10}lonely", EMP1)
     body = _usages(client, f"{UX10}lonely")
-    assert body == {"total": 0, "items": []}
+    assert body == {
+        "producer": {"total": 0, "items": []},
+        "reference": {"total": 0, "items": []},
+    }
 
 
-def test_generation_and_oral_references_listed(pg: psycopg.Connection, client: TestClient) -> None:
-    asset_id = f"{UX10}referenced"
+def test_producer_and_consumer_roles_are_listed_separately(
+    pg: psycopg.Connection, client: TestClient
+) -> None:
+    """T28 验收 A+B：产出与消费分节；同任务多引用计一次；跨 owner 不可见。"""
+    asset_id = f"{UX10}dual-role"
     _seed_material_asset(pg, asset_id, EMP1)
 
-    # generation 引用（batch 归属 EMP1）
+    # 生产者：任务产出该素材（result_asset_id）。
     _seed_generation_reference(
         pg,
         EMP1,
-        task_id=f"{UX10}gtask",
-        batch_id=f"{UX10}gbatch",
+        task_id=f"{UX10}producer",
+        batch_id=f"{UX10}producer-batch",
         asset_id=asset_id,
     )
-
-    # oral 引用（oral_tasks 直属 EMP1）
+    # 消费者任务的产出资产也必须真实存在（result_asset_id 外键）。
+    _seed_material_asset(pg, f"{UX10}other-output", EMP1)
+    _seed_material_asset(pg, f"{UX10}other-output-2", EMP1)
+    # 消费者 A：batch 快照冻结该素材为首帧（独立创作流形状）。
+    _seed_generation_reference(
+        pg,
+        EMP1,
+        task_id=f"{UX10}consumer-first",
+        batch_id=f"{UX10}consumer-first-batch",
+        asset_id=f"{UX10}other-output",
+        snapshot=f'{{"first_frame_asset_id": "{asset_id}"}}',
+    )
+    # 消费者 B：同一 batch 快照里首帧与参考清单都指向它——同任务多引用计 1。
+    _seed_generation_reference(
+        pg,
+        EMP1,
+        task_id=f"{UX10}consumer-multi",
+        batch_id=f"{UX10}consumer-multi-batch",
+        asset_id=f"{UX10}other-output-2",
+        snapshot='{{"first_frame_asset_id": "{}", "reference_asset_ids": ["{}", "{}"]}}'.format(
+            asset_id, asset_id, f"{UX10}elsewhere"
+        ),
+    )
+    # 消费者 C：oral 音频输入（冻结直列 audio_asset_id）。
     identity_id = f"{UX10}identity"
     avatar_id = f"{UX10}avatar"
     oral_id = f"{UX10}otask"
@@ -231,22 +261,42 @@ def test_generation_and_oral_references_listed(pg: psycopg.Connection, client: T
         "source_kind, source_asset_id, vendor_avatar_id, status) VALUES "
         "(%s, %s, %s, 'UX10 形象', 'IMAGE', %s, %s, 'READY') "
         "ON CONFLICT (id) DO NOTHING",
-        (avatar_id, identity_id, EMP1, asset_id, avatar_id),
+        (avatar_id, identity_id, EMP1, f"{UX10}avatar-src", avatar_id),
     )
     pg.execute(
         "INSERT INTO oral_tasks (id, owner_user_id, identity_id, avatar_id, mode, "
-        "title, idempotency_key, estimated_cost_fen, status, result_asset_id) "
+        "title, idempotency_key, estimated_cost_fen, status, audio_asset_id) "
         "VALUES (%s, %s, %s, %s, 'AUDIO', 'UX10 口播', %s, 0, 'SUCCEEDED', %s) "
         "ON CONFLICT (id) DO NOTHING",
         (oral_id, EMP1, identity_id, avatar_id, f"ux10-idem-{oral_id}", asset_id),
     )
+    # 跨 owner：他人 batch 冻结了同一素材 —— 不可见。
+    _seed_material_asset(pg, f"{UX10}foreign-output", EMP2)
+    _seed_generation_reference(
+        pg,
+        EMP2,
+        task_id=f"{UX10}foreign-consumer",
+        batch_id=f"{UX10}foreign-batch",
+        asset_id=f"{UX10}foreign-output",
+        snapshot=f'{{"first_frame_asset_id": "{asset_id}"}}',
+    )
 
     body = _usages(client, asset_id)
-    assert body["total"] == 2
-    kinds = {item["kind"] for item in body["items"]}
-    assert kinds == {"generation", "oral"}
-    task_ids = {item["task_id"] for item in body["items"]}
-    assert task_ids == {f"{UX10}gtask", f"{UX10}otask"}
+    producer = body["producer"]
+    assert producer["total"] == 1
+    assert [item["task_id"] for item in producer["items"]] == [f"{UX10}producer"]
+    assert all(item["role"] == "producer" for item in producer["items"])
+    reference = body["reference"]
+    assert reference["total"] == 3
+    ref_ids = {item["task_id"] for item in reference["items"]}
+    assert ref_ids == {
+        f"{UX10}consumer-first",
+        f"{UX10}consumer-multi",
+        oral_id,
+    }
+    assert all(item["role"] == "consumer" for item in reference["items"])
+    # 生产者任务同时出现在消费节的边界（同任务先产出再用作输入）不会被
+    # 误并入引用节：它没有冻结任何输入快照。
 
 
 def test_other_users_material_not_found(pg: psycopg.Connection) -> None:

@@ -96,6 +96,15 @@ export function SystemSettingsPage({
         items={visibleTabs}
         onChange={setTab}
       />
+      {/* T37 分层说明：普通管理员的业务设置入口与超管技术配置的边界在此讲清，
+          不靠「看不到页签」隐式传达。 */}
+      {!isSuperAdmin ? (
+        <p className="admin-hint">
+          这里是业务设置：价格与套餐、收款、告警均可由管理员直接配置；
+          接口服务连接与运行参数等技术配置由超级管理员在「技术配置」页维护，
+          配置校验结果见各服务卡的「连接测试」。
+        </p>
+      ) : null}
       {tab === "pricing" ? (
         <>
           <BillingQuoteCalculator readOnly={readOnly} />

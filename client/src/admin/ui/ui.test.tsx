@@ -308,3 +308,57 @@ describe("ConfirmDialog", () => {
     expect(onConfirm).toHaveBeenCalledWith("");
   });
 });
+
+describe("ConfirmDialog T33 键盘行为", () => {
+  it("焦点在表单输入框内按 Esc 也能关闭（回归：stopPropagation 吞键）", async () => {
+    const onClose = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        title="暂停激活码"
+        level="reason"
+        onConfirm={() => {}}
+        onClose={onClose}
+      />,
+    );
+    // 打开即聚焦原因输入框；旧实现无条件 stopPropagation，Esc 走 React 代理
+    // 被吞掉，window 监听器收不到。
+    const reasonInput = screen.getByLabelText("操作原因");
+    expect(reasonInput).toHaveFocus();
+    fireEvent.keyDown(reasonInput, { key: "Escape" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("关闭后焦点返回触发元素", async () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            打开确认
+          </button>
+          <ConfirmDialog
+            open={open}
+            title="删除草稿"
+            level="standard"
+            onConfirm={() => {}}
+            onClose={() => setOpen(false)}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "打开确认" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(trigger).toHaveFocus();
+  });
+});

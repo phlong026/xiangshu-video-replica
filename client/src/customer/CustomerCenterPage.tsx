@@ -885,14 +885,24 @@ export function CustomerCenterPage({
             <option value="">全部来源</option>
             <option value="session">软件操作</option>
             <option value="historical">早期版本消费</option>
-            {tokens?.map((token) => (
-              <option
-                key={token.token_group_id}
-                value={`token:${token.token_group_id}`}
-              >
-                {token.label || "未命名 Token"}（含历史版本）
-              </option>
-            ))}
+            {tokens?.map((token) => {
+              // T29：母账号的组织视图会带出子账号的 key，归属必须可见，
+              // 否则分不清两条同名 Token 是谁的了。
+              const ownerSuffix =
+                token.owner_label &&
+                token.owner_user_id !== (account.profile?.user_id ?? "")
+                  ? ` · ${token.owner_label}`
+                  : "";
+              return (
+                <option
+                  key={token.token_group_id}
+                  value={`token:${token.token_group_id}`}
+                >
+                  {token.label || "未命名 Token"}
+                  {ownerSuffix}（含历史版本）
+                </option>
+              );
+            })}
           </select>
         </label>
         <label>

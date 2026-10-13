@@ -79,6 +79,24 @@ export function ExternalCallsPage() {
         });
     }
   }
+  // T37：失败环节/责任侧的业务说法（与 RecordCallsPanel 同一套词典）。
+  const FAILURE_CATEGORY_LABELS: Record<string, string> = {
+    auth: "账号鉴权失败",
+    config: "服务配置缺失",
+    network: "网络连接失败",
+    timeout: "平台响应超时",
+    rate_limit: "平台限流",
+    platform_error: "平台返回错误",
+    parse: "响应解析失败",
+    upload: "素材上传失败",
+    internal: "我方服务内部错误",
+  };
+  const FAILURE_OWNER_LABELS: Record<string, string> = {
+    platform: "平台侧",
+    our_service: "我方服务",
+    config: "运营配置",
+    user_content: "客户素材",
+  };
   const serviceLabel = (provider: string) => {
     const index = page?.providers.indexOf(provider) ?? -1;
     return index >= 0 ? `接口服务 ${index + 1}` : "接口服务";
@@ -234,6 +252,23 @@ export function ExternalCallsPage() {
                     </td>
                     <td>{call.poll_count}</td>
                     <td>
+                      {call.failure_category || call.advice ? (
+                        <p>
+                          <b>失败环节：</b>
+                          {FAILURE_CATEGORY_LABELS[
+                            call.failure_category ?? ""
+                          ] ??
+                            call.failure_category ??
+                            "未知"}
+                          {call.failure_owner
+                            ? `（责任侧：${
+                                FAILURE_OWNER_LABELS[call.failure_owner] ??
+                                call.failure_owner
+                              }）`
+                            : ""}
+                          {call.advice ? `；处置建议：${call.advice}` : ""}
+                        </p>
+                      ) : null}
                       <details>
                         <summary>技术详情</summary>
                         <p>

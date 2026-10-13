@@ -384,10 +384,25 @@ export type MaterialGroupsResponse =
   components["schemas"]["MaterialGroupsResponse"];
 // MATERIAL-UX-05：标签聚合计数（/materials/tags）。
 export type MaterialTagItem = components["schemas"]["MaterialTagItem"];
-// MATERIAL-UX-10：单素材使用记录（/materials/{id}/usages，按需请求）。
-export type MaterialUsage = components["schemas"]["MaterialUsage"];
-export type MaterialUsagesResponse =
-  components["schemas"]["MaterialUsagesResponse"];
+// MATERIAL-UX-10 / T28：单素材使用记录（/materials/{id}/usages，按需请求）。
+// T28 起响应改为「生成来源 / 输入引用」双节，schema 快照尚未再生成，
+// 这里先行手写契约（与 server/app/materials.py 的 pydantic 模型一致）。
+export type MaterialUsageRole = "producer" | "consumer";
+export type MaterialUsage = {
+  task_id: string;
+  kind: "generation" | "oral";
+  role: MaterialUsageRole;
+  status: string;
+  created_at: string;
+};
+export type MaterialUsageSection = {
+  total: number;
+  items: MaterialUsage[];
+};
+export type MaterialUsagesResponse = {
+  producer: MaterialUsageSection;
+  reference: MaterialUsageSection;
+};
 export type MaterialBulkUpdate = components["schemas"]["MaterialBulkUpdate"];
 export type MaterialBulkRequest = components["schemas"]["MaterialBulkRequest"];
 export type MaterialBulkResult = components["schemas"]["MaterialBulkResult"];
@@ -7519,6 +7534,46 @@ export async function customerSetInitialPassword(
   ).body;
 }
 
+/** M2 公告中心（T34）：列表。复用共享客户请求器——浏览器传输头、
+ * Request-Id、超时与错误归一全部同轨；此前裸 fetch 直发 Bearer 在浏览器
+ * 模式必然 401 且失败静默。 */
+export async function customerListAnnouncements(
+  credential: CustomerCredential,
+): Promise<
+  Array<{
+    id: string;
+    title: string;
+    body: string;
+    tone: string;
+    pinned: boolean;
+    read: boolean;
+  }>
+> {
+  const { body } = await customerJson<{
+    items: Array<{
+      id: string;
+      title: string;
+      body: string;
+      tone: string;
+      pinned: boolean;
+      read: boolean;
+    }>;
+  }>("/api/announcements", { credential });
+  return Array.isArray(body.items) ? body.items : [];
+}
+
+/** M2 公告中心（T34）：已读回执。幂等接口，重复提交不重复计数；
+ * 失败抛错由调用方保留公告原位供重试。 */
+export async function customerMarkAnnouncementRead(
+  credential: CustomerCredential,
+  announcementId: string,
+): Promise<void> {
+  await customerJson<undefined>(
+    `/api/announcements/${encodeURIComponent(announcementId)}/read`,
+    { credential, method: "POST" },
+  );
+}
+
 export async function customerGetProfile(
   credential: CustomerSessionCredential,
   options?: { shouldDispatchLifecycle?: () => boolean },
@@ -8783,6 +8838,9 @@ export type CustomerApiKey = {
   revoked_at: string | null;
   is_default: boolean;
   total_consumed_credits: number;
+  /** T29 组织视图：key 归属者（本人 key=自己；母账号会看到子账号的 key）。 */
+  owner_user_id?: string;
+  owner_label?: string;
 };
 
 export type CustomerCreditConfig = {

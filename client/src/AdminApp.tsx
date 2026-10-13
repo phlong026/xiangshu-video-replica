@@ -28,6 +28,7 @@ import { ViralOverviewPage } from "./admin/ViralOverviewPage";
 import { ViralVideosPage } from "./admin/ViralVideosPage";
 import { WorkerObservationsPage } from "./admin/WorkerObservationsPage";
 import "./admin/admin-login.css";
+import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
 import { PageBanner } from "./admin/ui/PageBanner";
 import { TabBar } from "./admin/ui/TabBar";
 import { roleLabel } from "./admin/ui/vocabulary";
@@ -1131,7 +1132,11 @@ export function AdminApp() {
           {activeTab === "announcements" ? (
             <AnnouncementsPage readOnly={readOnly} />
           ) : null}
-          {activeTab === "reports" ? <ReportsPage readOnly={readOnly} /> : null}
+          {activeTab === "reports" ? (
+            <AdminErrorBoundary>
+              <ReportsPage readOnly={readOnly} />
+            </AdminErrorBoundary>
+          ) : null}
           {activeTab === "publishStats" ? (
             <PublishStatsPage readOnly={readOnly} />
           ) : null}

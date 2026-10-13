@@ -1605,6 +1605,8 @@ export interface CustomerLifecycleItem {
 
 export interface CustomerLifecycleResponse {
   items: CustomerLifecycleItem[];
+  /** T30：真实总数（此前缺失，前端只能拿本页行数伪造）。 */
+  total?: number;
   distribution: Array<{
     stage: string;
     count: number;
@@ -2635,6 +2637,8 @@ export type AdminExternalCall = components["schemas"]["ExternalCallSummary"] & {
   request_id?: string | null;
   exception_type?: string | null;
   failure_category?: string | null;
+  /** T36/T37：责任侧（platform/our_service/config/user_content），后端归类器给出。 */
+  failure_owner?: string | null;
   advice?: string | null;
   mapping_revision?: string | null;
   mapping_evidence?: string | null;
