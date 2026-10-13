@@ -69,6 +69,11 @@ FAILURE_RUNBOOK: dict[str, str] = {
     "H3_PROVIDER_FAILED": (
         "生成任务失败或返回无效结果。重试一次；确认提示词/素材无违规；持续失败携任务编号报障。"
     ),
+    "H3_SUBMISSION_REJECTED": (
+        "供应商在提交阶段明确拒绝（未受理、未扣费，暂扣已自动释放）。"
+        "先到外部调用日志看上游原话：402 为供应商余额不足，充值后让客户重新提交；"
+        "400/401/403/404/422 检查请求参数与供应商密钥配置。"
+    ),
     "ARCHIVE_RETRY_EXHAUSTED": (
         "归档重试已耗尽（上游结果地址可能已过期）。检查对象存储配置与网络后重新生成。"
     ),
@@ -258,6 +263,7 @@ FAILURE_CLASSIFICATION: dict[str, tuple[FailureCategory, FailureOwner]] = {
     "APILIO_SETTINGS_UNAVAILABLE": ("CONFIG", "ENGINEERING"),
     "PROVIDER_TERMINAL": ("PROVIDER_FAULT", "OPS"),
     "H3_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "H3_SUBMISSION_REJECTED": ("PROVIDER_FAULT", "OPS"),
     "ARCHIVE_RETRY_EXHAUSTED": ("DEFECT", "ENGINEERING"),
     "FIRST_FRAME_URL_SIGN_FAILED": ("CONFIG", "ENGINEERING"),
     "H3_SETTINGS_UNAVAILABLE": ("CONFIG", "ENGINEERING"),

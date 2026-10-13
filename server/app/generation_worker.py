@@ -61,6 +61,7 @@ from app.generation import (
     fail_generation_reconcile_operation,
     finalize_generation_direct_result,
     h3_provider_for_task,
+    is_submission_rejection,
     mark_generation_task_archiving,
     mark_generation_task_running,
     mark_task_first_frame_url_sign_failed,
@@ -1010,6 +1011,7 @@ def _run_pg_generation_step(
                             conn,
                             lease=lease,
                             provider_task_id=exc.provider_task_id,
+                            submission_rejected=is_submission_rejection(exc),
                         )
             except Exception:
                 # If the provider id was observed but its persistence callback
@@ -1046,6 +1048,7 @@ def _run_pg_generation_step(
                     conn,
                     lease=lease,
                     provider_task_id=exc.provider_task_id,
+                    submission_rejected=is_submission_rejection(exc),
                 )
             return
         with pg_transaction() as raw_conn:

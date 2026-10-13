@@ -428,10 +428,14 @@ class H3ProviderFailed(RuntimeError):
         provider_task_id: str | None = None,
         terminal: bool = False,
         provider_reason: str | None = None,
+        http_status: int | None = None,
     ) -> None:
         super().__init__(message)
         self.provider_task_id = provider_task_id
         self.terminal = terminal
+        # 上游返回的 HTTP 状态码；网络层失败（超时、连接错误）没有状态码，保持 None。
+        # 提交阶段据此区分「明确拒绝」与「可能已受理」，见 SUBMISSION_REJECTION_HTTP_STATUSES。
+        self.http_status = http_status
         # 服务商给出的失败原话（已脱敏、截断）；落进任务的错误说明供管理端排查。
         self.provider_reason = provider_reason
 
@@ -539,6 +543,34 @@ class MetasoHttpTransport(Protocol):
     ) -> bytes: ...
 
 
+# 提交（create）阶段上游「明确拒绝」的 HTTP 状态码：请求没有被受理、没有创建任务、没有扣费，
+# 属于确定性失败，应直接终态并释放暂扣，而不是 SUBMISSION_UNCERTAIN。
+# 故意用白名单而非「所有 4xx」：408（超时）、429（限流）与 5xx 都可能发生在受理之后，
+# 必须继续走未确认 + 对账。2026-10-13 H3 余额不足（HTTP 402）曾因被误判为未确认，
+# 占满账号并发名额导致视频生成整体停摆。
+SUBMISSION_REJECTION_HTTP_STATUSES = frozenset({400, 401, 402, 403, 404, 422})
+
+# 明确被拒绝的提交写给客户的说明。不带服务商原话：原话会暴露供应商余额等内部状态，
+# 原始响应已完整保留在 external_call_logs 供管理端排查。
+SUBMISSION_REJECTED_CUSTOMER_MESSAGE = "视频生成服务暂时不可用，本次未扣费，请稍后重试。"
+
+
+def is_submission_rejection(exc: H3ProviderFailed) -> bool:
+    """提交阶段被上游明确拒绝：没有任务号 + 白名单状态码。
+
+    轮询阶段的异常一定带 provider_task_id，所以不会被误判；worker 的各条提交分支都用这一个判定。
+    """
+    return exc.provider_task_id is None and exc.http_status in SUBMISSION_REJECTION_HTTP_STATUSES
+
+
+def _provider_reason_from_body(detail: str) -> str | None:
+    """从已脱敏的错误响应体取「原话（错误码）」；取不到返回 None，不编造原因。"""
+    code, message = parse_provider_error(detail)
+    if message and code:
+        return f"{message}（{code}）"
+    return message or code
+
+
 class UrllibMetasoHttpTransport:
     def __init__(self, *, timeout_seconds: float = 90.0) -> None:
         self.timeout_seconds = timeout_seconds
@@ -569,7 +601,11 @@ class UrllibMetasoHttpTransport:
             except OSError:
                 pass
             logger.warning("H3 provider request failed with HTTP status %s: %s", exc.code, detail)
-            raise H3ProviderFailed(f"H3 provider returned HTTP {exc.code}") from exc
+            raise H3ProviderFailed(
+                f"H3 provider returned HTTP {exc.code}",
+                provider_reason=_provider_reason_from_body(detail),
+                http_status=exc.code,
+            ) from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("H3 provider request failed: %s", type(exc).__name__)
             raise H3ProviderFailed("H3 provider request failed") from exc
@@ -629,6 +665,10 @@ class MetasoH3Provider(H3Provider):
                     ).encode(),
                 )
         except H3ProviderFailed as exc:
+            if exc.http_status in SUBMISSION_REJECTION_HTTP_STATUSES:
+                # 上游明确拒绝：没有受理、没有创建任务、没有扣费。原样抛出，交给 worker
+                # 走终态失败并释放暂扣；绝不能当作「结果未知」占住账号并发名额。
+                raise
             raise SubmissionUncertain("H3 provider submission result is unknown") from exc
 
         try:
@@ -3605,6 +3645,7 @@ def _run_leased_generation_task(
             lease=lease,
             provider_task_id=exc.provider_task_id,
             provider_reason=exc.provider_reason,
+            submission_rejected=is_submission_rejection(exc),
         )
         return get_task_result(conn, task_id)
 
@@ -6095,15 +6136,29 @@ def mark_task_provider_failed(
     lease: dict[str, Any],
     provider_task_id: str | None,
     provider_reason: str | None = None,
+    submission_rejected: bool = False,
 ) -> None:
+    """Terminal failure of the provider call.
+
+    ``submission_rejected`` marks a submission the provider explicitly refused
+    (e.g. HTTP 402 insufficient balance): nothing was created or charged, so the
+    cost closes at zero and the customer message must not echo the provider's
+    own wording (it would expose supplier balance state). The raw response stays
+    in external_call_logs for operators.
+    """
     provider_reason = summarize_provider_message(provider_reason)
     task_id = str(lease["id"])
     batch_id = str(lease["batch_id"])
-    message = (
-        f"视频生成服务返回失败：{provider_reason}"
-        if provider_reason
-        else "视频生成失败或返回了无效结果，服务商未给出原因。"
-    )
+    if submission_rejected:
+        error_code = "H3_SUBMISSION_REJECTED"
+        message = SUBMISSION_REJECTED_CUSTOMER_MESSAGE
+    else:
+        error_code = "H3_PROVIDER_FAILED"
+        message = (
+            f"视频生成服务返回失败：{provider_reason}"
+            if provider_reason
+            else "视频生成失败或返回了无效结果，服务商未给出原因。"
+        )
     with conn:
         provider_failed_update = conn.execute(
             """
@@ -6111,7 +6166,7 @@ def mark_task_provider_failed(
             SET
                 provider_task_id = %s,
                 status = 'FAILED',
-                error_code = 'H3_PROVIDER_FAILED',
+                error_code = %s,
                 error_message_redacted = %s,
                 locked_by = NULL,
                 locked_until = NULL,
@@ -6122,6 +6177,7 @@ def mark_task_provider_failed(
             """,
             (
                 provider_task_id,
+                error_code,
                 message,
                 task_id,
                 str(lease["status"]),
@@ -6133,7 +6189,10 @@ def mark_task_provider_failed(
             # L1 (M4M5 review): the replacement flow owns the terminal
             # state, the billing settlement and the slot release now.
             raise GenerationTaskSupersededError(task_id)
-        record_video_generation_cost(conn, task_id=task_id, output_seconds=None)
+        if submission_rejected:
+            record_video_generation_not_called(conn, task_id=task_id)
+        else:
+            record_video_generation_cost(conn, task_id=task_id, output_seconds=None)
         finalize_internal_billing(conn, task_id=task_id, outcome="failed")
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
         release_user_queue_slot_for_task(conn, task_id=task_id)
