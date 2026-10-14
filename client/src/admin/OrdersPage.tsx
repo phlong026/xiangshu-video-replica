@@ -18,6 +18,7 @@ import { type AdminRechargeOrder, listAdminRechargeOrders } from "../api.admin";
 import { CustomerLink } from "./CustomerLink";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { OrderStatusBadge } from "./ui/StatusBadge";
@@ -61,12 +62,17 @@ export function OrdersPage({
   const [orders, setOrders] = useState<AdminRechargeOrder[]>([]);
   const [orderTotal, setOrderTotal] = useState(0);
   const [orderOffset, setOrderOffset] = useState(0);
-  const [statusDraft, setStatusDraft] = useState(initialStatus);
-  const [statusFilter, setStatusFilter] = useState(initialStatus);
-  const [usernameFilter, setUsernameFilter] = useState("");
-  const [channelFilter, setChannelFilter] = useState("");
-  const [createdFrom, setCreatedFrom] = useState("");
-  const [createdTo, setCreatedTo] = useState("");
+  // 输入草稿与已提交筛选分开（T22）：点「查询」才发请求，不再逐键请求；
+  // 翻页沿用已提交的筛选。
+  const emptyFilters = {
+    status: initialStatus,
+    username: "",
+    channel: "",
+    createdFrom: "",
+    createdTo: "",
+  };
+  const [draft, setDraft] = useState(emptyFilters);
+  const [filters, setFilters] = useState(emptyFilters);
   const [reconciliation, setReconciliation] =
     useState<ControlReconciliation | null>(null);
   const [loading, setLoading] = useState(false);
@@ -88,16 +94,16 @@ export function OrdersPage({
       const [orderPage, nextReconciliation] = await Promise.all([
         listAdminRechargeOrders({
           orderNo: orderNo || undefined,
-          status: (statusFilter || undefined) as
+          status: (filters.status || undefined) as
             | RechargeOrderStatus
             | undefined,
           limit: PAGE_SIZE,
           offset: orderOffset,
           userId: userId || undefined,
-          username: usernameFilter || undefined,
-          channel: channelFilter || undefined,
-          createdFrom: createdFrom || undefined,
-          createdTo: createdTo || undefined,
+          username: filters.username || undefined,
+          channel: filters.channel || undefined,
+          createdFrom: filters.createdFrom || undefined,
+          createdTo: filters.createdTo || undefined,
         }),
         getControlReconciliation(),
       ]);
@@ -113,16 +119,7 @@ export function OrdersPage({
     } finally {
       setLoading(false);
     }
-  }, [
-    userId,
-    orderNo,
-    channelFilter,
-    createdFrom,
-    createdTo,
-    orderOffset,
-    statusFilter,
-    usernameFilter,
-  ]);
+  }, [userId, orderNo, filters, orderOffset]);
 
   const loadOrdersRef = useRef<(() => void) | null>(null);
   loadOrdersRef.current = () => void loadOrders();
@@ -131,10 +128,10 @@ export function OrdersPage({
     void loadOrders();
   }, [loadOrders]);
 
-  function handleFilterSubmit(event: FormEvent) {
-    event.preventDefault();
+  function applyFilters(next: typeof filters) {
     setOrderOffset(0);
-    setStatusFilter(statusDraft);
+    setDraft(next);
+    setFilters(next);
   }
 
   async function confirmSync(reason: string) {
@@ -167,12 +164,14 @@ export function OrdersPage({
     setNotice("");
     try {
       const summary = await downloadControlRechargeOrdersCsv({
-        status: (statusFilter || undefined) as RechargeOrderStatus | undefined,
+        status: (filters.status || undefined) as
+          | RechargeOrderStatus
+          | undefined,
         userId: userId || undefined,
-        username: usernameFilter || undefined,
-        channel: channelFilter || undefined,
-        createdFrom: createdFrom || undefined,
-        createdTo: createdTo || undefined,
+        username: filters.username || undefined,
+        channel: filters.channel || undefined,
+        createdFrom: filters.createdFrom || undefined,
+        createdTo: filters.createdTo || undefined,
       });
       setNotice(ledgerExportMessage(summary));
     } catch (cause) {
@@ -188,24 +187,6 @@ export function OrdersPage({
 
   return (
     <section aria-label="充值订单" className="admin-panel admin-orders-page">
-      <div className="admin-actions">
-        <button
-          aria-pressed={autoRefresh}
-          type="button"
-          onClick={toggleAutoRefresh}
-        >
-          {autoRefresh ? "自动刷新：开（30 秒）" : "自动刷新：关"}
-        </button>
-        {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
-        <button
-          type="button"
-          disabled={exporting || loading || Boolean(orderNo)}
-          onClick={() => void exportRechargeOrders()}
-        >
-          导出充值订单 CSV
-        </button>
-      </div>
-
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
@@ -213,15 +194,7 @@ export function OrdersPage({
         <div className="admin-metrics">
           <button
             type="button"
-            onClick={() => {
-              setStatusDraft("PENDING");
-              setStatusFilter("PENDING");
-              setOrderOffset(0);
-              setUsernameFilter("");
-              setChannelFilter("");
-              setCreatedFrom("");
-              setCreatedTo("");
-            }}
+            onClick={() => applyFilters({ ...emptyFilters, status: "PENDING" })}
           >
             <small>待支付订单 </small>
             <strong>{reconciliation.pending_order_count}</strong>
@@ -261,15 +234,38 @@ export function OrdersPage({
         </div>
       ) : null}
 
-      <form
-        className="admin-form admin-filter-grid"
-        onSubmit={handleFilterSubmit}
+      <FilterBar
+        ariaLabel="订单筛选"
+        busy={loading}
+        onReset={() => applyFilters({ ...emptyFilters, status: "" })}
+        onSubmit={() => applyFilters(draft)}
+        actions={
+          <>
+            {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
+            <button
+              type="button"
+              disabled={exporting || loading || Boolean(orderNo)}
+              onClick={() => void exportRechargeOrders()}
+            >
+              导出充值订单 CSV
+            </button>
+            <button
+              aria-pressed={autoRefresh}
+              type="button"
+              onClick={toggleAutoRefresh}
+            >
+              {autoRefresh ? "自动刷新：开（30 秒）" : "自动刷新：关"}
+            </button>
+          </>
+        }
       >
         <label>
           订单状态
           <select
-            value={statusDraft}
-            onChange={(event) => setStatusDraft(event.target.value)}
+            value={draft.status}
+            onChange={(event) =>
+              setDraft({ ...draft, status: event.target.value })
+            }
           >
             {STATUS_FILTERS.map((option) => (
               <option key={option.value} value={option.value}>
@@ -282,16 +278,20 @@ export function OrdersPage({
           客户
           <input
             aria-label="订单客户"
-            value={usernameFilter}
-            onChange={(event) => setUsernameFilter(event.target.value)}
+            value={draft.username}
+            onChange={(event) =>
+              setDraft({ ...draft, username: event.target.value })
+            }
           />
         </label>
         <label>
           支付方式
           <select
             aria-label="支付方式"
-            value={channelFilter}
-            onChange={(event) => setChannelFilter(event.target.value)}
+            value={draft.channel}
+            onChange={(event) =>
+              setDraft({ ...draft, channel: event.target.value })
+            }
           >
             <option value="">全部方式</option>
             <option value="alipay">支付宝</option>
@@ -303,8 +303,10 @@ export function OrdersPage({
           <input
             aria-label="订单起始时间"
             type="date"
-            value={createdFrom}
-            onChange={(event) => setCreatedFrom(event.target.value)}
+            value={draft.createdFrom}
+            onChange={(event) =>
+              setDraft({ ...draft, createdFrom: event.target.value })
+            }
           />
         </label>
         <label>
@@ -312,14 +314,13 @@ export function OrdersPage({
           <input
             aria-label="订单截止时间"
             type="date"
-            value={createdTo}
-            onChange={(event) => setCreatedTo(event.target.value)}
+            value={draft.createdTo}
+            onChange={(event) =>
+              setDraft({ ...draft, createdTo: event.target.value })
+            }
           />
         </label>
-        <button disabled={loading} type="submit">
-          筛选
-        </button>
-      </form>
+      </FilterBar>
 
       {!loading && orders.length === 0 && !error ? (
         <PageBanner tone="notice">暂无充值订单。</PageBanner>

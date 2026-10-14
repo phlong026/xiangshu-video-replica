@@ -1,28 +1,31 @@
-/** Skeleton loading table with placeholder rows and columns */
-export function SkeletonTable({ numRows = 5 }: { numRows?: number }) {
+/**
+ * 骨架加载：占位行 + 可读的加载文案（整改 T21）。
+ *
+ * 此前这个组件写死了「ID / 显示名称 / 用户名…」六列且全站零引用，列表页
+ * 加载中各写各的（"加载中..." / "正在读取…" / 什么都不显示）。改成与列数
+ * 无关的通用占位，由 ListPage 统一使用；文案可由调用方传入以保持原有提示。
+ */
+export function SkeletonTable({
+  numRows = 5,
+  columns = 6,
+  label = "加载中…",
+}: {
+  numRows?: number;
+  columns?: number;
+  label?: string;
+}) {
   return (
-    <div className="skeleton-table">
-      <table className="data-table">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>显示名称</th>
-            <th>用户名</th>
-            <th>状态</th>
-            <th>创建时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
+    <div aria-busy="true" className="skeleton-table" role="status">
+      <p className="admin-hint">{label}</p>
+      <table aria-hidden="true" className="data-table">
         <tbody>
-          {Array.from({ length: numRows }).map((_, idx) => (
+          {Array.from({ length: numRows }).map((_, row) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: 骨架行是固定数量的纯占位展示，无重排/增删，顺序即内容。
-            <tr key={idx}>
-              <td className="skeleton-cell" style={{ width: "120px" }} />
-              <td className="skeleton-cell" />
-              <td className="skeleton-cell" />
-              <td className="skeleton-cell" style={{ width: "80px" }} />
-              <td className="skeleton-cell" style={{ width: "140px" }} />
-              <td className="skeleton-cell" style={{ width: "160px" }} />
+            <tr key={row}>
+              {Array.from({ length: columns }).map((_, cell) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: 同上，纯占位单元格。
+                <td className="skeleton-cell" key={cell} />
+              ))}
             </tr>
           ))}
         </tbody>

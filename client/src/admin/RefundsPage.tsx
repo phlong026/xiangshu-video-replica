@@ -7,6 +7,7 @@ import {
 import { CustomerLink } from "./CustomerLink";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -42,8 +43,13 @@ export function RefundsPage({
   const [notice, setNotice] = useState("");
   const [offset, setOffset] = useState(0);
   const [total, setTotal] = useState(0);
-  const [username, setUsername] = useState("");
-  const [executed, setExecuted] = useState<ExecutedFilter>("pending");
+  // 草稿与已提交筛选分开（T22）：点「查询」才发请求。
+  const defaultFilters: { username: string; executed: ExecutedFilter } = {
+    username: "",
+    executed: "pending",
+  };
+  const [draft, setDraft] = useState(defaultFilters);
+  const [filters, setFilters] = useState(defaultFilters);
   const [pendingMark, setPendingMark] = useState<RefundListItem | null>(null);
   const [channel, setChannel] = useState<
     "wechat_manual" | "offline_transfer" | "other"
@@ -57,8 +63,8 @@ export function RefundsPage({
       setLoading(true);
       setError("");
       const response = await listRefunds({
-        targetUsername: username || undefined,
-        executed,
+        targetUsername: filters.username || undefined,
+        executed: filters.executed,
         limit: PAGE_SIZE,
         offset,
       });
@@ -69,7 +75,7 @@ export function RefundsPage({
     } finally {
       setLoading(false);
     }
-  }, [username, executed, offset]);
+  }, [filters, offset]);
 
   useEffect(() => {
     void load();
@@ -113,28 +119,38 @@ export function RefundsPage({
       </header>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
-      <form
-        className="admin-toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
+      <FilterBar
+        ariaLabel="退款筛选"
+        busy={loading}
+        onReset={() => {
           setOffset(0);
-          void load();
+          setDraft(defaultFilters);
+          setFilters(defaultFilters);
+        }}
+        onSubmit={() => {
+          setOffset(0);
+          setFilters(draft);
         }}
       >
         <label>
           客户
           <input
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
+            value={draft.username}
+            onChange={(event) =>
+              setDraft({ ...draft, username: event.target.value })
+            }
             placeholder="用户名或公司名"
           />
         </label>
         <label>
           退付状态
           <select
-            value={executed}
+            value={draft.executed}
             onChange={(event) =>
-              setExecuted(event.target.value as ExecutedFilter)
+              setDraft({
+                ...draft,
+                executed: event.target.value as ExecutedFilter,
+              })
             }
           >
             {EXECUTED_OPTIONS.map((option) => (
@@ -144,10 +160,7 @@ export function RefundsPage({
             ))}
           </select>
         </label>
-        <button type="submit" disabled={loading}>
-          查询
-        </button>
-      </form>
+      </FilterBar>
       {loading ? (
         <p role="status">正在读取退款清单…</p>
       ) : items.length === 0 ? (

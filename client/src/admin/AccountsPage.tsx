@@ -6,6 +6,7 @@ import {
   listAdminWalletTransactions,
 } from "../api.admin";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -40,10 +41,15 @@ export function AccountsPage({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [exporting, setExporting] = useState(false);
-  const [username, setUsername] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
-  const [createdFrom, setCreatedFrom] = useState("");
-  const [createdTo, setCreatedTo] = useState("");
+  // 草稿与已提交筛选分开（T22）：点「查询」才发请求，导出沿用已提交的筛选。
+  const emptyFilters = {
+    username: "",
+    type: "",
+    createdFrom: "",
+    createdTo: "",
+  };
+  const [draft, setDraft] = useState(emptyFilters);
+  const [filters, setFilters] = useState(emptyFilters);
   const { autoRefresh, toggleAutoRefresh } = useAutoRefresh(() => {
     void loadRef.current?.();
   });
@@ -56,10 +62,10 @@ export function AccountsPage({
         limit: PAGE_SIZE,
         offset: transactionOffset,
         userId: userId || undefined,
-        username: username || undefined,
-        type: typeFilter || undefined,
-        createdFrom: createdFrom || undefined,
-        createdTo: createdTo || undefined,
+        username: filters.username || undefined,
+        type: filters.type || undefined,
+        createdFrom: filters.createdFrom || undefined,
+        createdTo: filters.createdTo || undefined,
       });
       setTransactions(transactionPage.items);
       setTransactionTotal(transactionPage.total);
@@ -72,7 +78,7 @@ export function AccountsPage({
     } finally {
       setLoading(false);
     }
-  }, [createdFrom, createdTo, transactionOffset, typeFilter, username, userId]);
+  }, [filters, transactionOffset, userId]);
 
   const loadRef = useRef<(() => void) | null>(null);
   loadRef.current = () => void loadAccounts();
@@ -80,6 +86,12 @@ export function AccountsPage({
   useEffect(() => {
     void loadAccounts();
   }, [loadAccounts]);
+
+  function applyFilters(next: typeof filters) {
+    setTransactionOffset(0);
+    setDraft(next);
+    setFilters(next);
+  }
 
   async function exportTransactions() {
     if (exporting) return;
@@ -89,10 +101,10 @@ export function AccountsPage({
     try {
       const summary = await downloadControlWalletTransactionsCsv({
         userId: userId || undefined,
-        username: username || undefined,
-        type: typeFilter || undefined,
-        createdFrom: createdFrom || undefined,
-        createdTo: createdTo || undefined,
+        username: filters.username || undefined,
+        type: filters.type || undefined,
+        createdFrom: filters.createdFrom || undefined,
+        createdTo: filters.createdTo || undefined,
       });
       setNotice(ledgerExportMessage(summary));
     } catch (cause) {
@@ -108,48 +120,51 @@ export function AccountsPage({
 
   return (
     <section aria-label="积分流水" className="admin-panel">
-      <div className="admin-actions">
-        {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
-        <button
-          type="button"
-          disabled={exporting || loading}
-          onClick={() => void exportTransactions()}
-        >
-          导出账务流水 CSV
-        </button>
-        <button
-          aria-pressed={autoRefresh}
-          type="button"
-          onClick={toggleAutoRefresh}
-        >
-          {autoRefresh ? "自动刷新：开（30 秒）" : "自动刷新：关"}
-        </button>
-      </div>
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {loading ? <div className="loading">加载中...</div> : null}
-      <form
-        className="admin-toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setTransactionOffset(0);
-          void loadAccounts();
-        }}
+      <FilterBar
+        ariaLabel="流水筛选"
+        onReset={() => applyFilters(emptyFilters)}
+        onSubmit={() => applyFilters(draft)}
+        actions={
+          <>
+            {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
+            <button
+              type="button"
+              disabled={exporting || loading}
+              onClick={() => void exportTransactions()}
+            >
+              导出账务流水 CSV
+            </button>
+            <button
+              aria-pressed={autoRefresh}
+              type="button"
+              onClick={toggleAutoRefresh}
+            >
+              {autoRefresh ? "自动刷新：开（30 秒）" : "自动刷新：关"}
+            </button>
+          </>
+        }
       >
         <label>
           客户
           <input
             aria-label="流水客户"
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
+            value={draft.username}
+            onChange={(event) =>
+              setDraft({ ...draft, username: event.target.value })
+            }
           />
         </label>
         <label>
           业务类型
           <select
             aria-label="流水业务类型"
-            value={typeFilter}
-            onChange={(event) => setTypeFilter(event.target.value)}
+            value={draft.type}
+            onChange={(event) =>
+              setDraft({ ...draft, type: event.target.value })
+            }
           >
             <option value="">全部业务类型</option>
             {/* P2-1：选项从词典生成——此前手写四项漏了退款扣减/历史转换，
@@ -166,8 +181,10 @@ export function AccountsPage({
           <input
             aria-label="流水起始时间"
             type="date"
-            value={createdFrom}
-            onChange={(event) => setCreatedFrom(event.target.value)}
+            value={draft.createdFrom}
+            onChange={(event) =>
+              setDraft({ ...draft, createdFrom: event.target.value })
+            }
           />
         </label>
         <label>
@@ -175,12 +192,13 @@ export function AccountsPage({
           <input
             aria-label="流水截止时间"
             type="date"
-            value={createdTo}
-            onChange={(event) => setCreatedTo(event.target.value)}
+            value={draft.createdTo}
+            onChange={(event) =>
+              setDraft({ ...draft, createdTo: event.target.value })
+            }
           />
         </label>
-        <button type="submit">查询</button>
-      </form>
+      </FilterBar>
       {!loading && transactions.length > 0 ? (
         <DataTable
           ariaLabel="账务流水列表"
