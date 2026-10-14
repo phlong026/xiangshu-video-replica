@@ -17,7 +17,7 @@ from typing import Annotated, Any, cast
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import content_store
@@ -453,7 +453,13 @@ def write_login_failure(
 def list_projects(
     conn: Database,
     actor: AuthenticatedUser,
+    # 可选分页（FIX-16）：不传 limit 时返回全部，保持旧客户端行为不变；工作台首屏只
+    # 需要最近若干个项目，不必每次拉全量再在前端截断。
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> list[ProjectResponse]:
+    page_sql = "" if limit is None else " LIMIT %s OFFSET %s"
+    page_params: tuple[int, ...] = () if limit is None else (limit, offset)
     if actor.role in {"admin", "auditor"}:
         rows = conn.execute(
             """
@@ -524,6 +530,8 @@ def list_projects(
                 )
             ORDER BY projects.created_at DESC, projects.id DESC
             """
+            + page_sql,
+            page_params,
         ).fetchall()
     else:
         rows = conn.execute(
@@ -595,8 +603,9 @@ def list_projects(
                 )
             WHERE projects.owner_user_id = %s
             ORDER BY projects.created_at DESC, projects.id DESC
-            """,
-            (actor.id,),
+            """
+            + page_sql,
+            (actor.id, *page_params),
         ).fetchall()
     return [project_response(row) for row in rows]
 

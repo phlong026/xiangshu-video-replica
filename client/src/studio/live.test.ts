@@ -96,6 +96,7 @@ import {
   loadMoreGenerationTasks,
   loadMoreOralTasks,
   loadMorePeople,
+  loadPeopleEntries,
   loadPersonAssets,
   loadProjectDraft,
   loadStudioData,
@@ -168,6 +169,45 @@ describe("studioTaskStatus（FIX-01 批次展示态）", () => {
     expect(
       studioTaskStatus({ status: "CANCELLED", progress: progress({}) }),
     ).toBe("cancelled");
+  });
+});
+
+describe("loadPeopleEntries 并发加载（FIX-16）", () => {
+  it("所有人物的签名地址请求同时发出，结果仍按原顺序组装", async () => {
+    vi.resetAllMocks();
+    api.listOralAvatars.mockResolvedValue([]);
+    api.listOralVoices.mockResolvedValue([]);
+    const resolvers: Array<(value: { url: string }) => void> = [];
+    api.getCachedCharacterAssetUrl.mockImplementation(
+      () =>
+        new Promise<{ url: string }>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const entry = (id: string) =>
+      ({
+        identity_id: id,
+        display_name: `人物${id}`,
+        role: "",
+        views: [{ asset_id: `face-${id}`, view_type: "FRONT_FACE" }],
+        contact_sheet_asset_id: null,
+        status: "PUBLISHED",
+        scene_look_count: 0,
+      }) as unknown as SimpleLibraryEntry;
+
+    const loading = loadPeopleEntries(
+      [entry("a"), entry("b"), entry("c")],
+      null,
+      3,
+    );
+    // 串行实现下这里只会发出 1 个请求（要等第一个人物完成才轮到下一个）。
+    await vi.waitFor(() => expect(resolvers).toHaveLength(3));
+    for (const [index, resolve] of resolvers.entries()) {
+      resolve({ url: `/signed/${index}` });
+    }
+    const result = await loading;
+    expect(result.people.map((person) => person.id)).toEqual(["a", "b", "c"]);
+    expect(result.errors).toEqual([]);
   });
 });
 
