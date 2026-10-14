@@ -174,7 +174,7 @@ describe("CustomerWorkspace (T31)", () => {
 
     await waitFor(() => {
       const projectRequest = fetchMock.mock.calls.find(([url]) =>
-        url.endsWith("/api/projects"),
+        url.split("?")[0].endsWith("/api/projects"),
       );
       expect(projectRequest).toBeDefined();
       const headers = new Headers(projectRequest?.[1]?.headers);
@@ -225,7 +225,7 @@ describe("CustomerWorkspace (T31)", () => {
       expect(
         fetchMock.mock.calls
           .slice(requestCount)
-          .filter(([url]) => url.endsWith("/api/projects")),
+          .filter(([url]) => url.split("?")[0].endsWith("/api/projects")),
       ).toHaveLength(0);
       const nextSessionText = "replacement-workspace-session";
       await act(async () => {
@@ -236,7 +236,7 @@ describe("CustomerWorkspace (T31)", () => {
       await waitFor(() => {
         const newProjectRequests = fetchMock.mock.calls
           .slice(requestCount)
-          .filter(([url]) => url.endsWith("/api/projects"));
+          .filter(([url]) => url.split("?")[0].endsWith("/api/projects"));
         expect(newProjectRequests.length).toBeGreaterThan(0);
         for (const [, init] of newProjectRequests) {
           expect(new Headers(init?.headers).get("Authorization")).toBe(
