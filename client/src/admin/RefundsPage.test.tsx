@@ -148,3 +148,11 @@ it("筛选栏：查询在前、重置在后；重置回到默认的「待退付�
     ),
   );
 });
+
+it("每行客户都是可跳转的客户详情入口（T40）", async () => {
+  vi.stubGlobal("fetch", stubFetch([PENDING_ROW]));
+  const onCustomer = vi.fn();
+  render(<RefundsPage onCustomer={onCustomer} />);
+  fireEvent.click(await screen.findByRole("button", { name: /江西合家美宅/ }));
+  expect(onCustomer).toHaveBeenCalledWith("u1");
+});

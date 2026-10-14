@@ -154,7 +154,13 @@ export function CustomerRefundSection({
         从可用积分中扣回（当前最多 {availableCredits}{" "}
         积分）。系统只记账本，实际退款请线下办理。
       </p>
-      {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
+      {notice ? (
+        <PageBanner tone="notice">
+          {notice}{" "}
+          {/* 扣减与退付登记互相可达（T40）：扣完积分，下一步就是登记线下退付。 */}
+          <a href="#admin/funds?sub=refunds">去资金中心登记退付执行</a>
+        </PageBanner>
+      ) : null}
       {formError ? <PageBanner tone="error">{formError}</PageBanner> : null}
       {/* noValidate：超额、缺单号都由下方中文提示说明原因，不交给浏览器气泡。 */}
       <form className="admin-form" noValidate onSubmit={requestRefund}>

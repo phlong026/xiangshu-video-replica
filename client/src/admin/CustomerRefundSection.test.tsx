@@ -100,6 +100,10 @@ describe("CustomerRefundSection（P0-2 退款扣减迁入客户详情）", () =>
     });
     expect(reason).toBe("客户申请退还未用积分");
     expect(await screen.findByText(/余额 70 积分/)).toBeInTheDocument();
+    // 扣减成功后提示去资金中心登记退付，两边互相可达（T40）。
+    expect(
+      screen.getByRole("link", { name: "去资金中心登记退付执行" }),
+    ).toHaveAttribute("href", "#admin/funds?sub=refunds");
   });
 
   it("reuses the idempotency key after an uncertain failure", async () => {
