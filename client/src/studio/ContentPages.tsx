@@ -113,6 +113,7 @@ import {
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
+  VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
   ViralImportPollingTimeoutError,
   viralImportIdempotencyKey,
 } from "./viralImport";
@@ -1931,7 +1932,9 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
     }
     if (request !== requestRef.current) return undefined;
     if (task.status === "SUCCEEDED" || task.status === "FAILED") return task;
-    throw new ViralImportPollingTimeoutError("导入任务等待超时，请稍后重试");
+    throw new ViralImportPollingTimeoutError(
+      VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
+    );
   };
 
   return {

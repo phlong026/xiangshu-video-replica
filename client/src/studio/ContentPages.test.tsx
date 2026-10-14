@@ -1807,7 +1807,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
   });
 
-  it("导入轮询超时后清除旧键，允许用户发起新任务", async () => {
+  it("导入轮询超时后保留旧键，再点接回同一导入任务而不新建项目（FIX-09）", async () => {
     vi.useFakeTimers();
     try {
       createViralImportTask.mockResolvedValue({
@@ -1846,15 +1846,13 @@ describe("V1.4 内容与运营页面", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(120_000);
       });
-      expect(
-        screen.getByText("导入任务等待超时，请稍后重试"),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/导入仍在后台进行/)).toBeInTheDocument();
 
       createViralImportTask.mockResolvedValueOnce({
-        id: "new-import",
+        id: "stalled-import",
         status: "SUCCEEDED",
-        projectId: "new-project",
-        sourceAssetId: "new-asset",
+        projectId: "stalled-project",
+        sourceAssetId: "stalled-asset",
         canTranscribe: true,
         canAnalyze: true,
       });
@@ -1862,7 +1860,8 @@ describe("V1.4 内容与运营页面", () => {
       await act(async () => {});
 
       expect(createViralImportTask).toHaveBeenCalledTimes(2);
-      expect(createViralImportTask.mock.calls[1][3]).not.toBe(firstKey);
+      // 同一幂等键：服务端回放原任务，不会再建一个导入任务和空壳项目。
+      expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
     } finally {
       vi.useRealTimers();
     }

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
+  ViralImportPollingTimeoutError,
   viralImportIdempotencyKey,
 } from "./viralImport";
 
@@ -49,5 +50,11 @@ describe("爆款导入幂等键生命周期", () => {
     expect(shouldClearViralImportIdempotencyKey(new Error("network"))).toBe(
       false,
     );
+    // 轮询超时只是前端等不及，任务仍在后台：保留键以便接回（FIX-09）。
+    expect(
+      shouldClearViralImportIdempotencyKey(
+        new ViralImportPollingTimeoutError("timeout"),
+      ),
+    ).toBe(false);
   });
 });
