@@ -21,6 +21,7 @@ import { DataTable } from "./ui/DataTable";
 import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { useCan } from "./ui/permissions";
 import { OrderStatusBadge } from "./ui/StatusBadge";
 import { useAutoRefresh } from "./ui/useAutoRefresh";
 import {
@@ -79,6 +80,8 @@ export function OrdersPage({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [exporting, setExporting] = useState(false);
+  // 导出是独立权限点（T41）：模板没有 export 时按钮不出现。
+  const canExport = useCan()("export");
   const [pendingSyncOrderNo, setPendingSyncOrderNo] = useState<string | null>(
     null,
   );
@@ -247,13 +250,15 @@ export function OrdersPage({
         actions={
           <>
             {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
-            <button
-              type="button"
-              disabled={exporting || loading || Boolean(orderNo)}
-              onClick={() => void exportRechargeOrders()}
-            >
-              导出充值订单 CSV
-            </button>
+            {canExport ? (
+              <button
+                type="button"
+                disabled={exporting || loading || Boolean(orderNo)}
+                onClick={() => void exportRechargeOrders()}
+              >
+                导出充值订单 CSV
+              </button>
+            ) : null}
             <button
               aria-pressed={autoRefresh}
               type="button"

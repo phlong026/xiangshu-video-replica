@@ -34,6 +34,7 @@ import { WorkerObservationsPage } from "./admin/WorkerObservationsPage";
 import "./admin/admin-login.css";
 import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
 import { PageBanner } from "./admin/ui/PageBanner";
+import { AdminPermissionsProvider, canFromActor } from "./admin/ui/permissions";
 import { TabBar } from "./admin/ui/TabBar";
 import { roleLabel } from "./admin/ui/vocabulary";
 import { SESSION_EXPIRED_EVENT } from "./api";
@@ -288,6 +289,32 @@ const tabPageTitles: Record<AdminTab, string> = {
   alerts: "告警总览",
   team: "团队与权限",
   systemSettings: "系统设置",
+};
+
+// 菜单入口 → 读权限点（整改 T41）。总览人人可见；团队与技术入口另有超管判断。
+const tabReadPoints: Partial<Record<AdminTab, string>> = {
+  analytics: "business.read",
+  costReview: "business.read",
+  reports: "business.read",
+  funds: "funds.read",
+  customersMgmt: "customer.read",
+  customerLifecycle: "customer.read",
+  announcements: "customer.read",
+  publishStats: "customer.read",
+  supportTickets: "customer.read",
+  sessions: "customer.read",
+  generationRecords: "generation.read",
+  generationFailures: "generation.read",
+  workerObservations: "generation.read",
+  alerts: "generation.read",
+  externalCalls: "generation.read",
+  viralOverview: "content.read",
+  viralHomepage: "content.read",
+  viralCollection: "content.read",
+  viralVideos: "content.read",
+  viralDiscoveries: "content.read",
+  auditCenter: "audit.read",
+  systemSettings: "settings.read",
 };
 
 const compactNavigationBreakpoint = 1024;
@@ -913,491 +940,526 @@ export function AdminApp() {
       ?.label ?? "运营后台";
   const activePageTitle = tabPageTitles[activeTab];
   const readOnly = actor.role === "auditor";
+  const can = canFromActor(actor);
+  // 页面按领域收敛只读：没有对应写点的模板看到的是只读页（按钮不出现），
+  // 服务端同样按点拒绝，这里只是不把用不了的操作摆出来。
+  const readOnlyFor = (point: string) => readOnly || !can(point);
+  // 没有读权限的页面不渲染（地址栏手输进来也一样），显示说明而不是空白。
+  const viewAllowed = (() => {
+    const point = tabReadPoints[activeTab];
+    return point ? can(point) : true;
+  })();
+  const viewTab: AdminTab | null = viewAllowed ? activeTab : null;
+  const tabVisible = (tab: AdminTab) => {
+    if (
+      tab === "externalCalls" &&
+      !(actor.role === "admin" && actor.is_super_admin)
+    )
+      return false;
+    if (tab === "team") return actor.is_super_admin === true;
+    if (tab === "publishStats" && !publishStatsEnabled && activeTab !== tab)
+      return false;
+    const point = tabReadPoints[tab];
+    return point ? can(point) : true;
+  };
 
   return (
-    <main className="admin-shell admin-shell--control">
-      <header className="admin-header admin-header--workspace">
-        <div className="admin-title-block">
-          {isCompactNavigation ? (
-            <button
-              aria-controls="admin-navigation"
-              aria-expanded={isNavigationOpen}
-              aria-label={isNavigationOpen ? "关闭导航" : "展开导航"}
-              className="admin-nav-toggle"
-              type="button"
-              onClick={() => setIsNavigationOpen((current) => !current)}
-            >
-              菜单
-            </button>
-          ) : null}
-          <span className="admin-breadcrumb">
-            {activeGroupLabel} / {activePageTitle}
-          </span>
-        </div>
-        <div className="admin-session">
-          <GlobalSearch
-            onPick={(item) => {
-              // 命中后一步到详情：客户 → 客户详情；订单 → 资金中心订单；任务 → 生成记录。
-              if (item.type === "customer")
-                navigateAdmin("customersMgmt", "customer", { userId: item.id });
-              else if (item.type === "order")
-                navigateAdmin("funds", "order", { orderNo: item.id });
-              else navigateAdmin("generationRecords", "", { taskId: item.id });
-              setError("");
-              setNotice("");
-            }}
-          />
-          <time dateTime={shanghaiDate()}>{shanghaiDate()}</time>
-          <button type="button" onClick={() => setChangePasswordOpen(true)}>
-            修改密码
-          </button>
-          <button type="button" onClick={() => void signOut()}>
-            退出登录
-          </button>
-        </div>
-      </header>
-
-      <section className="admin-stage">
-        {isCompactNavigation && isNavigationOpen ? (
-          <button
-            aria-label="关闭导航遮罩"
-            className="admin-sidebar-backdrop"
-            type="button"
-            onClick={() => setIsNavigationOpen(false)}
-          />
-        ) : null}
-        <aside
-          aria-hidden={isCompactNavigation && !isNavigationOpen}
-          className={
-            isCompactNavigation && isNavigationOpen
-              ? "admin-sidebar is-open"
-              : "admin-sidebar"
-          }
-        >
-          <div className="admin-sidebar__top">
-            <div className="admin-brand">
-              <img alt="众墅之家" src={zhongshuBrandLogo} />
-              <span>AI 即创 · 运营管理后台</span>
-            </div>
-          </div>
-
-          {isNavigationOpen ? (
-            <nav
-              aria-label="管理端导航"
-              className="admin-nav-groups"
-              id="admin-navigation"
-            >
-              {tabGroups.map((group) => (
-                <section className="admin-nav-group" key={group.id}>
-                  <h3>{group.label}</h3>
-                  <div className="admin-nav-group__items">
-                    {group.tabs
-                      .filter((tab) => {
-                        if (tab.id === "externalCalls")
-                          return actor.role === "admin" && actor.is_super_admin;
-                        if (tab.id === "team") return actor.is_super_admin;
-                        if (tab.id === "publishStats")
-                          return publishStatsEnabled || activeTab === tab.id;
-                        return true;
-                      })
-                      .map((tab) => (
-                        // 真链接（整改 T09）：中键、Ctrl/⌘ 点击或右键「在新标签页
-                        // 打开」交给浏览器；普通左键仍走站内导航，保留上下文。
-                        <a
-                          aria-current={
-                            activeTab === tab.id ? "page" : undefined
-                          }
-                          aria-label={tab.label}
-                          className={
-                            activeTab === tab.id
-                              ? "admin-tab is-active"
-                              : "admin-tab"
-                          }
-                          key={tab.id}
-                          href={`#admin/${tab.id}`}
-                          onClick={(event) => {
-                            if (
-                              event.button !== 0 ||
-                              event.metaKey ||
-                              event.ctrlKey ||
-                              event.shiftKey ||
-                              event.altKey
-                            ) {
-                              return;
-                            }
-                            event.preventDefault();
-                            const inBusiness =
-                              ["analytics", "costReview"].includes(activeTab) &&
-                              ["analytics", "costReview"].includes(tab.id);
-                            const scope = inBusiness
-                              ? Object.fromEntries(
-                                  new URLSearchParams(
-                                    window.location.hash.split("?")[1] ?? "",
-                                  ),
-                                )
-                              : {};
-                            if (inBusiness)
-                              scope.analyticsTab =
-                                tab.id === "costReview" ? "cost" : "dashboard";
-                            navigateAdmin(tab.id, "", scope);
-                            // C3：切标签清掉上一页残留的全局提示。
-                            setError("");
-                            setNotice("");
-                            if (isCompactNavigation) {
-                              setIsNavigationOpen(false);
-                            }
-                          }}
-                        >
-                          <img
-                            alt=""
-                            aria-hidden="true"
-                            className="admin-navigation-icon"
-                            src={navigationIcons[tab.id]}
-                          />
-                          <span className="admin-navigation-copy">
-                            <span>{tab.label}</span>
-                            <small>{tab.helper}</small>
-                          </span>
-                        </a>
-                      ))}
-                  </div>
-                </section>
-              ))}
-            </nav>
-          ) : null}
-          <div className="admin-sidebar__footer">
-            <span className="admin-sidebar__avatar" aria-hidden="true">
-              {actor.display_name.slice(0, 1)}
+    <AdminPermissionsProvider can={can}>
+      <main className="admin-shell admin-shell--control">
+        <header className="admin-header admin-header--workspace">
+          <div className="admin-title-block">
+            {isCompactNavigation ? (
+              <button
+                aria-controls="admin-navigation"
+                aria-expanded={isNavigationOpen}
+                aria-label={isNavigationOpen ? "关闭导航" : "展开导航"}
+                className="admin-nav-toggle"
+                type="button"
+                onClick={() => setIsNavigationOpen((current) => !current)}
+              >
+                菜单
+              </button>
+            ) : null}
+            <span className="admin-breadcrumb">
+              {activeGroupLabel} / {activePageTitle}
             </span>
-            <div>
-              <span>{actor.display_name}</span>
-              <small>{roleLabel(actor.role)}</small>
-            </div>
           </div>
-        </aside>
+          <div className="admin-session">
+            <GlobalSearch
+              onPick={(item) => {
+                // 命中后一步到详情：客户 → 客户详情；订单 → 资金中心订单；任务 → 生成记录。
+                if (item.type === "customer")
+                  navigateAdmin("customersMgmt", "customer", {
+                    userId: item.id,
+                  });
+                else if (item.type === "order")
+                  navigateAdmin("funds", "order", { orderNo: item.id });
+                else
+                  navigateAdmin("generationRecords", "", { taskId: item.id });
+                setError("");
+                setNotice("");
+              }}
+            />
+            <time dateTime={shanghaiDate()}>{shanghaiDate()}</time>
+            <button type="button" onClick={() => setChangePasswordOpen(true)}>
+              修改密码
+            </button>
+            <button type="button" onClick={() => void signOut()}>
+              退出登录
+            </button>
+          </div>
+        </header>
 
-        <div className="admin-workspace">
-          {error ? <PageBanner tone="error">{error}</PageBanner> : null}
-          {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
-          <ChangePasswordDialog
-            open={changePasswordOpen}
-            onClose={() => setChangePasswordOpen(false)}
-            onChanged={() => {
-              setError("");
-              setNotice("密码已修改；你在其它设备上的管理登录已退出。");
-            }}
-          />
-
-          <header className="admin-page-heading">
-            <span>{activeGroupLabel}</span>
-            <h1>{activePageTitle}</h1>
-            <p>{activeTabMeta?.helper ?? "运营核心视图"}</p>
-          </header>
-
-          {/* 与其它页面同一渲染顺序：此前它挂在标题之前，页面内容会把标题顶到下方。 */}
-          {activeTab === "externalCalls" ? (
-            actor.role === "admin" && actor.is_super_admin ? (
-              <ExternalCallsPage />
-            ) : (
-              <PageBanner tone="error">此功能仅超级管理员可用。</PageBanner>
-            )
+        <section className="admin-stage">
+          {isCompactNavigation && isNavigationOpen ? (
+            <button
+              aria-label="关闭导航遮罩"
+              className="admin-sidebar-backdrop"
+              type="button"
+              onClick={() => setIsNavigationOpen(false)}
+            />
           ) : null}
+          <aside
+            aria-hidden={isCompactNavigation && !isNavigationOpen}
+            className={
+              isCompactNavigation && isNavigationOpen
+                ? "admin-sidebar is-open"
+                : "admin-sidebar"
+            }
+          >
+            <div className="admin-sidebar__top">
+              <div className="admin-brand">
+                <img alt="众墅之家" src={zhongshuBrandLogo} />
+                <span>AI 即创 · 运营管理后台</span>
+              </div>
+            </div>
 
-          {/* 一个层级只导航一次（整改 T08）：总览不再放与左侧菜单重复的快捷栏，
+            {isNavigationOpen ? (
+              <nav
+                aria-label="管理端导航"
+                className="admin-nav-groups"
+                id="admin-navigation"
+              >
+                {tabGroups
+                  .filter((group) =>
+                    group.tabs.some((tab) => tabVisible(tab.id)),
+                  )
+                  .map((group) => (
+                    <section className="admin-nav-group" key={group.id}>
+                      <h3>{group.label}</h3>
+                      <div className="admin-nav-group__items">
+                        {group.tabs
+                          .filter((tab) => tabVisible(tab.id))
+                          .map((tab) => (
+                            // 真链接（整改 T09）：中键、Ctrl/⌘ 点击或右键「在新标签页
+                            // 打开」交给浏览器；普通左键仍走站内导航，保留上下文。
+                            <a
+                              aria-current={
+                                activeTab === tab.id ? "page" : undefined
+                              }
+                              aria-label={tab.label}
+                              className={
+                                activeTab === tab.id
+                                  ? "admin-tab is-active"
+                                  : "admin-tab"
+                              }
+                              key={tab.id}
+                              href={`#admin/${tab.id}`}
+                              onClick={(event) => {
+                                if (
+                                  event.button !== 0 ||
+                                  event.metaKey ||
+                                  event.ctrlKey ||
+                                  event.shiftKey ||
+                                  event.altKey
+                                ) {
+                                  return;
+                                }
+                                event.preventDefault();
+                                const inBusiness =
+                                  ["analytics", "costReview"].includes(
+                                    activeTab,
+                                  ) &&
+                                  ["analytics", "costReview"].includes(tab.id);
+                                const scope = inBusiness
+                                  ? Object.fromEntries(
+                                      new URLSearchParams(
+                                        window.location.hash.split("?")[1] ??
+                                          "",
+                                      ),
+                                    )
+                                  : {};
+                                if (inBusiness)
+                                  scope.analyticsTab =
+                                    tab.id === "costReview"
+                                      ? "cost"
+                                      : "dashboard";
+                                navigateAdmin(tab.id, "", scope);
+                                // C3：切标签清掉上一页残留的全局提示。
+                                setError("");
+                                setNotice("");
+                                if (isCompactNavigation) {
+                                  setIsNavigationOpen(false);
+                                }
+                              }}
+                            >
+                              <img
+                                alt=""
+                                aria-hidden="true"
+                                className="admin-navigation-icon"
+                                src={navigationIcons[tab.id]}
+                              />
+                              <span className="admin-navigation-copy">
+                                <span>{tab.label}</span>
+                                <small>{tab.helper}</small>
+                              </span>
+                            </a>
+                          ))}
+                      </div>
+                    </section>
+                  ))}
+              </nav>
+            ) : null}
+            <div className="admin-sidebar__footer">
+              <span className="admin-sidebar__avatar" aria-hidden="true">
+                {actor.display_name.slice(0, 1)}
+              </span>
+              <div>
+                <span>{actor.display_name}</span>
+                <small>{actor.template_label || roleLabel(actor.role)}</small>
+              </div>
+            </div>
+          </aside>
+
+          <div className="admin-workspace">
+            {error ? <PageBanner tone="error">{error}</PageBanner> : null}
+            {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
+            <ChangePasswordDialog
+              open={changePasswordOpen}
+              onClose={() => setChangePasswordOpen(false)}
+              onChanged={() => {
+                setError("");
+                setNotice("密码已修改；你在其它设备上的管理登录已退出。");
+              }}
+            />
+
+            <header className="admin-page-heading">
+              <span>{activeGroupLabel}</span>
+              <h1>{activePageTitle}</h1>
+              <p>{activeTabMeta?.helper ?? "运营核心视图"}</p>
+            </header>
+
+            {viewAllowed ? null : (
+              <PageBanner tone="error">
+                当前角色没有查看此页面的权限，请联系超级管理员调整角色。
+              </PageBanner>
+            )}
+
+            {/* 与其它页面同一渲染顺序：此前它挂在标题之前，页面内容会把标题顶到下方。 */}
+            {viewTab === "externalCalls" ? (
+              actor.role === "admin" && actor.is_super_admin ? (
+                <ExternalCallsPage />
+              ) : (
+                <PageBanner tone="error">此功能仅超级管理员可用。</PageBanner>
+              )
+            ) : null}
+
+            {/* 一个层级只导航一次（整改 T08）：总览不再放与左侧菜单重复的快捷栏，
               经营分析、生成记录也不再渲染与菜单同名的页内页签。 */}
-          {activeTab === "overview" ? (
-            <>
-              <OverviewPage
+            {viewTab === "overview" ? (
+              <>
+                <OverviewPage
+                  readOnly={readOnly}
+                  onNavigate={(destination, target = {}) => {
+                    const routes: Record<string, AdminTab> = {
+                      customerAdjustments: "customersMgmt",
+                      customerPackage: "customersMgmt",
+                      customerRefund: "customersMgmt",
+                      costDetails: "analytics",
+                      // 待结算 / 成本待核对 / 收入未确定都是计费操作口径，落在
+                      // 经营分析而不是资金流水（方案 P0-5）。
+                      pendingOperations: "analytics",
+                      unknownCost: "analytics",
+                      unknownRevenue: "analytics",
+                      failedGenerationRecords: "generationRecords",
+                      analysisFailures: "generationRecords",
+                      rates: "systemSettings",
+                      recon: "funds",
+                    };
+                    // 全局待办（T11）落到带筛选的清单：条数与待办计数同口径。
+                    const filtered: Record<
+                      string,
+                      { tab: AdminTab; target: Record<string, string> }
+                    > = {
+                      pendingOrders: {
+                        tab: "funds",
+                        target: { sub: "orders", status: "PENDING" },
+                      },
+                      queueAttention: { tab: "workerObservations", target: {} },
+                      openTickets: {
+                        tab: "supportTickets",
+                        target: { status: "unresolved" },
+                      },
+                      contentFailed: {
+                        tab: "viralVideos",
+                        target: { listQuery: "libraryStatus=failed" },
+                      },
+                      activeAlerts: { tab: "alerts", target: {} },
+                    };
+                    const direct = filtered[destination];
+                    if (direct) {
+                      navigateAdmin(direct.tab, "", direct.target);
+                      return;
+                    }
+                    navigateAdmin(
+                      routes[destination] ?? (destination as AdminTab),
+                      destination,
+                      target,
+                    );
+                  }}
+                />
+              </>
+            ) : null}
+            {viewTab === "analytics" || viewTab === "costReview" ? (
+              <AnalyticsPage
+                key={`${activeTab}:${navigationIntent}:${businessTarget.get("billingQuery") ?? ""}`}
                 readOnly={readOnly}
-                onNavigate={(destination, target = {}) => {
-                  const routes: Record<string, AdminTab> = {
-                    customerAdjustments: "customersMgmt",
-                    customerPackage: "customersMgmt",
-                    customerRefund: "customersMgmt",
-                    costDetails: "analytics",
-                    // 待结算 / 成本待核对 / 收入未确定都是计费操作口径，落在
-                    // 经营分析而不是资金流水（方案 P0-5）。
-                    pendingOperations: "analytics",
-                    unknownCost: "analytics",
-                    unknownRevenue: "analytics",
-                    failedGenerationRecords: "generationRecords",
-                    analysisFailures: "generationRecords",
-                    rates: "systemSettings",
-                    recon: "funds",
-                  };
-                  // 全局待办（T11）落到带筛选的清单：条数与待办计数同口径。
-                  const filtered: Record<
-                    string,
-                    { tab: AdminTab; target: Record<string, string> }
-                  > = {
-                    pendingOrders: {
-                      tab: "funds",
-                      target: { sub: "orders", status: "PENDING" },
-                    },
-                    queueAttention: { tab: "workerObservations", target: {} },
-                    openTickets: {
-                      tab: "supportTickets",
-                      target: { status: "unresolved" },
-                    },
-                    contentFailed: {
-                      tab: "viralVideos",
-                      target: { listQuery: "libraryStatus=failed" },
-                    },
-                    activeAlerts: { tab: "alerts", target: {} },
-                  };
-                  const direct = filtered[destination];
-                  if (direct) {
-                    navigateAdmin(direct.tab, "", direct.target);
-                    return;
-                  }
-                  navigateAdmin(
-                    routes[destination] ?? (destination as AdminTab),
-                    destination,
-                    target,
-                  );
-                }}
+                showViewTabs={false}
+                onCustomer={(userId) =>
+                  navigateAdmin("customersMgmt", "customer", { userId })
+                }
+                initialStart={businessTarget.get("start") ?? undefined}
+                initialEnd={businessTarget.get("end") ?? undefined}
+                initialCostQuery={businessTarget.get("billingQuery") ?? ""}
+                onScopeChange={persistAnalyticsScope}
+                initialTab={
+                  viewTab === "costReview" ||
+                  businessTarget.get("analyticsTab") === "cost" ||
+                  navigationIntent === "costDetails" ||
+                  navigationIntent === "pendingOperations" ||
+                  navigationIntent === "unknownCost" ||
+                  navigationIntent === "unknownRevenue"
+                    ? "cost"
+                    : "dashboard"
+                }
+                initialAttention={
+                  navigationIntent === "pendingOperations"
+                    ? "pending"
+                    : navigationIntent === "unknownCost"
+                      ? "unknown_cost"
+                      : navigationIntent === "unknownRevenue"
+                        ? "unknown_revenue"
+                        : ""
+                }
               />
-            </>
-          ) : null}
-          {activeTab === "analytics" || activeTab === "costReview" ? (
-            <AnalyticsPage
-              key={`${activeTab}:${navigationIntent}:${businessTarget.get("billingQuery") ?? ""}`}
-              readOnly={readOnly}
-              showViewTabs={false}
-              onCustomer={(userId) =>
-                navigateAdmin("customersMgmt", "customer", { userId })
-              }
-              initialStart={businessTarget.get("start") ?? undefined}
-              initialEnd={businessTarget.get("end") ?? undefined}
-              initialCostQuery={businessTarget.get("billingQuery") ?? ""}
-              onScopeChange={persistAnalyticsScope}
-              initialTab={
-                activeTab === "costReview" ||
-                businessTarget.get("analyticsTab") === "cost" ||
-                navigationIntent === "costDetails" ||
-                navigationIntent === "pendingOperations" ||
-                navigationIntent === "unknownCost" ||
-                navigationIntent === "unknownRevenue"
-                  ? "cost"
-                  : "dashboard"
-              }
-              initialAttention={
-                navigationIntent === "pendingOperations"
-                  ? "pending"
-                  : navigationIntent === "unknownCost"
-                    ? "unknown_cost"
-                    : navigationIntent === "unknownRevenue"
-                      ? "unknown_revenue"
-                      : ""
-              }
-            />
-          ) : null}
-          {activeTab === "funds" ? (
-            // 总览「对账不一致」待办带 recon 意图进来时直达对账异常页签
-            // （方案 P0-5：待办点击后落到的清单与待办数一致）。
-            <FundsPage
-              onCustomer={(userId) =>
-                navigateAdmin("customersMgmt", "customer", { userId })
-              }
-              key={`funds:${businessTarget}:${navigationIntent}`}
-              initialMonth={businessTarget.get("month") ?? undefined}
-              initialOrderStatus={businessTarget.get("status") ?? ""}
-              onMonthChange={(month) => persistBusinessScope({ month })}
-              initialAnomaly={
-                (businessTarget.get(
-                  "anomaly",
-                ) as import("./api").ReconciliationAnomaly) || undefined
-              }
-              userId={businessTarget.get("userId") ?? ""}
-              orderNo={businessTarget.get("orderNo") ?? ""}
-              initialTab={
-                navigationIntent === "recon"
-                  ? "reconciliation"
-                  : navigationIntent === "order"
-                    ? "orders"
-                    : navigationIntent === "ledger"
-                      ? "transactions"
-                      : undefined
-              }
-              readOnly={readOnly}
-            />
-          ) : null}
-          {activeTab === "customersMgmt" ? (
-            /* 总览快捷入口（开通套餐 / 赠送积分 / 退款扣减）都落在本页：把
+            ) : null}
+            {viewTab === "funds" ? (
+              // 总览「对账不一致」待办带 recon 意图进来时直达对账异常页签
+              // （方案 P0-5：待办点击后落到的清单与待办数一致）。
+              <FundsPage
+                onCustomer={(userId) =>
+                  navigateAdmin("customersMgmt", "customer", { userId })
+                }
+                key={`funds:${businessTarget}:${navigationIntent}`}
+                initialMonth={businessTarget.get("month") ?? undefined}
+                initialOrderStatus={businessTarget.get("status") ?? ""}
+                onMonthChange={(month) => persistBusinessScope({ month })}
+                initialAnomaly={
+                  (businessTarget.get(
+                    "anomaly",
+                  ) as import("./api").ReconciliationAnomaly) || undefined
+                }
+                userId={businessTarget.get("userId") ?? ""}
+                orderNo={businessTarget.get("orderNo") ?? ""}
+                initialTab={
+                  navigationIntent === "recon"
+                    ? "reconciliation"
+                    : navigationIntent === "order"
+                      ? "orders"
+                      : navigationIntent === "ledger"
+                        ? "transactions"
+                        : undefined
+                }
+                readOnly={readOnlyFor("funds.write")}
+              />
+            ) : null}
+            {viewTab === "customersMgmt" ? (
+              /* 总览快捷入口（开通套餐 / 赠送积分 / 退款扣减）都落在本页：把
                intent 透传下去，客户管理页才能定位到对应表单，否则点完只是
                换了个页签、没有下文。 */
-            <CustomerList
-              embedded
-              key={`customers:${navigationIntent}:${businessTarget}`}
-              initialCustomerId={businessTarget.get("userId") ?? ""}
-              initialIntent={navigationIntent}
-              operatorId={actor.user_id}
-              readOnly={readOnly}
-              initialListQuery={businessTarget.get("listQuery") ?? ""}
-              onScopeChange={persistBusinessScope}
-              onCustomer={(userId) =>
-                navigateAdmin("customersMgmt", "customer", {
-                  userId,
-                  listQuery:
-                    new URLSearchParams(
-                      window.location.hash.split("?")[1] ?? "",
-                    ).get("listQuery") ?? "",
-                })
-              }
-              onReturnToList={() =>
-                navigateAdmin("customersMgmt", "", {
-                  listQuery:
-                    new URLSearchParams(
-                      window.location.hash.split("?")[1] ?? "",
-                    ).get("listQuery") ?? "",
-                })
-              }
-            />
-          ) : null}
-          {/* 任务书 C：恢复在线会话挂载。多设备并存下按设备强制下线是管理刚需，
+              <CustomerList
+                embedded
+                key={`customers:${navigationIntent}:${businessTarget}`}
+                initialCustomerId={businessTarget.get("userId") ?? ""}
+                initialIntent={navigationIntent}
+                operatorId={actor.user_id}
+                readOnly={readOnly}
+                initialListQuery={businessTarget.get("listQuery") ?? ""}
+                onScopeChange={persistBusinessScope}
+                onCustomer={(userId) =>
+                  navigateAdmin("customersMgmt", "customer", {
+                    userId,
+                    listQuery:
+                      new URLSearchParams(
+                        window.location.hash.split("?")[1] ?? "",
+                      ).get("listQuery") ?? "",
+                  })
+                }
+                onReturnToList={() =>
+                  navigateAdmin("customersMgmt", "", {
+                    listQuery:
+                      new URLSearchParams(
+                        window.location.hash.split("?")[1] ?? "",
+                      ).get("listQuery") ?? "",
+                  })
+                }
+              />
+            ) : null}
+            {/* 任务书 C：恢复在线会话挂载。多设备并存下按设备强制下线是管理刚需，
               readOnly 由会话页自身收敛（auditor 不渲染强制下线与调账入口）。 */}
-          {activeTab === "customerLifecycle" ? (
-            <CustomerLifecyclePage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "announcements" ? (
-            <AnnouncementsPage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "reports" ? (
-            <AdminErrorBoundary>
-              <ReportsPage readOnly={readOnly} />
-            </AdminErrorBoundary>
-          ) : null}
-          {activeTab === "publishStats" ? (
-            <PublishStatsPage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "supportTickets" ? (
-            <SupportTicketsPage
-              key={`tickets:${businessTarget}`}
-              initialStatus={businessTarget.get("status") ?? ""}
-              readOnly={readOnly}
-              onCustomer={(userId) =>
-                navigateAdmin("customersMgmt", "customer", {
-                  userId,
-                  listQuery:
-                    new URLSearchParams(
-                      window.location.hash.split("?")[1] ?? "",
-                    ).get("listQuery") ?? "",
-                })
-              }
-            />
-          ) : null}
-          {activeTab === "workerObservations" ? (
-            <WorkerObservationsPage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "sessions" ? (
-            <DeviceManagement global key="all" readOnly={readOnly} />
-          ) : null}
-          {activeTab === "generationRecords" ||
-          activeTab === "generationFailures" ? (
-            <GenerationRecordsPage
-              key={`${activeTab}:${navigationIntent}:${businessTarget}`}
-              initialTaskRef={businessTarget.get("taskId") ?? ""}
-              initialUserId={businessTarget.get("userId") ?? ""}
-              initialStatus={
-                activeTab === "generationFailures" ||
-                navigationIntent === "failedGenerationRecords" ||
-                navigationIntent === "analysisFailures"
-                  ? "FAILED"
-                  : (businessTarget.get("status") ?? undefined)
-              }
-              initialRecordType={
-                navigationIntent === "analysisFailures"
-                  ? "ANALYSIS"
-                  : (businessTarget.get("recordType") ?? undefined)
-              }
-              initialView={
-                activeTab === "generationFailures" ? "diagnostics" : "records"
-              }
-              onViewChange={(view, taskId) =>
-                navigateAdmin(
-                  view === "diagnostics"
-                    ? "generationFailures"
-                    : "generationRecords",
-                  "",
-                  taskId ? { taskId } : {},
-                )
-              }
-              readOnly={readOnly}
-            />
-          ) : null}
-          {activeTab === "auditCenter" ? (
-            <AuditEventsPage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "viralOverview" ? (
-            <ViralOverviewPage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "viralHomepage" ? (
-            <ViralHomepagePage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "viralCollection" ? (
-            <ViralCollectionPage
-              key={`collection:${businessTarget}`}
-              readOnly={readOnly}
-              initialBatchId={businessTarget.get("batchId") ?? ""}
-            />
-          ) : null}
-          {activeTab === "viralVideos" ? (
-            <ViralVideosPage
-              key={`videos:${businessTarget}`}
-              initialListQuery={businessTarget.get("listQuery") ?? ""}
-              onScopeChange={persistBusinessScope}
-              onCustomer={(userId) =>
-                navigateAdmin("customersMgmt", "customer", { userId })
-              }
-              initialVideo={
-                businessTarget.get("videoId")
-                  ? {
-                      video_id: businessTarget.get("videoId") ?? "",
-                      platform:
-                        businessTarget.get("platform") === "wechat_channels"
-                          ? "wechat_channels"
-                          : "douyin",
-                    }
-                  : null
-              }
-              readOnly={readOnly}
-              initialSearch={viralDemandSearch}
-            />
-          ) : null}
-          {activeTab === "viralDiscoveries" ? (
-            <ViralDiscoveriesPage
-              readOnly={readOnly}
-              onCustomer={(userId) => {
-                navigateAdmin("customersMgmt", "demandCustomer", { userId });
-              }}
-              onSearch={(keyword, platform) => {
-                setViralDemandSearch({ keyword, platform });
-                navigateAdmin("viralVideos");
-              }}
-            />
-          ) : null}
-          {activeTab === "alerts" ? (
-            <AdminAlertsSection readOnly={readOnly} />
-          ) : null}
-          {activeTab === "team" ? (
-            actor.is_super_admin === true ? (
-              <TeamManagementSection currentUserId={actor.user_id} />
-            ) : (
-              <PageBanner tone="notice">
-                仅超级管理员可管理团队与权限。
-              </PageBanner>
-            )
-          ) : null}
-          {activeTab === "systemSettings" ? (
-            <SystemSettingsPage
-              isSuperAdmin={actor.is_super_admin === true}
-              readOnly={readOnly}
-              initialTab={navigationIntent === "rates" ? "rates" : undefined}
-              onPublishStatsChanged={setPublishStatsEnabled}
-            />
-          ) : null}
-        </div>
-      </section>
-    </main>
+            {viewTab === "customerLifecycle" ? (
+              <CustomerLifecyclePage readOnly={readOnlyFor("customer.write")} />
+            ) : null}
+            {viewTab === "announcements" ? (
+              <AnnouncementsPage readOnly={readOnlyFor("customer.write")} />
+            ) : null}
+            {viewTab === "reports" ? <ReportsPage readOnly={readOnly} /> : null}
+            {viewTab === "publishStats" ? (
+              <PublishStatsPage readOnly={readOnlyFor("customer.write")} />
+            ) : null}
+            {viewTab === "supportTickets" ? (
+              <SupportTicketsPage
+                key={`tickets:${businessTarget}`}
+                initialStatus={businessTarget.get("status") ?? ""}
+                readOnly={readOnlyFor("customer.write")}
+                onCustomer={(userId) =>
+                  navigateAdmin("customersMgmt", "customer", {
+                    userId,
+                    listQuery:
+                      new URLSearchParams(
+                        window.location.hash.split("?")[1] ?? "",
+                      ).get("listQuery") ?? "",
+                  })
+                }
+              />
+            ) : null}
+            {viewTab === "workerObservations" ? (
+              <WorkerObservationsPage readOnly={readOnly} />
+            ) : null}
+            {viewTab === "sessions" ? (
+              <DeviceManagement
+                global
+                key="all"
+                readOnly={readOnlyFor("customer.write")}
+              />
+            ) : null}
+            {viewTab === "generationRecords" ||
+            viewTab === "generationFailures" ? (
+              <GenerationRecordsPage
+                key={`${activeTab}:${navigationIntent}:${businessTarget}`}
+                initialTaskRef={businessTarget.get("taskId") ?? ""}
+                initialUserId={businessTarget.get("userId") ?? ""}
+                initialStatus={
+                  viewTab === "generationFailures" ||
+                  navigationIntent === "failedGenerationRecords" ||
+                  navigationIntent === "analysisFailures"
+                    ? "FAILED"
+                    : (businessTarget.get("status") ?? undefined)
+                }
+                initialRecordType={
+                  navigationIntent === "analysisFailures"
+                    ? "ANALYSIS"
+                    : (businessTarget.get("recordType") ?? undefined)
+                }
+                initialView={
+                  viewTab === "generationFailures" ? "diagnostics" : "records"
+                }
+                onViewChange={(view, taskId) =>
+                  navigateAdmin(
+                    view === "diagnostics"
+                      ? "generationFailures"
+                      : "generationRecords",
+                    "",
+                    taskId ? { taskId } : {},
+                  )
+                }
+                readOnly={readOnly}
+              />
+            ) : null}
+            {viewTab === "auditCenter" ? (
+              <AuditEventsPage readOnly={readOnly} />
+            ) : null}
+            {viewTab === "viralOverview" ? (
+              <ViralOverviewPage readOnly={readOnlyFor("content.write")} />
+            ) : null}
+            {viewTab === "viralHomepage" ? (
+              <ViralHomepagePage readOnly={readOnlyFor("content.write")} />
+            ) : null}
+            {viewTab === "viralCollection" ? (
+              <ViralCollectionPage
+                key={`collection:${businessTarget}`}
+                readOnly={readOnlyFor("content.write")}
+                initialBatchId={businessTarget.get("batchId") ?? ""}
+              />
+            ) : null}
+            {viewTab === "viralVideos" ? (
+              <ViralVideosPage
+                key={`videos:${businessTarget}`}
+                initialListQuery={businessTarget.get("listQuery") ?? ""}
+                onScopeChange={persistBusinessScope}
+                onCustomer={(userId) =>
+                  navigateAdmin("customersMgmt", "customer", { userId })
+                }
+                initialVideo={
+                  businessTarget.get("videoId")
+                    ? {
+                        video_id: businessTarget.get("videoId") ?? "",
+                        platform:
+                          businessTarget.get("platform") === "wechat_channels"
+                            ? "wechat_channels"
+                            : "douyin",
+                      }
+                    : null
+                }
+                readOnly={readOnlyFor("content.write")}
+                initialSearch={viralDemandSearch}
+              />
+            ) : null}
+            {viewTab === "viralDiscoveries" ? (
+              <ViralDiscoveriesPage
+                readOnly={readOnlyFor("content.write")}
+                onCustomer={(userId) => {
+                  navigateAdmin("customersMgmt", "demandCustomer", { userId });
+                }}
+                onSearch={(keyword, platform) => {
+                  setViralDemandSearch({ keyword, platform });
+                  navigateAdmin("viralVideos");
+                }}
+              />
+            ) : null}
+            {viewTab === "alerts" ? (
+              <AdminAlertsSection readOnly={readOnlyFor("settings.write")} />
+            ) : null}
+            {viewTab === "team" ? (
+              actor.is_super_admin === true ? (
+                <TeamManagementSection currentUserId={actor.user_id} />
+              ) : (
+                <PageBanner tone="notice">
+                  仅超级管理员可管理团队与权限。
+                </PageBanner>
+              )
+            ) : null}
+            {viewTab === "systemSettings" ? (
+              <SystemSettingsPage
+                isSuperAdmin={actor.is_super_admin === true}
+                readOnly={readOnlyFor("settings.write")}
+                initialTab={navigationIntent === "rates" ? "rates" : undefined}
+                onPublishStatsChanged={setPublishStatsEnabled}
+              />
+            ) : null}
+          </div>
+        </section>
+      </main>
+    </AdminPermissionsProvider>
   );
 }

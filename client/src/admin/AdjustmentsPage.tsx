@@ -10,6 +10,7 @@ import { DataTable } from "./ui/DataTable";
 import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { useCan } from "./ui/permissions";
 import { StatusBadge } from "./ui/StatusBadge";
 import {
   ADJUSTMENT_SOURCE_LABELS,
@@ -58,6 +59,7 @@ export function AdjustmentsPage({
   readOnly?: boolean;
   onCustomer?: (id: string) => void;
 }) {
+  const canExport = useCan()("export");
   const [adjustments, setAdjustments] = useState<AdjustmentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -136,10 +138,12 @@ export function AdjustmentsPage({
             setFilters(draft);
           }}
           actions={
-            /* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */
-            <button type="button" onClick={() => void exportCsv()}>
-              导出 CSV
-            </button>
+            /* 导出对审计员开放（T19）：服务端每次导出留审计并限流；T41 起还要有 export 权限点。 */
+            canExport ? (
+              <button type="button" onClick={() => void exportCsv()}>
+                导出 CSV
+              </button>
+            ) : null
           }
         >
           <label>

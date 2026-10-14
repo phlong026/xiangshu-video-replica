@@ -10,6 +10,7 @@ import { GenerationRecordsPage } from "./GenerationRecordsPage";
 import { SupportTicketsPage } from "./SupportTicketsPage";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
+import { useCan } from "./ui/permissions";
 import { CustomerStatusBadge } from "./ui/StatusBadge";
 import { TabBar } from "./ui/TabBar";
 import { useHashParam } from "./ui/useHashParam";
@@ -65,6 +66,11 @@ export function CustomerDetail({
   refreshError: string;
   onBack: () => void;
 }) {
+  // 权限按领域拆开（T41）：资金类表单看 funds.write，客户类（暂停、标注、设备、工单）
+  // 看 customer.write；readOnly 仍是审计员的总开关。
+  const can = useCan();
+  const fundsReadOnly = readOnly || !can("funds.write");
+  const customerReadOnly = readOnly || !can("customer.write");
   // 带资金意图进入时，先切到对应页签，展开客户即直达表单。
   // 详情页签写入 URL（?detail=），刷新或转发链接仍停在同一页签。
   const [tab, setTab] = useHashParam<CustomerDetailTab>(
@@ -138,7 +144,7 @@ export function CustomerDetail({
         <div className="customer-detail-operations">
           {/* 收款开通计入收入、赠送不计收入：两个入口分开，避免把客户付过的
               钱误记成赠送（方案 P0-1）；退款扣减从会话页迁到这里（P0-2）。 */}
-          {!readOnly ? (
+          {!fundsReadOnly ? (
             <>
               <button
                 type="button"
@@ -158,11 +164,10 @@ export function CustomerDetail({
               >
                 退款扣减
               </button>
-              <CustomerSuspendButton
-                customer={customer}
-                onChanged={onChanged}
-              />
             </>
+          ) : null}
+          {!customerReadOnly ? (
+            <CustomerSuspendButton customer={customer} onChanged={onChanged} />
           ) : null}
         </div>
       </section>
@@ -212,7 +217,7 @@ export function CustomerDetail({
           <CustomerAnnotationSection
             key={`annotation:${customer.user_id}`}
             onChanged={onChanged}
-            readOnly={readOnly}
+            readOnly={customerReadOnly}
             userId={customer.user_id}
           />
           <details className="customer-technical-details">
@@ -231,11 +236,11 @@ export function CustomerDetail({
             key={`account:${customer.user_id}:${customer.available_credits}`}
             onChanged={onChanged}
             userId={customer.user_id}
-            readOnly={readOnly}
+            readOnly={fundsReadOnly}
           />
           <Customer360Data
             key={`ledger:${customer.user_id}:${customer.available_credits}`}
-            readOnly={readOnly}
+            readOnly={fundsReadOnly}
             userId={customer.user_id}
           />
           <div className="customer-detail-settings-grid">
@@ -243,14 +248,14 @@ export function CustomerDetail({
               key={`free-grant:${operatorId}:${customer.user_id}`}
               onGranted={onGranted}
               operatorId={operatorId}
-              readOnly={readOnly}
+              readOnly={fundsReadOnly}
               userId={customer.user_id}
             />
             <CustomerRefundSection
               key={`refund:${customer.user_id}`}
               availableCredits={customer.available_credits ?? 0}
               onRefunded={onGranted}
-              readOnly={readOnly}
+              readOnly={fundsReadOnly}
               userId={customer.user_id}
             />
           </div>
@@ -274,14 +279,14 @@ export function CustomerDetail({
             username: customer.username,
             display_name: customer.display_name ?? "",
           }}
-          readOnly={readOnly}
+          readOnly={customerReadOnly}
         />
       ) : null}
 
       {tab === "devices" ? (
         <CustomerDeviceSection
           key={`devices:${customer.user_id}`}
-          readOnly={readOnly}
+          readOnly={customerReadOnly}
           userId={customer.user_id}
         />
       ) : null}
@@ -291,12 +296,12 @@ export function CustomerDetail({
           <CustomerBenefitsSection
             key={`benefits:${customer.user_id}`}
             onChanged={onChanged}
-            readOnly={readOnly}
+            readOnly={fundsReadOnly}
             userId={customer.user_id}
           />
           {customer.activation_code !== "账号注册" && (
             <CustomerPriceEditor
-              readOnly={readOnly}
+              readOnly={fundsReadOnly}
               userId={customer.user_id}
             />
           )}
@@ -304,7 +309,7 @@ export function CustomerDetail({
             key={`quote:${customer.user_id}`}
             userId={customer.user_id}
             customerLabel={companyNameOf(customer)}
-            readOnly={readOnly}
+            readOnly={fundsReadOnly}
           />
         </>
       ) : null}

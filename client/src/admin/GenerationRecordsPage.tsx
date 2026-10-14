@@ -20,6 +20,7 @@ import { DataTable } from "./ui/DataTable";
 import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { useCan } from "./ui/permissions";
 import { StatusBadge } from "./ui/StatusBadge";
 import { TabBar } from "./ui/TabBar";
 import {
@@ -92,6 +93,10 @@ export function GenerationRecordsPage({
    */
   compact?: boolean;
 }) {
+  // 权限点（T41）：补偿积分是资金操作（funds.write），导出是 export。
+  const can = useCan();
+  const canExport = can("export");
+  const canCompensate = !readOnly && can("funds.write");
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -599,20 +604,22 @@ export function GenerationRecordsPage({
         ) : null}
         {!readOnly && FAILURE_STATUSES.has(item.status) ? (
           <div className="admin-generation-records__actions">
-            <button
-              aria-label={`补偿积分 ${item.record_id}`}
-              type="button"
-              onClick={() => {
-                setPendingCompensation(item);
-                setCompensationError("");
-                setCompensationCredits(
-                  String(Math.max(0, item.charged_credits)),
-                );
-                compensationRetryRef.current = null;
-              }}
-            >
-              补偿积分
-            </button>
+            {canCompensate ? (
+              <button
+                aria-label={`补偿积分 ${item.record_id}`}
+                type="button"
+                onClick={() => {
+                  setPendingCompensation(item);
+                  setCompensationError("");
+                  setCompensationCredits(
+                    String(Math.max(0, item.charged_credits)),
+                  );
+                  compensationRetryRef.current = null;
+                }}
+              >
+                补偿积分
+              </button>
+            ) : null}
             <button
               aria-label={`复制客户说明 ${item.record_id}`}
               type="button"
@@ -711,26 +718,30 @@ export function GenerationRecordsPage({
             <button type="button" onClick={() => void loadRecords()}>
               {loading ? "刷新中…" : "刷新记录"}
             </button>
-            <button
-              type="button"
-              onClick={() =>
-                void downloadGenerationRecordsCsv({
-                  userId: initialUserId || undefined,
-                  username: filters.username || undefined,
-                  projectName: filters.projectName || undefined,
-                  status: filters.status || undefined,
-                  recordType: filters.recordType || undefined,
-                  failurePhase: filters.failurePhase || undefined,
-                  taskRef: filters.taskRef || undefined,
-                  createdFrom: filters.createdFrom || undefined,
-                  createdTo: filters.createdTo || undefined,
-                }).catch((cause: unknown) =>
-                  setError(cause instanceof Error ? cause.message : "导出失败"),
-                )
-              }
-            >
-              导出当前筛选 CSV
-            </button>
+            {canExport ? (
+              <button
+                type="button"
+                onClick={() =>
+                  void downloadGenerationRecordsCsv({
+                    userId: initialUserId || undefined,
+                    username: filters.username || undefined,
+                    projectName: filters.projectName || undefined,
+                    status: filters.status || undefined,
+                    recordType: filters.recordType || undefined,
+                    failurePhase: filters.failurePhase || undefined,
+                    taskRef: filters.taskRef || undefined,
+                    createdFrom: filters.createdFrom || undefined,
+                    createdTo: filters.createdTo || undefined,
+                  }).catch((cause: unknown) =>
+                    setError(
+                      cause instanceof Error ? cause.message : "导出失败",
+                    ),
+                  )
+                }
+              >
+                导出当前筛选 CSV
+              </button>
+            ) : null}
             <span>共 {total} 条</span>
           </div>
 
@@ -957,7 +968,7 @@ export function GenerationRecordsPage({
           {error ? <PageBanner tone="error">{error}</PageBanner> : null}
           {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
-          {!readOnly && selectedRecords.length > 0 ? (
+          {canCompensate && selectedRecords.length > 0 ? (
             <div
               className="admin-generation-records__batch"
               role="toolbar"
@@ -980,7 +991,7 @@ export function GenerationRecordsPage({
               ariaLabel="用户生成记录列表"
               headers={
                 <>
-                  {readOnly ? null : (
+                  {!canCompensate ? null : (
                     <th>
                       <input
                         aria-label="选择本页全部失败记录"
@@ -1018,7 +1029,7 @@ export function GenerationRecordsPage({
             >
               {items.map((item) => (
                 <tr key={`${item.record_type}-${item.record_id}`}>
-                  {readOnly ? null : (
+                  {!canCompensate ? null : (
                     <td>
                       {FAILURE_STATUSES.has(item.status) ? (
                         <input
@@ -1140,7 +1151,7 @@ export function GenerationRecordsPage({
       )}
 
       <BatchCompensateDialog
-        open={batchOpen && !readOnly}
+        open={batchOpen && canCompensate}
         records={selectedRecords}
         onClose={() => setBatchOpen(false)}
         onFinished={() => {
@@ -1206,7 +1217,7 @@ export function GenerationRecordsPage({
         }
         error={compensationError}
         level="reasonAndAck"
-        open={pendingCompensation !== null && !readOnly}
+        open={pendingCompensation !== null && canCompensate}
         title="补偿积分"
         onClose={() => {
           if (compensationBusy) return;
