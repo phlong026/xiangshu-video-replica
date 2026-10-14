@@ -2563,6 +2563,37 @@ describe("V1.4 workspace integration", () => {
       ).toBe("提取出的乡墅口播原文");
     });
 
+    it("来源是爆款视频而草稿残留旧项目时不去转写旧项目的视频（FIX-06）", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("workbench");
+      state.draft.projectId = "old-project";
+      state.draft.sourceAssetId = "old-asset";
+      state.draft.sourceId = "douyin-viral-1";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      expect(
+        await screen.findByText(/当前文案来源是爆款视频/),
+      ).toBeInTheDocument();
+      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+    });
+
+    it("草稿只有来源 ID 没有项目时不把来源 ID 当项目 ID 请求（FIX-06）", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("workbench");
+      state.draft.sourceId = "asset-only";
+      state.draft.sourceAssetId = "asset-only";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      expect(
+        await screen.findByText("请先上传视频来源，再提取文案。"),
+      ).toBeInTheDocument();
+      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+    });
+
     it.each(["success", "failure"])(
       "文案提取 %s 后刷新结算或退款余额",
       async (outcome) => {
