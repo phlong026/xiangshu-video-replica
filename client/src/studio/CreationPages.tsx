@@ -75,6 +75,7 @@ import {
   ReplicaPreflightChecklist,
   replicaInputKey,
 } from "./PromptEditor";
+import { projectSourceAssetId } from "./projectSource";
 import { ReplicaNarration } from "./ReplicaPreparation";
 import {
   clearReferencePreview,
@@ -836,8 +837,8 @@ export function CopyPage() {
       ...createDraft(),
       projectId: script.sourceProjectId,
       ipId: script.ipId,
-      sourceId: project?.reference_asset_id ?? undefined,
-      sourceAssetId: project?.reference_asset_id ?? undefined,
+      sourceId: projectSourceAssetId(project),
+      sourceAssetId: projectSourceAssetId(project),
       originalImageId: undefined,
       imageId: undefined,
       firstFrameId: undefined,

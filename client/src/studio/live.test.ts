@@ -2536,6 +2536,31 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
     expect(api.deleteProject).not.toHaveBeenCalled();
   });
 
+  it("只上传抽出的音轨时不把它伪装成复刻参考视频（FIX-05）", async () => {
+    const audio = new File(["bytes"], "长视频.m4a", { type: "audio/mp4" });
+    mockUploadStart("p-audio", "a-audio");
+    api.uploadReferenceVideo.mockResolvedValue(undefined);
+    api.completeVideoUpload.mockResolvedValue({
+      asset_id: "a-audio",
+      project_id: "p-audio",
+      status: "uploaded",
+      analysis_task_id: null,
+      analysis_task_status: null,
+    });
+    api.getAssetDownloadUrl.mockResolvedValue({ url: "/signed/a-audio.m4a" });
+
+    const result = await live.uploadWorkbenchSourceVideo(
+      audio,
+      () => {},
+      undefined,
+      "script",
+    );
+
+    expect(result.project).toMatchObject({ script_source_asset_id: "a-audio" });
+    expect(result.project?.reference_asset_id ?? null).toBeNull();
+    expect(result.asset).toMatchObject({ id: "a-audio", kind: "audio" });
+  });
+
   it("命中去重复用时沿用意图回执里自动排队的拆解任务（FIX-08）", async () => {
     api.createProject.mockResolvedValue({ id: "p-dedup", name: "断线素材" });
     api.createVideoUploadIntent.mockResolvedValue({
