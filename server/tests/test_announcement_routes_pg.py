@@ -508,6 +508,15 @@ def test_support_ticket_lifecycle_and_publish_stats_guard(client: TestClient) ->
     assert revived.status_code == 422
     listed = client.get("/api/control/support-tickets", headers=headers).json()
     assert listed["total"] == 1 and listed["items"][0]["status"] == "resolved"
+    # 客户详情「工单」页签：按客户编号精确过滤。
+    scoped = client.get(
+        "/api/control/support-tickets", params={"user_id": "customer_u"}, headers=headers
+    ).json()
+    assert scoped["total"] == 1
+    other = client.get(
+        "/api/control/support-tickets", params={"user_id": "someone_else"}, headers=headers
+    ).json()
+    assert other["total"] == 0
     assert listed["items"][0]["handler_username"] == "admin_u"
     assert (
         client.get(

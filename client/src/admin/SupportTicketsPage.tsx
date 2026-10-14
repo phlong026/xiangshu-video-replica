@@ -79,10 +79,16 @@ export function SupportTicketsPage({
   readOnly = false,
   onCustomer,
   initialStatus = "",
+  customer,
 }: {
   readOnly?: boolean;
   onCustomer?: (id: string) => void;
   initialStatus?: string;
+  /**
+   * 客户详情「工单」页签（T32）：限定为这一位客户。清单按客户编号精确过滤，
+   * 隐藏客户筛选，登记工单时关联客户固定为此人。
+   */
+  customer?: PickedCustomer;
 }) {
   const [items, setItems] = useState<SupportTicket[]>([]);
   const [total, setTotal] = useState(0);
@@ -98,7 +104,7 @@ export function SupportTicketsPage({
   const [summary, setSummary] = useState("");
   const [newCategory, setNewCategory] = useState("other");
   const [targetCustomer, setTargetCustomer] = useState<PickedCustomer | null>(
-    null,
+    customer ?? null,
   );
   const [newPriority, setNewPriority] = useState("P2");
   const [relatedKind, setRelatedKind] = useState<"" | "task" | "order">("");
@@ -122,6 +128,7 @@ export function SupportTicketsPage({
         status: filters.status || undefined,
         category: filters.category || undefined,
         username: filters.username || undefined,
+        userId: customer?.user_id,
         limit: PAGE_SIZE,
         offset,
       });
@@ -132,7 +139,7 @@ export function SupportTicketsPage({
     } finally {
       setLoading(false);
     }
-  }, [filters, offset]);
+  }, [filters, offset, customer?.user_id]);
 
   useEffect(() => {
     void load();
@@ -156,7 +163,7 @@ export function SupportTicketsPage({
       setNotice("工单已登记。");
       setCreating(false);
       setSummary("");
-      setTargetCustomer(null);
+      setTargetCustomer(customer ?? null);
       setNewPriority("P2");
       setRelatedKind("");
       setRelatedValue("");
@@ -308,16 +315,18 @@ export function SupportTicketsPage({
                 ))}
               </select>
             </label>
-            <label>
-              客户
-              <input
-                value={draft.username}
-                onChange={(e) =>
-                  setDraft({ ...draft, username: e.target.value })
-                }
-                placeholder="用户名或公司名"
-              />
-            </label>
+            {customer ? null : (
+              <label>
+                客户
+                <input
+                  value={draft.username}
+                  onChange={(e) =>
+                    setDraft({ ...draft, username: e.target.value })
+                  }
+                  placeholder="用户名或公司名"
+                />
+              </label>
+            )}
           </FilterBar>
         }
         pagination={
@@ -434,11 +443,15 @@ export function SupportTicketsPage({
         onConfirm={(reason) => void submitCreate(reason)}
       >
         {/* 客户按名字联想选择（T14），不再粘贴用户编号；不选 = 平台侧问题。 */}
-        <CustomerPicker
-          label="关联客户（可选，不选 = 平台侧问题）"
-          value={targetCustomer}
-          onChange={setTargetCustomer}
-        />
+        {customer ? (
+          <p className="admin-hint">关联客户：{customer.username}</p>
+        ) : (
+          <CustomerPicker
+            label="关联客户（可选，不选 = 平台侧问题）"
+            value={targetCustomer}
+            onChange={setTargetCustomer}
+          />
+        )}
         <label>
           优先级
           <select

@@ -112,6 +112,7 @@ def list_support_tickets(
     status: str = "",
     category: str = "",
     username: str = "",
+    user_id: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, object]:
@@ -129,6 +130,10 @@ def list_support_tickets(
     if category.strip():
         clauses.append("st.category = %s")
         params.append(category.strip())
+    if user_id.strip():
+        # 客户详情「工单」页签按客户编号精确取，不走用户名模糊匹配。
+        clauses.append("st.target_user_id = %s")
+        params.append(user_id.strip())
     if username.strip():
         clauses.append("(tu.username ILIKE %s OR tu.display_name ILIKE %s)")
         params.extend([f"%{username.strip()}%", f"%{username.strip()}%"])
