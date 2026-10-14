@@ -276,3 +276,46 @@
   gap: 8px 12px;
   margin: 8px 0;
 }
+
+/* 首页编排：封面缩略图、拖拽行与问题项高亮。 */
+.admin-homepage-order > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.admin-homepage-order > li[draggable="true"] {
+  cursor: grab;
+}
+
+.admin-homepage-order > li.has-problem {
+  background: var(--admin-warn-bg, #fff7ed);
+  border-left: 3px solid var(--admin-warn, #f59e0b);
+}
+
+.admin-homepage-thumb {
+  flex: 0 0 72px;
+  width: 72px;
+  height: 96px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--admin-muted-bg, #f3f4f6);
+}
+
+.admin-homepage-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.admin-homepage-savebar,
+.admin-homepage-problems {
+  margin: 8px 0;
+}
+
+.admin-homepage-savebar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
