@@ -80,6 +80,10 @@ class CreatedUploadIntent:
     headers: dict[str, str]
     expires_at: str | None
     upload_required: bool
+    # 去重复用（upload_required=False）时没有 complete 这一步：复刻用途的自动拆解
+    # 在这里排队，任务号随意图回执带回，前端据此接回进度。
+    analysis_task_id: str | None = None
+    analysis_task_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +232,7 @@ def create_upload_intent(
             project_id=project_id,
             sha256=sha256,
             size_bytes=size_bytes,
+            purpose=purpose,
         )
         if reused is not None:
             return reused
@@ -314,6 +319,7 @@ def reuse_owned_completed_upload(
     project_id: str,
     sha256: str,
     size_bytes: int,
+    purpose: str = "replica",
 ) -> CreatedUploadIntent | None:
     source = conn.execute(
         """
@@ -345,12 +351,25 @@ def reuse_owned_completed_upload(
         return None
 
     source_asset_id = str(source["id"])
+    source_metadata = json.loads(str(source["metadata_json"]))
+    stored_duration = source_metadata.get("duration_seconds")
+    duration = (
+        float(stored_duration)
+        if isinstance(stored_duration, int | float) and not isinstance(stored_duration, bool)
+        else None
+    )
+    # 复用不能绕过本次用途的时长门禁：同一文件先以「提取文案」（放开 15 秒上限）
+    # 上传、再拿去复刻时，必须按复刻的 4–15 秒重新校验，与正常 complete 同一错误码。
+    if duration is not None:
+        validate_duration(duration, allow_long=purpose == "script")
     asset_id = source_asset_id
     if str(source["project_id"]) != project_id:
         asset_id = str(uuid4())
-        reused_metadata = json.loads(str(source["metadata_json"]))
+        reused_metadata = dict(source_metadata)
         for field in ("upload_source_uri", "intent_expires_at", "cleanup_object_cursor"):
             reused_metadata.pop(field, None)
+        # 用途跟随本次上传，后续「是否自动拆解」等判断才不会沿用旧用途。
+        reused_metadata["upload_purpose"] = purpose
         conn.execute(
             """
             INSERT INTO assets (
@@ -386,6 +405,15 @@ def reuse_owned_completed_upload(
             "sha256_prefix": sha256[:12],
         },
     )
+    analysis_task = _enqueue_reused_replica_analysis(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        asset_id=asset_id,
+        storage_uri=str(source["storage_uri"]),
+        duration_seconds=duration,
+        purpose=purpose,
+    )
     return CreatedUploadIntent(
         asset_id=asset_id,
         project_id=project_id,
@@ -395,7 +423,60 @@ def reuse_owned_completed_upload(
         headers={},
         expires_at=None,
         upload_required=False,
+        analysis_task_id=None if analysis_task is None else str(analysis_task["id"]),
+        analysis_task_status=None if analysis_task is None else str(analysis_task["status"]),
     )
+
+
+def _enqueue_reused_replica_analysis(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    project_id: str,
+    asset_id: str,
+    storage_uri: str,
+    duration_seconds: float | None,
+    purpose: str,
+) -> sqlite3.Row | None:
+    """复刻页上传命中去重时，与正常 complete 一样自动排队 AI 拆解。
+
+    去重路径没有 complete 这一步，早先复刻页「上传即拆解」在重传同一文件时失效，
+    用户只能手动再点一次。已有拆解任务或拆解结果时直接复用，不重复排队、不重复计费。
+    """
+    if purpose != "replica" or duration_seconds is None:
+        return None
+    existing = find_latest_analysis_task(conn, project_id=project_id, asset_id=asset_id)
+    if existing is not None:
+        return existing
+    if (
+        not _automatic_analysis_input_ready(conn, storage_uri)
+        or find_analysis_version_for_asset(conn, project_id=project_id, asset_id=asset_id)
+        is not None
+    ):
+        return None
+    task, created = enqueue_analysis_task(
+        conn,
+        project_id=project_id,
+        asset_id=asset_id,
+        created_by_user_id=actor.id,
+        duration_seconds=duration_seconds,
+        request_id=None,
+    )
+    if created:
+        write_audit(
+            conn,
+            actor=actor,
+            action="analysis.task_enqueued",
+            entity_type="analysis_task",
+            entity_id=str(task["id"]),
+            metadata={
+                "project_id": project_id,
+                "asset_id": asset_id,
+                "trigger": "asset.upload_deduplicated",
+            },
+            commit=False,
+        )
+    return task
 
 
 def prepare_upload_completion(

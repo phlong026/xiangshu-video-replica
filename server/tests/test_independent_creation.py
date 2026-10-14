@@ -578,6 +578,37 @@ def test_i2v_replay_returns_same_batch_and_conflicting_key_is_rejected(scene: st
     assert _wallet("employee_1") == (992, 8)
 
 
+def test_acceptance_limit_does_not_reject_idempotent_replay(
+    scene: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX-13：验收账号限额只拦真正的新提交；网络超时后同键重放必须拿回原批次."""
+    monkeypatch.setenv("VIDEO_REPLICA_ACCEPTANCE_GENERATION_USER_ID", "employee_1")
+    monkeypatch.setenv("VIDEO_REPLICA_ACCEPTANCE_PAID_GENERATION_LIMIT", "1")
+    # 只验证建批前的门禁顺序：供应商配置与首帧 COS 校验用替身放行。
+    monkeypatch.setattr("app.independent.metaso_h3_provider_from_settings", lambda _conn: None)
+    monkeypatch.setattr("app.independent.require_cos_first_frame_storage", lambda *_a, **_k: None)
+    request = IndependentVideoRequest(
+        mode="i2v",
+        prompt_text="黄昏庭院航拍",
+        first_frame_asset_id="frame-owned",
+        output_duration_seconds=8,
+        quantity=1,
+        idempotency_key="acceptance-replay-key",
+        provider="metaso",
+    )
+    first = _create(request, EMPLOYEE_1)
+    replay = _create(request, EMPLOYEE_1)
+    assert replay.id == first.id
+    assert _ledger_count("RESERVE") == 1
+    # 新键的第二次提交仍受「限额 1 条」约束。
+    with pytest.raises(HTTPException) as exc:
+        _create(
+            request.model_copy(update={"idempotency_key": "acceptance-second-key"}),
+            EMPLOYEE_1,
+        )
+    assert exc.value.status_code == 409
+
+
 def test_extended_modes_submit_without_any_flag(scene: str) -> None:
     """门禁移除后 T2V / R2V / 尾帧可直接提交，无需任何开关。
 
