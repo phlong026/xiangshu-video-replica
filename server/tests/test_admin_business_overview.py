@@ -1056,6 +1056,62 @@ def test_summary_export_allows_auditor_but_requires_csrf_and_valid_range(
     assert audited == (1,)
 
 
+def test_quarter_report_equals_sum_of_its_three_months(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    """T42：季度区间与三个月报在可加指标上合计一致（区间按北京时间自然日切分）。"""
+
+    def funds(start: str, end: str) -> dict[str, int]:
+        response = client.get(
+            "/api/control/funds/summary",
+            params={"start": start, "end": end},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    quarter = funds("2026-10-01", "2026-12-31")
+    months = [
+        funds("2026-10-01", "2026-10-31"),
+        funds("2026-11-01", "2026-11-30"),
+        funds("2026-12-01", "2026-12-31"),
+    ]
+    for field in ("recharge_fen", "orders", "refund_fen", "grant_credits", "offline_fen"):
+        assert quarter[field] == sum(month[field] for month in months), field
+
+
+def test_recent_exports_lists_latest_ten_with_who_when_and_range(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    """T42：报表中心展示最近 10 次导出（谁、何时、什么范围），不含导出内容。"""
+    for day in range(1, 13):
+        exported = client.post(
+            "/api/control/reports/summary/export",
+            headers=admin_headers,
+            json={
+                "kind": "funds",
+                "start_date": f"2026-10-{day:02d}",
+                "end_date": f"2026-10-{day:02d}",
+            },
+        )
+        assert exported.status_code == 200, exported.text
+    recent = client.get("/api/control/reports/exports/recent", headers=admin_headers)
+    assert recent.status_code == 200, recent.text
+    items = recent.json()["items"]
+    assert len(items) == 10
+    assert items[0]["label"] == "资金报表" and items[0]["kind"] == "summary_funds"
+    # 最新一次排第一：范围是最后导出的 10-12。
+    assert items[0]["filters"]["start"] == "2026-10-12"
+    assert items[0]["actor"] and items[0]["at"]
+    # 季度长度的账务明细区间不再被 90 天上限拒绝。
+    quarter = client.post(
+        "/api/control/reports/export",
+        headers=admin_headers,
+        json={"start_date": "2026-10-01", "end_date": "2026-12-31"},
+    )
+    assert quarter.status_code == 200, quarter.text
+
+
 def test_fake_payment_confirmation_persists_actual_method_not_preselected_channel(
     client: TestClient, admin_headers: dict[str, str], overview_pg_dsn: str
 ) -> None:

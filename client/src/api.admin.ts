@@ -4542,6 +4542,19 @@ export async function exportBillingReportCsv(
   return { filename, bytes: blob.size };
 }
 
+export interface RecentExport {
+  at: string;
+  actor: string;
+  kind: string;
+  label: string;
+  filters: Record<string, string>;
+}
+
+/** 最近 10 次导出（谁、何时、什么范围），来自导出审计（整改 T42）。 */
+export async function listRecentExports(): Promise<{ items: RecentExport[] }> {
+  return adminRead("/api/control/reports/exports/recent", "读取导出记录失败");
+}
+
 export async function exportSummaryReportCsv(
   input: BillingReportExportInput & { kind: "business" | "funds" },
   idempotencyKey?: string,
