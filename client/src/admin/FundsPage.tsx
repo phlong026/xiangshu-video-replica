@@ -8,6 +8,7 @@ import { OrdersPage } from "./OrdersPage";
 import { ReconciliationPage } from "./ReconciliationPage";
 import { RefundsPage } from "./RefundsPage";
 import { TabBar } from "./ui/TabBar";
+import { useHashParam } from "./ui/useHashParam";
 
 const tabs = [
   { id: "overview", label: "资金概览" },
@@ -17,6 +18,15 @@ const tabs = [
   { id: "refunds", label: "退款管理" },
   { id: "reconciliation", label: "对账异常" },
 ];
+
+const FUNDS_TABS = [
+  "overview",
+  "orders",
+  "transactions",
+  "adjustments",
+  "refunds",
+  "reconciliation",
+] as const;
 
 export type FundsTab =
   | "overview"
@@ -33,7 +43,7 @@ export type FundsTab =
  */
 export function FundsPage({
   readOnly = false,
-  initialTab = "overview",
+  initialTab,
   userId = "",
   orderNo = "",
   initialMonth,
@@ -62,7 +72,13 @@ export function FundsPage({
         .slice(0, 7),
   );
   const [anomaly, setAnomaly] = useState<ReconciliationAnomaly>(initialAnomaly);
-  const [tab, setTab] = useState<FundsTab>(initialTab);
+  // 页签写入 URL（?sub=）：刷新与分享链接都停在当前页签；跳转意图优先。
+  const [tab, setTab] = useHashParam<FundsTab>(
+    "sub",
+    "overview",
+    FUNDS_TABS,
+    initialTab,
+  );
   return (
     <div>
       <TabBar

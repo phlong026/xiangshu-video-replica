@@ -11,6 +11,7 @@ import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
 import { CustomerStatusBadge } from "./ui/StatusBadge";
 import { TabBar } from "./ui/TabBar";
+import { useHashParam } from "./ui/useHashParam";
 import { formatDateTime } from "./ui/vocabulary";
 import "./admin-customer-detail.css";
 
@@ -63,8 +64,12 @@ export function CustomerDetail({
   onBack: () => void;
 }) {
   // 带资金意图进入时，先切到对应页签，展开客户即直达表单。
-  const [tab, setTab] = useState<CustomerDetailTab>(
-    (focusSectionId && SECTION_TAB[focusSectionId]) || "overview",
+  // 详情页签写入 URL（?detail=），刷新或转发链接仍停在同一页签。
+  const [tab, setTab] = useHashParam<CustomerDetailTab>(
+    "detail",
+    "overview",
+    CUSTOMER_DETAIL_TABS.map(({ id }) => id),
+    (focusSectionId && SECTION_TAB[focusSectionId]) || undefined,
   );
   const [pendingSection, setPendingSection] = useState<string | null>(
     focusSectionId,
@@ -81,7 +86,7 @@ export function CustomerDetail({
     if (!focusSectionId) return;
     setTab(SECTION_TAB[focusSectionId] ?? "overview");
     setPendingSection(focusSectionId);
-  }, [focusSectionId]);
+  }, [focusSectionId, setTab]);
 
   function focusSection(sectionId: string) {
     const target = SECTION_TAB[sectionId];

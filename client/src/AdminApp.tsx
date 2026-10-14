@@ -443,6 +443,10 @@ export function AdminApp() {
           "billingQuery",
           "month",
           "anomaly",
+          // 页内子状态（useHashParam）：子页签、客户详情页签、二级分组。
+          "sub",
+          "detail",
+          "section",
         ].includes(key)
       )
         allowed.delete(key);
@@ -1105,7 +1109,7 @@ export function AdminApp() {
                     ? "orders"
                     : navigationIntent === "ledger"
                       ? "transactions"
-                      : "overview"
+                      : undefined
               }
               readOnly={readOnly}
             />
@@ -1251,7 +1255,7 @@ export function AdminApp() {
               currentUserId={actor.user_id}
               isSuperAdmin={actor.is_super_admin === true}
               readOnly={readOnly}
-              initialTab={navigationIntent === "rates" ? "rates" : "payment"}
+              initialTab={navigationIntent === "rates" ? "rates" : undefined}
             />
           ) : null}
         </div>
