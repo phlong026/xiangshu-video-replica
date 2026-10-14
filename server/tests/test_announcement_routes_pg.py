@@ -96,6 +96,7 @@ def admin_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[Fas
     from app.admin_customer_lifecycle_routes import router as lifecycle_router
     from app.admin_customer_ops_params_routes import router as ops_params_router
     from app.admin_publish_stats_routes import router as publish_stats_router
+    from app.admin_search_routes import router as search_router
     from app.admin_support_ticket_routes import router as support_ticket_router
     from app.admin_worker_observation_routes import router as worker_observation_router
     from app.announcement_routes import router as announcement_router
@@ -108,6 +109,7 @@ def admin_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[Fas
     app.include_router(worker_observation_router)
     app.include_router(support_ticket_router)
     app.include_router(publish_stats_router)
+    app.include_router(search_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_ADMIN_SESSION_KEY)
@@ -403,6 +405,40 @@ def test_customer_ops_params_default_update_and_health_follow(
     meta = audit[0][0] if isinstance(audit[0][0], dict) else json.loads(audit[0][0])
     assert meta["before"]["low_balance_threshold"] == 100
     assert meta["after"]["low_balance_threshold"] == 1000
+
+
+def test_global_search_finds_customer_order_and_rejects_noise(client: TestClient) -> None:
+    """T39：客户名 / 订单号一步命中，短词与未知词不返回，审计员也可用。"""
+    headers = _admin_session(client)
+    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO recharge_orders (id, user_id, merchant_order_no, status, "
+            "amount_fen, credits, provider, transaction_id, paid_at, created_at, "
+            "base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
+            "min_recharge_fen_snapshot, recharge_step_fen_snapshot) VALUES "
+            "('ro-s1', 'customer_u', 'SEARCH-ORDER-1', 'PAID', 10000, 1000, "
+            "'wechat_native', 'TEST-TX-S1', %s, %s, 10, 10, 100, 100)",
+            (datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()),
+        )
+
+    def search(term: str, h: dict[str, str] = headers) -> list[dict[str, str]]:
+        response = client.get("/api/control/search", params={"q": term}, headers=h)
+        assert response.status_code == 200, response.text
+        return response.json()["items"]
+
+    by_company = search("Cust Co")
+    assert [(i["type"], i["id"]) for i in by_company] == [("customer", "customer_u")]
+    assert by_company[0]["label"] == "Cust Co"
+    by_order = search("SEARCH-ORDER-1")
+    assert [(i["type"], i["id"]) for i in by_order] == [("order", "SEARCH-ORDER-1")]
+    assert search("c") == []
+    assert search("nothing-matches-this") == []
+    # 通配符按字面匹配：%% 不会命中全部客户。
+    assert search("%%") == []
+    # 管理员账号不在客户搜索范围内。
+    assert all(i["type"] != "customer" or i["id"] != "admin_u" for i in search("admin_u"))
+    auditor = _admin_session(client, "auditor_u")
+    assert [i["id"] for i in search("SEARCH-ORDER-1", auditor)] == ["SEARCH-ORDER-1"]
 
 
 def test_support_ticket_priority_related_ref_and_handlers(client: TestClient) -> None:

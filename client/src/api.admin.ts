@@ -1837,6 +1837,23 @@ export async function listPublishStats(
   );
 }
 
+export interface GlobalSearchItem {
+  type: "customer" | "order" | "task";
+  id: string;
+  label: string;
+  detail: string;
+}
+
+/** 顶栏全局搜索（整改 T39）：客户名、订单号、任务号。 */
+export async function globalSearch(
+  query: string,
+): Promise<{ items: GlobalSearchItem[] }> {
+  return adminRead(
+    `/api/control/search?${new URLSearchParams({ q: query }).toString()}`,
+    "搜索失败",
+  );
+}
+
 /** 菜单显隐用：开关关闭时「发布成效」不出现在侧边栏。 */
 export async function readPublishStatsEnabled(): Promise<{
   enabled: boolean;
