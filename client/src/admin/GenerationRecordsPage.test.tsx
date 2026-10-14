@@ -825,6 +825,21 @@ describe("GenerationRecordsPage", () => {
     expect(screen.getByLabelText("诊断任务编号")).toHaveValue("analysis-1");
   });
 
+  it("外壳接管视图切换时不渲染页内页签，查看诊断交给外壳带上任务编号", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [firstFrameRecord({ record_id: "ff-failed", status: "FAILED" })],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    const onViewChange = vi.fn();
+    render(<GenerationRecordsPage onViewChange={onViewChange} />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    expect(screen.queryByRole("tablist", { name: "生成记录页签" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看诊断" }));
+    expect(onViewChange).toHaveBeenCalledWith("diagnostics", "ff-failed");
+  });
+
   it("offers first-frame reconcile only for a SUBMISSION_UNCERTAIN row", async () => {
     vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
       items: [

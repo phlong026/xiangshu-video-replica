@@ -967,22 +967,21 @@ describe("AdminApp", () => {
     expect(screen.getByText(/服务端未确认本次会话释放/)).toBeInTheDocument();
   });
 
-  it("opens economics from the overview group tabs while retaining navigation context", async () => {
+  it("总览与经营分析不再渲染与左侧菜单重复的页内导航", async () => {
     installFetch({ session: "valid" });
     render(<AdminApp />);
     await screen.findByRole("navigation", { name: "管理端导航" });
-    const groupTabs = screen.getByRole("tablist", { name: "运营概览快捷导航" });
-    expect(groupTabs).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "总览" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    fireEvent.click(screen.getByRole("tab", { name: "经营看板" }));
-    expect(screen.getByRole("tab", { name: "成本核对" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tablist", { name: "运营概览快捷导航" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
     expect(screen.getByRole("button", { name: "经营看板" })).toHaveAttribute(
       "aria-current",
       "page",
     );
+    expect(screen.queryByRole("tablist", { name: "经营分析页签" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "生成记录" }));
+    expect(screen.queryByRole("tablist", { name: "生成记录页签" })).toBeNull();
   });
 
   it("renders the original eight navigation groups with scoped pages", async () => {
@@ -1024,8 +1023,9 @@ describe("AdminApp", () => {
     expect(screen.getByRole("tab", { name: "积分流水" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
-    expect(screen.getByRole("tab", { name: "经营看板" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "成本核对" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "成本核对" }),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
     expect(
@@ -1466,10 +1466,9 @@ describe("AdminApp", () => {
     await screen.findByRole("navigation", { name: "管理端导航" });
     fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
     fireEvent.click(screen.getByRole("button", { name: "成本核对" }));
-    expect(screen.getByRole("tab", { name: "成本核对" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(
+      await screen.findByRole("region", { name: "成本明细" }),
+    ).toBeInTheDocument();
     expect(window.location.hash).toContain("#admin/costReview");
     fireEvent.click(screen.getByRole("button", { name: "生成记录" }));
     await waitFor(() =>
@@ -1518,10 +1517,9 @@ describe("AdminApp", () => {
       "aria-current",
       "page",
     );
-    expect(screen.getByRole("tab", { name: "成本核对" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(
+      await screen.findByRole("region", { name: "成本明细" }),
+    ).toBeInTheDocument();
     expect(window.location.hash).toContain("#admin/costReview");
     const params = new URLSearchParams(window.location.hash.split("?")[1]);
     expect(params.get("billingQuery")).toBe("user_id=same-a&attention=pending");
