@@ -508,6 +508,33 @@ def test_generated_video_size_limit_precedes_tool_invocation(
         )
 
 
+def test_generated_video_oversize_message_names_the_limit() -> None:
+    """FIX-15：被上限挡住时要能一眼看出是大小问题，而不是笼统的「不规范」。"""
+    with pytest.raises(media_tools.MediaValidationFailed) as excinfo:
+        media_tools.normalize_generated_video(
+            b"\x00\x00\x00\x18ftypisom" + b"\x00" * 40,
+            target_width=144,
+            target_height=256,
+            max_bytes=32,
+        )
+    message = str(excinfo.value)
+    assert "大小上限" in message
+    assert "32 字节" in message
+
+
+def test_generated_video_max_bytes_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """归档上限与用户上传上限分离，可按线上 2K 成片的实际大小调整（FIX-15）。"""
+    monkeypatch.setenv(media_tools.GENERATED_VIDEO_MAX_MB_ENV, "180")
+    assert media_tools._generated_video_max_bytes() == 180 * 1024 * 1024
+    # 非法或非正值 fail-safe 回退默认：把上限写成 0 会拒绝所有成片，等于停服。
+    for bad in ("0", "-5", "abc", "", "  "):
+        monkeypatch.setenv(media_tools.GENERATED_VIDEO_MAX_MB_ENV, bad)
+        assert (
+            media_tools._generated_video_max_bytes()
+            == media_tools.DEFAULT_GENERATED_VIDEO_MAX_MB * 1024 * 1024
+        )
+
+
 def test_generated_video_missing_tool_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     def unavailable(tool: str) -> str:
         raise media_tools.MediaToolUnavailable("未找到媒体工具")
