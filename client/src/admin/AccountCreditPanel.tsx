@@ -68,46 +68,27 @@ export function AccountCreditPanel({
   }
   return (
     <section className="customer-detail-section" aria-label="账号积分查账">
-      <details className="customer-account-tools">
-        <summary>技术详情</summary>
-        {error && (
-          <PageBanner tone="error">
-            {error}
-            <button
-              type="button"
-              onClick={() => setRefresh((value) => value + 1)}
-            >
-              重新加载
-            </button>
-          </PageBanner>
-        )}
-        {notice && <PageBanner tone="notice">{notice}</PageBanner>}
-        {!data && !error && <p role="status">正在加载账号账目…</p>}
-        {data && data.tokens.length > 0 && (
-          <div className="admin-table-wrap">
-            <table className="admin-data-table">
-              <thead>
-                <tr>
-                  <th>接口密钥</th>
-                  <th>版本</th>
-                  <th>状态</th>
-                  <th>累计消费</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.tokens.map((token) => (
-                  <tr key={token.id}>
-                    <td>{token.label || "未命名密钥"}</td>
-                    <td>V{token.credential_version}</td>
-                    <td>{token.revoked_at ? "已撤销" : "有效"}</td>
-                    <td>{token.total_consumed_credits} 积分</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {!readOnly && (
+      {error && (
+        <PageBanner tone="error">
+          {error}
+          <button
+            type="button"
+            onClick={() => setRefresh((value) => value + 1)}
+          >
+            重新加载
+          </button>
+        </PageBanner>
+      )}
+      {notice && <PageBanner tone="notice">{notice}</PageBanner>}
+      {/* 补单会补发积分，是资金写操作（整改 T16）：此前藏在「技术详情」折叠
+          里既难找又容易误点，改为带标题的正式区块，确认仍需原因 + 勾选。 */}
+      {!readOnly && (
+        <section aria-label="补单" className="customer-account-reissue">
+          <h3>补单（核验原充值订单）</h3>
+          <p className="admin-hint">
+            客户已付款但积分未到账时使用：按原商户订单号向支付通道核验，到账
+            积分以原订单为准，不能手填金额。
+          </p>
           <form
             className="admin-form"
             onSubmit={(event) => {
@@ -131,6 +112,37 @@ export function AccountCreditPanel({
               核验原订单并补发
             </button>
           </form>
+        </section>
+      )}
+      <details className="customer-account-tools">
+        <summary>技术详情：接口密钥用量</summary>
+        {!data && !error && <p role="status">正在加载账号账目…</p>}
+        {data && data.tokens.length === 0 && (
+          <p className="admin-hint">该账号没有接口密钥。</p>
+        )}
+        {data && data.tokens.length > 0 && (
+          <div className="admin-table-wrap">
+            <table className="admin-data-table">
+              <thead>
+                <tr>
+                  <th>接口密钥</th>
+                  <th>版本</th>
+                  <th>状态</th>
+                  <th>累计消费</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.tokens.map((token) => (
+                  <tr key={token.id}>
+                    <td>{token.label || "未命名密钥"}</td>
+                    <td>V{token.credential_version}</td>
+                    <td>{token.revoked_at ? "已撤销" : "有效"}</td>
+                    <td>{token.total_consumed_credits} 积分</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </details>
       <ConfirmDialog

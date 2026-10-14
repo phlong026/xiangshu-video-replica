@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { AccountCreditPanel } from "./AccountCreditPanel";
 
@@ -33,4 +33,13 @@ it("shows one account ledger and token consumption without a secret control", as
   expect(
     screen.queryByRole("button", { name: /复制/ }),
   ).not.toBeInTheDocument();
+});
+
+it("可写角色的补单是独立区块，不藏在技术详情折叠里", async () => {
+  render(<AccountCreditPanel userId="u1" />);
+  const reissue = await screen.findByRole("region", { name: "补单" });
+  expect(
+    within(reissue).getByRole("button", { name: "核验原订单并补发" }),
+  ).toBeVisible();
+  expect(reissue.closest("details")).toBeNull();
 });
