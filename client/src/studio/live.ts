@@ -519,7 +519,10 @@ async function loadProjects(): Promise<{
   assets: StudioAsset[];
   errors: string[];
 }> {
-  const projects = (await listProjects()).slice(0, projectLimit);
+  const projects = (await listProjects({ limit: projectLimit })).slice(
+    0,
+    projectLimit,
+  );
   const previewProjects = projects
     .filter(
       (project) =>
@@ -734,6 +737,12 @@ async function loadPeople(): Promise<{
   return loadPeopleEntries(page.items, page.next_cursor, page.total);
 }
 
+type SettledEntryData = [
+  PromiseSettledResult<string | undefined>,
+  PromiseSettledResult<string | undefined>,
+  PromiseSettledResult<OralIdentityAssets>,
+];
+
 export async function loadPeopleEntries(
   entries: SimpleLibraryEntry[],
   nextCursor: string | null,
@@ -743,19 +752,27 @@ export async function loadPeopleEntries(
   const people: StudioPerson[] = [];
   const assets: StudioAsset[] = [];
 
-  for (const entry of entries) {
-    const face =
-      entry.views.find((view) => view.view_type === "FRONT_FACE") ??
-      entry.views[0];
-    const requests = await Promise.allSettled([
-      face
-        ? signedUrl(face.asset_id, getCachedCharacterAssetUrl)
-        : Promise.resolve(undefined),
-      entry.contact_sheet_asset_id
-        ? signedUrl(entry.contact_sheet_asset_id, getCachedCharacterAssetUrl)
-        : Promise.resolve(undefined),
-      loadOralIdentityAssets(entry.identity_id),
-    ]);
+  // 各人物的签名地址与口播资产互不依赖：先全部并发取回，再按原顺序组装。早先逐个
+  // await，首屏耗时随人数线性增长（FIX-16）；组装仍按列表顺序，错误顺序也不变。
+  const fetched = await Promise.all(
+    entries.map((entry): Promise<SettledEntryData> => {
+      const face =
+        entry.views.find((view) => view.view_type === "FRONT_FACE") ??
+        entry.views[0];
+      return Promise.allSettled([
+        face
+          ? signedUrl(face.asset_id, getCachedCharacterAssetUrl)
+          : Promise.resolve(undefined),
+        entry.contact_sheet_asset_id
+          ? signedUrl(entry.contact_sheet_asset_id, getCachedCharacterAssetUrl)
+          : Promise.resolve(undefined),
+        loadOralIdentityAssets(entry.identity_id),
+      ]);
+    }),
+  );
+  for (const [index, entry] of entries.entries()) {
+    const requests = fetched[index];
+    if (!requests) continue;
     const portrait =
       requests[0].status === "fulfilled" ? requests[0].value : undefined;
     const sheetUrl =

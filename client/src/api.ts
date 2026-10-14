@@ -2715,8 +2715,17 @@ async function pollGenerationReconcileOperation(
   throw new Error("任务仍在后台对账，请稍后返回查看。");
 }
 
-export async function listProjects(): Promise<Project[]> {
-  return requestApiJson<Project[]>("/api/projects", "项目列表暂不可用");
+/** 项目列表；不传 limit 返回全部，工作台首屏只取最近若干个（FIX-16）。 */
+export async function listProjects(
+  options: { limit?: number; offset?: number } = {},
+): Promise<Project[]> {
+  const query = new URLSearchParams();
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.offset) query.set("offset", String(options.offset));
+  return requestApiJson<Project[]>(
+    `/api/projects${query.size ? `?${query}` : ""}`,
+    "项目列表暂不可用",
+  );
 }
 
 export async function createProject(name: string): Promise<Project> {

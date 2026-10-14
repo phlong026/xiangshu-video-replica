@@ -2535,6 +2535,34 @@ def test_project_list_exposes_audio_only_script_source(
     assert row["script_source_asset_id"] == "audio-source"
 
 
+def test_project_list_optional_pagination(lane_env: str, pg: psycopg.Connection) -> None:
+    """FIX-16：/api/projects 不传 limit 返回全部（旧客户端不变）；传 limit/offset 按创建时间
+    倒序分页，且只含本人项目。"""
+    from app.auth import get_current_user
+    from app.main import app
+
+    for index in range(5):
+        seed_project(pg, f"page-project-{index}", "employee_1")
+        pg.execute(
+            "UPDATE projects SET created_at = %s WHERE id = %s",
+            (f"2026-01-0{index + 1} 00:00:00", f"page-project-{index}"),
+        )
+    seed_project(pg, "page-project-foreign", "employee_2")
+    pg.commit()
+    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    try:
+        client = TestClient(app)
+        everything = [item["id"] for item in client.get("/api/projects").json()]
+        assert everything == [f"page-project-{index}" for index in (4, 3, 2, 1, 0)]
+        first = [item["id"] for item in client.get("/api/projects?limit=2").json()]
+        assert first == ["page-project-4", "page-project-3"]
+        second = [item["id"] for item in client.get("/api/projects?limit=2&offset=2").json()]
+        assert second == ["page-project-2", "page-project-1"]
+        assert client.get("/api/projects?limit=0").status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_cancel_batch_visible_but_not_own_is_forbidden_not_missing(
     lane_env: str, pg: psycopg.Connection
 ) -> None:
