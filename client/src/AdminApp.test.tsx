@@ -1465,18 +1465,21 @@ describe("AdminApp", () => {
     );
     vi.mocked(fetch).mockClear();
     fireEvent.click(screen.getByRole("button", { name: "失败诊断" }));
+    // 菜单「失败诊断」必须落在诊断视图（诊断队列读取），而不是失败状态的记录列表。
     await waitFor(() =>
       expect(
         vi.mocked(fetch).mock.calls.some(([url]) => {
           const parsed = new URL(String(url));
           return (
             parsed.pathname.endsWith("/generation-records") &&
-            parsed.searchParams.get("status") ===
-              "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED"
+            parsed.searchParams.get("diagnostics") === "true"
           );
         }),
       ).toBe(true),
     );
+    expect(
+      await screen.findByRole("region", { name: "全类型失败诊断" }),
+    ).toBeInTheDocument();
     expect(window.location.hash).toContain("#admin/generationFailures");
   });
 

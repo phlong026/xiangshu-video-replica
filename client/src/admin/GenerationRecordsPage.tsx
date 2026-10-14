@@ -65,6 +65,7 @@ export function GenerationRecordsPage({
   initialUsername = "",
   initialUserId = "",
   initialTaskRef = "",
+  initialView = "records",
   readOnly = false,
 }: {
   initialStatus?: string;
@@ -73,6 +74,8 @@ export function GenerationRecordsPage({
   initialUsername?: string;
   initialUserId?: string;
   initialTaskRef?: string;
+  /** 左侧「失败诊断」入口进来时直接落在诊断视图，而不是失败状态的记录列表。 */
+  initialView?: "records" | "diagnostics";
   readOnly?: boolean;
 }) {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
@@ -109,7 +112,7 @@ export function GenerationRecordsPage({
     createdTo: "",
   });
   // 合并页签：诊断是同一页面的第二视图，跳转时把任务编号一起带过去。
-  const [view, setView] = useState<"records" | "diagnostics">("records");
+  const [view, setView] = useState<"records" | "diagnostics">(initialView);
   const [diagnosticTaskId, setDiagnosticTaskId] = useState("");
   const [notice, setNotice] = useState("");
   // 首帧对账：确认框里只放"待处理的那一行"，避免把行对象散进多个状态。
