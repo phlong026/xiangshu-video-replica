@@ -1467,6 +1467,15 @@ describe("AdminApp", () => {
     expect(new Set(icons).size).toBe(icons.length);
   });
 
+  it("顶栏提供修改密码入口，打开后是改密对话框", async () => {
+    installFetch({ session: "valid" });
+    render(<AdminApp />);
+    fireEvent.click(await screen.findByRole("button", { name: "修改密码" }));
+    expect(
+      await screen.findByRole("dialog", { name: /修改我的密码/ }),
+    ).toBeInTheDocument();
+  });
+
   it("菜单项是真链接：带地址，修饰键点击交给浏览器新开标签页", async () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
