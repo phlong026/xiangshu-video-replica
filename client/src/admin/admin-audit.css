@@ -1,4 +1,6 @@
-.admin-shell--control .audit-filter-grid.admin-filter-grid {
+/* 审计筛选沿用 FilterBar（T20），但保持原有的多列网格排布。 */
+.admin-shell--control .audit-filter-grid.admin-filter-bar {
+  display: grid;
   grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) minmax(
       170px,
       1.1fr
@@ -6,12 +8,7 @@
   align-items: end;
 }
 
-.audit-filter-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.audit-filter-actions button {
+.audit-filter-grid .admin-filter-bar__actions button {
   min-width: 72px;
   white-space: nowrap;
 }
@@ -50,13 +47,13 @@
 }
 
 @media (max-width: 1180px) {
-  .admin-shell--control .audit-filter-grid.admin-filter-grid {
+  .admin-shell--control .audit-filter-grid.admin-filter-bar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 720px) {
-  .admin-shell--control .audit-filter-grid.admin-filter-grid {
+  .admin-shell--control .audit-filter-grid.admin-filter-bar {
     grid-template-columns: 1fr;
   }
 }

@@ -8,6 +8,7 @@ import {
 } from "./billingTypes";
 import { CostQueues } from "./CostQueues";
 import { SourceActionPanorama } from "./SourceActionPanorama";
+import { PageBanner } from "./ui/PageBanner";
 import { TabBar } from "./ui/TabBar";
 import { useHashParam } from "./ui/useHashParam";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
@@ -313,7 +314,7 @@ export function BillingEconomics({
       >
         <h2>关联业务账单</h2>
         <p>查看这次业务的积分与调用成本；证据不齐时显示待核对。</p>
-        {error && <p role="alert">{error}</p>}
+        {error && <PageBanner tone="error">{error}</PageBanner>}
         <a href="#admin/analytics?analyticsTab=cost">查看全部成本账单</a>
         <SourceActionPanorama key={query} query={query} name={name} />
       </section>
@@ -502,7 +503,7 @@ export function BillingEconomics({
           </button>
         </div>
       </form>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {notice && <p role="status">{notice}</p>}
       {busy && <p role="status">正在计算…</p>}
       {section === "collections" && (

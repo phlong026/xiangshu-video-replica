@@ -3,6 +3,7 @@ import { adminRead, adminWrite } from "../api.admin";
 import { costInCredits, creditsToCost } from "./billingAmounts";
 import { type BillingService, billingUnit } from "./billingTypes";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 
 /**
@@ -318,7 +319,7 @@ export function BillingRatesManager({
             }
           </p>
           {historyBusy && <p role="status">正在读取价目历史…</p>}
-          {historyError && <p role="alert">{historyError}</p>}
+          {historyError && <PageBanner tone="error">{historyError}</PageBanner>}
           {!historyBusy && !historyError && history && (
             <div className="admin-table-scroll">
               <table
@@ -481,7 +482,7 @@ export function BillingRatesManager({
                   取消
                 </button>
               </div>
-              {error && <p role="alert">{error}</p>}
+              {error && <PageBanner tone="error">{error}</PageBanner>}
             </td>
           </tr>
         )}
@@ -514,7 +515,7 @@ export function BillingRatesManager({
         <p role="status">设置充值换算后即可配置积分成本。</p>
       )}
       {error && !selected && (
-        <p role="alert">
+        <PageBanner tone="error">
           {error}{" "}
           <button
             type="button"
@@ -522,7 +523,7 @@ export function BillingRatesManager({
           >
             重新读取
           </button>
-        </p>
+        </PageBanner>
       )}
       {notice && <p role="status">{notice}</p>}
       {!catalog ? (
@@ -731,7 +732,9 @@ export function BillingRatesManager({
                                   取消
                                 </button>
                               </div>
-                              {error && <p role="alert">{error}</p>}
+                              {error && (
+                                <PageBanner tone="error">{error}</PageBanner>
+                              )}
                             </td>
                           </tr>
                         )}

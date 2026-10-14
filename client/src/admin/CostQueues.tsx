@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { adminRead } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 
 const queues = [
   { key: "pending", label: "待结算" },
@@ -55,7 +56,7 @@ export function CostQueues({
   const range = new URLSearchParams(query);
   return (
     <section className="economics-kpis cost-queues" aria-label="待核对队列">
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {queues.map((q) => (
         <article key={q.key}>
           <button

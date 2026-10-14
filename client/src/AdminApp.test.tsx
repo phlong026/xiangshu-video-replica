@@ -1115,7 +1115,7 @@ describe("AdminApp", () => {
     fireEvent.click(screen.getByRole("link", { name: "登录与设备" }));
 
     expect(await screen.findByLabelText("公司名或用户名")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "搜索" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查询" })).toBeInTheDocument();
   });
 
   it("returns to the login gate and clears admin session state when a control 401 emits the shared expiry event", async () => {
@@ -1467,6 +1467,27 @@ describe("AdminApp", () => {
     expect(icons.length).toBeGreaterThan(20);
     expect(new Set(icons).size).toBe(icons.length);
   });
+
+  it.each([
+    ["announcements", "公告与消息"],
+    ["supportTickets", "工单反馈"],
+    ["reports", "报表中心"],
+    ["workerObservations", "队列观测"],
+    ["publishStats", "发布成效"],
+    ["customerLifecycle", "客户运营"],
+    ["viralOverview", "内容概览"],
+    ["viralHomepage", "首页编排"],
+    ["sessions", "登录与设备"],
+  ])(
+    "%s 页面只有一个页面级标题（外壳的 h1，页内不再重复）",
+    async (tab, title) => {
+      window.history.replaceState(null, "", `#admin/${tab}`);
+      installFetch({ session: "valid" });
+      render(<AdminApp />);
+      await screen.findByRole("heading", { level: 1, name: title });
+      expect(screen.getAllByRole("heading", { name: title })).toHaveLength(1);
+    },
+  );
 
   it("顶栏提供修改密码入口，打开后是改密对话框", async () => {
     installFetch({ session: "valid" });

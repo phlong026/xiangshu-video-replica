@@ -6,6 +6,7 @@ import {
   type ViralRecycleVideo,
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { CONTENT_STATE_LABELS, formatDateTime } from "./ui/vocabulary";
 
@@ -58,7 +59,7 @@ export function ViralRecycleBin({ readOnly }: { readOnly: boolean }) {
       <p className="admin-hint">
         删除后30天内可恢复，恢复不会自动上首页。到期保留删除标记，防止采集重新带回；永久清理需单独批准。
       </p>
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <p role="status">{notice}</p> : null}
       <button type="button" disabled={busy} onClick={() => void load()}>
         刷新回收站

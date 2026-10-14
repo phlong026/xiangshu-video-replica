@@ -6,6 +6,7 @@ import {
   getCustomerPricing,
   updateCustomerPricing,
 } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime } from "./ui/vocabulary";
 
 /** 万分比折扣 → 折数回显（10000 → "10"，9500 → "9.5"，8750 → "8.75"）。 */
@@ -181,7 +182,7 @@ export function CustomerPricingManager({
     >
       <h2>客户报价配置</h2>
       {error && (
-        <div role="alert">
+        <PageBanner tone="error">
           {error}{" "}
           <button
             type="button"
@@ -190,7 +191,7 @@ export function CustomerPricingManager({
           >
             刷新配置
           </button>
-        </div>
+        </PageBanner>
       )}
       {notice && <p role="status">{notice}</p>}
       {!data ? (
@@ -266,7 +267,9 @@ export function CustomerPricingManager({
           {historyOpen && (
             <div>
               {historyBusy && <p role="status">正在读取配置历史…</p>}
-              {historyError && <p role="alert">{historyError}</p>}
+              {historyError && (
+                <PageBanner tone="error">{historyError}</PageBanner>
+              )}
               {!historyBusy && !historyError && history && (
                 <table
                   className="admin-data-table"

@@ -360,9 +360,9 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
-.customer-list-filters__actions {
+/* FilterBar 的动作区在客户列表里独占一行、靠右。 */
+.customer-list-filters .admin-filter-bar__actions {
   grid-column: 1 / -1;
-  display: flex;
   justify-content: flex-end;
   gap: 10px;
 }

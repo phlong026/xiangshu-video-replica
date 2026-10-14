@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { adminWrite } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 
 export function BillingEvidenceForm({
   operationId,
@@ -94,7 +95,7 @@ export function BillingEvidenceForm({
       <button type="submit" disabled={busy}>
         确认并保存核对记录
       </button>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
     </form>
   );
 }

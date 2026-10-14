@@ -7,6 +7,7 @@ import {
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -26,6 +27,8 @@ export function PublishStatsPage({ readOnly = false }: { readOnly?: boolean }) {
   const [rule, setRule] = useState("");
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
+  // 草稿与已提交筛选分开（T22/T23）：点「查询」才发请求。
+  const [draftUsername, setDraftUsername] = useState("");
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -99,7 +102,6 @@ export function PublishStatsPage({ readOnly = false }: { readOnly?: boolean }) {
   return (
     <section className="admin-panel admin-publish-stats" aria-label="发布成效">
       <header>
-        <h2>发布成效</h2>
         <p className="admin-hint">{rule}</p>
         {!readOnly ? (
           <button
@@ -120,25 +122,28 @@ export function PublishStatsPage({ readOnly = false }: { readOnly?: boolean }) {
           {enabled ? "回流已开启" : "回流未开启（默认）"}
         </StatusBadge>
       </p>
-      <form
-        className="admin-toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
+      <FilterBar
+        ariaLabel="发布成效筛选"
+        busy={loading}
+        onReset={() => {
           setOffset(0);
+          setDraftUsername("");
+          setUsername("");
+        }}
+        onSubmit={() => {
+          setOffset(0);
+          setUsername(draftUsername.trim());
         }}
       >
         <label>
           客户
           <input
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
+            value={draftUsername}
+            onChange={(event) => setDraftUsername(event.target.value)}
             placeholder="用户名"
           />
         </label>
-        <button type="submit" disabled={loading}>
-          查询
-        </button>
-      </form>
+      </FilterBar>
       {loading ? (
         <p role="status">正在读取发布成效…</p>
       ) : items.length === 0 ? (

@@ -11,7 +11,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
 import * as adminApi from "../api.admin";
-import { CustomersPage } from "./CustomersPage";
+import { CustomerList as CustomersPage } from "./CustomerList";
 
 // Mock the admin API module
 vi.mock("../api.admin", () => ({
@@ -234,12 +234,57 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       target: { value: "50" },
     });
     expect(adminApi.listCustomers).toHaveBeenCalledTimes(before);
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await waitFor(() =>
       expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
         expect.objectContaining({ lowBalanceThreshold: 50 }),
       ),
     );
+  });
+
+  it("重置清空所有筛选与「需要处理」选中并回到未筛选列表", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+      attention_counts: { low_balance: 3, recent_failure: 1, inactive: 2 },
+    } as never);
+    render(<CustomersPage />);
+    await screen.findByText(/暂无客户/);
+    fireEvent.change(screen.getByPlaceholderText("按用户名或公司名称筛选"), {
+      target: { value: "洪雅" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ username_filter: "洪雅" }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /近7天有失败/ }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ attention: "recent_failure" }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+    expect(screen.getByPlaceholderText("按用户名或公司名称筛选")).toHaveValue(
+      "",
+    );
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ username_filter: undefined, attention: "" }),
+      ),
+    );
+    const buttons = screen
+      .getByRole("form", { name: "客户筛选" })
+      .querySelectorAll("button");
+    expect(Array.from(buttons).map((b) => b.textContent)).toEqual([
+      "查询",
+      "重置",
+      "导出列表 CSV",
+    ]);
   });
 
   it.each([false, true])(
@@ -1002,7 +1047,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     const filterInput = screen.getByPlaceholderText("按用户名或公司名称筛选");
     fireEvent.change(filterInput, { target: { value: "customer-1" } });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     expect(adminApi.listCustomers).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1044,7 +1089,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       target: { value: "2026-09-01" },
     });
     expect(adminApi.listCustomers).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await screen.findByText("new-user");
     resolveOld({ items: [], total: 0, limit: 20, offset: 0 });
     await waitFor(() =>
@@ -1080,7 +1125,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     fireEvent.change(screen.getByPlaceholderText("按用户名或公司名称筛选"), {
       target: { value: "customer-1" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     fireEvent.click(screen.getByRole("button", { name: "导出列表 CSV" }));
 
     expect(api.downloadCustomersCsv).toHaveBeenCalledWith({
@@ -1159,7 +1204,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         target: { value: "customer-1" },
       },
     );
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await waitFor(() => {
       expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
         expect.objectContaining({ username_filter: "customer-1" }),

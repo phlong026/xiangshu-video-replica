@@ -1526,8 +1526,6 @@ export function ViralVideosPage({
     >
       <header className="admin-viral-heading">
         <div>
-          <span className="admin-viral-eyebrow">客户运营</span>
-          <h2>爆款视频库</h2>
           <p className="admin-hint">
             关键词定时采集 → 准备云存储 →
             上首页展示；搜索、预览、展示与删除都在本页完成。
@@ -1549,7 +1547,7 @@ export function ViralVideosPage({
               disabled={saving || collectionEnabled === false}
               title={
                 collectionEnabled === false
-                  ? "采集已暂停，请先在内容运营 → 采集设置中恢复采集。"
+                  ? "采集已暂停，请先在「内容 → 采集设置」中恢复采集。"
                   : undefined
               }
               type="button"
@@ -1689,7 +1687,7 @@ export function ViralVideosPage({
               ))
             )}
             <span className="admin-viral-keywords__hint">
-              关键词在「内容运营 → 采集设置」维护，修改后下个采集周期生效。
+              关键词在「内容 → 采集设置」维护，修改后下个采集周期生效。
             </span>
           </section>
         </details>

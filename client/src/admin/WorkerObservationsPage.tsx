@@ -66,7 +66,6 @@ export function WorkerObservationsPage({
       aria-label="队列观测"
     >
       <header>
-        <h2>队列观测</h2>
         <p className="admin-hint">
           三个 worker 与发布队列的实时积压。高龄任务超过阈值先查 worker 进程
           与日志；隔离区任务冻结了客户积分，按失败诊断页的建议人工核对。

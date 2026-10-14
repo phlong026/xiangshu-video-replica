@@ -97,7 +97,6 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
   return (
     <section className="admin-panel admin-reports-page" aria-label="报表中心">
       <header>
-        <h2>报表中心</h2>
         <p className="admin-hint">
           统一出口：选定月份后一键导出经营月报、资金月报与账务明细；月份为
           北京时间自然月。

@@ -11,7 +11,8 @@ import { CustomerLink } from "./CustomerLink";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CustomerPicker, type PickedCustomer } from "./ui/CustomerPicker";
 import { DataTable } from "./ui/DataTable";
-import { PageBanner } from "./ui/PageBanner";
+import { FilterBar } from "./ui/FilterBar";
+import { ListPage } from "./ui/ListPage";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
 import { formatDateTime } from "./ui/vocabulary";
@@ -86,9 +87,10 @@ export function SupportTicketsPage({
   const [items, setItems] = useState<SupportTicket[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
-  const [status, setStatus] = useState(initialStatus);
-  const [category, setCategory] = useState("");
-  const [username, setUsername] = useState("");
+  // 草稿与已提交筛选分开（T22/T23）：点「查询」才发请求。
+  const emptyFilters = { status: initialStatus, category: "", username: "" };
+  const [draft, setDraft] = useState(emptyFilters);
+  const [filters, setFilters] = useState(emptyFilters);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -117,9 +119,9 @@ export function SupportTicketsPage({
       setLoading(true);
       setError("");
       const response = await listSupportTickets({
-        status: status || undefined,
-        category: category || undefined,
-        username: username || undefined,
+        status: filters.status || undefined,
+        category: filters.category || undefined,
+        username: filters.username || undefined,
         limit: PAGE_SIZE,
         offset,
       });
@@ -130,7 +132,7 @@ export function SupportTicketsPage({
     } finally {
       setLoading(false);
     }
-  }, [status, category, username, offset]);
+  }, [filters, offset]);
 
   useEffect(() => {
     void load();
@@ -240,72 +242,93 @@ export function SupportTicketsPage({
   }
 
   return (
-    <section
-      className="admin-panel admin-support-tickets"
-      aria-label="工单反馈"
-    >
-      <header>
-        <h2>工单 / 反馈</h2>
-        <p className="admin-hint">
-          客户问题的登记—处理—结案闭环（v1 管理端代录；客户端提单入口后续
-          开放）。状态只能前进：待处理 → 处理中 → 已解决，结案后不可复活。
-        </p>
-        {!readOnly && !creating ? (
-          <button type="button" onClick={() => setCreating(true)}>
-            登记工单
-          </button>
-        ) : null}
-      </header>
-      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
-      {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
-      <form
-        className="admin-toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setOffset(0);
-        }}
-      >
-        <label>
-          状态
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
-            {STATUS_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          类目
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
+    <>
+      <ListPage
+        ariaLabel="工单反馈"
+        className="admin-support-tickets"
+        error={error}
+        notice={notice}
+        loading={loading}
+        hasItems={items.length > 0}
+        loadingText="正在读取工单…"
+        emptyText="暂无符合条件的工单。"
+        actions={
+          <header>
+            <p className="admin-hint">
+              客户问题的登记—处理—结案闭环（v1 管理端代录；客户端提单入口后续
+              开放）。状态只能前进：待处理 → 处理中 → 已解决，结案后不可复活。
+            </p>
+            {!readOnly && !creating ? (
+              <button type="button" onClick={() => setCreating(true)}>
+                登记工单
+              </button>
+            ) : null}
+          </header>
+        }
+        filters={
+          <FilterBar
+            ariaLabel="工单筛选"
+            busy={loading}
+            onReset={() => {
+              setOffset(0);
+              setDraft(emptyFilters);
+              setFilters(emptyFilters);
+            }}
+            onSubmit={() => {
+              setOffset(0);
+              setFilters(draft);
+            }}
           >
-            <option value="">全部类目</option>
-            {CATEGORY_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          客户
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="用户名或公司名"
+            <label>
+              状态
+              <select
+                value={draft.status}
+                onChange={(e) => setDraft({ ...draft, status: e.target.value })}
+              >
+                {STATUS_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              类目
+              <select
+                value={draft.category}
+                onChange={(e) =>
+                  setDraft({ ...draft, category: e.target.value })
+                }
+              >
+                <option value="">全部类目</option>
+                {CATEGORY_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              客户
+              <input
+                value={draft.username}
+                onChange={(e) =>
+                  setDraft({ ...draft, username: e.target.value })
+                }
+                placeholder="用户名或公司名"
+              />
+            </label>
+          </FilterBar>
+        }
+        pagination={
+          <Pagination
+            total={total}
+            limit={PAGE_SIZE}
+            offset={offset}
+            onPageChange={setOffset}
           />
-        </label>
-        <button type="submit" disabled={loading}>
-          查询
-        </button>
-      </form>
-      {loading ? (
-        <p role="status">正在读取工单…</p>
-      ) : items.length === 0 ? (
-        <PageBanner tone="notice">暂无符合条件的工单。</PageBanner>
-      ) : (
+        }
+      >
         <DataTable
           ariaLabel="工单清单"
           headers={
@@ -398,13 +421,7 @@ export function SupportTicketsPage({
             </tr>
           ))}
         </DataTable>
-      )}
-      <Pagination
-        total={total}
-        limit={PAGE_SIZE}
-        offset={offset}
-        onPageChange={setOffset}
-      />
+      </ListPage>
       <ConfirmDialog
         open={creating}
         title="登记工单"
@@ -556,6 +573,6 @@ export function SupportTicketsPage({
           </label>
         ) : null}
       </ConfirmDialog>
-    </section>
+    </>
   );
 }
