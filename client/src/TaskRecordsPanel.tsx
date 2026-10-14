@@ -20,8 +20,10 @@ import {
   type GenerationTask,
   getGenerationBatch,
   getLatestGenerationReconcileOperation,
+  isResultUrlExpired,
   listGenerationBatches,
   openVideoDownloadFolder,
+  RESULT_URL_EXPIRED_MESSAGE,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
@@ -774,11 +776,13 @@ export function TaskRecordsPanel({
           return;
         }
         setPreviewUrls((current) => ({ ...current, [task.id]: previewUrl }));
-      } catch {
+      } catch (error) {
         if (sourceIsCurrent()) {
           setResultErrors((current) => ({
             ...current,
-            [task.id]: "预览链接获取失败，请重试。",
+            [task.id]: isResultUrlExpired(error)
+              ? RESULT_URL_EXPIRED_MESSAGE
+              : "预览链接获取失败，请重试。",
           }));
         }
       } finally {
@@ -811,6 +815,17 @@ export function TaskRecordsPanel({
       ...current,
       [task.id]: "视频已生成，但播放地址暂时不可用。",
     }));
+    // 直链交付的成片播放失败时复查直链：已失效就明确提示「文件已失效」（FIX-02）。
+    if (!task.direct_result_available || task.result_asset_id) return;
+    void createGenerationTaskPreviewUrl(task.id, { verify: true }).catch(
+      (error: unknown) => {
+        if (!isResultUrlExpired(error) || !isMountedRef.current) return;
+        setResultErrors((current) => ({
+          ...current,
+          [task.id]: RESULT_URL_EXPIRED_MESSAGE,
+        }));
+      },
+    );
   }, []);
 
   async function handleDownload(task: GenerationTask) {
@@ -847,7 +862,9 @@ export function TaskRecordsPanel({
             message:
               error instanceof VideoDownloadUnconfirmedError
                 ? "尚未确认保存结果，请先检查所选文件夹，避免重复下载。"
-                : "下载失败，请检查网络和保存位置后重试。",
+                : isResultUrlExpired(error)
+                  ? RESULT_URL_EXPIRED_MESSAGE
+                  : "下载失败，请检查网络和保存位置后重试。",
           },
         }));
       }

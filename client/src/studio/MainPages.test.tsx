@@ -773,6 +773,52 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(loadTaskPreview).not.toHaveBeenCalled();
   });
 
+  it("直链成片提醒及时保存；保存时发现直链已失效则改为「文件已失效」（FIX-02）", async () => {
+    const direct: StudioAsset = {
+      id: "direct-task-a",
+      name: "张工建房预算 · 首个可用结果",
+      kind: "video",
+      url: "https://provider.example/a.mp4",
+      group: "任务结果",
+      source: "任务中心",
+      saved: false,
+      generationTaskId: "provider-result-a",
+      delivery: "direct",
+    };
+    let value = studio();
+    useStudio.mockImplementation(() => value);
+    loadTaskPreview.mockResolvedValue(direct);
+    const view = render(<TaskDetailPage />);
+    await waitFor(() => expect(value.updateData).toHaveBeenCalledOnce());
+    const update = vi.mocked(value.updateData).mock.calls[0][0];
+    value = { ...value, data: update(value.data) };
+    view.rerender(<TaskDetailPage />);
+    expect(
+      screen.getByText(/链接可能存在有效期，请尽快下载到本地/),
+    ).toBeVisible();
+
+    saveTaskPreview.mockRejectedValueOnce(
+      Object.assign(
+        new Error("成片文件已失效：生成服务提供的下载链接已过期。"),
+        {
+          code: "RESULT_URL_EXPIRED",
+          status: 410,
+        },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存到素材库" }));
+    expect(
+      await screen.findByText(
+        /成片文件已失效：生成服务提供的下载链接已过期，无法再预览/,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "保存到素材库" }),
+    ).not.toBeInTheDocument();
+    // 失效后不再反复重新读取预览。
+    expect(loadTaskPreview).toHaveBeenCalledTimes(1);
+  });
+
   it("审核示例不请求真实预览接口", () => {
     useStudio.mockReturnValue(studio(taskA.id, { review: true }));
     render(<TaskDetailPage />);

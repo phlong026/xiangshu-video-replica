@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CustomerProfile,
+  createGenerationTaskPreviewUrl,
   createViralImportTask,
   customerVisibleErrorMessage,
+  DIRECT_RESULT_RETENTION_HINT,
   getPublishSummary,
   getStudioNotificationPreferences,
   getViralImportTask,
+  isResultUrlExpired,
+  RESULT_URL_EXPIRED_MESSAGE,
   resolveViralLink,
   updateStudioNotificationPreferences,
   type ViralImportTask,
@@ -1576,7 +1580,8 @@ export function TaskDetailPage() {
   const [previewLoad, setPreviewLoad] = useState<{
     key?: string;
     asset?: StudioAsset;
-    status: "idle" | "loading" | "empty" | "error" | "ready";
+    /** expired：直链交付的成片已失效（服务端 410），重试也无法恢复。 */
+    status: "idle" | "loading" | "empty" | "error" | "ready" | "expired";
   }>({ status: "idle" });
   const [detailLoad, setDetailLoad] = useState<{
     key?: string;
@@ -1738,12 +1743,15 @@ export function TaskDetailPage() {
         ),
       }));
       setPreviewLoad({ key: requestedContext, status: "ready", asset });
-    } catch {
+    } catch (cause) {
       if (
         requestId === previewRequestRef.current &&
         previewContextRef.current === requestedContext
       )
-        setPreviewLoad({ key: requestedContext, status: "error" });
+        setPreviewLoad({
+          key: requestedContext,
+          status: isResultUrlExpired(cause) ? "expired" : "error",
+        });
     }
   }, [task, taskIsVerified, review, previewContextKey, updateData]);
   // 部分完成 / 待核对的批次里已成功的成片同样可看、可存、可发布，
@@ -1872,6 +1880,15 @@ export function TaskDetailPage() {
         notify(
           error instanceof Error ? error.message : "保存成片失败，请重试。",
         );
+        if (isResultUrlExpired(error)) {
+          // 直链已失效：重新读取也拿不到，直接进入「文件已失效」态。
+          setPreviewLoad({
+            key: requestedContext,
+            status: "expired",
+            asset: result,
+          });
+          return;
+        }
         // 超时不代表服务端停止归档；只重新读取结果，不重发保存或生成请求。
         await previewResult();
       }
@@ -1973,6 +1990,25 @@ export function TaskDetailPage() {
               status: "error",
               asset: result,
             });
+            // 直链交付的成片播放失败时复查一次直链：已失效就明确告诉用户，
+            // 而不是一直提示「预览加载失败，请重试」。
+            const directTaskId =
+              result && !result.saved ? result.generationTaskId : undefined;
+            if (!directTaskId || review) return;
+            const requestedContext = previewContextKey;
+            void createGenerationTaskPreviewUrl(directTaskId, {
+              verify: true,
+            }).catch((cause: unknown) => {
+              if (
+                isResultUrlExpired(cause) &&
+                previewContextRef.current === requestedContext
+              )
+                setPreviewLoad({
+                  key: requestedContext,
+                  status: "expired",
+                  asset: result,
+                });
+            });
           }}
         />
         <Panel>
@@ -1989,16 +2025,20 @@ export function TaskDetailPage() {
         <Panel>
           <h2>动作</h2>
           <div className="studio-result-actions">
-            {!review && result?.generationTaskId && !result.saved && (
-              <Button
-                onClick={() => void saveResult()}
-                disabled={actionBusy === "archive"}
-              >
-                {actionBusy === "archive" ? "正在保存成片…" : "保存到素材库"}
-              </Button>
-            )}
+            {!review &&
+              result?.generationTaskId &&
+              !result.saved &&
+              previewStatus !== "expired" && (
+                <Button
+                  onClick={() => void saveResult()}
+                  disabled={actionBusy === "archive"}
+                >
+                  {actionBusy === "archive" ? "正在保存成片…" : "保存到素材库"}
+                </Button>
+              )}
             {!review &&
               taskDeliverable &&
+              previewStatus !== "expired" &&
               (!result?.url || previewStatus === "error") && (
                 <Button
                   variant="primary"
@@ -2049,8 +2089,12 @@ export function TaskDetailPage() {
             <Hint>该批次暂时没有可预览的成功结果。</Hint>
           )}
           {previewStatus === "error" && <Hint>预览加载失败，请重试。</Hint>}
-          {result && !result.saved && (
+          {previewStatus === "expired" && (
+            <Hint>{RESULT_URL_EXPIRED_MESSAGE}</Hint>
+          )}
+          {result && !result.saved && previewStatus !== "expired" && (
             <Hint>
+              {DIRECT_RESULT_RETENTION_HINT}
               保存到素材库后可复用和创建发布草稿，保存不会重新生成或扣积分。
             </Hint>
           )}

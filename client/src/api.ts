@@ -2295,13 +2295,32 @@ export async function createGenerationResultPreviewUrl(
 
 // 直链交付不复制成片到云存储。URL 仅通过任务所属权限接口按需签发，
 // 不进入批次详情，避免被列表、日志或跨用户缓存意外暴露。
+/** 成片直链已失效（服务端 410）。直链目前长期有效，但不排除日后改为限时签名。 */
+export const RESULT_URL_EXPIRED_CODE = "RESULT_URL_EXPIRED";
+export const RESULT_URL_EXPIRED_MESSAGE =
+  "成片文件已失效：生成服务提供的下载链接已过期，无法再预览、下载或保存。如需帮助，请联系客服并提供任务编号。";
+/** 拿到直链交付的成片时给用户的提醒：直链可能有有效期，尽快落到本地或素材库。 */
+export const DIRECT_RESULT_RETENTION_HINT =
+  "成片由生成服务以直链交付，链接可能存在有效期，请尽快下载到本地或保存到素材库，以免失效后无法找回。";
+
+export function isResultUrlExpired(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === RESULT_URL_EXPIRED_CODE
+  );
+}
+
 export async function createGenerationTaskPreviewUrl(
   taskId: string,
+  options: { verify?: boolean } = {},
 ): Promise<string> {
   const { url } = await requestGenerationJson<
     components["schemas"]["GenerationTaskPreviewUrlResponse"]
   >(
-    `/api/generation-tasks/${encodeURIComponent(taskId)}/preview-url`,
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/preview-url${
+      options.verify ? "?verify=true" : ""
+    }`,
     "获取生成结果播放地址失败",
   );
   if (!url) {
@@ -2338,10 +2357,23 @@ export async function downloadGenerationTaskResult(
     }
     return downloadGenerationResult(task.result_asset_id, filename);
   }
-  return downloadVideoToFile(
-    () => createGenerationTaskPreviewUrl(taskId),
-    filename,
-  );
+  try {
+    return await downloadVideoToFile(
+      () => createGenerationTaskPreviewUrl(taskId),
+      filename,
+    );
+  } catch (error) {
+    // 桌面端直接从直链下载：失败时复查一次直链，已失效就明确告诉用户「文件已失效」；
+    // 复查本身失败（网络等）不掩盖原始下载错误。
+    if (!(error instanceof VideoDownloadUnconfirmedError)) {
+      await createGenerationTaskPreviewUrl(taskId, { verify: true }).catch(
+        (verifyError: unknown) => {
+          if (isResultUrlExpired(verifyError)) throw verifyError;
+        },
+      );
+    }
+    throw error;
+  }
 }
 
 export type VideoDownloadResult =
@@ -5864,6 +5896,17 @@ function generationRequestError(error: unknown, errorPrefix: string): Error {
         : null;
   if (archiveMessage) {
     const mapped = new Error(archiveMessage) as RequestError;
+    mapped.status = status;
+    mapped.code = code;
+    return mapped;
+  }
+  if (status === 410 && code === RESULT_URL_EXPIRED_CODE) {
+    // 直链已失效：重试必然失败，原样透传服务端「文件已失效」说明，并保留 code 供界面识别。
+    const mapped = new Error(
+      error instanceof Error && error.message
+        ? error.message
+        : RESULT_URL_EXPIRED_MESSAGE,
+    ) as RequestError;
     mapped.status = status;
     mapped.code = code;
     return mapped;
