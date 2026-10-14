@@ -1006,9 +1006,7 @@ export async function uploadWorkbenchSourceVideo(
   analysisTaskId?: string;
   analysisTaskStatus?: string;
 }> {
-  const base = file.name
-    .replace(/\.(mp4|mov|m4a|mp3|wav|aac)$/i, "")
-    .trim();
+  const base = file.name.replace(/\.(mp4|mov|m4a|mp3|wav|aac)$/i, "").trim();
   const project = await createProject((base || file.name).slice(0, 120));
   try {
     const intent = await createVideoUploadIntent(project.id, file, purpose);
