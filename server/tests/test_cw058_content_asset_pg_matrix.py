@@ -2508,6 +2508,46 @@ def test_provider_result_url_probe_maps_statuses(monkeypatch: pytest.MonkeyPatch
     assert generation.provider_result_url_expired("fake://h3-results/a.mp4") is None
 
 
+def test_cancel_batch_visible_but_not_own_is_forbidden_not_missing(
+    lane_env: str, pg: psycopg.Connection
+) -> None:
+    """FIX-12：项目主人看得到他人在本项目提交的批次，取消时应明确「只能取消自己的」，
+    而不是 404「批次不存在」；看不到的人仍是 404。"""
+    from app.generation import cancel_generation_batch
+
+    seed_project(pg, "cancel-owner-project", "employee_1")
+    pg.execute(
+        "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+        "request_hash,request_snapshot_json,status) VALUES "
+        "('cancel-other-batch','cancel-owner-project','employee_2','cancel-other-key',"
+        "'h','{}','QUEUED')"
+    )
+    pg.execute(
+        "INSERT INTO generation_tasks(id,batch_id,provider,model,status) VALUES "
+        "('cancel-other-task','cancel-other-batch','fake_h3','MiniMax-H3','PENDING')"
+    )
+    pg.commit()
+    with pytest.raises(HTTPException) as owner_exc, pg_transaction() as raw:
+        cancel_generation_batch(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_1", "employee"),
+            batch_id="cancel-other-batch",
+        )
+    assert owner_exc.value.status_code == 403
+    assert owner_exc.value.detail["code"] == "BATCH_CANCEL_FORBIDDEN"
+    with pytest.raises(HTTPException) as stranger_exc, pg_transaction() as raw:
+        cancel_generation_batch(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_3", "employee"),
+            batch_id="cancel-other-batch",
+        )
+    assert stranger_exc.value.status_code == 404
+    status = pg.execute(
+        "SELECT status FROM generation_batches WHERE id='cancel-other-batch'"
+    ).fetchone()
+    assert status == ("QUEUED",)
+
+
 def test_archive_retry_while_first_request_runs_deduplicates_expensive_work(
     lane_env: str, pg: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

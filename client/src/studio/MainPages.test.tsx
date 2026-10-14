@@ -2356,6 +2356,34 @@ describe("V1.4 任务中心列表", () => {
     expect(value.notify).toHaveBeenCalledWith("审核示例不执行真实取消。");
   });
 
+  it("委派项目里他人提交的排队批次不出现取消入口（FIX-12）", () => {
+    const others: StudioTask = {
+      ...taskA,
+      id: "batch-others",
+      type: "视频生成",
+      backendKind: "generation_batch",
+      backendId: "batch-others",
+      status: "queued",
+      createdByUserId: "someone-else",
+    };
+    const mine: StudioTask = {
+      ...others,
+      id: "batch-mine",
+      backendId: "batch-mine",
+      title: "我的排队任务",
+      createdByUserId: "account-a",
+    };
+    useStudio.mockReturnValue(
+      studio(taskA.id, {
+        state: createState("tasks"),
+        data: data([others, mine]),
+        user: { id: "account-a" } as StudioContextValue["user"],
+      }),
+    );
+    render(<TasksPage />);
+    expect(screen.getAllByRole("button", { name: "取消任务" })).toHaveLength(1);
+  });
+
   it("非排队行不出现取消入口", () => {
     useStudio.mockReturnValue(tasksPage());
     render(<TasksPage />);
