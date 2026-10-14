@@ -4,7 +4,6 @@ import {
   archiveCollectedViralVideo,
   estimateViralOperation,
   getViralHomepage,
-  moveViralHomepage,
   reorderViralHomepage,
   scheduleViralHomepage,
   type ViralHomepage,
@@ -20,6 +19,21 @@ function dateInput(value: string | null) {
   if (!value) return "";
   const date = new Date(value);
   return new Date(date.getTime() + 8 * 3600000).toISOString().slice(0, 16);
+}
+
+/** 一条首页内容当前的问题（封面缺失 / 下架 / 素材未就绪 / 展示过久）。 */
+function homepageProblems(video: ViralHomepageVideo) {
+  return [
+    !video.cover_key ? "封面缺失" : "",
+    video.availability !== "AVAILABLE" ? "已下架" : "",
+    video.media_status !== "SUCCEEDED" || !video.storage_uri
+      ? "素材未就绪"
+      : "",
+    video.homepage_featured_at &&
+    Date.now() - Date.parse(video.homepage_featured_at) > 30 * 86400000
+      ? "已展示超过30天，建议替换"
+      : "",
+  ].filter(Boolean);
 }
 
 /** 预览封面兜底：无封面或源站链接过期都退回占位，不出现裂图。 */
@@ -50,6 +64,10 @@ export function ViralHomepagePage({
   const [starts, setStarts] = useState("");
   const [ends, setEnds] = useState("");
   const [positions, setPositions] = useState<Record<string, string>>({});
+  // 顺序草稿（T36）：上移 / 下移 / 拖拽 / 移到第 N 位都只改本地草稿，点「保存顺序」
+  // 才提交一次；null 表示没有未保存的调整。
+  const [draftIds, setDraftIds] = useState<string[] | null>(null);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
   const generation = useRef(0);
   const retry = useRef<{ fingerprint: string; key: string } | null>(null);
   const load = useCallback(async () => {
@@ -64,6 +82,7 @@ export function ViralHomepagePage({
   }, [platform]);
   useEffect(() => {
     setData(null);
+    setDraftIds(null);
     setEditing(null);
     setPreparation(null);
     setError("");
@@ -78,46 +97,48 @@ export function ViralHomepagePage({
       retry.current = { fingerprint, key: crypto.randomUUID() };
     return retry.current.key;
   }
-  async function move(index: number, to: number) {
+  const orderedItems = (() => {
+    if (!data) return [];
+    if (!draftIds) return data.items;
+    const byId = new Map(data.items.map((video) => [video.video_id, video]));
+    return draftIds.flatMap((id) => {
+      const video = byId.get(id);
+      return video ? [video] : [];
+    });
+  })();
+  function move(index: number, to: number) {
     if (
       !data ||
       saving ||
       readOnly ||
       !Number.isInteger(to) ||
       to < 0 ||
-      to >= data.items.length ||
+      to >= orderedItems.length ||
       index === to
     )
       return;
-    const before = data.items.map((v) => v.video_id),
-      after = [...before];
+    const after = orderedItems.map((video) => video.video_id);
     after.splice(to, 0, after.splice(index, 1)[0]);
+    const original = data.items.map((video) => video.video_id);
+    // 调回原顺序等于没有调整，不留「未保存」状态。
+    setDraftIds(after.every((id, i) => id === original[i]) ? null : after);
+    setNotice("");
+  }
+  async function saveOrder() {
+    if (!data || !draftIds || saving || readOnly) return;
+    const before = data.items.map((video) => video.video_id);
     setSaving(true);
     setError("");
     try {
-      if (data.revision) {
-        await moveViralHomepage(
-          platform,
-          before[index],
-          to + 1,
-          data.revision,
-          keyFor(
-            JSON.stringify({
-              platform,
-              video_id: before[index],
-              position: to + 1,
-              revision: data.revision,
-            }),
-          ),
-        );
-      } else
-        await reorderViralHomepage(
-          platform,
-          after,
-          before,
-          keyFor(JSON.stringify({ platform, after, before })),
-        );
+      // 整体提交完整顺序与加载时的旧快照：多处调整只产生一次写入与一条审计。
+      await reorderViralHomepage(
+        platform,
+        draftIds,
+        before,
+        keyFor(JSON.stringify({ platform, after: draftIds, before })),
+      );
       retry.current = null;
+      setDraftIds(null);
       await load();
       setNotice("首页顺序已保存，客户首页按此顺序展示可用内容。");
     } catch (cause) {
@@ -238,23 +259,80 @@ export function ViralHomepagePage({
               或到「采集设置」调整容量。
             </PageBanner>
           ) : null}
+          {(() => {
+            const flagged = orderedItems.filter(
+              (video) => homepageProblems(video).length > 0,
+            );
+            return flagged.length > 0 ? (
+              <section
+                aria-label="需要处理的内容"
+                className="admin-homepage-problems"
+              >
+                <h3>需要处理（{flagged.length}）</h3>
+                <ul>
+                  {flagged.map((video) => (
+                    <li key={video.video_id}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          document
+                            .getElementById(`homepage-item-${video.video_id}`)
+                            ?.scrollIntoView({ block: "center" })
+                        }
+                      >
+                        {video.title || "未命名视频"}
+                      </button>
+                      ：{homepageProblems(video).join(" · ")}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null;
+          })()}
+          {draftIds ? (
+            <div
+              className="admin-homepage-savebar"
+              role="status"
+              aria-label="顺序调整"
+            >
+              <strong>顺序已调整，尚未保存</strong>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => void saveOrder()}
+              >
+                {saving ? "保存中…" : "保存顺序"}
+              </button>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => setDraftIds(null)}
+              >
+                撤销调整
+              </button>
+            </div>
+          ) : null}
           <ol className="admin-homepage-order">
-            {data.items.map((video, index) => {
-              const problems = [
-                !video.cover_key ? "封面缺失" : "",
-                video.availability !== "AVAILABLE" ? "已下架" : "",
-                video.media_status !== "SUCCEEDED" || !video.storage_uri
-                  ? "素材未就绪"
-                  : "",
-                video.homepage_featured_at &&
-                Date.now() - Date.parse(video.homepage_featured_at) >
-                  30 * 86400000
-                  ? "已展示超过30天，建议替换"
-                  : "",
-              ].filter(Boolean);
+            {orderedItems.map((video, index) => {
+              const problems = homepageProblems(video);
               return (
-                <li key={video.video_id}>
+                <li
+                  id={`homepage-item-${video.video_id}`}
+                  key={video.video_id}
+                  className={problems.length > 0 ? "has-problem" : undefined}
+                  draggable={!readOnly && !saving}
+                  onDragStart={() => setDragIndex(index)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => {
+                    if (dragIndex !== null) move(dragIndex, index);
+                    setDragIndex(null);
+                  }}
+                  onDragEnd={() => setDragIndex(null)}
+                >
                   <span className="admin-homepage-position">{index + 1}</span>
+                  <div className="admin-homepage-thumb">
+                    <PreviewCover src={video.cover_url ?? null} />
+                  </div>
                   <div className="admin-homepage-content">
                     <strong>{video.title || "未命名视频"}</strong>
                     <p className="admin-hint">
@@ -290,14 +368,14 @@ export function ViralHomepagePage({
                       <button
                         type="button"
                         disabled={saving || index === 0}
-                        onClick={() => void move(index, index - 1)}
+                        onClick={() => move(index, index - 1)}
                       >
                         上移
                       </button>
                       <button
                         type="button"
-                        disabled={saving || index === data.items.length - 1}
-                        onClick={() => void move(index, index + 1)}
+                        disabled={saving || index === orderedItems.length - 1}
+                        onClick={() => move(index, index + 1)}
                       >
                         下移
                       </button>
@@ -306,7 +384,7 @@ export function ViralHomepagePage({
                         <input
                           type="number"
                           min={1}
-                          max={data.items.length}
+                          max={orderedItems.length}
                           aria-label={`「${video.title}」目标位置`}
                           value={positions[video.video_id] ?? String(index + 1)}
                           onChange={(e) =>
@@ -321,7 +399,7 @@ export function ViralHomepagePage({
                         type="button"
                         disabled={saving}
                         onClick={() =>
-                          void move(
+                          move(
                             index,
                             Number(positions[video.video_id] ?? index + 1) - 1,
                           )
@@ -388,7 +466,7 @@ export function ViralHomepagePage({
               起计，包含已授权客户的再次成功读取；更早的点击历史无法还原。
             </p>
           )}
-          {data.items.length === 0 && (
+          {orderedItems.length === 0 && (
             <p>该平台暂无首页内容，请到视频库选择并上首页。</p>
           )}
           <h3>客户首页预览 · 前12条</h3>
