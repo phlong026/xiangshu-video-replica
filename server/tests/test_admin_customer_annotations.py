@@ -498,6 +498,131 @@ def test_customer_list_carries_annotation_fields(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# T30：标签 / 负责人筛选与批量标注
+# ---------------------------------------------------------------------------
+
+
+def _batch(
+    client: TestClient,
+    headers: dict[str, str],
+    **fields: object,
+) -> object:
+    body: dict[str, object] = {"confirm": True, "reason": "批量整理标签"}
+    body.update(fields)
+    return client.post(
+        "/api/control/customers/batch-annotation",
+        json=body,
+        headers={**headers, IDEMPOTENCY_KEY_HEADER: f"key-{uuid.uuid4()}"},
+    )
+
+
+def test_list_filters_by_tag_and_owner_including_unassigned(client: TestClient) -> None:
+    admin = _admin_session(client)
+    assert (
+        _put_annotation(
+            client, admin, tags=["重点"], owner_user_id="ops_admin", key="f-1"
+        ).status_code
+        == 200
+    )
+
+    def ids(**params: str) -> list[str]:
+        response = client.get("/api/control/customers", params=params, headers=admin)
+        assert response.status_code == 200, response.text
+        return [item["user_id"] for item in response.json()["items"]]
+
+    assert ids(tag="重点") == [CUSTOMER_USER_ID]
+    assert ids(tag="不存在") == []
+    assert ids(owner_user_id="ops_admin") == [CUSTOMER_USER_ID]
+    assert ids(owner_user_id="none") == [QUIET_USER_ID]
+    # 待办汇总遵守同一批筛选：只统计被筛出的客户。
+    summary = client.get("/api/control/customers", params={"tag": "重点"}, headers=admin).json()
+    assert summary["total"] == 1
+    exported = client.get(
+        "/api/control/customers.csv", params={"owner_user_id": "none"}, headers=admin
+    )
+    assert exported.status_code == 200, exported.text
+    assert "quiet_u" in exported.text and "customer_u" not in exported.text
+
+
+def test_tag_candidates_count_customers(client: TestClient) -> None:
+    admin = _admin_session(client)
+    _put_annotation(client, admin, tags=["VIP", "重点"], key="t-1")
+    _put_annotation(client, admin, user_id=QUIET_USER_ID, tags=["VIP"], key="t-2")
+    response = client.get("/api/control/customers/tags", headers=admin)
+    assert response.status_code == 200, response.text
+    assert response.json()["items"] == [
+        {"tag": "VIP", "count": 2},
+        {"tag": "重点", "count": 1},
+    ]
+
+
+def test_batch_annotation_merges_per_customer_and_reports_failures(
+    client: TestClient,
+) -> None:
+    admin = _admin_session(client)
+    assert (
+        _put_annotation(
+            client, admin, tags=["VIP"], note="保留的备注", owner_user_id="ops_admin", key="b-1"
+        ).status_code
+        == 200
+    )
+
+    result = _batch(
+        client,
+        admin,
+        user_ids=[CUSTOMER_USER_ID, QUIET_USER_ID, "ghost_u"],
+        add_tags=["续费关注"],
+        set_owner=True,
+        owner_user_id="admin_u",
+    )
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["succeeded"] == 2 and body["failed"] == 1
+    assert [item["ok"] for item in body["results"]] == [True, True, False]
+
+    mine = client.get(_annotation_path(), headers=admin).json()
+    # 增量叠加：原标签与备注保留，负责人被改成新的。
+    assert mine["tags"] == ["VIP", "续费关注"]
+    assert mine["note"] == "保留的备注"
+    assert mine["owner_user_id"] == "admin_u"
+    quiet = client.get(_annotation_path(QUIET_USER_ID), headers=admin).json()
+    assert quiet["tags"] == ["续费关注"] and quiet["owner_user_id"] == "admin_u"
+    # 逐户留痕：两名成功客户各一条批量审计。
+    assert sum(1 for row in _annotation_audit_rows() if row) >= 2
+
+    removed = _batch(client, admin, user_ids=[CUSTOMER_USER_ID], remove_tags=["VIP"])
+    assert removed.status_code == 200, removed.text
+    assert client.get(_annotation_path(), headers=admin).json()["tags"] == ["续费关注"]
+
+    cleared = _batch(
+        client,
+        admin,
+        user_ids=[QUIET_USER_ID],
+        remove_tags=["续费关注"],
+        set_owner=True,
+        owner_user_id=None,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert all(row[0] != QUIET_USER_ID for row in _annotation_rows())
+
+
+def test_batch_annotation_validates_input_and_blocks_auditor(client: TestClient) -> None:
+    admin = _admin_session(client)
+    empty = _batch(client, admin, user_ids=[CUSTOMER_USER_ID])
+    assert empty.status_code == 400, empty.text
+    bad_owner = _batch(
+        client, admin, user_ids=[CUSTOMER_USER_ID], set_owner=True, owner_user_id="auditor_u"
+    )
+    assert bad_owner.status_code == 400, bad_owner.text
+    too_many = _batch(client, admin, user_ids=[f"u{i}" for i in range(51)], add_tags=["x"])
+    assert too_many.status_code == 422, too_many.text
+
+    auditor = _admin_session(client, "auditor_u")
+    denied = _batch(client, auditor, user_ids=[CUSTOMER_USER_ID], add_tags=["x"])
+    assert denied.status_code == 403, denied.text
+
+
+# ---------------------------------------------------------------------------
 # Fail-closed runtime
 # ---------------------------------------------------------------------------
 

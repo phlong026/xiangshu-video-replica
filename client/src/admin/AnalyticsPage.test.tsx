@@ -321,7 +321,7 @@ describe("current range summary export", () => {
       "范围 2026-09-01 至 2026-09-30",
     );
   });
-  test("surfaces server export errors and hides export for auditor", async () => {
+  test("surfaces server export errors; auditors can export too (T19)", async () => {
     vi.mocked(exportSummaryReportCsv).mockRejectedValue(
       new Error("导出失败：范围无效"),
     );
@@ -333,8 +333,8 @@ describe("current range summary export", () => {
     view.unmount();
     render(<AnalyticsPage readOnly />);
     expect(
-      screen.queryByRole("region", { name: "当前范围报表导出" }),
-    ).toBeNull();
+      screen.getByRole("region", { name: "当前范围报表导出" }),
+    ).toBeInTheDocument();
   });
   test("queue counts and click carry exactly the applied dates and customer through tabs", async () => {
     const urls: string[] = [];

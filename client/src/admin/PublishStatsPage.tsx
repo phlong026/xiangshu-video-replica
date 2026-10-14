@@ -2,11 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import {
   listPublishStats,
   type PublishStatsItem,
-  setPublishStatsEnabled,
   syncPublishStats,
 } from "../api.admin";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -15,7 +14,7 @@ import { formatDateTime } from "./ui/vocabulary";
 /**
  * ADM-18 发布效果回流（默认关闭）：客户发布成片后的公开互动数据。
  *
- * 打开总开关前需确认对客户发布内容的采集授权口径（改进方案 §7 待拍板）；
+ * 总开关在「系统设置 → 功能开关」（T28）；打开前需确认对客户发布内容的采集授权口径（改进方案 §7 待拍板）；
  * 同步按条触发（抖音），费用记平台成本。列表即"爆款赋能效果"数据面。
  */
 const PAGE_SIZE = 20;
@@ -26,12 +25,12 @@ export function PublishStatsPage({ readOnly = false }: { readOnly?: boolean }) {
   const [rule, setRule] = useState("");
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
+  // 草稿与已提交筛选分开（T22/T23）：点「查询」才发请求。
+  const [draftUsername, setDraftUsername] = useState("");
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [toggleOpen, setToggleOpen] = useState(false);
-  const [nextEnabled, setNextEnabled] = useState(false);
   const [syncingId, setSyncingId] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -81,37 +80,13 @@ export function PublishStatsPage({ readOnly = false }: { readOnly?: boolean }) {
     }
   }
 
-  async function toggle(reason: string) {
-    setSaving(true);
-    setError("");
-    try {
-      await setPublishStatsEnabled({ enabled: nextEnabled, reason });
-      setNotice(nextEnabled ? "发布效果回流已开启。" : "发布效果回流已关闭。");
-      setToggleOpen(false);
-      await load();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "切换失败");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
     <section className="admin-panel admin-publish-stats" aria-label="发布成效">
       <header>
-        <h2>发布成效</h2>
         <p className="admin-hint">{rule}</p>
-        {!readOnly ? (
-          <button
-            type="button"
-            onClick={() => {
-              setNextEnabled(!enabled);
-              setToggleOpen(true);
-            }}
-          >
-            {enabled ? "关闭回流" : "开启回流（需确认授权口径）"}
-          </button>
-        ) : null}
+        <a href="#admin/systemSettings?sub=features">
+          回流开关在「系统设置 → 功能开关」
+        </a>
       </header>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
@@ -120,25 +95,28 @@ export function PublishStatsPage({ readOnly = false }: { readOnly?: boolean }) {
           {enabled ? "回流已开启" : "回流未开启（默认）"}
         </StatusBadge>
       </p>
-      <form
-        className="admin-toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
+      <FilterBar
+        ariaLabel="发布成效筛选"
+        busy={loading}
+        onReset={() => {
           setOffset(0);
+          setDraftUsername("");
+          setUsername("");
+        }}
+        onSubmit={() => {
+          setOffset(0);
+          setUsername(draftUsername.trim());
         }}
       >
         <label>
           客户
           <input
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
+            value={draftUsername}
+            onChange={(event) => setDraftUsername(event.target.value)}
             placeholder="用户名"
           />
         </label>
-        <button type="submit" disabled={loading}>
-          查询
-        </button>
-      </form>
+      </FilterBar>
       {loading ? (
         <p role="status">正在读取发布成效…</p>
       ) : items.length === 0 ? (
@@ -207,21 +185,6 @@ export function PublishStatsPage({ readOnly = false }: { readOnly?: boolean }) {
         limit={PAGE_SIZE}
         offset={offset}
         onPageChange={setOffset}
-      />
-      <ConfirmDialog
-        open={toggleOpen}
-        title={nextEnabled ? "开启发布效果回流" : "关闭发布效果回流"}
-        confirmLabel="确认"
-        description={
-          nextEnabled
-            ? "开启后将可采集客户发布内容的公开互动数据。请确认已具备对客户发布内容的采集授权口径（改进方案 §7 待拍板项）。"
-            : "关闭后停止同步；已采集的数据保留。"
-        }
-        busy={saving}
-        error={error}
-        level="reason"
-        onClose={() => !saving && setToggleOpen(false)}
-        onConfirm={(reason) => void toggle(reason)}
       />
     </section>
   );

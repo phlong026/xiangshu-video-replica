@@ -3890,14 +3890,21 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
 ) -> None:
     from datetime import UTC, datetime, timedelta
 
+    from app.admin_dates import SHANGHAI
     from app.db_portable import BusinessConnection
     from app.viral_content_observations import record_content_source, record_customer_read
 
     # customer_visible 只放行 7 天采集窗内的视频：published_at 必须取相对当前
     # 时间，否则夹具落库一周后「ready」滑出窗口、用例必然转红。
+    #
+    # 日期必须按上海时区取：published_from/published_to 在服务端是按 SHANGHAI
+    # 的零点换算的，用 UTC 日期会在上海 00:00–08:00（= UTC 16:00–24:00）算出一个
+    # 已结束的窗口——此时 now-1h 落在窗口之外，source_keyword 过滤恒为 0，用例
+    # 只在白天绿。这里统一到服务端口径。
     published = datetime.now(UTC) - timedelta(hours=1)
     published_ts = int(published.timestamp())
-    published_date = published.date().isoformat()
+    published_day = published.astimezone(SHANGHAI).date()
+    published_date = published_day.isoformat()
 
     headers = _admin_session(client)
     states = ["pending_prepare", "prepare_failed", "ready", "featured", "removed", "blocked"]
@@ -3990,7 +3997,7 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
         client.get(
             "/api/control/viral/videos",
             params={
-                "published_from": (published.date() + timedelta(days=1)).isoformat(),
+                "published_from": (published_day + timedelta(days=1)).isoformat(),
                 "published_to": published_date,
             },
             headers=headers,

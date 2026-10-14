@@ -179,5 +179,34 @@ def _valid_sha256_digest(value: str) -> bool:
 
 ControlUser = Annotated[CurrentUser, Depends(get_control_route_user)]
 ControlSuperUser = Annotated[CurrentUser, Depends(get_control_super_admin)]
+
+
 # Bulk exports (CSV dumps) — write-level authority on the read path.
+def get_control_exporter(
+    request: Request,
+    conn: Database,
+    proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+) -> CurrentUser:
+    """整表 CSV 导出的控制面身份（整改 T19，决策 D2）：审计员可导出。
+
+    与 :func:`get_control_writer` 的区别只有一处：客户生产线不再要求写级角色。
+    导出仍必须经 ``_guard_ledger_export`` 留 ``control.export`` 审计并过限流；
+    内部 P0 线沿用代理令牌身份（它本来只认 ``admin``）。写接口继续用
+    ``ControlWriter``，不受影响。
+    """
+    if not _is_customer_production():
+        return get_control_user(conn, proxy_token)
+
+    from app.admin_auth_routes import get_admin_actor
+
+    admin_actor = get_admin_actor(request)
+    return CurrentUser(
+        id=admin_actor.user_id,
+        username=admin_actor.username,
+        display_name=admin_actor.display_name,
+        role=cast(Role, admin_actor.role),
+    )
+
+
 ControlWriter = Annotated[CurrentUser, Depends(get_control_writer)]
+ControlExporter = Annotated[CurrentUser, Depends(get_control_exporter)]

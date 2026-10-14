@@ -2087,12 +2087,16 @@ def test_customers_csv_export_is_audited_and_filtered(client: TestClient) -> Non
     )
     assert audit is not None and int(audit[0]) == 1
 
-    # 审计员不可导出（AdminWriter 门）。B3（2026-09-22 评审）：批量导出是数据
-    # 外带动作而非查看，资金两个 CSV 导出已收敛到同一口径，三处导出此处对齐。
+    # 整改 T19（决策 D2）：审计员可导出（曾为 AdminWriter 门，B3 约定），
+    # 前提是导出记在审计员名下。
     auditor = _admin_session(client, actor="auditor_u")
-    denied = client.get("/api/control/customers.csv", headers=auditor)
-    assert denied.status_code == 403
-    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+    allowed = client.get("/api/control/customers.csv", headers=auditor)
+    assert allowed.status_code == 200
+    audit = _fetch_one(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'control.export' "
+        "AND entity_id = 'customers' AND actor_user_id = 'auditor_u'"
+    )
+    assert audit is not None and int(audit[0]) == 1
 
 
 def test_customers_csv_export_normalizes_status_casing(client: TestClient) -> None:
@@ -3125,12 +3129,16 @@ def test_customer_attention_is_global_sorted_and_matches_export(client: TestClie
         headers=headers,
     ).json()["items"][0]
     assert target["success_rate_30d"] is None and target["low_balance"] is False
-    assert (
-        client.get(
-            "/api/control/customers", params={"attention": "low_balance"}, headers=headers
-        ).status_code
-        == 400
+    # 未显式传阈值时取持久化的运营参数（T29，默认 100），不再 400：
+    # 余额 49/50 的这批客户都低于默认线，卡片开箱可用。
+    default_threshold = client.get(
+        "/api/control/customers",
+        params={"username": "scope-", "attention": "low_balance"},
+        headers=headers,
     )
+    assert default_threshold.status_code == 200, default_threshold.text
+    assert default_threshold.json()["low_balance_threshold"] == 100
+    assert default_threshold.json()["total"] == 25
     exported = client.get(
         "/api/control/customers.csv", params={**params, "attention": "low_balance"}, headers=headers
     )

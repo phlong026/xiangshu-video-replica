@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast
 
@@ -30,7 +30,7 @@ from app.admin_write_contract import (
 )
 from app.auth import Database, Role
 from app.billing_catalog import SERVICES
-from app.control_auth import ControlSuperUser, ControlUser, ControlWriter
+from app.control_auth import ControlExporter, ControlSuperUser, ControlUser, ControlWriter
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
@@ -1680,9 +1680,10 @@ def list_generation_records(
     page = records[offset : offset + limit]
     _attach_failure_explanations(conn, page)
     if _actor.role == "auditor":
+        # 整改 T18（决策 D1）：审计员可见成本与毛利——经营看板、成本核对对审计员
+        # 本就展示金额，这里单独脱敏只会让三处口径互相矛盾；故 provider_cost 不再
+        # 置空。错误原文、上游说明、媒体预览仍属客户内容，继续对审计员脱敏。
         for record in page:
-            record.provider_cost = None
-            record.provider_cost_status = "UNAVAILABLE"
             record.error_message = None
             record.provider_message = None
             record.upstream_reason = None
@@ -3115,11 +3116,9 @@ def update_control_billing_settings(
 @router.get("/recharge-orders.csv")
 def export_recharge_orders_csv(
     conn: Database,
-    # B3 (2026-09-22 review): bulk export is a data-egress action, not a view —
-    # it requires write-level authority (auditor 403 AUDITOR_READ_ONLY), the
-    # same policy customers.csv already applied. Auditors keep their read-only
-    # views of these rows on the pages; only the one-shot full dump is removed.
-    actor: ControlWriter,
+    # B3 (2026-09-22) 曾要求导出写级权限；整改 T19（决策 D2）改为审计员也可
+    # 导出，前提是每次导出都经 _guard_ledger_export 留审计并过限流。
+    actor: ControlExporter,
     status: OrderStatus | None = None,
     user_id: str | None = None,
     username: str | None = None,
@@ -3200,12 +3199,111 @@ def export_recharge_orders_csv(
     )
 
 
+@router.get("/generation-records.csv")
+def export_generation_records_csv(
+    conn: Database,
+    actor: ControlExporter,
+    username: str | None = None,
+    user_id: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    status: str | None = None,
+    status_group: Literal["queued", "running", "succeeded", "failed", "attention"] | None = None,
+    record_type: GenerationRecordType | None = None,
+    failure_phase: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    task_ref: Annotated[str | None, Query(max_length=200)] = None,
+    project_name: Annotated[str | None, Query(max_length=100)] = None,
+    limit: int = Query(default=2000, ge=1, le=2000),
+) -> Response:
+    """导出当前筛选的生成记录（整改 T33）。
+
+    与列表同一份筛选与同一条查询（直接调用 ``list_generation_records``，口径不会
+    和页面各走各的）；与账务导出同一道门：审计员可导出，必留审计并限流。
+    不导出上游服务名与第三方任务号——对外材料里不出现数据源信息；成本只给金额与
+    状态，状态不是「已核实」时不以 0 代替。
+    """
+    _guard_ledger_export(
+        conn,
+        actor,
+        kind="generation_records",
+        filters={
+            key: str(value)
+            for key, value in [
+                ("username", username),
+                ("user_id", user_id),
+                ("status", status),
+                ("status_group", status_group),
+                ("record_type", record_type),
+                ("failure_phase", failure_phase),
+                ("created_from", created_from),
+                ("created_to", created_to),
+                ("task_ref", task_ref),
+                ("project_name", project_name),
+            ]
+            if value
+        },
+        row_limit=limit,
+    )
+    page = list_generation_records(
+        conn=conn,
+        _actor=actor,
+        username=username,
+        user_id=user_id,
+        status=status,
+        status_group=status_group,
+        record_type=record_type,
+        failure_phase=failure_phase,
+        diagnostics=False,
+        failure_category=None,
+        created_from=created_from,
+        created_to=created_to,
+        task_ref=task_ref,
+        project_name=project_name,
+        limit=limit,
+        offset=0,
+    )
+    # 列名 → 记录字段。成本列对外叫 cost / cost_status：导出件里不带 provider 字样。
+    columns = (
+        ("record_id", "record_id"),
+        ("short_ref", "short_ref"),
+        ("record_type", "record_type"),
+        ("operation", "operation"),
+        ("username", "username"),
+        ("display_name", "display_name"),
+        ("project_name", "project_name"),
+        ("status", "status"),
+        ("charged_credits", "charged_credits"),
+        ("cost", "provider_cost"),
+        ("cost_status", "provider_cost_status"),
+        ("failure_category", "failure_category"),
+        ("error_code", "error_code"),
+        ("error_message", "error_message"),
+        ("advice", "advice"),
+        ("created_at", "created_at"),
+        ("completed_at", "completed_at"),
+        ("failed_at", "failed_at"),
+    )
+    headers = tuple(header for header, _field in columns)
+    rows = [
+        tuple(
+            "" if getattr(item, field) is None else getattr(item, field)
+            for _header, field in columns
+        )
+        for item in page.items
+    ]
+    return _csv_response(
+        filename="generation-records.csv",
+        headers=headers,
+        rows=rows,
+        total=page.total,
+    )
+
+
 @router.get("/wallet-transactions.csv")
 def export_wallet_transactions_csv(
     conn: Database,
-    # B3 (2026-09-22 review): same write-level gate as recharge-orders.csv —
-    # one GET pulls the whole wallet ledger out of the platform in bulk.
-    actor: ControlWriter,
+    # 与 recharge-orders.csv 同一导出门（T19）：审计员可导出，必留审计并限流。
+    actor: ControlExporter,
     user_id: str | None = None,
     type: TransactionType | None = None,
     username: str | None = None,
@@ -4351,7 +4449,7 @@ def _csv_response(
     *,
     filename: str,
     headers: tuple[str, ...],
-    rows: list[sqlite3.Row],
+    rows: Sequence[Sequence[object]],
     total: int | None = None,
 ) -> Response:
     output = io.StringIO()

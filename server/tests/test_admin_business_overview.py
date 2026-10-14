@@ -1014,7 +1014,7 @@ def test_summary_export_matches_selected_range_and_preserves_unknown(
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_summary_export_rejects_auditor_csrf_and_invalid_range(
+def test_summary_export_allows_auditor_but_requires_csrf_and_valid_range(
     client: TestClient, admin_headers: dict[str, str]
 ) -> None:
     body = {"kind": "business", "start_date": "2026-10-01", "end_date": "2026-10-01"}
@@ -1035,16 +1035,81 @@ def test_summary_export_rejects_auditor_csrf_and_invalid_range(
         ).status_code
         == 422
     )
+    # 整改 T19（决策 D2）：审计员可导出汇总报表；CSRF 仍是写类请求的前提，
+    # 导出本身必须留审计（见下方断言）。
     session = password_admin_session(client, "auditor_u")
     assert session.status_code == 201
     assert (
-        client.post(
-            "/api/control/reports/summary/export",
-            headers={ADMIN_CSRF_HEADER: session.json()["csrf_token"]},
-            json=body,
-        ).status_code
-        == 403
+        client.post("/api/control/reports/summary/export", json=body).status_code == 403
+    )  # 缺 CSRF 头
+    exported = client.post(
+        "/api/control/reports/summary/export",
+        headers={ADMIN_CSRF_HEADER: session.json()["csrf_token"]},
+        json=body,
     )
+    assert exported.status_code == 200, exported.text
+    with psycopg.connect(_w15_dsn()) as conn:
+        audited = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action = 'control.export' "
+            "AND actor_user_id = 'auditor_u' AND entity_id = 'summary_business'"
+        ).fetchone()
+    assert audited == (1,)
+
+
+def test_quarter_report_equals_sum_of_its_three_months(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    """T42：季度区间与三个月报在可加指标上合计一致（区间按北京时间自然日切分）。"""
+
+    def funds(start: str, end: str) -> dict[str, int]:
+        response = client.get(
+            "/api/control/funds/summary",
+            params={"start": start, "end": end},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    quarter = funds("2026-10-01", "2026-12-31")
+    months = [
+        funds("2026-10-01", "2026-10-31"),
+        funds("2026-11-01", "2026-11-30"),
+        funds("2026-12-01", "2026-12-31"),
+    ]
+    for field in ("recharge_fen", "orders", "refund_fen", "grant_credits", "offline_fen"):
+        assert quarter[field] == sum(month[field] for month in months), field
+
+
+def test_recent_exports_lists_latest_ten_with_who_when_and_range(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    """T42：报表中心展示最近 10 次导出（谁、何时、什么范围），不含导出内容。"""
+    for day in range(1, 13):
+        exported = client.post(
+            "/api/control/reports/summary/export",
+            headers=admin_headers,
+            json={
+                "kind": "funds",
+                "start_date": f"2026-10-{day:02d}",
+                "end_date": f"2026-10-{day:02d}",
+            },
+        )
+        assert exported.status_code == 200, exported.text
+    recent = client.get("/api/control/reports/exports/recent", headers=admin_headers)
+    assert recent.status_code == 200, recent.text
+    items = recent.json()["items"]
+    assert len(items) == 10
+    assert items[0]["label"] == "资金报表" and items[0]["kind"] == "summary_funds"
+    # 最新一次排第一：范围是最后导出的 10-12。
+    assert items[0]["filters"]["start"] == "2026-10-12"
+    assert items[0]["actor"] and items[0]["at"]
+    # 季度长度的账务明细区间不再被 90 天上限拒绝。
+    quarter = client.post(
+        "/api/control/reports/export",
+        headers=admin_headers,
+        json={"start_date": "2026-10-01", "end_date": "2026-12-31"},
+    )
+    assert quarter.status_code == 200, quarter.text
 
 
 def test_fake_payment_confirmation_persists_actual_method_not_preselected_channel(

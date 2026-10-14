@@ -233,7 +233,7 @@ test("opens one action panorama with its own requests and provider calls", async
   const requests = within(detail).getByRole("table", { name: "动作内业务" });
   expect(within(requests).getAllByRole("row").slice(1)).toHaveLength(2);
   const calls = within(detail).getByRole("table", {
-    name: "first_frame 供应商调用",
+    name: "first_frame 上游服务调用",
   });
   expect(
     within(calls).getByRole("cell", { name: "¥0.07" }),

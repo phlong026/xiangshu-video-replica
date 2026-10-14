@@ -118,3 +118,43 @@ it("readOnly 不渲染登记按钮", async () => {
   await screen.findByText("江西合家美宅");
   expect(screen.queryByRole("button", { name: "登记退付" })).toBeNull();
 });
+
+it("筛选栏：查询在前、重置在后；重置回到默认的「待退付」并重新查询", async () => {
+  const fetchMock = stubFetch([PENDING_ROW]);
+  vi.stubGlobal("fetch", fetchMock);
+  render(<RefundsPage />);
+  await screen.findByText("江西合家美宅");
+
+  const bar = screen.getByRole("form", { name: "退款筛选" });
+  const names = Array.from(bar.querySelectorAll("button")).map(
+    (button) => button.textContent,
+  );
+  expect(names).toEqual(["查询", "重置"]);
+
+  fireEvent.change(screen.getByLabelText("退付状态"), {
+    target: { value: "done" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "查询" }));
+  await waitFor(() =>
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("executed=done"),
+      ),
+    ).toBe(true),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "重置" }));
+  expect(screen.getByLabelText("退付状态")).toHaveValue("pending");
+  await waitFor(() =>
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain(
+      "executed=pending",
+    ),
+  );
+});
+
+it("每行客户都是可跳转的客户详情入口（T40）", async () => {
+  vi.stubGlobal("fetch", stubFetch([PENDING_ROW]));
+  const onCustomer = vi.fn();
+  render(<RefundsPage onCustomer={onCustomer} />);
+  fireEvent.click(await screen.findByRole("button", { name: /江西合家美宅/ }));
+  expect(onCustomer).toHaveBeenCalledWith("u1");
+});

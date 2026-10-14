@@ -228,7 +228,13 @@ export function CustomerRefundSection({
         来源无法核对或原单余额不足时暂停扣减，交人工核对；含赠送的混合套餐也需人工核对。
         系统只记账本，实际退款请线下办理。
       </p>
-      {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
+      {notice ? (
+        <PageBanner tone="notice">
+          {notice}{" "}
+          {/* 扣减与退付登记互相可达（T40）：扣完积分，下一步就是登记线下退付。 */}
+          <a href="#admin/funds?sub=refunds">去资金中心登记退付执行</a>
+        </PageBanner>
+      ) : null}
       {formError ? <PageBanner tone="error">{formError}</PageBanner> : null}
       {unresolved && !busy && !pending ? (
         <PageBanner tone="error">

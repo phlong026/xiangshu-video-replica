@@ -831,7 +831,20 @@ def get_super_admin_writer(
     return _require_super_admin(actor)
 
 
+def get_admin_exporter(actor: Annotated[AdminActor, Depends(get_admin_actor)]) -> AdminActor:
+    """整表导出的权限门（整改 T19，决策 D2）。
+
+    此前导出一律挂写级（B3 约定：数据出境不是查看），审计员连报表和审计日志
+    都导不出来，而审计员恰恰是最需要对账底稿的角色。现决定放行审计员，前提
+    是**每一次导出都必须留审计并过限流**（见 ``admin_export_guard``）。导出依赖
+    单独命名而不是直接用 ``AdminReader``：以后想再收紧，只改这一处。
+    激活码导出等含密文的下载不走这里，仍是写级。
+    """
+    return actor
+
+
 AdminReader = Annotated[AdminActor, Depends(get_admin_actor)]
+AdminExporter = Annotated[AdminActor, Depends(get_admin_exporter)]
 AdminWriter = Annotated[AdminActor, Depends(get_admin_writer)]
 SuperAdminReader = Annotated[AdminActor, Depends(get_super_admin_actor)]
 SuperAdminWriter = Annotated[AdminActor, Depends(get_super_admin_writer)]
@@ -853,6 +866,11 @@ class PasswordLoginRequest(BaseModel):
 
 class PasswordRecoveryRequest(BaseModel):
     password: str = Field(max_length=MAX_ADMIN_PASSWORD_LENGTH)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(max_length=MAX_ADMIN_PASSWORD_LENGTH)
+    new_password: str = Field(max_length=MAX_ADMIN_PASSWORD_LENGTH)
 
 
 class AdminActorInfo(BaseModel):
@@ -1148,6 +1166,112 @@ def recover_admin_password(
     response.delete_cookie(ADMIN_SESSION_COOKIE, path=ADMIN_COOKIE_PATH)
     response.headers["Cache-Control"] = "no-store"
     logger.info("admin password recovered: actor=%s", actor.user_id)
+
+
+_PG_REQUIRED_MESSAGE = "管理员会话需要 PostgreSQL 运行时。"
+
+
+@router.post("/password/change", status_code=204)
+def change_own_admin_password(
+    body: PasswordChangeRequest,
+    request: Request,
+    actor: AdminReader,
+) -> None:
+    """管理员自助改密（整改 T17）：必须校验原密码。
+
+    此前只有一次性恢复凭证与超管代改两条路，管理员登录后无法自己改密码。
+    原密码校验与登录共用限流桶（按 IP + 账号），防止拿着已登录会话暴力试原
+    密码；成功后吊销本人其它会话、保留当前会话，并写审计。
+    """
+    request_id = get_or_create_request_id(request)
+    # 改密尝试用独立的限流标识（同一账号维度、不同 identifier）：既能挡住拿着
+    # 已登录会话暴力试原密码，又不会和登录共用计数——否则一次正常改密就可能
+    # 把管理员自己锁在登录之外。会话已认证调用方，故不再按 IP 限流。
+    change_identifier = _sha256_hex(f"password-change:{actor.user_id}")
+    try:
+        with pg_transaction() as conn:
+            decision = consume_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=change_identifier,
+                limit=login_account_limit(),
+                window_seconds=rate_limit_window_seconds(),
+            )
+    except (RuntimeError, ValueError) as exc:
+        raise _http(503, "ADMIN_SESSIONS_UNAVAILABLE", _PG_REQUIRED_MESSAGE) from exc
+    if not decision.allowed:
+        set_current_result_code("RATE_LIMITED")
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "RATE_LIMITED", "message": "尝试过于频繁，请稍后再试。"},
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+    if body.new_password == body.current_password:
+        raise _http(422, "ADMIN_PASSWORD_UNCHANGED", "新密码不能与原密码相同。")
+    try:
+        new_hash = hash_admin_password(body.new_password)
+    except ValueError as exc:
+        raise _http(
+            422,
+            "ADMIN_PASSWORD_INVALID",
+            f"新密码需为 {MIN_ADMIN_PASSWORD_LENGTH} 到 {MAX_ADMIN_PASSWORD_LENGTH} 个字符。",
+        ) from exc
+    try:
+        with pg_transaction() as conn:
+            row = conn.execute(
+                "SELECT c.password_hash FROM admin_password_credentials c "
+                "JOIN users u ON u.id = c.user_id "
+                "WHERE c.user_id = %s AND u.is_active = 1 FOR UPDATE OF c",
+                (actor.user_id,),
+            ).fetchone()
+            if row is None or not verify_admin_password(body.current_password, str(row[0])):
+                current_ok = False
+            else:
+                current_ok = True
+                now_row = conn.execute("SELECT clock_timestamp()").fetchone()
+                if now_row is None:  # pragma: no cover - database clock always returns a row
+                    raise RuntimeError("database clock unavailable")
+                changed_at = _as_datetime(now_row[0]).isoformat()
+                conn.execute(
+                    "UPDATE admin_password_credentials SET password_hash = %s, "
+                    "credential_version = credential_version + 1, password_changed_at = %s "
+                    "WHERE user_id = %s",
+                    (new_hash, changed_at, actor.user_id),
+                )
+                conn.execute(
+                    "UPDATE admin_sessions SET revoked_at = %s "
+                    "WHERE actor_user_id = %s AND revoked_at IS NULL AND id <> %s",
+                    (changed_at, actor.user_id, actor.session_id),
+                )
+                conn.execute(
+                    "INSERT INTO audit_logs "
+                    "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+                    "VALUES (%s, %s, 'admin_password.change', 'user', %s, %s)",
+                    (
+                        str(uuid.uuid4()),
+                        actor.user_id,
+                        actor.user_id,
+                        json.dumps({"request_id": request_id}, separators=(",", ":")),
+                    ),
+                )
+    except RuntimeError as exc:
+        raise _http(503, "ADMIN_SESSIONS_UNAVAILABLE", _PG_REQUIRED_MESSAGE) from exc
+    if not current_ok:
+        try:
+            with pg_transaction() as conn:
+                record_auth_failure(
+                    conn,
+                    dimension=DIMENSION_LOGIN_ACCOUNT,
+                    identifier=change_identifier,
+                    request_id=request_id,
+                )
+        except Exception as audit_error:  # noqa: BLE001 — 审计不可用不影响拒绝结果。
+            logger.warning(
+                "admin password change failure audit unavailable (%s)",
+                type(audit_error).__name__,
+            )
+        raise _http(422, "ADMIN_PASSWORD_CURRENT_INVALID", "原密码不正确。")
+    logger.info("admin password changed: actor=%s", actor.user_id)
 
 
 @router.get("/session", response_model=AdminSessionInfo)

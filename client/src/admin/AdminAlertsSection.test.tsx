@@ -97,7 +97,7 @@ describe("AdminAlertsSection", () => {
                 count: 5,
                 category: "PROVIDER_FAULT",
                 owner: "OPS",
-                advice: "等待服务商恢复后原地重试",
+                advice: "等待上游服务恢复后原地重试",
               },
             ],
           },
@@ -110,10 +110,10 @@ describe("AdminAlertsSection", () => {
     expect(screen.getByText(/请技术负责人处理标记项/)).toBeInTheDocument();
     expect(screen.getByText("视频生成")).toBeInTheDocument();
     expect(
-      screen.getByText(/失败分类：服务商故障 · 处理人：运营重试/),
+      screen.getByText(/失败分类：上游服务故障 · 处理人：运营重试/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/处理建议：等待服务商恢复后原地重试/),
+      screen.getByText(/处理建议：等待上游服务恢复后原地重试/),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));

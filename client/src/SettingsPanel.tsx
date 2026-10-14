@@ -975,14 +975,14 @@ function paidProbeStatusNote(provider: ProviderName) {
     case "metaso":
       return "现状：该服务已接入真实客户端——执行会真实提交一次最小规格的视频生成任务（4 秒 · 768P · 纯文本），并回查一次任务状态；任务受理后即产生供应商侧费用，且不会等待成片，执行后请核对账单。启用视频生成账号池时，只会测第一个启用的账号，池里其他账号不会被验证。";
     default:
-      return "现状：真实供应商客户端尚未接入，执行后服务端只会返回 501「未实现」，不会创建供应商任务，也不会产生任何费用。";
+      return "现状：真实上游服务客户端尚未接入，执行后服务端只会返回 501「未实现」，不会创建上游服务任务，也不会产生任何费用。";
   }
 }
 
 function paidProbeResultLabel(result: ProviderTestResult) {
   switch (result.status) {
     case "ok":
-      return "付费探针通过：供应商账号可完成一次计费调用";
+      return "付费探针通过：上游服务账号可完成一次计费调用";
     case "configured_only":
       return "参数已保存；本次未发起计费调用";
     default:
@@ -1007,7 +1007,7 @@ function paidProbeErrorMessage(error: unknown) {
       ? (error as { code?: unknown }).code
       : undefined;
   if (code === "PROVIDER_TEST_NOT_IMPLEMENTED") {
-    return "付费探针未执行：该服务尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。";
+    return "付费探针未执行：该服务尚未接入真实上游服务客户端（服务端 501 未实现），未产生任何费用。";
   }
   return visibleErrorMessage(error, "付费探针执行失败，请稍后重试。");
 }

@@ -10,6 +10,7 @@ import {
   type ExternalCallResponseState,
   ResponseViewer,
 } from "./RecordCallsPanel";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime } from "./ui/vocabulary";
 
@@ -103,7 +104,6 @@ export function ExternalCallsPage() {
   };
   return (
     <section aria-label="全局接口调用日志">
-      <h2>接口调用日志</h2>
       <p>
         仅超级管理员可用。近24小时指标逐次统计，连续等待轮询虽合并展示，仍逐次计入指标；耗时未知不按0处理。历史未采集的指标不回填。
       </p>
@@ -133,11 +133,14 @@ export function ExternalCallsPage() {
           )}
         </section>
       ) : null}
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          setQuery({ ...draft, offset: 0, limit: 50 });
+      <FilterBar
+        ariaLabel="接口调用筛选"
+        busy={loading}
+        onReset={() => {
+          setDraft(emptyFilters);
+          setQuery({ ...emptyFilters, offset: 0, limit: 50 });
         }}
+        onSubmit={() => setQuery({ ...draft, offset: 0, limit: 50 })}
       >
         <label>
           服务
@@ -208,7 +211,7 @@ export function ExternalCallsPage() {
           />
         </label>
         <label>
-          任务编号、8 位错误编号或第三方任务号；重号用服务商:凭证
+          任务编号、8 位错误编号或第三方任务号；重号用上游服务:凭证
           <input
             value={draft.task_ref}
             placeholder="我方完整或8位编号、第三方任务号或请求编号"
@@ -217,10 +220,7 @@ export function ExternalCallsPage() {
             }
           />
         </label>
-        <button type="submit" disabled={loading}>
-          查询
-        </button>
-      </form>
+      </FilterBar>
       {loading ? <p>读取中…</p> : null}
       {!loading && !error && page ? (
         <>

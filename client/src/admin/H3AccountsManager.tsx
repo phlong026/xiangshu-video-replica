@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { adminRead, adminWrite } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 
 type Account = {
   id: string;
@@ -54,12 +55,12 @@ export function H3AccountsManager({
         {data && <strong>总并发 {data.total_concurrency}</strong>}
       </header>
       {error && (
-        <p role="alert">
+        <PageBanner tone="error">
           {error}{" "}
           <button type="button" onClick={() => setRevision((v) => v + 1)}>
             重新读取
           </button>
-        </p>
+        </PageBanner>
       )}
       {!data ? (
         <p role="status">正在读取账号…</p>
@@ -239,9 +240,9 @@ function AccountForm({
         )}
       </div>
       {error && (
-        <p className="h3-account-row__error" role="alert">
-          {error}
-        </p>
+        <div className="h3-account-row__error">
+          <PageBanner tone="error">{error}</PageBanner>
+        </div>
       )}
     </form>
   );

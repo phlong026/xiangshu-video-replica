@@ -27,8 +27,11 @@ export function AnalyticsPage({
   initialCostQuery = "",
   onScopeChange,
   onCustomer,
+  showViewTabs = true,
 }: {
   readOnly?: boolean;
+  /** 管理端外壳的左侧菜单已有「经营看板 / 成本核对」两项时传 false，避免重复导航。 */
+  showViewTabs?: boolean;
   initialTab?: "dashboard" | "cost";
   initialAttention?: BillingAttention;
   initialStart?: string;
@@ -47,15 +50,17 @@ export function AnalyticsPage({
   const [costQuery, setCostQuery] = useState(initialCostQuery);
   return (
     <div>
-      <TabBar
-        active={tab}
-        ariaLabel="经营分析页签"
-        items={tabs}
-        onChange={(next) => {
-          setTab(next);
-          onScopeChange?.({ analyticsTab: next });
-        }}
-      />
+      {showViewTabs ? (
+        <TabBar
+          active={tab}
+          ariaLabel="经营分析页签"
+          items={tabs}
+          onChange={(next) => {
+            setTab(next);
+            onScopeChange?.({ analyticsTab: next });
+          }}
+        />
+      ) : null}
       {tab === "cost" && (
         <BillingEconomics
           readOnly={readOnly}
@@ -99,7 +104,7 @@ export function AnalyticsPage({
               });
             }}
           />
-          {!readOnly && <SummaryReportExport kind="business" range={range} />}
+          <SummaryReportExport kind="business" range={range} />
         </>
       )}
     </div>

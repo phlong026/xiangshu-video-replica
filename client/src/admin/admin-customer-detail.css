@@ -360,9 +360,9 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
-.customer-list-filters__actions {
+/* FilterBar 的动作区在客户列表里独占一行、靠右。 */
+.customer-list-filters .admin-filter-bar__actions {
   grid-column: 1 / -1;
-  display: flex;
   justify-content: flex-end;
   gap: 10px;
 }
@@ -436,31 +436,62 @@
     white-space: normal;
     font-variant-numeric: tabular-nums;
   }
+  /* 可写态首列是勾选框（T30）；只读态无此列，沿用下面的 9 列规则。 */
   .customers-table th:nth-child(1) {
-    width: 23%;
+    width: 4%;
   }
   .customers-table th:nth-child(2) {
-    width: 8%;
+    width: 20%;
   }
   .customers-table th:nth-child(3) {
-    width: 10%;
+    width: 8%;
   }
   .customers-table th:nth-child(4) {
-    width: 9%;
+    width: 10%;
   }
   .customers-table th:nth-child(5) {
-    width: 10%;
+    width: 9%;
   }
   .customers-table th:nth-child(6) {
     width: 10%;
   }
   .customers-table th:nth-child(7) {
-    width: 12%;
-  }
-  .customers-table th:nth-child(8) {
     width: 10%;
   }
+  .customers-table th:nth-child(8) {
+    width: 11%;
+  }
   .customers-table th:nth-child(9) {
+    width: 10%;
+  }
+  .customers-table th:nth-child(10) {
+    width: 8%;
+  }
+  .customers-table--readonly th:nth-child(1) {
+    width: 23%;
+  }
+  .customers-table--readonly th:nth-child(2) {
+    width: 8%;
+  }
+  .customers-table--readonly th:nth-child(3) {
+    width: 10%;
+  }
+  .customers-table--readonly th:nth-child(4) {
+    width: 9%;
+  }
+  .customers-table--readonly th:nth-child(5) {
+    width: 10%;
+  }
+  .customers-table--readonly th:nth-child(6) {
+    width: 10%;
+  }
+  .customers-table--readonly th:nth-child(7) {
+    width: 12%;
+  }
+  .customers-table--readonly th:nth-child(8) {
+    width: 10%;
+  }
+  .customers-table--readonly th:nth-child(9) {
     width: 8%;
   }
 }
@@ -576,4 +607,24 @@
 
 .admin-alerts__overview-item small {
   color: #71717a;
+}
+
+/* 客户列表高级筛选：折叠区独占一整行，内部沿用工具栏字段的横向排布。 */
+.customer-advanced-filters {
+  flex: 1 1 100%;
+}
+
+.customer-advanced-filters__fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 8px;
+}
+
+.customer-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 0;
 }

@@ -21,6 +21,7 @@ from app.admin_billing_reconciliation_routes import router as admin_billing_reco
 from app.admin_customer_annotation_routes import router as admin_customer_annotation_router
 from app.admin_customer_benefit_routes import router as admin_customer_benefit_router
 from app.admin_customer_lifecycle_routes import router as customer_lifecycle_router
+from app.admin_customer_ops_params_routes import router as customer_ops_params_router
 from app.admin_customer_routes import router as admin_customer_router
 from app.admin_dashboard_routes import router as admin_dashboard_router
 from app.admin_device_routes import router as admin_device_router
@@ -30,6 +31,7 @@ from app.admin_publish_reconcile_routes import router as admin_publish_reconcile
 from app.admin_publish_stats_routes import router as publish_stats_router
 from app.admin_refund_routes import router as admin_refund_router
 from app.admin_runtime_routes import router as admin_runtime_router
+from app.admin_search_routes import router as admin_search_router
 from app.admin_session_routes import router as admin_session_router
 from app.admin_support_ticket_routes import router as support_ticket_router
 from app.admin_team_routes import router as admin_team_router
@@ -400,7 +402,9 @@ app.include_router(control_router)
 app.include_router(admin_auth_router)
 app.include_router(admin_billing_reconciliation_router)
 app.include_router(admin_dashboard_router)
+app.include_router(admin_search_router)
 app.include_router(admin_customer_router)
+app.include_router(customer_ops_params_router)
 app.include_router(customer_lifecycle_router)
 app.include_router(admin_customer_benefit_router)
 app.include_router(admin_customer_annotation_router)

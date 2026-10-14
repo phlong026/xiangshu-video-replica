@@ -134,6 +134,7 @@ export function CustomerAnnouncementCenter({
               知道了
             </button>
           </div>
+          {/* 原生 button 自带键盘与读屏语义，不再用 p + role="button" 模拟。 */}
           <button
             type="button"
             className="customer-announcement__body"

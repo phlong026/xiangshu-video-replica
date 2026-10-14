@@ -8,7 +8,10 @@ import {
 } from "./billingTypes";
 import { CostQueues } from "./CostQueues";
 import { SourceActionPanorama } from "./SourceActionPanorama";
+import { PageBanner } from "./ui/PageBanner";
+import { RuleNote } from "./ui/RuleNote";
 import { TabBar } from "./ui/TabBar";
+import { useHashParam } from "./ui/useHashParam";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 import { ViralCollectionBilling } from "./ViralCollectionBilling";
 
@@ -211,7 +214,12 @@ export function BillingEconomics({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [section, setSection] = useState("details");
+  // 成本核对三视图写入 URL（?sub=），与 billingQuery 一起可分享。
+  const [section, setSection] = useHashParam<string>("sub", "details", [
+    "details",
+    "collections",
+    "actions",
+  ]);
   const name = (key: string) =>
     catalog.find((item) => item.service === key)?.name ?? key;
   useEffect(() => {
@@ -307,7 +315,7 @@ export function BillingEconomics({
       >
         <h2>关联业务账单</h2>
         <p>查看这次业务的积分与调用成本；证据不齐时显示待核对。</p>
-        {error && <p role="alert">{error}</p>}
+        {error && <PageBanner tone="error">{error}</PageBanner>}
         <a href="#admin/analytics?analyticsTab=cost">查看全部成本账单</a>
         <SourceActionPanorama key={query} query={query} name={name} />
       </section>
@@ -457,14 +465,14 @@ export function BillingEconomics({
             </select>
           </label>
           <label>
-            服务商
+            上游服务
             <select
               value={filters.provider}
               onChange={(event) =>
                 setFilters({ ...filters, provider: event.target.value })
               }
             >
-              <option value="">全部服务商</option>
+              <option value="">全部上游服务</option>
               {[...new Set(catalog.map((item) => item.provider))].map((key) => (
                 <option key={key} value={key}>
                   {providerLabels[key] ?? key}
@@ -496,7 +504,7 @@ export function BillingEconomics({
           </button>
         </div>
       </form>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {notice && <p role="status">{notice}</p>}
       {busy && <p role="status">正在计算…</p>}
       {section === "collections" && (
@@ -510,7 +518,7 @@ export function BillingEconomics({
           <>
             <p>{report.basis} 时区：北京时间。</p>
             <p>
-              供应商调用记录 {report.totals.provider_call_count ?? 0}{" "}
+              上游服务调用记录 {report.totals.provider_call_count ?? 0}{" "}
               次；客户采集计费{" "}
               {report.totals.shared_collection_charge_count ?? 0} 笔。
               客户累计用量（含免费）：{usage(report.totals.seconds ?? 0)} 秒 /{" "}
@@ -596,10 +604,12 @@ export function BillingEconomics({
           <>
             <h3>生成账务明细（共 {operations.total} 条）</h3>
             {!costView && (
-              <p className="admin-hint">
-                按售价折合以受理时的积分售价计算；确认收入按所消费积分对应的实际充值金额分摊，
-                赠送或免费加款不产生确认收入。利润按确认收入减成本计算。
-              </p>
+              <RuleNote>
+                <p className="admin-hint">
+                  按售价折合以受理时的积分售价计算；确认收入按所消费积分对应的实际充值金额分摊，
+                  赠送或免费加款不产生确认收入。利润按确认收入减成本计算。
+                </p>
+              </RuleNote>
             )}
             <div className="admin-table-scroll">
               <table
@@ -725,12 +735,12 @@ export function BillingEconomics({
                 onSaved={() => setRevision((value) => value + 1)}
               />
             )}
-          <h4>供应商调用（重试分别记成本）</h4>
+          <h4>上游服务调用（重试分别记成本）</h4>
           <table>
             <thead>
               <tr>
                 <th>业务</th>
-                <th>服务商</th>
+                <th>上游服务</th>
                 <th>用量</th>
                 <th>成本单价</th>
                 <th>成本</th>

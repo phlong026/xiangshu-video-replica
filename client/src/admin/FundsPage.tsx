@@ -8,7 +8,9 @@ import { FundsOverview } from "./FundsOverview";
 import { OrdersPage } from "./OrdersPage";
 import { ReconciliationPage } from "./ReconciliationPage";
 import { RefundsPage } from "./RefundsPage";
+import { PageBanner } from "./ui/PageBanner";
 import { TabBar } from "./ui/TabBar";
+import { useHashParam } from "./ui/useHashParam";
 
 const tabs = [
   { id: "overview", label: "资金概览" },
@@ -19,6 +21,15 @@ const tabs = [
   { id: "reconciliation", label: "对账异常" },
   { id: "billingQueue", label: "卡单核对" },
 ];
+
+const FUNDS_TABS = [
+  "overview",
+  "orders",
+  "transactions",
+  "adjustments",
+  "refunds",
+  "reconciliation",
+] as const;
 
 export type FundsTab =
   | "overview"
@@ -36,14 +47,16 @@ export type FundsTab =
  */
 export function FundsPage({
   readOnly = false,
-  initialTab = "overview",
+  initialTab,
   userId = "",
   orderNo = "",
   initialMonth,
   onMonthChange,
   initialAnomaly = "paid_without_charge",
+  initialOrderStatus = "",
   onCustomer,
 }: {
+  initialOrderStatus?: string;
   readOnly?: boolean;
   initialTab?: FundsTab;
   userId?: string;
@@ -65,9 +78,21 @@ export function FundsPage({
         .slice(0, 7),
   );
   const [anomaly, setAnomaly] = useState<ReconciliationAnomaly>(initialAnomaly);
-  const [tab, setTab] = useState<FundsTab>(initialTab);
+  // 页签写入 URL（?sub=）：刷新与分享链接都停在当前页签；跳转意图优先。
+  const [tab, setTab] = useHashParam<FundsTab>(
+    "sub",
+    "overview",
+    FUNDS_TABS,
+    initialTab,
+  );
   return (
     <div>
+      {userId && ["orders", "transactions", "adjustments"].includes(tab) ? (
+        <PageBanner tone="notice">
+          当前只看一位客户的记录（编号 {userId}）。
+          <a href={`#admin/funds?sub=${tab}`}>查看全部客户</a>
+        </PageBanner>
+      ) : null}
       <TabBar
         active={tab}
         ariaLabel="资金中心页签"
@@ -91,6 +116,7 @@ export function FundsPage({
           readOnly={readOnly}
           userId={userId}
           orderNo={orderNo}
+          initialStatus={initialOrderStatus}
           onOpenReconciliation={(next) => {
             setAnomaly(next);
             setTab("reconciliation");
@@ -101,7 +127,11 @@ export function FundsPage({
         <AccountsPage readOnly={readOnly} userId={userId} />
       )}
       {tab === "adjustments" && (
-        <AdjustmentsPage readOnly={readOnly} onCustomer={onCustomer} />
+        <AdjustmentsPage
+          readOnly={readOnly}
+          onCustomer={onCustomer}
+          userId={userId || undefined}
+        />
       )}
       {tab === "refunds" && (
         <RefundsPage readOnly={readOnly} onCustomer={onCustomer} />

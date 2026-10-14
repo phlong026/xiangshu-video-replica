@@ -18,13 +18,14 @@ import {
   updateViralVideoAvailability,
   type ViralLibraryOverview,
   type ViralOperationEstimate,
-  type ViralRuntimeControls,
   viralLibraryOverview,
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { type BadgeTone, StatusBadge } from "./ui/StatusBadge";
+import { TabBar } from "./ui/TabBar";
+import { useHashParam } from "./ui/useHashParam";
 import { CONTENT_FUNNEL_LABELS, CONTENT_STATE_LABELS } from "./ui/vocabulary";
 import { ViralOperationCostSummary } from "./ViralOperationCostSummary";
 import { ViralRecycleBin } from "./ViralRecycleBin";
@@ -330,30 +331,6 @@ function AuthorBadge({ video }: { video: CollectedViralVideo }) {
         </span>
       ) : null}
     </span>
-  );
-}
-
-function Tile({
-  label,
-  value,
-  unit,
-}: {
-  label: string;
-  value?: number | string;
-  unit?: string;
-}) {
-  return (
-    <div className="admin-viral-tile">
-      <dt>{label}</dt>
-      <dd>
-        {value === undefined
-          ? "—"
-          : typeof value === "number"
-            ? value.toLocaleString("zh-CN")
-            : value}
-        {unit ? <small>{unit}</small> : null}
-      </dd>
-    </div>
   );
 }
 
@@ -758,13 +735,13 @@ function pendingCopy(action: PendingAction, count: number) {
     return {
       title: "立即采集爆款视频",
       description:
-        "将按已配置的关键词触发一轮采集，采到的视频进入内容池，准备后才能展示到首页。供应商成本记平台账，不扣客户积分。",
+        "将按已配置的关键词触发一轮采集，采到的视频进入内容池，准备后才能展示到首页。上游服务成本记平台账，不扣客户积分。",
     };
   if (action === "archive")
     return {
       title: "准备单条视频素材",
       description:
-        "后台将获取此视频并准备到已配置的云存储，可能产生供应商调用费用。已完成的视频文件会复用；不会重新搜索整个列表或修改首页展示。请填写操作原因。",
+        "后台将获取此视频并准备到已配置的云存储，可能产生上游服务调用费用。已完成的视频文件会复用；不会重新搜索整个列表或修改首页展示。请填写操作原因。",
     };
   if (action === "delete")
     return batch
@@ -919,8 +896,6 @@ export function ViralVideosPage({
   const [watchRows, setWatchRows] = useState<CollectedViralVideo[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [overview, setOverview] = useState<ViralLibraryOverview | null>(null);
-  const [controls, setControls] = useState<ViralRuntimeControls | null>(null);
-  const [controlsError, setControlsError] = useState("");
   // 详情抽屉只记行的 key，渲染时再从当前列表取最新一行：操作后列表刷新，
   // 抽屉里的状态跟着变，不必另做一份同步逻辑。
   const [detail, setDetail] = useState<{
@@ -987,8 +962,18 @@ export function ViralVideosPage({
     }
   }
   // 实时搜索：数据接口，命中视频直接并入内容池（不扣客户积分）。
-  const [upstreamOpen, setUpstreamOpen] = useState(Boolean(initialSearch));
-  const [recycleOpen, setRecycleOpen] = useState(false);
+  // 视频库 / 实时搜索入库 / 回收站 三视图写入 URL（?sub=），刷新不丢；
+  // 需求洞察带关键词跳来时直接落在实时搜索。
+  const [libraryView, setLibraryView] = useHashParam<
+    "library" | "upstream" | "recycle"
+  >(
+    "sub",
+    "library",
+    ["library", "upstream", "recycle"],
+    initialSearch ? "upstream" : undefined,
+  );
+  const upstreamOpen = libraryView === "upstream";
+  const recycleOpen = libraryView === "recycle";
   const [upstreamKeyword, setUpstreamKeyword] = useState(
     initialSearch?.keyword ?? "",
   );
@@ -1134,13 +1119,6 @@ export function ViralVideosPage({
 
   useEffect(() => {
     void loadOverview();
-    fetchViralRuntimeControls()
-      .then((value) => {
-        setControls(value);
-        setControlsError("");
-      })
-      // 关键词只是页面上的提示条：读不到时退回一句说明，不惊动整页错误横幅。
-      .catch(() => setControlsError("采集关键词暂时读取失败。"));
   }, [loadOverview]);
 
   useEffect(() => {
@@ -1522,7 +1500,6 @@ export function ViralVideosPage({
         crypto.randomUUID(),
       );
       setUpstreamNotice(`已把「${keyword}」加入采集关键词，下个采集周期生效。`);
-      setControls(await fetchViralRuntimeControls());
       await loadOverview();
     } catch (cause) {
       setUpstreamError(
@@ -1636,7 +1613,6 @@ export function ViralVideosPage({
   const detailVideo = detail
     ? (entities.get(detail.key) ?? detail.video)
     : null;
-  const keywords = controls?.keywords ?? [];
   const collectionEnabled = overview?.collection_enabled;
   const copy = pending
     ? pendingCopy(pending.action, pending.items.length)
@@ -1650,11 +1626,10 @@ export function ViralVideosPage({
     >
       <header className="admin-viral-heading">
         <div>
-          <span className="admin-viral-eyebrow">客户运营</span>
-          <h2>爆款视频库</h2>
           <p className="admin-hint">
-            找视频 → 查看真实互动与预览 → 发布给客户 →
-            核对可用结果。首页推荐是独立的展示设置。
+            关键词定时采集 → 准备云存储 →
+            上首页展示；搜索、预览、展示与删除都在本页完成。库存与采集计划见
+            「内容概览」「采集设置」。
           </p>
         </div>
         <div className="admin-viral-headacts">
@@ -1674,7 +1649,7 @@ export function ViralVideosPage({
               disabled={saving || collectionEnabled === false}
               title={
                 collectionEnabled === false
-                  ? "采集已暂停，请先在内容运营 → 采集设置中恢复采集。"
+                  ? "采集已暂停，请先在「内容 → 采集设置」中恢复采集。"
                   : undefined
               }
               type="button"
@@ -1685,6 +1660,20 @@ export function ViralVideosPage({
           ) : null}
         </div>
       </header>
+      <TabBar
+        active={libraryView}
+        ariaLabel="视频库页签"
+        items={[
+          { id: "library", label: "视频库" },
+          ...(readOnly ? [] : [{ id: "upstream", label: "实时搜索入库" }]),
+          { id: "recycle", label: "回收站" },
+        ]}
+        onChange={(next) => {
+          setLibraryView(next as "library" | "upstream" | "recycle");
+          if (next === "library" && filters.status === "blocked")
+            changeFilters({ status: "", offset: 0 });
+        }}
+      />
       {!readOnly && selectedItems.length > 0 ? (
         <section aria-label="批量操作" className="admin-viral-batch">
           <span>
@@ -1793,48 +1782,6 @@ export function ViralVideosPage({
           </ul>
         </section>
       )}
-      <div role="tablist" aria-label="视频库页签" className="admin-tabs">
-        <button
-          role="tab"
-          aria-selected={!upstreamOpen && !recycleOpen}
-          type="button"
-          onClick={() => {
-            setSelected([]);
-            setUpstreamOpen(false);
-            setRecycleOpen(false);
-            if (filters.status === "blocked")
-              changeFilters({ status: "", offset: 0 });
-          }}
-        >
-          视频库
-        </button>
-        {!readOnly ? (
-          <button
-            role="tab"
-            aria-selected={upstreamOpen}
-            type="button"
-            onClick={() => {
-              setSelected([]);
-              setUpstreamOpen(true);
-              setRecycleOpen(false);
-            }}
-          >
-            实时搜索入库
-          </button>
-        ) : null}
-        <button
-          role="tab"
-          aria-selected={recycleOpen}
-          type="button"
-          onClick={() => {
-            setRecycleOpen(true);
-            setSelected([]);
-            setUpstreamOpen(false);
-          }}
-        >
-          回收站
-        </button>
-      </div>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
       {statisticsProgress ? (
@@ -1849,90 +1796,6 @@ export function ViralVideosPage({
       ) : null}
 
       {recycleOpen ? <ViralRecycleBin readOnly={readOnly} /> : null}
-      <div hidden={upstreamOpen || recycleOpen}>
-        <dl aria-label="爆款视频库概览" className="admin-viral-tiles">
-          <Tile label="内容池总量" unit="条" value={overview?.content_total} />
-          <Tile label="素材已准备" unit="条" value={overview?.archive_ready} />
-          <Tile
-            label="首页展示中"
-            unit="条"
-            value={overview?.homepage_featured}
-          />
-          <Tile
-            label="待准备 / 失败"
-            value={
-              overview
-                ? `${overview.pending_archive ?? 0} / ${overview.archive_failed ?? 0}`
-                : undefined
-            }
-          />
-          <Tile label="今日新增" unit="条" value={overview?.added_today} />
-        </dl>
-
-        <details className="admin-viral-plan-details">
-          <summary>采集计划与关键词</summary>
-          <dl className="admin-viral-tiles">
-            <div className="admin-viral-tile admin-viral-tile--plan">
-              <dt>采集计划</dt>
-              <dd>
-                <span>
-                  采集
-                  <StatusBadge tone={collectionEnabled ? "good" : "neutral"}>
-                    {collectionEnabled === undefined
-                      ? "读取中"
-                      : collectionEnabled
-                        ? "已开启"
-                        : "已暂停"}
-                  </StatusBadge>
-                </span>
-                <span>
-                  关键词 {keywords.length} 条（抖音{" "}
-                  {overview?.keyword_count?.douyin ?? 0} / 视频号{" "}
-                  {overview?.keyword_count?.wechat_channels ?? 0}）
-                </span>
-                <span>
-                  {overview?.collection_interval_days === 1 ? "每天" : "每周"}
-                  采集一次 · 下一次{" "}
-                  {overview?.next_collection_at
-                    ? displayDate(overview.next_collection_at, true)
-                    : "等待后台调度"}
-                </span>
-                <span>
-                  最后采集{" "}
-                  {overview?.last_fetched_at
-                    ? displayDate(overview.last_fetched_at, true)
-                    : "暂无"}
-                </span>
-              </dd>
-            </div>
-          </dl>
-          <section aria-label="采集关键词" className="admin-viral-keywords">
-            <span className="admin-viral-keywords__label">采集关键词</span>
-            {controlsError ? (
-              <span className="admin-viral-muted">{controlsError}</span>
-            ) : keywords.length === 0 ? (
-              <span className="admin-viral-muted">
-                尚未配置关键词，未配置时后台不会采集。
-              </span>
-            ) : (
-              keywords.map((item) => (
-                <span
-                  className="admin-viral-kw"
-                  key={`${item.platform}:${item.category}:${item.keyword}`}
-                >
-                  {item.keyword}
-                  <i>
-                    {platformLabel(item.platform)} · {item.category || "未分类"}
-                  </i>
-                </span>
-              ))
-            )}
-            <span className="admin-viral-keywords__hint">
-              关键词在「内容运营 → 采集设置」维护，修改后下个采集周期生效。
-            </span>
-          </section>
-        </details>
-      </div>
 
       {!readOnly && upstreamOpen ? (
         <section aria-label="实时搜索上游" className="admin-viral-upstream">
@@ -2206,9 +2069,7 @@ export function ViralVideosPage({
             onChange={(value) => {
               changeFilters({ status: value as Filters["status"], offset: 0 });
               if (value === "blocked") {
-                setRecycleOpen(true);
-                setSelected([]);
-                setUpstreamOpen(false);
+                setLibraryView("recycle");
               }
             }}
           />

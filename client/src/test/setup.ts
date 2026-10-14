@@ -17,4 +17,13 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
+  // 管理端页内状态写进 hash（useHashParam）：jsdom 的 URL 跨用例保留，
+  // 不清掉会让上一个用例的页签/筛选泄漏到下一个用例。
+  if (typeof window !== "undefined" && window.location.hash) {
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}`,
+    );
+  }
 });

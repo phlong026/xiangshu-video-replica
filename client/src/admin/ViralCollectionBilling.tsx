@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { adminRead } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 
 type Page<T> = { items: T[]; total: number };
@@ -100,10 +101,10 @@ export function ViralCollectionBilling({ query }: { query: string }) {
     <section aria-label="爆款采集账单">
       <h3>爆款采集账单</h3>
       <p>
-        按上方日期查看采集批次，不受用户、模块、供应商筛选影响。每次成功采集请求按批次快照单价向符合条件客户逐项扣分；后台实时搜索不向客户扣分。供应商接口成本只记录一次。数据库读取和云存储不向客户计收积分，供应商下载与存储成本另行核对。
+        按上方日期查看采集批次，不受用户、模块、上游服务筛选影响。每次成功采集请求按批次快照单价向符合条件客户逐项扣分；后台实时搜索不向客户扣分。上游服务接口成本只记录一次。数据库读取和云存储不向客户计收积分，上游服务下载与存储成本另行核对。
       </p>
       <p>
-        搜索分页和视频号详情均计入接口次数。未成功的请求暂不向客户扣分；无法确认的供应商成本保留待核对。客户收入明细不分摊公共采集成本，请以批次总账核对利润。
+        搜索分页和视频号详情均计入接口次数。未成功的请求暂不向客户扣分；无法确认的上游服务成本保留待核对。客户收入明细不分摊公共采集成本，请以批次总账核对利润。
       </p>
       <button
         type="button"
@@ -114,7 +115,7 @@ export function ViralCollectionBilling({ query }: { query: string }) {
       >
         刷新采集账单
       </button>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {!page && !error && <p role="status">正在读取采集账单…</p>}
       {page && (
         <>

@@ -54,6 +54,18 @@ function installFetch(payload: unknown = summaryPayload) {
         json: async () => payload,
       });
     }
+    if (url.includes("/api/control/customers?")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          items: [
+            { user_id: "u-1", username: "hongya", display_name: "洪雅店" },
+          ],
+          total: 1,
+        }),
+      });
+    }
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -92,8 +104,9 @@ describe("OverviewPage", () => {
     expect(screen.getByText("近 7 日生成与成本")).toBeInTheDocument();
     expect(screen.getByText("成本（元）")).toBeInTheDocument();
     expect(screen.getByText("成功生成数（条）")).toBeInTheDocument();
-    expect(screen.getAllByRole("img", { name: /图标/ })).toHaveLength(7);
-    expect(screen.getByText("资金账务核对")).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: /图标/ })).toHaveLength(6);
+    // 对账异常只在待办里出现一次，不再重复成 KPI 卡。
+    expect(screen.queryByRole("region", { name: "对账异常" })).toBeNull();
     expect(screen.queryByText("点击下钻资金流水")).toBeNull();
 
     // 待办计数
@@ -109,12 +122,31 @@ describe("OverviewPage", () => {
     expect(
       screen.queryByRole("button", { name: "后台加款" }),
     ).not.toBeInTheDocument();
+    // T13：快捷操作先选客户，选定后带 userId 直达该客户的对应表单。
     fireEvent.click(screen.getByRole("button", { name: "开通套餐（已收款）" }));
-    expect(onNavigate).toHaveBeenCalledWith("customerPackage");
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "前往表单" }));
+    expect(within(dialog).getByText("请先选择客户。")).toBeInTheDocument();
+    expect(onNavigate).not.toHaveBeenCalledWith(
+      "customerPackage",
+      expect.anything(),
+    );
+    fireEvent.change(within(dialog).getByRole("searchbox"), {
+      target: { value: "洪雅" },
+    });
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "洪雅店（hongya）" }),
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "前往表单" }));
+    expect(onNavigate).toHaveBeenCalledWith("customerPackage", {
+      userId: "u-1",
+    });
     fireEvent.click(screen.getByRole("button", { name: "赠送积分" }));
-    expect(onNavigate).toHaveBeenCalledWith("customerAdjustments");
+    expect(screen.getByRole("dialog")).toHaveTextContent("赠送积分：选择客户");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     fireEvent.click(screen.getByRole("button", { name: "退款扣减" }));
-    expect(onNavigate).toHaveBeenCalledWith("customerRefund");
+    expect(screen.getByRole("dialog")).toHaveTextContent("退款扣减：选择客户");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     fireEvent.click(screen.getByRole("button", { name: "成本核对" }));
     expect(onNavigate).toHaveBeenCalledWith("costDetails");
 
@@ -179,6 +211,69 @@ describe("OverviewPage", () => {
     render(<OverviewPage />);
 
     expect(await screen.findByText(/network down/)).toBeInTheDocument();
+  });
+
+  it("首次读取失败给出重试，重试成功后展示数据与更新时间", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => summaryPayload,
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<OverviewPage />);
+    expect(await screen.findByText(/network down/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(await screen.findByText("328")).toBeInTheDocument();
+    expect(screen.getByText(/数据更新于/)).toBeInTheDocument();
+    expect(screen.queryByText(/network down/)).toBeNull();
+  });
+
+  it("刷新失败时保留上次数据，只局部提示", async () => {
+    const fetchMock = installFetch();
+    render(<OverviewPage />);
+    expect(await screen.findByText("328")).toBeInTheDocument();
+    fetchMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("gateway timeout")),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    expect(
+      await screen.findByText(/刷新失败，下方仍是上次成功读取的数据/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("328")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "自动刷新：开（60 秒）" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("待办按业务域分组；告警不可用时显示「—」而不是 0", async () => {
+    installFetch({
+      ...summaryPayload,
+      todos: {
+        ...summaryPayload.todos,
+        open_tickets: 4,
+        queue_attention: 1,
+        content_prepare_failed: 0,
+        pending_orders: 0,
+        active_alerts: null,
+      },
+    });
+    const onNavigate = vi.fn();
+    render(<OverviewPage onNavigate={onNavigate} />);
+    const customer = await screen.findByRole("region", { name: "客户待办" });
+    expect(within(customer).getByText("工单未结案")).toBeInTheDocument();
+    fireEvent.click(within(customer).getByRole("button", { name: "去处理" }));
+    expect(onNavigate).toHaveBeenCalledWith("openTickets");
+    const system = screen.getByRole("region", { name: "系统待办" });
+    expect(within(system).getByText("告警聚合暂不可用")).toBeInTheDocument();
+    expect(within(system).getByText("—")).toBeInTheDocument();
+    for (const group of ["资金", "生成", "内容"]) {
+      expect(
+        screen.getByRole("region", { name: `${group}待办` }),
+      ).toBeInTheDocument();
+    }
   });
 
   it("keeps unsettled and legacy costs unknown in cards and chart", async () => {

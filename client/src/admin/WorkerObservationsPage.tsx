@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listWorkerObservations, type WorkerObservations } from "../api.admin";
 import { PageBanner } from "./ui/PageBanner";
 import { StatusBadge } from "./ui/StatusBadge";
+import { useAutoRefresh } from "./ui/useAutoRefresh";
 
 /**
  * M4 队列与 Worker 观测（ADM-11）：任务积压从"客户报障才知道"变成一眼可见。
@@ -14,17 +15,17 @@ const QUEUE_LABELS: Array<{
   label: string;
   hint: string;
 }> = [
-  { key: "video", label: "视频任务", hint: "generation worker（H3 生成）" },
-  { key: "oral", label: "口播任务", hint: "oral worker（数字人口播）" },
+  { key: "video", label: "视频任务", hint: "视频生成后台进程" },
+  { key: "oral", label: "口播任务", hint: "数字人口播后台进程" },
   {
     key: "viralRefresh",
     label: "采集/转存",
-    hint: "viral-collection worker（搜索与素材准备）",
+    hint: "搜索与素材准备后台进程",
   },
   {
     key: "publish",
     label: "发布队列",
-    hint: "publish worker（抖音/视频号投递）",
+    hint: "抖音/视频号投递后台进程",
   },
 ];
 
@@ -33,6 +34,11 @@ function staleTone(minutes: number | null, threshold: number) {
   if (minutes > threshold * 2) return "danger" as const;
   if (minutes > threshold) return "warn" as const;
   return "good" as const;
+}
+
+/** 「去处理」落点：生成记录页按类型与状态预筛选（hash 参数由外壳透传）。 */
+function recordsHref(recordType: string, status: string) {
+  return `#admin/generationRecords?recordType=${recordType}&status=${status}`;
 }
 
 export function WorkerObservationsPage({
@@ -59,6 +65,12 @@ export function WorkerObservationsPage({
   useEffect(() => {
     void load();
   }, [load]);
+  // 值班常开页：默认 30 秒自动刷新（页面隐藏时暂停），可手动关闭。
+  const { autoRefresh, toggleAutoRefresh } = useAutoRefresh(
+    () => void load(),
+    30_000,
+    true,
+  );
 
   return (
     <section
@@ -66,16 +78,20 @@ export function WorkerObservationsPage({
       aria-label="队列观测"
     >
       <header>
-        <h2>队列观测</h2>
         <p className="admin-hint">
-          三个 worker 与发布队列的实时积压。高龄任务超过阈值先查 worker 进程
+          各类后台任务队列的实时积压。高龄任务超过阈值先查对应后台进程
           与日志；隔离区任务冻结了客户积分，按失败诊断页的建议人工核对。
         </p>
-        {!readOnly ? (
-          <button type="button" onClick={() => void load()} disabled={loading}>
-            刷新
-          </button>
-        ) : null}
+        <button type="button" onClick={() => void load()} disabled={loading}>
+          刷新
+        </button>
+        <button
+          type="button"
+          aria-pressed={autoRefresh}
+          onClick={toggleAutoRefresh}
+        >
+          {autoRefresh ? "自动刷新：开（30 秒）" : "自动刷新：关"}
+        </button>
       </header>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {loading && !data ? (
@@ -120,6 +136,11 @@ export function WorkerObservationsPage({
                   ? "无任务"
                   : `${data.attention.videoStaleMinutes} 分`}
               </StatusBadge>
+              {data.attention.videoStaleMinutes != null &&
+              data.attention.videoStaleMinutes >
+                data.attention.videoStaleThresholdMinutes ? (
+                <a href={recordsHref("VIDEO", "RUNNING")}>去处理</a>
+              ) : null}
             </li>
             <li>
               <span>
@@ -136,6 +157,11 @@ export function WorkerObservationsPage({
                   ? "无任务"
                   : `${data.attention.oralStaleMinutes} 分`}
               </StatusBadge>
+              {data.attention.oralStaleMinutes != null &&
+              data.attention.oralStaleMinutes >
+                data.attention.oralStaleThresholdMinutes ? (
+                <a href={recordsHref("ORAL_VIDEO", "RUNNING")}>去处理</a>
+              ) : null}
             </li>
             <li>
               <span>
@@ -169,6 +195,22 @@ export function WorkerObservationsPage({
                 {data.attention.oralQuarantinedAvatars} · 声音{" "}
                 {data.attention.oralQuarantinedVoices}
               </StatusBadge>
+              {/* 隔离区一步跳到对应记录：口播任务 / 分身 / 声音各自一个落点。 */}
+              {data.attention.oralQuarantinedTasks > 0 ? (
+                <a href={recordsHref("ORAL_VIDEO", "SUBMISSION_UNCERTAIN")}>
+                  处理口播任务
+                </a>
+              ) : null}
+              {data.attention.oralQuarantinedAvatars > 0 ? (
+                <a href={recordsHref("ORAL_AVATAR", "SUBMISSION_UNCERTAIN")}>
+                  处理分身
+                </a>
+              ) : null}
+              {data.attention.oralQuarantinedVoices > 0 ? (
+                <a href={recordsHref("ORAL_VOICE", "SUBMISSION_UNCERTAIN")}>
+                  处理声音
+                </a>
+              ) : null}
             </li>
             <li>
               <span>卡住的素材准备（RUNNING 超 10 分钟）</span>

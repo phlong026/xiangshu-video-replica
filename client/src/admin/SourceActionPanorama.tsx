@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { adminRead } from "../api.admin";
 import { billingStates, billingUnit } from "./billingTypes";
+import { PageBanner } from "./ui/PageBanner";
 import { formatFen, formatRelativeTime } from "./ui/vocabulary";
 
 type Action = {
@@ -148,7 +149,7 @@ export function SourceActionPanorama({
       >
         刷新操作
       </button>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {!list && !error && <p role="status">正在读取操作…</p>}
       {list && (
         <>
@@ -291,15 +292,15 @@ export function SourceActionPanorama({
               </div>
               {detail.operations.map((operation) => (
                 <section key={operation.id}>
-                  <h5>{name(operation.service)} 供应商调用</h5>
+                  <h5>{name(operation.service)} 上游服务调用</h5>
                   <table
                     className="admin-data-table"
-                    aria-label={`${name(operation.service)} 供应商调用`}
+                    aria-label={`${name(operation.service)} 上游服务调用`}
                   >
                     <thead>
                       <tr>
                         <th>业务</th>
-                        <th>服务商</th>
+                        <th>上游服务</th>
                         <th>用量</th>
                         <th>成本</th>
                         <th>凭据</th>

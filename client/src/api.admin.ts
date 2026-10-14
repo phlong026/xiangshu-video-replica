@@ -591,6 +591,25 @@ export async function recoverAdminPassword(password: string): Promise<void> {
   clearAdminCsrfToken();
 }
 
+/** 已登录管理员自助改密（整改 T17）：必须提供原密码；其它会话随之失效。 */
+export async function changeOwnAdminPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl("/api/control/admin/password/change", {
+    method: "POST",
+    headers: { [CSRF_HEADER]: csrf },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "修改密码失败");
+  }
+}
+
 export async function deleteAdminSession(): Promise<void> {
   const csrf = requireCsrfToken();
   const response = await requestControl("/api/control/admin/session", {
@@ -946,6 +965,8 @@ const CODE_MESSAGES: Record<string, string> = {
   ADMIN_ROLE_REQUIRED: "仅管理员或审计员可登录管理端",
   ADMIN_LOGIN_INVALID: "管理员账号或密码错误",
   ADMIN_PASSWORD_INVALID: "密码需为 12 至 128 个字符",
+  ADMIN_PASSWORD_CURRENT_INVALID: "原密码不正确",
+  ADMIN_PASSWORD_UNCHANGED: "新密码不能与原密码相同",
   ADMIN_PASSWORD_RECOVERY_REQUIRED: "请先使用一次性恢复凭据验证身份",
   ADMIN_PASSWORD_RECOVERY_ONLY: "请先设置密码，再使用账号和密码登录后台",
   ADMIN_SESSION_INVALID: "会话已失效，请重新登录",
@@ -1067,6 +1088,9 @@ export interface CustomerListOptions {
   direction?: "asc" | "desc";
   attention?: "low_balance" | "recent_failure" | "inactive" | "";
   lowBalanceThreshold?: number;
+  /** 按标签 / 负责人筛选（整改 T30）；负责人传 "none" 表示未分配。 */
+  tag?: string;
+  ownerUserId?: string;
 }
 
 /**
@@ -1099,6 +1123,8 @@ export async function listCustomers(
   if (options.attention) params.set("attention", options.attention);
   if (options.lowBalanceThreshold !== undefined)
     params.set("low_balance_threshold", String(options.lowBalanceThreshold));
+  if (options.tag) params.set("tag", options.tag);
+  if (options.ownerUserId) params.set("owner_user_id", options.ownerUserId);
 
   const response = await requestControl(
     `/api/control/customers?${params.toString()}`,
@@ -1288,6 +1314,49 @@ export async function listCustomerOwnerCandidates(): Promise<{
   return adminRead<{ items: CustomerOwnerCandidate[] }>(
     "/api/control/customers/owner-candidates",
     "读取负责人候选失败",
+  );
+}
+
+/** 已用过的标签及使用客户数：列表筛选与批量打标签的候选。 */
+export async function listCustomerTags(): Promise<{
+  items: Array<{ tag: string; count: number }>;
+}> {
+  return adminRead("/api/control/customers/tags", "读取标签失败");
+}
+
+export interface BatchAnnotationResult {
+  results: Array<{ user_id: string; ok: boolean; message: string }>;
+  succeeded: number;
+  failed: number;
+}
+
+/**
+ * 批量标注（整改 T30）：对多名客户增量加 / 去标签、改负责人，逐户返回结果。
+ * setOwner=false 表示不动负责人；setOwner=true 且 ownerUserId=null 表示清空。
+ */
+export function batchAnnotateCustomers(
+  input: {
+    userIds: string[];
+    addTags: string[];
+    removeTags: string[];
+    setOwner: boolean;
+    ownerUserId: string | null;
+  },
+  reason: string,
+  idempotencyKey?: string,
+): Promise<BatchAnnotationResult> {
+  return adminWrite<BatchAnnotationResult>(
+    "/api/control/customers/batch-annotation",
+    {
+      user_ids: input.userIds,
+      add_tags: input.addTags,
+      remove_tags: input.removeTags,
+      set_owner: input.setOwner,
+      owner_user_id: input.ownerUserId,
+    },
+    reason,
+    "批量标注失败",
+    idempotencyKey,
   );
 }
 
@@ -1510,14 +1579,31 @@ export interface AnnouncementItem {
   created_at: string;
   read_count: number;
   live: boolean;
+  /** 管理端清单：scheduled 待生效 / live 生效中 / ended 已结束。 */
+  status?: "scheduled" | "live" | "ended";
   read?: boolean;
 }
 
+export interface AnnouncementPage {
+  items: AnnouncementItem[];
+  total: number;
+  /** 触达率分母：当前启用的客户数。 */
+  audience_total: number;
+  limit: number;
+  offset: number;
+}
+
 export async function listAnnouncements(
-  includeOffline = true,
-): Promise<{ items: AnnouncementItem[] }> {
+  options: { includeOffline?: boolean; limit?: number; offset?: number } = {},
+): Promise<AnnouncementPage> {
+  const params = new URLSearchParams();
+  if (options.includeOffline === false) params.set("include_offline", "false");
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
+  const query = params.toString();
   return adminRead(
-    `/api/control/announcements${includeOffline ? "" : "?include_offline=false"}`,
+    `/api/control/announcements${query ? `?${query}` : ""}`,
     "读取公告失败",
   );
 }
@@ -1554,6 +1640,10 @@ export async function updateAnnouncement(input: {
   title?: string;
   body?: string;
   tone?: string;
+  startsAt?: string;
+  endsAt?: string;
+  /** 把失效时间改回「不限」；endsAt 留空只表示不修改。 */
+  clearEndsAt?: boolean;
   reason: string;
   idempotencyKey?: string;
 }): Promise<{ id: string }> {
@@ -1564,6 +1654,9 @@ export async function updateAnnouncement(input: {
       body: input.body ?? "",
       tone: input.tone ?? "",
       pinned: input.pinned ?? null,
+      starts_at: input.startsAt ?? "",
+      ends_at: input.endsAt ?? "",
+      clear_ends_at: input.clearEndsAt ?? false,
     },
     input.reason,
     "修改公告失败",
@@ -1615,8 +1708,42 @@ export interface CustomerLifecycleResponse {
   }>;
   lifecycleRule: string;
   healthRule: string;
+  /** 低于该健康分标红（运营参数，客户列表与本页共用）。 */
+  healthAlertScore: number;
+  lowBalanceThreshold: number;
   limit: number;
   offset: number;
+}
+
+// --- 客户运营参数（整改 T29）-----------------------------------------------------
+
+export interface CustomerOpsParams {
+  low_balance_threshold: number;
+  health_alert_score: number;
+  rule: string;
+}
+
+export async function getCustomerOpsParams(): Promise<CustomerOpsParams> {
+  return adminRead("/api/control/customer-ops-params", "读取运营参数失败");
+}
+
+export async function updateCustomerOpsParams(input: {
+  lowBalanceThreshold: number;
+  healthAlertScore: number;
+  reason: string;
+  idempotencyKey?: string;
+}): Promise<CustomerOpsParams> {
+  return adminWrite(
+    "/api/control/customer-ops-params",
+    {
+      low_balance_threshold: input.lowBalanceThreshold,
+      health_alert_score: input.healthAlertScore,
+    },
+    input.reason,
+    "保存运营参数失败",
+    input.idempotencyKey,
+    "PUT",
+  );
 }
 
 export async function listCustomerLifecycle(
@@ -1710,6 +1837,33 @@ export async function listPublishStats(
   );
 }
 
+export interface GlobalSearchItem {
+  type: "customer" | "order" | "task";
+  id: string;
+  label: string;
+  detail: string;
+}
+
+/** 顶栏全局搜索（整改 T39）：客户名、订单号、任务号。 */
+export async function globalSearch(
+  query: string,
+): Promise<{ items: GlobalSearchItem[] }> {
+  return adminRead(
+    `/api/control/search?${new URLSearchParams({ q: query }).toString()}`,
+    "搜索失败",
+  );
+}
+
+/** 菜单显隐用：开关关闭时「发布成效」不出现在侧边栏。 */
+export async function readPublishStatsEnabled(): Promise<{
+  enabled: boolean;
+}> {
+  return adminRead(
+    "/api/control/publish-stats/enabled",
+    "读取发布成效开关失败",
+  );
+}
+
 export async function setPublishStatsEnabled(input: {
   enabled: boolean;
   reason: string;
@@ -1778,6 +1932,26 @@ export interface SupportTicket {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** P0–P3，P0 最紧急；未结案工单按此排序。 */
+  priority?: string;
+  /** 关联对象：`task:<任务号>` 或 `order:<订单号>`，空串表示无。 */
+  related_ref?: string;
+}
+
+export interface TicketHandler {
+  user_id: string;
+  username: string;
+  display_name: string;
+}
+
+/** 可指派的工单负责人：启用中的管理员。 */
+export async function listTicketHandlers(): Promise<{
+  items: TicketHandler[];
+}> {
+  return adminRead(
+    "/api/control/support-tickets/handlers",
+    "读取可指派负责人失败",
+  );
 }
 
 export async function listSupportTickets(
@@ -1785,6 +1959,8 @@ export async function listSupportTickets(
     status?: string;
     category?: string;
     username?: string;
+    /** 客户编号，精确匹配（客户详情「工单」页签用）。 */
+    userId?: string;
     limit?: number;
     offset?: number;
   } = {},
@@ -1798,6 +1974,7 @@ export async function listSupportTickets(
   if (options.status) params.set("status", options.status);
   if (options.category) params.set("category", options.category);
   if (options.username) params.set("username", options.username);
+  if (options.userId) params.set("user_id", options.userId);
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));
@@ -1811,6 +1988,8 @@ export async function createSupportTicket(input: {
   targetUserId: string;
   category: string;
   summary: string;
+  priority?: string;
+  relatedRef?: string;
   reason: string;
   idempotencyKey?: string;
 }): Promise<{ id: string }> {
@@ -1820,6 +1999,8 @@ export async function createSupportTicket(input: {
       target_user_id: input.targetUserId,
       category: input.category,
       summary: input.summary,
+      priority: input.priority ?? "P2",
+      related_ref: input.relatedRef ?? "",
     },
     input.reason,
     "登记工单失败",
@@ -1829,14 +2010,21 @@ export async function createSupportTicket(input: {
 
 export async function updateSupportTicket(input: {
   id: string;
-  status: string;
-  resolution: string;
+  status?: string;
+  resolution?: string;
+  priority?: string;
+  handlerUserId?: string;
   reason: string;
   idempotencyKey?: string;
 }): Promise<{ id: string }> {
   return adminWrite(
     `/api/control/support-tickets/${encodeURIComponent(input.id)}`,
-    { status: input.status, resolution: input.resolution },
+    {
+      status: input.status ?? "",
+      resolution: input.resolution ?? "",
+      priority: input.priority ?? "",
+      handler_user_id: input.handlerUserId ?? "",
+    },
     input.reason,
     "更新工单失败",
     input.idempotencyKey,
@@ -4178,6 +4366,16 @@ export type DashboardSummary = {
     reconciliation_problems: number;
     unconfigured_rates?: number;
     unknown_cost_records?: number;
+    /** 工单未结案（待处理 + 处理中）。 */
+    open_tickets?: number;
+    /** 待支付充值订单（与订单页「待支付」筛选同口径）。 */
+    pending_orders?: number;
+    /** 队列需人工处理：口播隔离区 + 卡住的素材准备。 */
+    queue_attention?: number;
+    /** 内容素材准备失败条数。 */
+    content_prepare_failed?: number;
+    /** 当前命中的告警条数；告警聚合不可用时为 null。 */
+    active_alerts?: number | null;
   };
 };
 
@@ -4424,6 +4622,19 @@ export async function exportBillingReportCsv(
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return { filename, bytes: blob.size };
+}
+
+export interface RecentExport {
+  at: string;
+  actor: string;
+  kind: string;
+  label: string;
+  filters: Record<string, string>;
+}
+
+/** 最近 10 次导出（谁、何时、什么范围），来自导出审计（整改 T42）。 */
+export async function listRecentExports(): Promise<{ items: RecentExport[] }> {
+  return adminRead("/api/control/reports/exports/recent", "读取导出记录失败");
 }
 
 export async function exportSummaryReportCsv(

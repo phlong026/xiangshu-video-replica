@@ -66,13 +66,14 @@ from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import Response as HttpResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminExporter, AdminReader, AdminWriter
 from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE
 from app.admin_customer_metrics import (
     CUSTOMER_FACTS_CTE,
     CUSTOMER_METRICS_JOINS,
     INACTIVE_SQL,
     CustomerAttention,
+    append_annotation_filters,
     append_attention_filter,
     utc_text_timestamp,
 )
@@ -101,6 +102,7 @@ from app.admin_write_contract import (
 )
 from app.auth import CurrentUser, Role
 from app.csv_export import spreadsheet_safe_cell
+from app.customer_ops_params import effective_low_balance_threshold
 from app.customer_session_service import revoke_session
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.db_portable import BusinessConnection
@@ -1225,7 +1227,7 @@ CUSTOMER_ACCOUNT_FROM = (
 
 @router.get("/adjustments.csv")
 def export_adjustments_csv(
-    actor: AdminWriter,
+    actor: AdminExporter,
     actor_username: str = "",
     target_username: str = "",
     source_document_type: str = "",
@@ -1529,6 +1531,8 @@ def list_customers(
     direction: Literal["asc", "desc"] = "desc",
     attention: CustomerAttention = "",
     low_balance_threshold: int | None = Query(default=None, ge=0, le=2147483647),
+    tag: str = "",
+    owner_user_id: str = "",
 ) -> dict[str, object]:
     """Registered and activated customer accounts for operators and auditors (ADM-02 read path).
 
@@ -1579,6 +1583,10 @@ def list_customers(
         clauses.append("COALESCE(w.available_credits, 0) <= %s")
         params.append(max(0, balance_max))
 
+    # 标签 / 负责人属于「当前筛选客户」范围，待办汇总也要遵守（T30）。
+    append_annotation_filters(clauses, params, tag, owner_user_id)
+    # 未显式传阈值时取持久化的运营参数（T29），「余额不足」卡片开箱可用。
+    low_balance_threshold = effective_low_balance_threshold(low_balance_threshold)
     summary_clauses = list(clauses)
     summary_params = list(params)
     append_attention_filter(clauses, params, attention, low_balance_threshold)
@@ -1859,7 +1867,7 @@ def customer_overview(user_id: str, actor: AdminReader) -> dict[str, object]:
 
 @router.get("/customers.csv")
 def export_customers_csv(
-    actor: AdminWriter,
+    actor: AdminExporter,
     status: str | None = None,
     username: str = "",
     created_from: str = "",
@@ -1868,6 +1876,8 @@ def export_customers_csv(
     balance_max: int | None = None,
     attention: CustomerAttention = "",
     low_balance_threshold: int | None = Query(default=None, ge=0, le=2147483647),
+    tag: str = "",
+    owner_user_id: str = "",
     sort: Literal["activated", "recharge", "month_consumed", "last_active"] = "activated",
     direction: Literal["asc", "desc"] = "desc",
     limit: int = 5000,
@@ -1941,6 +1951,8 @@ def export_customers_csv(
             if balance_max is not None:
                 clauses.append("COALESCE(w.available_credits, 0) <= %s")
                 params.append(max(0, balance_max))
+            append_annotation_filters(clauses, params, tag, owner_user_id)
+            low_balance_threshold = effective_low_balance_threshold(low_balance_threshold)
             append_attention_filter(clauses, params, attention, low_balance_threshold)
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             # Same list sort/filter, including customer-level attention across all pages.

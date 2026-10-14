@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { type FundsSummary, getFundsSummary } from "../api";
 import { SummaryReportExport } from "./SummaryReportExport";
+import { PageBanner } from "./ui/PageBanner";
 import { formatFen } from "./ui/vocabulary";
 
 const methodLabel = (method: string) =>
@@ -154,7 +155,7 @@ export function FundsOverview({
         所选月份范围 {range.start} 至 {range.end}
         （北京时间）；今日单独对照。时点数据取当前余额与异常。
       </p>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {busy && <p role="status">正在计算…</p>}
       {todaySummary && monthSummary && (
         <>

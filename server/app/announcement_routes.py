@@ -29,6 +29,7 @@ from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
 from app.auth import AuthenticatedUser, Database
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
+from app.sql_pagination import page_bounds
 
 router = APIRouter(prefix="/api", tags=["announcements"])
 logger = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ class AnnouncementUpdateRequest(AdminWriteRequest):
     starts_at: str = ""
     ends_at: str = ""
     pinned: bool | None = None
+    # 显式清空失效时间（改回「不限」）；ends_at 留空只表示「不修改」。
+    clear_ends_at: bool = False
 
 
 def _live_clause(alias: str = "a") -> str:
@@ -163,9 +166,26 @@ def mark_announcement_read(
 # --- 管理端 -------------------------------------------------------------------
 
 
+def _status_of(starts_at: object, ends_at: object, live: bool) -> str:
+    """待生效 / 生效中 / 已结束：此前界面把「未生效」与「已过期」混成一个状态。"""
+    if live:
+        return "live"
+    now = datetime.now(UTC)
+    if isinstance(starts_at, datetime) and starts_at > now:
+        return "scheduled"
+    return "ended"
+
+
 @router.get("/control/announcements")
-def list_announcements_admin(actor: AdminReader, include_offline: bool = True) -> dict[str, object]:
+def list_announcements_admin(
+    actor: AdminReader,
+    include_offline: bool = True,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, object]:
     del actor
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=100)
+    live_filter = "" if include_offline else f"AND {_live_clause('a')}"
     try:
         with pg_transaction() as pg:
             rows = pg.execute(
@@ -177,17 +197,32 @@ def list_announcements_admin(actor: AdminReader, include_offline: bool = True) -
                        {_live_clause("a")}
                 FROM announcements a
                 JOIN users creator ON creator.id = a.created_by_user_id
-                WHERE a.deleted_at IS NULL
+                WHERE a.deleted_at IS NULL {live_filter}
                 ORDER BY a.pinned DESC, a.created_at DESC
-                LIMIT 200
-                """
+                LIMIT %s OFFSET %s
+                """,
+                (bounded_limit, bounded_offset),
             ).fetchall()
+            total_row = pg.execute(
+                f"SELECT count(*) FROM announcements a WHERE a.deleted_at IS NULL {live_filter}"
+            ).fetchone()
+            # 触达率分母：当前启用的客户数（公告面向全部客户）。
+            audience_row = pg.execute(
+                "SELECT count(*) FROM users WHERE role = 'customer' AND is_active = 1"
+            ).fetchone()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
-    items = [_announcement_row(row) for row in rows]
-    if not include_offline:
-        items = [item for item in items if item["live"]]
-    return {"items": items}
+    items = [
+        _announcement_row(row) | {"status": _status_of(row[4], row[5], bool(row[10]))}
+        for row in rows
+    ]
+    return {
+        "items": items,
+        "total": int(total_row[0]) if total_row else 0,
+        "audience_total": int(audience_row[0]) if audience_row else 0,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
 
 
 @router.post("/control/announcements")
@@ -294,7 +329,9 @@ def update_announcement(
         if body.starts_at.strip():
             sets.append("starts_at=%s")
             params.append(_parse_ts(body.starts_at, field="生效时间"))
-        if body.ends_at.strip():
+        if body.clear_ends_at:
+            sets.append("ends_at=NULL")
+        elif body.ends_at.strip():
             sets.append("ends_at=%s")
             params.append(_parse_ts(body.ends_at, field="失效时间"))
         if body.pinned is not None:

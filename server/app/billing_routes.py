@@ -14,7 +14,8 @@ import psycopg
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import Field, model_validator
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminExporter, AdminReader, AdminWriter
+from app.admin_export_guard import guard_admin_export
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.billing_catalog import SERVICES, Tariff, read_tariff, retail_snapshot
 from app.billing_history import pricing_versions, retail_version, tariff_versions
@@ -569,9 +570,8 @@ def source_action_panorama(
 
 @router.get("/api/control/billing/export")
 def export(
-    # GET 批量导出按仓库 B3 约定挂写级权限：数据出境动作看意图而非 HTTP 方法，
-    # auditor（只读角色）不得整表拉取营收/成本明细。
-    _actor: AdminWriter,
+    # 整表导出（T19，决策 D2）：审计员可导出，但必须留审计并过限流（见下）。
+    actor: AdminExporter,
     start: date,
     end: date,
     user_id: str | None = None,
@@ -581,6 +581,20 @@ def export(
     provider: str | None = None,
     attention: Literal["pending", "unknown_cost"] | None = None,
 ) -> Response:
+    guard_admin_export(
+        actor,
+        kind="billing_operations",
+        filters={
+            "start": start,
+            "end": end,
+            "user_id": user_id or "",
+            "username": username or "",
+            "service": service or "",
+            "module": module or "",
+            "provider": provider or "",
+            "attention": attention or "",
+        },
+    )
     with pg_transaction() as raw:
         rows = operation_rows(
             BusinessConnection.postgres(raw),

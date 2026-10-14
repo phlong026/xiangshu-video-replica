@@ -11,7 +11,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
 import * as adminApi from "../api.admin";
-import { CustomersPage } from "./CustomersPage";
+import { CustomerList as CustomersPage } from "./CustomerList";
 
 // Mock the admin API module
 vi.mock("../api.admin", () => ({
@@ -35,7 +35,8 @@ vi.mock("../api.admin", () => ({
   fetchCustomerUnitPrice: vi.fn(),
   updateCustomerUnitPrice: vi.fn(),
   fetchCustomerAnnotation: vi.fn(),
-  listCustomerOwnerCandidates: vi.fn(),
+  listCustomerOwnerCandidates: vi.fn().mockResolvedValue({ items: [] }),
+  listCustomerTags: vi.fn().mockResolvedValue({ items: [] }),
   updateCustomerAnnotation: vi.fn(),
   createCustomerAdjustment: vi.fn(),
   listAdminRechargeOrders: vi.fn(),
@@ -183,7 +184,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         direction: "asc",
       }),
     );
-    expect(screen.queryByRole("button", { name: "导出列表 CSV" })).toBeNull();
+    // 决策 D2：只读角色也可导出客户列表（服务端留审计并限流）。
+    expect(
+      screen.getByRole("button", { name: "导出列表 CSV" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /余额不足.*7/ }));
     await waitFor(() =>
       expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
@@ -231,12 +235,78 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       target: { value: "50" },
     });
     expect(adminApi.listCustomers).toHaveBeenCalledTimes(before);
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await waitFor(() =>
       expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
         expect.objectContaining({ lowBalanceThreshold: 50 }),
       ),
     );
+  });
+
+  it("阈值留空时用服务端运营参数：卡片可点，提示里写明生效阈值", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+      attention_counts: { low_balance: 4, recent_failure: 0, inactive: 0 },
+      low_balance_threshold: 100,
+    });
+    render(<CustomersPage />);
+    await screen.findByText(/暂无客户/);
+    expect(screen.getByRole("button", { name: /余额不足/ })).toBeEnabled();
+    expect(screen.getByLabelText("低余额阈值")).toHaveAttribute(
+      "placeholder",
+      "默认 100",
+    );
+    expect(
+      screen.getByText(/严格小于 100 积分（系统设置 → 运营参数）/),
+    ).toBeInTheDocument();
+  });
+
+  it("重置清空所有筛选与「需要处理」选中并回到未筛选列表", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+      attention_counts: { low_balance: 3, recent_failure: 1, inactive: 2 },
+    } as never);
+    render(<CustomersPage />);
+    await screen.findByText(/暂无客户/);
+    fireEvent.change(screen.getByPlaceholderText("按用户名或公司名称筛选"), {
+      target: { value: "洪雅" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ username_filter: "洪雅" }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /近7天有失败/ }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ attention: "recent_failure" }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+    expect(screen.getByPlaceholderText("按用户名或公司名称筛选")).toHaveValue(
+      "",
+    );
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ username_filter: undefined, attention: "" }),
+      ),
+    );
+    const buttons = screen
+      .getByRole("form", { name: "客户筛选" })
+      .querySelectorAll("button");
+    expect(Array.from(buttons).map((b) => b.textContent)).toEqual([
+      "查询",
+      "重置",
+      "导出列表 CSV",
+    ]);
   });
 
   it.each([false, true])(
@@ -350,25 +420,20 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     render(<CustomersPage readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
     fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "查看全部人工调整" }),
-    );
-    expect(await screen.findByText("150 → 50 积分")).toBeInTheDocument();
-    expect(screen.getByText("operator")).toBeInTheDocument();
-    const history = screen.getByRole("table", { name: "调账历史列表" })
-      .parentElement?.parentElement;
-    expect(history).not.toBeNull();
-    fireEvent.click(
-      within(history as HTMLElement).getByRole("button", { name: "下一页" }),
-    );
-    await waitFor(() =>
-      expect(adminApi.listAdminAdjustments).toHaveBeenLastCalledWith("user-1", {
-        limit: 20,
-        offset: 20,
-      }),
+    // 完整记录回资金中心（T32）：详情页不再内嵌全量表，只给带客户编号的真链接。
+    const link = await screen.findByRole("link", { name: "查看全部人工调整" });
+    expect(link).toHaveAttribute(
+      "href",
+      "#admin/funds?sub=adjustments&userId=user-1",
     );
     expect(
-      screen.queryByRole("button", { name: "导出 CSV" }),
+      screen.getByRole("link", { name: "查看全部充值订单" }),
+    ).toHaveAttribute("href", "#admin/funds?sub=orders&userId=user-1");
+    expect(
+      screen.getByRole("link", { name: "查看全部积分流水" }),
+    ).toHaveAttribute("href", "#admin/funds?sub=transactions&userId=user-1");
+    expect(
+      screen.queryByRole("table", { name: "调账历史列表" }),
     ).not.toBeInTheDocument();
   });
 
@@ -409,7 +474,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       offset: 0,
     });
 
-    render(<CustomersPage />);
+    render(<CustomersPage readOnly />);
 
     await waitFor(() => {
       expect(screen.getByText("customer-1")).toBeInTheDocument();
@@ -470,7 +535,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       offset: 0,
     });
 
-    render(<CustomersPage />);
+    render(<CustomersPage readOnly />);
 
     const row = await screen.findByRole("row", { name: /customer-1/ });
     const cells = within(row)
@@ -930,6 +995,19 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       Array.from({ length: columns }, (_, index) => index + 1),
     );
     expect(rules.reduce((sum, rule) => sum + Number(rule[2]), 0)).toBe(100);
+
+    // 只读态没有勾选列，列宽由 .customers-table--readonly 的另一组规则负责。
+    const readonlyRules = [
+      ...(desktop as string).matchAll(
+        /\.customers-table--readonly th:nth-child\((\d+)\)\s*\{\s*width:\s*(\d+)%/g,
+      ),
+    ];
+    expect(readonlyRules.map((rule) => Number(rule[1]))).toEqual(
+      Array.from({ length: columns - 1 }, (_, index) => index + 1),
+    );
+    expect(readonlyRules.reduce((sum, rule) => sum + Number(rule[2]), 0)).toBe(
+      100,
+    );
   });
 
   it("shows loading state while fetching customers", () => {
@@ -999,7 +1077,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     const filterInput = screen.getByPlaceholderText("按用户名或公司名称筛选");
     fireEvent.change(filterInput, { target: { value: "customer-1" } });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     expect(adminApi.listCustomers).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1041,7 +1119,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       target: { value: "2026-09-01" },
     });
     expect(adminApi.listCustomers).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await screen.findByText("new-user");
     resolveOld({ items: [], total: 0, limit: 20, offset: 0 });
     await waitFor(() =>
@@ -1077,7 +1155,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     fireEvent.change(screen.getByPlaceholderText("按用户名或公司名称筛选"), {
       target: { value: "customer-1" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     fireEvent.click(screen.getByRole("button", { name: "导出列表 CSV" }));
 
     expect(api.downloadCustomersCsv).toHaveBeenCalledWith({
@@ -1156,7 +1234,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         target: { value: "customer-1" },
       },
     );
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await waitFor(() => {
       expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
         expect.objectContaining({ username_filter: "customer-1" }),
@@ -1181,7 +1259,12 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(
       screen.getByRole("region", { name: "客户核心指标" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("累计消耗")).toBeInTheDocument();
+    // 首屏核心指标只留 4 张，且不与头部重复（T32）。
+    const kpis = within(screen.getByRole("region", { name: "客户核心指标" }));
+    for (const label of ["可用积分", "累计充值", "本月消耗", "近30天成功率"])
+      expect(kpis.getByText(label)).toBeInTheDocument();
+    expect(kpis.queryByText("累计消耗")).not.toBeInTheDocument();
+    expect(kpis.queryByText("当前权益")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", {
         name: "调账历史",

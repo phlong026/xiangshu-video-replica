@@ -7,8 +7,14 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as controlApi from "../api";
 import * as adminApi from "../api.admin";
 import { GenerationRecordsPage } from "./GenerationRecordsPage";
+
+vi.mock("../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api")>()),
+  downloadGenerationRecordsCsv: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
@@ -75,7 +81,7 @@ function videoFailureRecord(
     project_name: "演示项目",
     status: "FAILED",
     retry_path: "PRE_PROVIDER",
-    handling_advice: "尚未触达服务商，按原规则重新入队。",
+    handling_advice: "尚未触达上游服务，按原规则重新入队。",
     provider: null,
     model: null,
     provider_cost: null,
@@ -242,7 +248,7 @@ describe("GenerationRecordsPage", () => {
     });
   });
 
-  it("uses five business groups, keeps technical details folded and hides auditor cost and thumbnails", async () => {
+  it("uses five business groups, keeps technical details folded; auditors see cost but not thumbnails or customer text", async () => {
     const statuses = [
       "CREATED",
       "QUEUED",
@@ -303,18 +309,29 @@ describe("GenerationRecordsPage", () => {
       "需人工核对",
       "需人工核对",
     ]);
+    // T18（决策 D1）：成本与毛利对审计员可见，与经营看板、成本核对同口径。
     expect(
-      within(table).queryByRole("columnheader", { name: /成本/ }),
-    ).toBeNull();
+      within(table).getByRole("columnheader", { name: /成本/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(table).getByRole("columnheader", { name: /毛利/ }),
+    ).toBeInTheDocument();
     expect(adminApi.getAdminGenerationRecordThumbnail).not.toHaveBeenCalled();
     expect(adminApi.getAdminGenerationRecordCalls).not.toHaveBeenCalled();
+    // 详情默认不展开；点「查看详情」后在右侧抽屉里看（T33）。
+    expect(
+      screen.queryByRole("complementary", { name: "记录详情" }),
+    ).toBeNull();
+    fireEvent.click(within(rows[9]).getByText("查看详情"));
+    const drawer = within(
+      screen.getByRole("complementary", { name: "记录详情" }),
+    );
+    expect(drawer.getByText("本轮积分退回")).toBeInTheDocument();
+    expect(drawer.getByText("未退回")).toBeInTheDocument();
+    expect(drawer.queryByText("raw English failure")).toBeNull();
+    expect(drawer.queryByText("private vendor quote")).toBeNull();
     for (const detail of table.querySelectorAll("details"))
       expect(detail.open).toBe(false);
-    fireEvent.click(within(rows[9]).getByText("查看详情"));
-    expect(within(rows[9]).getByText("本轮积分退回")).toBeInTheDocument();
-    expect(within(rows[9]).getByText("未退回")).toBeInTheDocument();
-    expect(within(rows[9]).queryByText("raw English failure")).toBeNull();
-    expect(within(rows[9]).queryByText("private vendor quote")).toBeNull();
   });
 
   it("sends company and project filters to both list and summary within the stable customer scope", async () => {
@@ -358,10 +375,23 @@ describe("GenerationRecordsPage", () => {
     expect(within(table).getByText("源画面 AI 评分")).toBeInTheDocument();
     expect(within(table).getAllByText("成本待核对")).toHaveLength(2);
     expect(within(table).getByText("估算 ¥1.25")).toBeInTheDocument();
-    expect(screen.getByText("apilio / gpt-image-2")).toBeInTheDocument();
+    // 服务 / 模型在抽屉的技术详情里：逐行打开，两条记录的模型都能看到。
+    const drawerTexts: string[] = [];
+    for (const open of within(table).getAllByText("查看详情")) {
+      fireEvent.click(open);
+      drawerTexts.push(
+        screen.getByRole("complementary", { name: "记录详情" }).textContent ??
+          "",
+      );
+    }
     expect(
-      screen.getByText("apilio_gemini / gemini-2.5-flash"),
-    ).toBeInTheDocument();
+      drawerTexts.some((text) => text.includes("apilio / gpt-image-2")),
+    ).toBe(true);
+    expect(
+      drawerTexts.some((text) =>
+        text.includes("apilio_gemini / gemini-2.5-flash"),
+      ),
+    ).toBe(true);
     expect(screen.getAllByText("customer-1")).toHaveLength(3);
     // P2-2：这三条都没有产物，预览列如实占位而不是留空。
     expect(within(table).getAllByText("无产物")).toHaveLength(3);
@@ -621,11 +651,11 @@ describe("GenerationRecordsPage", () => {
 
     render(<GenerationRecordsPage initialStatus="FAILED" />);
 
-    expect(await screen.findByText("服务商故障 · 1 次")).toBeInTheDocument();
+    expect(await screen.findByText("上游服务故障 · 1 次")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("查看详情"));
     expect(screen.getByText("原因分类")).toBeInTheDocument();
-    expect(screen.getByText("服务商故障")).toBeInTheDocument();
+    expect(screen.getByText("上游服务故障")).toBeInTheDocument();
     expect(screen.getByText("处理人")).toBeInTheDocument();
     expect(screen.getByText("运营重试")).toBeInTheDocument();
   });
@@ -825,6 +855,21 @@ describe("GenerationRecordsPage", () => {
     expect(screen.getByLabelText("诊断任务编号")).toHaveValue("analysis-1");
   });
 
+  it("外壳接管视图切换时不渲染页内页签，查看诊断交给外壳带上任务编号", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [firstFrameRecord({ record_id: "ff-failed", status: "FAILED" })],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    const onViewChange = vi.fn();
+    render(<GenerationRecordsPage onViewChange={onViewChange} />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    expect(screen.queryByRole("tablist", { name: "生成记录页签" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看诊断" }));
+    expect(onViewChange).toHaveBeenCalledWith("diagnostics", "ff-failed");
+  });
+
   it("offers first-frame reconcile only for a SUBMISSION_UNCERTAIN row", async () => {
     vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
       items: [
@@ -837,15 +882,18 @@ describe("GenerationRecordsPage", () => {
     });
 
     render(<GenerationRecordsPage />);
-    for (const summary of await screen.findAllByText("查看详情")) {
-      fireEvent.click(summary);
-    }
+    const openers = await screen.findAllByText("查看详情");
 
     // 服务端也只在 SUBMISSION_UNCERTAIN 放行，其余状态一律 409；前端按同一
-    // 条件显示入口，避免运营点开就是错。
+    // 条件显示入口，避免运营点开就是错。抽屉一次只显示一条记录，逐条打开核对。
+    fireEvent.click(openers[0]);
     expect(
       screen.getByRole("button", { name: "重新对账首帧任务 ff-uncertain" }),
     ).toBeInTheDocument();
+    fireEvent.click(openers[1]);
+    expect(
+      screen.queryByRole("button", { name: "重新对账首帧任务 ff-uncertain" }),
+    ).toBeNull();
     expect(
       screen.queryByRole("button", { name: "重新对账首帧任务 ff-done" }),
     ).toBeNull();
@@ -897,7 +945,7 @@ describe("GenerationRecordsPage", () => {
       ),
     );
     expect(
-      await screen.findByText(/已对账：任务 ff-stuck 供应商侧已受理/),
+      await screen.findByText(/已对账：任务 ff-stuck 上游服务侧已受理/),
     ).toBeInTheDocument();
     // 对账后重新拉取列表：状态已被服务端改写，旧行不该留在页面上。
     await waitFor(() =>
@@ -1072,7 +1120,7 @@ describe("GenerationRecordsPage", () => {
       target: { value: "客服补偿" },
     });
     // reasonAndAck 级：确认后直接进客户钱包，必须勾选知晓。
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: "发放补偿" }));
 
     await waitFor(() =>
@@ -1291,4 +1339,82 @@ it("客户详情的稳定ID在列表、聚合、筛选及失败诊断中持续�
       expect.objectContaining({ diagnostics: true, userId: "stable-wallet-a" }),
     ),
   );
+});
+
+it("导出当前筛选 CSV：带上已提交的筛选条件", async () => {
+  vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+    items: [videoFailureRecord()],
+    total: 1,
+    limit: 50,
+    offset: 0,
+  });
+  render(<GenerationRecordsPage initialStatus="FAILED" />);
+  await screen.findByText("查看详情");
+  fireEvent.change(screen.getByLabelText("生成项目"), {
+    target: { value: "演示" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "查询" }));
+  await waitFor(() =>
+    expect(adminApi.getAdminGenerationRecords).toHaveBeenLastCalledWith(
+      expect.objectContaining({ projectName: "演示" }),
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "导出当前筛选 CSV" }));
+  expect(controlApi.downloadGenerationRecordsCsv).toHaveBeenCalledWith(
+    expect.objectContaining({ projectName: "演示" }),
+  );
+});
+
+it("勾选失败记录后批量补偿：按各自原扣积分逐条调账，只读角色没有勾选框", async () => {
+  vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+    items: [
+      videoFailureRecord(),
+      videoFailureRecord({
+        record_id: "video-failed-2",
+        user_id: "user-2",
+        username: "customer-2",
+        charged_credits: 9,
+      }),
+      videoFailureRecord({
+        record_id: "video-ok-1",
+        status: "SUCCEEDED",
+        charged_credits: 3,
+      }),
+    ],
+    total: 3,
+    limit: 50,
+    offset: 0,
+  });
+  vi.mocked(adminApi.createCustomerAdjustment).mockResolvedValue({
+    wallet_balance_after: 100,
+  } as never);
+  const view = render(<GenerationRecordsPage />);
+  await screen.findAllByText("查看详情");
+  // 成功记录没有勾选框。
+  expect(screen.queryByLabelText("选择记录 video-ok-1")).toBeNull();
+  fireEvent.click(screen.getByLabelText("选择本页全部失败记录"));
+  expect(screen.getByText("已选 2 条失败记录")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "批量补偿积分" }));
+  fireEvent.change(screen.getByLabelText("操作原因"), {
+    target: { value: "批量补偿十月故障" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认补偿" }));
+  await waitFor(() =>
+    expect(adminApi.createCustomerAdjustment).toHaveBeenCalledTimes(2),
+  );
+  expect(adminApi.createCustomerAdjustment).toHaveBeenCalledWith(
+    "user-2",
+    {
+      sourceDocumentType: "CREDIT_COMPENSATION",
+      sourceDocumentRef: "video-failed-2",
+      credits: 9,
+    },
+    "批量补偿十月故障",
+    expect.any(String),
+  );
+  view.unmount();
+
+  render(<GenerationRecordsPage readOnly />);
+  await screen.findAllByText("查看详情");
+  expect(screen.queryByLabelText("选择本页全部失败记录")).toBeNull();
 });

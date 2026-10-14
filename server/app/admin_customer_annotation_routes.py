@@ -26,7 +26,7 @@ import uuid
 
 import psycopg
 from fastapi import APIRouter, Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from app.admin_auth_routes import AdminReader, AdminWriter
 from app.admin_customer_routes import _write_with_idempotency, require_customer_target
@@ -159,6 +159,161 @@ def list_owner_candidates(actor: AdminReader) -> dict[str, object]:
             for row in rows
         ]
     }
+
+
+@router.get("/customers/tags")
+def list_customer_tags(actor: AdminReader) -> dict[str, object]:
+    """已用过的标签（去重，按使用客户数降序）：列表筛选与批量打标签的候选。"""
+    del actor
+    try:
+        with pg_transaction() as conn:
+            rows = conn.execute(
+                "SELECT tag, count(*) FROM customer_annotations ca, "
+                "LATERAL jsonb_array_elements_text(ca.tags_json) AS tag "
+                "GROUP BY tag ORDER BY count(*) DESC, tag LIMIT 200"
+            ).fetchall()
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
+    return {"items": [{"tag": str(row[0]), "count": int(row[1])} for row in rows]}
+
+
+MAX_BATCH_CUSTOMERS = 50
+
+
+class CustomerBatchAnnotationRequest(AdminWriteRequest):
+    """批量标注（整改 T30）：对多名客户**增量**打标签 / 移除标签 / 改负责人。
+
+    与整体替换的单户 PUT 不同：这里只叠加或移除，不碰客户已有的其他标签与备注，
+    批量操作才不会把别人写好的标注冲掉。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_ids: list[str] = Field(min_length=1, max_length=MAX_BATCH_CUSTOMERS)
+    add_tags: list[str] = []
+    remove_tags: list[str] = []
+    # owner_user_id 为空串也是合法取值（清空负责人），故用显式开关区分「不改」。
+    set_owner: bool = False
+    owner_user_id: str | None = None
+
+
+@router.post("/customers/batch-annotation")
+def batch_update_customer_annotation(
+    body: CustomerBatchAnnotationRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    """逐户应用同一份增量，返回逐户结果；单户失败不连累其他客户，逐户写审计。"""
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        add_tags = _normalize_tags(body.add_tags) if body.add_tags else []
+        remove_tags = {tag.strip() for tag in body.remove_tags if tag.strip()}
+        if not add_tags and not remove_tags and not body.set_owner:
+            raise _http(
+                400,
+                "CUSTOMER_ANNOTATION_VALIDATION_FAILED",
+                "请至少选择一项要改的内容：加标签、去标签或负责人。",
+            )
+        owner_user_id = (body.owner_user_id or "").strip() or None
+        if body.set_owner and owner_user_id is not None:
+            owner = conn.execute(
+                "SELECT 1 FROM users WHERE id = %s AND role = 'admin' AND is_active = 1",
+                (owner_user_id,),
+            ).fetchone()
+            if owner is None:
+                raise _http(
+                    400,
+                    "CUSTOMER_ANNOTATION_VALIDATION_FAILED",
+                    "负责人必须是启用中的管理员账号。",
+                )
+        results: list[dict[str, object]] = []
+        for user_id in dict.fromkeys(body.user_ids):
+            if conn.execute("SELECT 1 FROM users WHERE id = %s", (user_id,)).fetchone() is None:
+                results.append({"user_id": user_id, "ok": False, "message": "客户不存在。"})
+                continue
+            before = _annotation_payload(conn, user_id=user_id)
+            old_tags = [str(tag) for tag in before["tags"]]  # type: ignore[attr-defined]
+            tags = [tag for tag in old_tags if tag not in remove_tags]
+            for tag in add_tags:
+                if tag not in tags:
+                    tags.append(tag)
+            if len(tags) > MAX_TAGS:
+                results.append(
+                    {
+                        "user_id": user_id,
+                        "ok": False,
+                        "message": f"叠加后标签超过 {MAX_TAGS} 个，请先清理。",
+                    }
+                )
+                continue
+            new_owner = owner_user_id if body.set_owner else (before["owner_user_id"] or None)
+            note = str(before["note"])
+            if not tags and not note and new_owner is None:
+                conn.execute("DELETE FROM customer_annotations WHERE user_id = %s", (user_id,))
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO customer_annotations
+                        (user_id, tags_json, note, owner_user_id,
+                         updated_by_user_id, updated_at)
+                    VALUES (%s, %s::jsonb, %s, %s, %s, clock_timestamp())
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET tags_json = EXCLUDED.tags_json,
+                        owner_user_id = EXCLUDED.owner_user_id,
+                        updated_by_user_id = EXCLUDED.updated_by_user_id,
+                        updated_at = clock_timestamp()
+                    """,
+                    (
+                        user_id,
+                        json.dumps(tags, ensure_ascii=False),
+                        note,
+                        new_owner,
+                        actor.user_id,
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO audit_logs "
+                "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+                "VALUES (%s, %s, 'customer_annotation.update', 'customer_annotation', %s, %s)",
+                (
+                    str(uuid.uuid4()),
+                    actor.user_id,
+                    user_id,
+                    json.dumps(
+                        {
+                            "old_tags": old_tags,
+                            "new_tags": tags,
+                            "old_owner_user_id": before["owner_user_id"],
+                            "new_owner_user_id": new_owner or "",
+                            "batch": True,
+                            "reason": body.reason.strip(),
+                            "request_id": request_id,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+            results.append({"user_id": user_id, "ok": True, "message": ""})
+        succeeded = sum(1 for item in results if item["ok"])
+        return {
+            "results": results,
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "request_id": request_id,
+        }
+
+    return _write_with_idempotency(
+        request,
+        response,
+        actor,
+        body,
+        business,
+        success_status=200,
+        unavailable_code=_UNAVAILABLE_CODE,
+        unavailable_message=_UNAVAILABLE_MESSAGE,
+    )
 
 
 @router.get("/customers/{user_id}/annotation")

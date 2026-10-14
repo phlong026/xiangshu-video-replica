@@ -218,11 +218,7 @@ export function RegistrationBonusSection({
               {updaterLabel ? `（${updaterLabel}）` : ""}
             </p>
           ) : null}
-          {formError ? (
-            <p className="settings-error" role="alert">
-              {formError}
-            </p>
-          ) : null}
+          {formError ? <PageBanner tone="error">{formError}</PageBanner> : null}
           <div className="admin-actions">
             <button disabled={saving || !dirty} type="submit">
               保存注册赠送设置

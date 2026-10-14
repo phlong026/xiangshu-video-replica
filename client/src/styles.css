@@ -2964,8 +2964,10 @@ button.activation-generator__submit {
   gap: 2px;
 }
 
-.admin-shell--control button.admin-tab {
+.admin-shell--control a.admin-tab {
   display: flex;
+  box-sizing: border-box;
+  text-decoration: none;
   width: 100%;
   min-height: clamp(32px, 6.5dvh, 52px);
   align-items: center;
@@ -2980,7 +2982,7 @@ button.activation-generator__submit {
   text-align: left;
 }
 
-.admin-shell--control button.admin-tab small {
+.admin-shell--control a.admin-tab small {
   display: none;
   color: var(--admin-muted);
   font-size: var(--font-caption);
@@ -3000,13 +3002,13 @@ button.activation-generator__submit {
   filter: invert(72%) sepia(16%) saturate(560%) hue-rotate(2deg) brightness(94%);
 }
 
-.admin-shell--control button.admin-tab:not(:disabled):hover {
+.admin-shell--control a.admin-tab:hover {
   border-color: #2c2a27;
   color: #d3cec4;
   background: #171716;
 }
 
-.admin-shell--control button.admin-tab.is-active {
+.admin-shell--control a.admin-tab.is-active {
   border-color: rgba(198, 164, 95, 0.4);
   color: #ead7ad;
   background: var(--admin-gold-wash);
@@ -5634,12 +5636,6 @@ button.activation-generator__submit {
   :is(span, dt, dd, label, small) {
   font-size: var(--font-caption);
 }
-.admin-shell--control span.admin-viral-eyebrow {
-  display: block;
-  margin-bottom: 7px;
-  color: var(--admin-gold);
-  letter-spacing: 0.18em;
-}
 .admin-viral-headacts {
   display: flex;
   flex-wrap: wrap;
@@ -5649,20 +5645,48 @@ button.activation-generator__submit {
 /* ── 概览数字 ───────────────────────────────────────────────────────── */
 /* 固定列数而非 auto-fit：5 张数字卡按 2/3/5 列始终铺满整行，auto-fit 在宽屏
    上会多分出空轨道，把数字卡挤在左半行。 */
-.admin-viral-tiles {
+/* admin-stat-tiles 是同一套数字卡的通用名：客户运营等非内容页不再借用
+   viral 前缀，后续页面统一用通用名。 */
+.admin-viral-tiles,
+.admin-stat-tiles {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 @media (min-width: 720px) {
-  .admin-viral-tiles {
+  .admin-viral-tiles,
+  .admin-stat-tiles {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 @media (min-width: 1080px) {
-  .admin-viral-tiles {
+  .admin-viral-tiles,
+  .admin-stat-tiles {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
+}
+.admin-stat-tile {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--admin-line);
+  border-radius: 8px;
+  padding: 11px 13px;
+  background: var(--admin-panel-raised);
+  color: var(--admin-muted, #a49e95);
+  cursor: pointer;
+  text-align: left;
+}
+.admin-stat-tile strong {
+  color: var(--admin-text);
+  font-size: var(--font-subtitle);
+  font-weight: 600;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+.admin-stat-tile[aria-pressed="true"] {
+  border-color: var(--admin-gold-bright, #f0bc5e);
+  box-shadow: inset 0 0 0 1px var(--admin-gold-bright, #f0bc5e);
 }
 .admin-viral-tile {
   min-width: 0;

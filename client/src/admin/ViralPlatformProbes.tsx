@@ -102,7 +102,7 @@ export function ViralPlatformProbes({
     <section aria-label="平台连接探测">
       <h3>平台连接探测</h3>
       <p className="admin-hint">
-        按配置执行一页搜索验证；不入库、不扣客户积分。供应商请求可能收费，只有确认后才执行；结果10分钟后过期。
+        按配置执行一页搜索验证；不入库、不扣客户积分。上游服务请求可能收费，只有确认后才执行；结果10分钟后过期。
       </p>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {loading ? <p role="status">正在读取已记录探测…</p> : null}

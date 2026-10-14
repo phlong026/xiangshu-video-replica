@@ -14,6 +14,7 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { RuleNote } from "./ui/RuleNote";
 import { StatusBadge } from "./ui/StatusBadge";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 
@@ -207,6 +208,20 @@ export function CustomerLifecyclePage({
     void loadRetention();
   }, [loadRetention]);
 
+  const items = data?.items ?? [];
+  const stageCounts = new Map(
+    (data?.distribution ?? []).map((row) => [row.stage, row.count]),
+  );
+  const allCount = [...stageCounts.values()].reduce((sum, n) => sum + n, 0);
+  const allSelected =
+    items.length > 0 && items.every((item) => selected.has(item.user_id));
+
+  function toggleAll() {
+    setSelected(
+      allSelected ? new Set() : new Set(items.map((item) => item.user_id)),
+    );
+  }
+
   function toggle(user_id: string) {
     setSelected((previous) => {
       const next = new Set(previous);
@@ -320,11 +335,9 @@ export function CustomerLifecyclePage({
     }
   }
 
-  const items = data?.items ?? [];
   return (
     <section className="admin-panel admin-lifecycle-page" aria-label="客户运营">
       <header>
-        <h2>客户运营</h2>
         <p className="admin-hint">
           生命周期分层与健康分定位需要激活的客户；勾选后可批量赠送积分
           （逐户调账、逐户留痕，失败会中断并列出已成功名单）。
@@ -354,27 +367,31 @@ export function CustomerLifecyclePage({
       ) : null}
       {data ? (
         <>
-          <dl className="admin-viral-tiles">
-            {(data.distribution.length
-              ? data.distribution
-              : [{ stage: "—", count: 0, min_score: 0, max_score: 0 }]
-            ).map((row) => (
+          {/* 分层卡片：分布由服务端按全量统计（不随所选分层收窄），选中哪层
+              都能直接点别的层；aria-pressed 标出当前分层。 */}
+          <section className="admin-stat-tiles" aria-label="分层分布">
+            {(["", ...STAGE_FILTERS.slice(1)] as string[]).map((value) => (
               <button
-                key={row.stage}
+                key={value || "all"}
                 type="button"
-                className="admin-viral-tile"
+                className="admin-stat-tile"
+                aria-pressed={stage === value}
                 onClick={() => {
-                  setStage(row.stage in STAGE_LABELS ? row.stage : "");
+                  setStage(value);
                   setOffset(0);
                 }}
               >
-                <dt>{STAGE_LABELS[row.stage] ?? row.stage}</dt>
-                <dd>{row.count} 人</dd>
+                <span>{value ? STAGE_LABELS[value] : "全部分层"}</span>
+                <strong>
+                  {value ? (stageCounts.get(value) ?? 0) : allCount} 人
+                </strong>
               </button>
             ))}
-          </dl>
-          <p className="admin-hint">{data.lifecycleRule}</p>
-          <p className="admin-hint">{data.healthRule}</p>
+          </section>
+          <RuleNote>
+            <p className="admin-hint">{data.lifecycleRule}</p>
+            <p className="admin-hint">{data.healthRule}</p>
+          </RuleNote>
         </>
       ) : null}
       <form
@@ -416,7 +433,16 @@ export function CustomerLifecyclePage({
           ariaLabel="客户生命周期清单"
           headers={
             <>
-              <th>选择</th>
+              {readOnly ? null : (
+                <th>
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAll}
+                    aria-label="全选本页客户"
+                  />
+                </th>
+              )}
               <th>客户</th>
               <th>分层</th>
               <th>健康分</th>
@@ -427,14 +453,16 @@ export function CustomerLifecyclePage({
         >
           {items.map((item: CustomerLifecycleItem) => (
             <tr key={item.user_id}>
-              <td>
-                <input
-                  type="checkbox"
-                  checked={selected.has(item.user_id)}
-                  onChange={() => toggle(item.user_id)}
-                  aria-label={`选择 ${item.display_name || item.username}`}
-                />
-              </td>
+              {readOnly ? null : (
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.user_id)}
+                    onChange={() => toggle(item.user_id)}
+                    aria-label={`选择 ${item.display_name || item.username}`}
+                  />
+                </td>
+              )}
               <td>
                 <CustomerLink
                   userId={item.user_id}
@@ -459,7 +487,9 @@ export function CustomerLifecyclePage({
               <td>
                 <strong
                   className={
-                    item.health_score < 40 ? "is-danger-text" : undefined
+                    item.health_score < (data?.healthAlertScore ?? 40)
+                      ? "is-danger-text"
+                      : undefined
                   }
                 >
                   {item.health_score}
@@ -476,6 +506,8 @@ export function CustomerLifecyclePage({
         </DataTable>
       )}
       {data ? (
+        // 服务端返回该分层真实总数；此前用「本页条数 + offset」冒充总数，
+        // 满页时「下一页」被禁用，第 2 页之后的客户永远看不到。
         <Pagination
           // T30：后端已下发真实 total，不再用「本页行数+offset」伪造
           // （满一页时恒为 20 条、无法翻页）。

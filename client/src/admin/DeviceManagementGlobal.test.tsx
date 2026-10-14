@@ -2,7 +2,17 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setAdminCsrfToken } from "../api";
-import { SessionsPage } from "./SessionsPage";
+import { DeviceManagement } from "./DeviceManagement";
+
+// 「登录与设备」页 = 全局视图的 DeviceManagement；换客户范围要整体重挂载，
+// 否则上一个客户的筛选与分页会残留（AdminApp 用固定 key，这里按 userId 换 key）。
+function SessionsPage(props: {
+  userId?: string;
+  readOnly?: boolean;
+  onCustomerChange?: (userId: string | undefined) => void;
+}) {
+  return <DeviceManagement key={props.userId ?? "all"} global {...props} />;
+}
 
 function jsonResponse(payload: unknown, status = 200) {
   return Promise.resolve({
@@ -37,7 +47,7 @@ function sessionList() {
   return { items: [sessionItem], total: 1, limit: 50, offset: 0 };
 }
 
-describe("SessionsPage", () => {
+describe("DeviceManagement（全局「登录与设备」）", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2026-09-01T12:00:00+00:00"));
@@ -388,11 +398,13 @@ describe("SessionsPage", () => {
     fireEvent.change(screen.getByLabelText("公司名或用户名"), {
       target: { value: "设备公司" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await screen.findByText("customer_one");
+    // 下拉也走草稿，点「查询」才应用（T22/T23）。
     fireEvent.change(screen.getByLabelText("系统"), {
       target: { value: "windows" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await screen.findByText("customer_one");
     fireEvent.click(screen.getByRole("button", { name: /当前在线客户/ }));
     await screen.findByText("customer_one");

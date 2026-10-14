@@ -260,6 +260,14 @@ ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {
     "get_admin_actor",
     # 方案 P2-4：团队信息只对超管可见，读侧门槛是 get_admin_actor 的加强版。
     "get_super_admin_actor",
+    # 整改 T19（决策 D2）：整表 CSV 导出对审计员开放，因此导出路由的身份依赖
+    # 不再要求写级角色；留痕与限流由 _guard_ledger_export 承担。它只出现在
+    # 三个 GET 导出路由上（充值订单/生成记录/钱包流水），故归读侧权限。
+    "get_control_exporter",
+    # 同一决策的另一条线：管理端（非客户生产线）导出身份。挂在报告/审计/客户
+    # 与调账四类 GET 导出，以及两个只产出 CSV 的 POST 导出上（见
+    # READ_ONLY_POST_ROUTES），同样归读侧。
+    "get_admin_exporter",
 }
 
 # A JSON POST can be a read: this endpoint only estimates costs, without
@@ -268,6 +276,10 @@ ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {
 READ_ONLY_POST_ROUTES = {
     ("POST", "/viral/operations/estimate"),
     ("POST", "/api/control/viral/operations/estimate"),
+    # 整改 T19：报表导出 POST 只读取数据、产出 CSV 并落一条导出审计，不改动任何
+    # 业务记录，与上面两个估算端点同类——保留审计员读级权限。
+    ("POST", "/api/control/reports/export"),
+    ("POST", "/api/control/reports/summary/export"),
 }
 
 # Self-scoped recovery changes only the caller's password and revokes their
@@ -276,6 +288,9 @@ READ_ONLY_POST_ROUTES = {
 SELF_SCOPED_EXEMPT = {
     ("DELETE", "/api/control/admin/session"),
     ("PUT", "/api/control/admin/password"),
+    # 整改 T17：管理员自助改密。同样只作用于调用者本人——必须校验原密码、成功后
+    # 吊销本人其它会话并写审计，因此维持 get_admin_actor 级权限，不升写级。
+    ("POST", "/api/control/admin/password/change"),
 }
 # Session establishment (credential exchange / password login) runs before
 # any session exists — they are the only dep-less admin routes.

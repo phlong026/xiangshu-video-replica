@@ -59,34 +59,17 @@ afterEach(() => {
   setAdminCsrfToken("");
 });
 describe("首页编排", () => {
-  it("新编排提交目标位置与revision，不发送完整首页数组", async () => {
-    const fetchMock = install(true);
-    render(<ViralHomepagePage />);
-    await screen.findAllByText("测试视频two");
-    fireEvent.click(screen.getAllByRole("button", { name: "上移" })[1]);
-    await waitFor(() =>
-      expect(
-        fetchMock.mock.calls.some(([, init]) => init?.method === "POST"),
-      ).toBe(true),
-    );
-    const call = fetchMock.mock.calls.find(
-      ([, init]) => init?.method === "POST",
-    );
-    expect(String(call?.[0])).toContain("/viral/homepage/move");
-    const body = JSON.parse(String(call?.[1]?.body));
-    expect(body).toMatchObject({
-      video_id: "two",
-      position: 1,
-      expected_revision: "r".repeat(64),
-    });
-    expect(body).not.toHaveProperty("video_ids");
-    expect(body).not.toHaveProperty("expected_video_ids");
-  });
-  it("上移提交完整顺序与旧快照并刷新客户预览", async () => {
+  it("调整只改本地草稿，点保存才提交一次完整顺序与旧快照", async () => {
     const fetchMock = install();
     render(<ViralHomepagePage />);
     await screen.findAllByText("测试视频two");
     fireEvent.click(screen.getAllByRole("button", { name: "上移" })[1]);
+    // 草稿阶段不写接口，页面提示尚未保存。
+    expect(await screen.findByText("顺序已调整，尚未保存")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "PUT"),
+    ).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "保存顺序" }));
     await screen.findByText(/首页顺序已保存/);
     const writes = fetchMock.mock.calls.filter(
       ([, init]) => init?.method === "PUT",
@@ -104,6 +87,45 @@ describe("首页编排", () => {
     expect(
       document.querySelectorAll(".admin-homepage-preview strong")[0],
     ).toHaveTextContent("two");
+    expect(screen.queryByText("顺序已调整，尚未保存")).toBeNull();
+  });
+  it("多次调整（含拖拽）只产生一次保存，撤销后回到原顺序且不写接口", async () => {
+    const fetchMock = install();
+    render(<ViralHomepagePage />);
+    await screen.findAllByText("测试视频two");
+    const rows = () =>
+      Array.from(document.querySelectorAll(".admin-homepage-order > li"));
+    // 拖拽：把第 1 条拖到第 2 条的位置。
+    fireEvent.dragStart(rows()[0]);
+    fireEvent.drop(rows()[1]);
+    expect(
+      document.querySelectorAll(".admin-homepage-order strong")[0],
+    ).toHaveTextContent("two");
+    // 再用上移调回去：与原顺序一致 → 不再有未保存状态。
+    fireEvent.click(screen.getAllByRole("button", { name: "上移" })[1]);
+    expect(screen.queryByText("顺序已调整，尚未保存")).toBeNull();
+    // 再拖一次后点撤销。
+    fireEvent.dragStart(rows()[0]);
+    fireEvent.drop(rows()[1]);
+    fireEvent.click(screen.getByRole("button", { name: "撤销调整" }));
+    expect(
+      document.querySelectorAll(".admin-homepage-order strong")[0],
+    ).toHaveTextContent("one");
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "PUT"),
+    ).toBe(false);
+  });
+  it("问题项在顶部汇总并在列表中高亮", async () => {
+    install();
+    render(<ViralHomepagePage />);
+    const summary = await screen.findByRole("region", {
+      name: "需要处理的内容",
+    });
+    expect(summary).toHaveTextContent("需要处理（2）");
+    expect(summary).toHaveTextContent("封面缺失");
+    expect(
+      document.querySelectorAll(".admin-homepage-order > li.has-problem"),
+    ).toHaveLength(2);
   });
   it("排期使用北京时间，下线早于上线时不写接口", async () => {
     const fetchMock = install();
@@ -149,6 +171,7 @@ describe("首页编排", () => {
       screen.queryByRole("button", { name: "设置排期" }),
     ).not.toBeInTheDocument();
     expect(screen.getAllByText("封面缺失")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "保存顺序" })).toBeNull();
     expect(
       fetchMock.mock.calls.every(
         ([, init]) => !init?.method || init.method === "GET",

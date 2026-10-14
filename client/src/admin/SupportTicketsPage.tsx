@@ -2,13 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import {
   createSupportTicket,
   listSupportTickets,
+  listTicketHandlers,
   type SupportTicket,
+  type TicketHandler,
   updateSupportTicket,
 } from "../api.admin";
 import { CustomerLink } from "./CustomerLink";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { CustomerPicker, type PickedCustomer } from "./ui/CustomerPicker";
 import { DataTable } from "./ui/DataTable";
-import { PageBanner } from "./ui/PageBanner";
+import { FilterBar } from "./ui/FilterBar";
+import { ListPage } from "./ui/ListPage";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
 import { formatDateTime } from "./ui/vocabulary";
@@ -21,6 +25,38 @@ import { formatDateTime } from "./ui/vocabulary";
  */
 const PAGE_SIZE = 20;
 
+// 优先级（T15）：P0 最紧急；未结案工单按优先级排在前面。
+const PRIORITY_OPTIONS = [
+  { value: "P0", label: "P0 紧急" },
+  { value: "P1", label: "P1 高" },
+  { value: "P2", label: "P2 普通" },
+  { value: "P3", label: "P3 低" },
+];
+const PRIORITY_TONE: Record<string, "danger" | "warn" | "info" | "neutral"> = {
+  P0: "danger",
+  P1: "warn",
+  P2: "info",
+  P3: "neutral",
+};
+
+/** 关联对象（T14）→ 可点击的跳转地址；处理人不必再从描述里抄编号。 */
+function relatedLink(ref: string): { label: string; href: string } | null {
+  const [kind, ...rest] = ref.split(":");
+  const value = rest.join(":");
+  if (!value) return null;
+  if (kind === "task")
+    return {
+      label: `生成任务 ${value}`,
+      href: `#admin/generationRecords?${new URLSearchParams({ taskId: value })}`,
+    };
+  if (kind === "order")
+    return {
+      label: `充值订单 ${value}`,
+      href: `#admin/funds?${new URLSearchParams({ sub: "orders", orderNo: value })}`,
+    };
+  return null;
+}
+
 const CATEGORY_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "billing", label: "计费/资金" },
   { value: "generation", label: "生成问题" },
@@ -32,6 +68,8 @@ const CATEGORY_OPTIONS: Array<{ value: string; label: string }> = [
 
 const STATUS_OPTIONS = [
   { value: "", label: "全部状态" },
+  // 未结案 = 待处理 + 处理中，与总览「工单未结案」待办同口径。
+  { value: "unresolved", label: "未结案" },
   { value: "open", label: "待处理" },
   { value: "processing", label: "处理中" },
   { value: "resolved", label: "已解决" },
@@ -40,23 +78,42 @@ const STATUS_OPTIONS = [
 export function SupportTicketsPage({
   readOnly = false,
   onCustomer,
+  initialStatus = "",
+  customer,
 }: {
   readOnly?: boolean;
   onCustomer?: (id: string) => void;
+  initialStatus?: string;
+  /**
+   * 客户详情「工单」页签（T32）：限定为这一位客户。清单按客户编号精确过滤，
+   * 隐藏客户筛选，登记工单时关联客户固定为此人。
+   */
+  customer?: PickedCustomer;
 }) {
   const [items, setItems] = useState<SupportTicket[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
-  const [status, setStatus] = useState("");
-  const [category, setCategory] = useState("");
-  const [username, setUsername] = useState("");
+  // 草稿与已提交筛选分开（T22/T23）：点「查询」才发请求。
+  const emptyFilters = { status: initialStatus, category: "", username: "" };
+  const [draft, setDraft] = useState(emptyFilters);
+  const [filters, setFilters] = useState(emptyFilters);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [creating, setCreating] = useState(false);
   const [summary, setSummary] = useState("");
   const [newCategory, setNewCategory] = useState("other");
-  const [targetUser, setTargetUser] = useState("");
+  const [targetCustomer, setTargetCustomer] = useState<PickedCustomer | null>(
+    customer ?? null,
+  );
+  const [newPriority, setNewPriority] = useState("P2");
+  const [relatedKind, setRelatedKind] = useState<"" | "task" | "order">("");
+  const [relatedValue, setRelatedValue] = useState("");
+  // 指派与改优先级（T14/T15）：负责人候选在首次打开时读取。
+  const [assigning, setAssigning] = useState<SupportTicket | null>(null);
+  const [handlers, setHandlers] = useState<TicketHandler[] | null>(null);
+  const [assignHandler, setAssignHandler] = useState("");
+  const [assignPriority, setAssignPriority] = useState("P2");
   const [pendingTicket, setPendingTicket] = useState<SupportTicket | null>(
     null,
   );
@@ -68,9 +125,10 @@ export function SupportTicketsPage({
       setLoading(true);
       setError("");
       const response = await listSupportTickets({
-        status: status || undefined,
-        category: category || undefined,
-        username: username || undefined,
+        status: filters.status || undefined,
+        category: filters.category || undefined,
+        username: filters.username || undefined,
+        userId: customer?.user_id,
         limit: PAGE_SIZE,
         offset,
       });
@@ -81,7 +139,7 @@ export function SupportTicketsPage({
     } finally {
       setLoading(false);
     }
-  }, [status, category, username, offset]);
+  }, [filters, offset, customer?.user_id]);
 
   useEffect(() => {
     void load();
@@ -92,18 +150,67 @@ export function SupportTicketsPage({
     setError("");
     try {
       await createSupportTicket({
-        targetUserId: targetUser.trim(),
+        targetUserId: targetCustomer?.user_id ?? "",
         category: newCategory,
         summary: summary.trim(),
+        priority: newPriority,
+        relatedRef:
+          relatedKind && relatedValue.trim()
+            ? `${relatedKind}:${relatedValue.trim()}`
+            : "",
         reason,
       });
       setNotice("工单已登记。");
       setCreating(false);
       setSummary("");
-      setTargetUser("");
+      setTargetCustomer(customer ?? null);
+      setNewPriority("P2");
+      setRelatedKind("");
+      setRelatedValue("");
       await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "登记工单失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openAssign(item: SupportTicket) {
+    setAssigning(item);
+    setAssignHandler(item.handler_user_id);
+    setAssignPriority(item.priority || "P2");
+    if (handlers === null) {
+      void listTicketHandlers()
+        .then((response) => setHandlers(response.items))
+        .catch((cause) => {
+          setHandlers([]);
+          setError(
+            cause instanceof Error ? cause.message : "读取可指派负责人失败",
+          );
+        });
+    }
+  }
+
+  async function confirmAssign(reason: string) {
+    if (!assigning) return;
+    setSaving(true);
+    setError("");
+    try {
+      await updateSupportTicket({
+        id: assigning.id,
+        priority:
+          assignPriority !== (assigning.priority || "P2") ? assignPriority : "",
+        handlerUserId:
+          assignHandler && assignHandler !== assigning.handler_user_id
+            ? assignHandler
+            : "",
+        reason,
+      });
+      setNotice("工单负责人与优先级已更新。");
+      setAssigning(null);
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "更新工单失败");
     } finally {
       setSaving(false);
     }
@@ -142,77 +249,100 @@ export function SupportTicketsPage({
   }
 
   return (
-    <section
-      className="admin-panel admin-support-tickets"
-      aria-label="工单反馈"
-    >
-      <header>
-        <h2>工单 / 反馈</h2>
-        <p className="admin-hint">
-          客户问题的登记—处理—结案闭环（v1 管理端代录；客户端提单入口后续
-          开放）。状态只能前进：待处理 → 处理中 → 已解决，结案后不可复活。
-        </p>
-        {!readOnly && !creating ? (
-          <button type="button" onClick={() => setCreating(true)}>
-            登记工单
-          </button>
-        ) : null}
-      </header>
-      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
-      {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
-      <form
-        className="admin-toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setOffset(0);
-        }}
-      >
-        <label>
-          状态
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
-            {STATUS_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          类目
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
+    <>
+      <ListPage
+        ariaLabel="工单反馈"
+        className="admin-support-tickets"
+        error={error}
+        notice={notice}
+        loading={loading}
+        hasItems={items.length > 0}
+        loadingText="正在读取工单…"
+        emptyText="暂无符合条件的工单。"
+        actions={
+          <header>
+            <p className="admin-hint">
+              客户问题的登记—处理—结案闭环（v1 管理端代录；客户端提单入口后续
+              开放）。状态只能前进：待处理 → 处理中 → 已解决，结案后不可复活。
+            </p>
+            {!readOnly && !creating ? (
+              <button type="button" onClick={() => setCreating(true)}>
+                登记工单
+              </button>
+            ) : null}
+          </header>
+        }
+        filters={
+          <FilterBar
+            ariaLabel="工单筛选"
+            busy={loading}
+            onReset={() => {
+              setOffset(0);
+              setDraft(emptyFilters);
+              setFilters(emptyFilters);
+            }}
+            onSubmit={() => {
+              setOffset(0);
+              setFilters(draft);
+            }}
           >
-            <option value="">全部类目</option>
-            {CATEGORY_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          客户
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="用户名或公司名"
+            <label>
+              状态
+              <select
+                value={draft.status}
+                onChange={(e) => setDraft({ ...draft, status: e.target.value })}
+              >
+                {STATUS_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              类目
+              <select
+                value={draft.category}
+                onChange={(e) =>
+                  setDraft({ ...draft, category: e.target.value })
+                }
+              >
+                <option value="">全部类目</option>
+                {CATEGORY_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {customer ? null : (
+              <label>
+                客户
+                <input
+                  value={draft.username}
+                  onChange={(e) =>
+                    setDraft({ ...draft, username: e.target.value })
+                  }
+                  placeholder="用户名或公司名"
+                />
+              </label>
+            )}
+          </FilterBar>
+        }
+        pagination={
+          <Pagination
+            total={total}
+            limit={PAGE_SIZE}
+            offset={offset}
+            onPageChange={setOffset}
           />
-        </label>
-        <button type="submit" disabled={loading}>
-          查询
-        </button>
-      </form>
-      {loading ? (
-        <p role="status">正在读取工单…</p>
-      ) : items.length === 0 ? (
-        <PageBanner tone="notice">暂无符合条件的工单。</PageBanner>
-      ) : (
+        }
+      >
         <DataTable
           ariaLabel="工单清单"
           headers={
             <>
-              <th>状态</th>
+              <th>状态 / 优先级</th>
               <th>客户 / 类目</th>
               <th>问题描述</th>
               <th>负责人 / 结论</th>
@@ -234,6 +364,11 @@ export function SupportTicketsPage({
                   }
                 >
                   {item.status_label}
+                </StatusBadge>{" "}
+                <StatusBadge
+                  tone={PRIORITY_TONE[item.priority ?? "P2"] ?? "info"}
+                >
+                  {item.priority ?? "P2"}
                 </StatusBadge>
               </td>
               <td>
@@ -249,7 +384,19 @@ export function SupportTicketsPage({
                 )}{" "}
                 · {item.category_label}
               </td>
-              <td>{item.summary}</td>
+              <td>
+                {item.summary}
+                {(() => {
+                  const link = item.related_ref
+                    ? relatedLink(item.related_ref)
+                    : null;
+                  return link ? (
+                    <small>
+                      <a href={link.href}>{link.label}</a>
+                    </small>
+                  ) : null;
+                })()}
+              </td>
               <td>
                 {item.handler_username || "—"}
                 {item.resolution ? ` · ${item.resolution.slice(0, 40)}` : ""}
@@ -259,28 +406,31 @@ export function SupportTicketsPage({
                 {readOnly || item.status === "resolved" ? (
                   "—"
                 ) : (
-                  <button
-                    type="button"
-                    disabled={saving}
-                    onClick={() => {
-                      setResolution("");
-                      setPendingTicket(item);
-                    }}
-                  >
-                    {item.status === "open" ? "开始处理" : "结案"}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => {
+                        setResolution("");
+                        setPendingTicket(item);
+                      }}
+                    >
+                      {item.status === "open" ? "开始处理" : "结案"}
+                    </button>{" "}
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => openAssign(item)}
+                    >
+                      指派 / 优先级
+                    </button>
+                  </>
                 )}
               </td>
             </tr>
           ))}
         </DataTable>
-      )}
-      <Pagination
-        total={total}
-        limit={PAGE_SIZE}
-        offset={offset}
-        onPageChange={setOffset}
-      />
+      </ListPage>
       <ConfirmDialog
         open={creating}
         title="登记工单"
@@ -292,14 +442,52 @@ export function SupportTicketsPage({
         onClose={() => !saving && setCreating(false)}
         onConfirm={(reason) => void submitCreate(reason)}
       >
-        <label>
-          关联客户编号（可选）
-          <input
-            value={targetUser}
-            onChange={(e) => setTargetUser(e.target.value)}
-            placeholder="从客户列表复制的用户编号；留空 = 平台侧问题"
+        {/* 客户按名字联想选择（T14），不再粘贴用户编号；不选 = 平台侧问题。 */}
+        {customer ? (
+          <p className="admin-hint">关联客户：{customer.username}</p>
+        ) : (
+          <CustomerPicker
+            label="关联客户（可选，不选 = 平台侧问题）"
+            value={targetCustomer}
+            onChange={setTargetCustomer}
           />
+        )}
+        <label>
+          优先级
+          <select
+            value={newPriority}
+            onChange={(e) => setNewPriority(e.target.value)}
+          >
+            {PRIORITY_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
         </label>
+        <label>
+          关联对象（可选）
+          <select
+            value={relatedKind}
+            onChange={(e) =>
+              setRelatedKind(e.target.value as "" | "task" | "order")
+            }
+          >
+            <option value="">无</option>
+            <option value="task">生成任务号</option>
+            <option value="order">充值订单号</option>
+          </select>
+        </label>
+        {relatedKind ? (
+          <label>
+            {relatedKind === "task" ? "生成任务号" : "充值订单号"}
+            <input
+              value={relatedValue}
+              maxLength={100}
+              onChange={(e) => setRelatedValue(e.target.value)}
+            />
+          </label>
+        ) : null}
         <label>
           类目
           <select
@@ -322,6 +510,50 @@ export function SupportTicketsPage({
             onChange={(e) => setSummary(e.target.value)}
             placeholder="客户遇到了什么、如何复现、期望结果"
           />
+        </label>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={assigning !== null}
+        title="指派负责人 / 调整优先级"
+        confirmLabel="保存"
+        description="负责人只能是启用中的管理员；变更带原因入审计。"
+        busy={saving}
+        error={error}
+        level="reason"
+        onClose={() => !saving && setAssigning(null)}
+        onConfirm={(reason) => void confirmAssign(reason)}
+      >
+        <label>
+          负责人
+          <select
+            value={assignHandler}
+            onChange={(e) => setAssignHandler(e.target.value)}
+            disabled={handlers === null}
+          >
+            <option value="">
+              {handlers === null ? "正在读取…" : "暂不指派"}
+            </option>
+            {(handlers ?? []).map((h) => (
+              <option key={h.user_id} value={h.user_id}>
+                {h.display_name
+                  ? `${h.display_name}（${h.username}）`
+                  : h.username}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          优先级
+          <select
+            value={assignPriority}
+            onChange={(e) => setAssignPriority(e.target.value)}
+          >
+            {PRIORITY_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
         </label>
       </ConfirmDialog>
       <ConfirmDialog
@@ -354,6 +586,6 @@ export function SupportTicketsPage({
           </label>
         ) : null}
       </ConfirmDialog>
-    </section>
+    </>
   );
 }

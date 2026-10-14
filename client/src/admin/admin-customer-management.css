@@ -165,3 +165,234 @@
     padding: 10px 5px;
   }
 }
+
+/* 公告客户端预览：与工作台横幅同样只露出标题与正文前 60 字。 */
+.admin-announcement-preview {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--admin-line, #38362e);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--admin-panel-raised, #1b1a18);
+}
+.admin-announcement-preview p {
+  margin: 6px 0 0;
+  color: var(--admin-muted, #a49e95);
+}
+.admin-announcement-preview--maintenance {
+  border-left-color: #d08a3c;
+}
+.admin-announcement-preview--promo {
+  border-left-color: var(--admin-gold, #c6a45f);
+}
+
+/* 客户选择器（CustomerPicker）：联想结果是一列按钮，选中后显示为一行摘要。 */
+.admin-customer-picker {
+  display: grid;
+  gap: 6px;
+}
+.admin-customer-picker--chosen {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+.admin-customer-picker__options {
+  display: grid;
+  gap: 4px;
+  max-height: 240px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.admin-customer-picker__options button {
+  width: 100%;
+  text-align: left;
+}
+
+/* FilterBar：查询 / 重置 / 其它动作固定排成一行，换行时整组一起换。 */
+.admin-filter-bar__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+/* 口径说明折叠块：默认只占一行，展开后沿用 admin-hint 的字号与配色。 */
+.admin-rule-note {
+  margin: 4px 0;
+}
+.admin-rule-note > summary {
+  width: fit-content;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--font-caption);
+  cursor: pointer;
+}
+.admin-rule-note__body {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+/* 功能开关行：说明在左，状态与操作在右，窄屏换行。 */
+.admin-feature-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--admin-border, #e5e7eb);
+}
+
+.admin-feature-switch > div {
+  flex: 1 1 320px;
+}
+
+/* 生成记录详情抽屉：固定在视口右侧，内容独立滚动，不撑高表格行。 */
+.admin-record-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  width: min(520px, 100vw);
+  padding: 20px;
+  overflow-y: auto;
+  background: var(--admin-surface, #fff);
+  border-left: 1px solid var(--admin-border, #e5e7eb);
+  box-shadow: -8px 0 24px rgba(15, 23, 42, 0.12);
+}
+
+.admin-record-drawer > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-generation-records__batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 0;
+}
+
+/* 首页编排：封面缩略图、拖拽行与问题项高亮。 */
+.admin-homepage-order > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.admin-homepage-order > li[draggable="true"] {
+  cursor: grab;
+}
+
+.admin-homepage-order > li.has-problem {
+  background: var(--admin-warn-bg, #fff7ed);
+  border-left: 3px solid var(--admin-warn, #f59e0b);
+}
+
+.admin-homepage-thumb {
+  flex: 0 0 72px;
+  width: 72px;
+  height: 96px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--admin-muted-bg, #f3f4f6);
+}
+
+.admin-homepage-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.admin-homepage-savebar,
+.admin-homepage-problems {
+  margin: 8px 0;
+}
+
+.admin-homepage-savebar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+/* 带意图跳转到的设置区块：短暂高亮，提示「就是这里」。 */
+.admin-settings-highlight {
+  border-radius: 8px;
+  outline: 2px solid var(--admin-accent, #2563eb);
+  outline-offset: 4px;
+  animation: admin-settings-highlight-fade 3s ease-out forwards;
+}
+
+@keyframes admin-settings-highlight-fade {
+  to {
+    outline-color: transparent;
+  }
+}
+
+/* 顶栏全局搜索：输入框 + 结果下拉，挂在顶栏会话区左侧。 */
+.admin-global-search {
+  position: relative;
+  display: block;
+}
+
+.admin-global-search__form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-global-search input {
+  width: 240px;
+  max-width: 40vw;
+}
+
+.admin-global-search__message {
+  font-size: 12px;
+  color: var(--admin-muted, #6b7280);
+}
+
+.admin-global-search__results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 280px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--admin-surface, #fff);
+  border: 1px solid var(--admin-border, #e5e7eb);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.admin-global-search__results button {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  align-items: flex-start;
+  text-align: left;
+}
+
+/* 订单页对账提示：一行内联，数字按钮去掉卡片外观。 */
+.admin-recon-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  margin: 0 0 8px;
+}
+
+.admin-recon-line button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}

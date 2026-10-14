@@ -240,6 +240,54 @@ def test_panorama_attention_combines_scope_before_aggregation_and_export(
     assert invalid.status_code == 422
 
 
+def test_billing_export_allows_auditor_but_audits_and_rate_limits(
+    pricing_client, route_state, monkeypatch
+):
+    """T19（决策 D2）：审计员可导出计费明细；每次导出留 control.export 审计，且过限流。"""
+    from uuid import uuid4
+
+    from app.admin_auth_routes import hash_admin_password
+    from app.billing_routes import router
+
+    pricing_client.app.include_router(router)
+    auditor_id = str(uuid4())
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role) VALUES (%s, "
+            "'export_auditor', 'Export Auditor', 'auditor')",
+            (auditor_id,),
+        )
+        raw.execute(
+            "INSERT INTO admin_password_credentials (user_id, password_hash, "
+            "credential_version, password_changed_at) VALUES (%s, %s, 1, CURRENT_TIMESTAMP)",
+            (auditor_id, hash_admin_password("Auditor-test-2026!")),
+        )
+    login = pricing_client.post(
+        "/api/control/admin/session/password",
+        json={"username": "export_auditor", "password": "Auditor-test-2026!"},
+    )
+    assert login.status_code == 201, login.text
+    params = {"start": "2000-01-01", "end": "2099-01-01"}
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_CONTROL_EXPORT", "2")
+    first = pricing_client.get("/api/control/billing/export", params=params)
+    assert first.status_code == 200, first.text
+    assert pricing_client.get("/api/control/billing/export", params=params).status_code == 200
+    limited = pricing_client.get("/api/control/billing/export", params=params)
+    assert limited.status_code == 429
+    assert limited.json()["detail"]["code"] == "CONTROL_EXPORT_RATE_LIMITED"
+    assert "Retry-After" in limited.headers
+
+    with psycopg.connect(route_state) as raw:
+        audited = raw.execute(
+            "SELECT count(*) FROM audit_logs WHERE action = 'control.export' "
+            "AND actor_user_id = %s AND entity_id = 'billing_operations'",
+            (auditor_id,),
+        ).fetchone()
+    # 被限流的那次不留审计（它没有真的导出）。
+    assert audited == (2,)
+
+
 def test_customer_and_admin_ledgers_share_causal_order_and_pagination(pricing_client, route_state):
     from app.account_admin_routes import router as account_admin_router
 

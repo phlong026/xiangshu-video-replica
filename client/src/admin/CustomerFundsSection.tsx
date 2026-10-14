@@ -8,9 +8,6 @@ import {
   resumeCustomer,
   suspendCustomer,
 } from "../api.admin";
-import { AccountsPage } from "./AccountsPage";
-import { AdjustmentsPage } from "./AdjustmentsPage";
-import { OrdersPage } from "./OrdersPage";
 import { RecordCallsPanel } from "./RecordCallsPanel";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
@@ -44,9 +41,6 @@ export function Customer360Data({
   const [error, setError] = useState("");
   // 一次只展开一单的查单日志；再点一次收起。
   const [openedOrderNo, setOpenedOrderNo] = useState<string | null>(null);
-  const [fullFunds, setFullFunds] = useState<
-    "orders" | "ledger" | "adjustments" | null
-  >(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,31 +80,25 @@ export function Customer360Data({
 
   return (
     <section aria-label="客户 360 度运营数据" className="customer-360-grid">
+      {/* 完整记录统一回资金中心（T32）：带上客户编号的真链接，不再在详情里内嵌三张
+          全量表——资金口径只在一处维护，也能用资金中心的筛选与导出。 */}
       <nav aria-label="客户完整资金记录">
-        <button type="button" onClick={() => setFullFunds("orders")}>
+        <a
+          href={`#admin/funds?sub=orders&userId=${encodeURIComponent(userId)}`}
+        >
           查看全部充值订单
-        </button>
-        <button type="button" onClick={() => setFullFunds("ledger")}>
+        </a>
+        <a
+          href={`#admin/funds?sub=transactions&userId=${encodeURIComponent(userId)}`}
+        >
           查看全部积分流水
-        </button>
-        <button type="button" onClick={() => setFullFunds("adjustments")}>
+        </a>
+        <a
+          href={`#admin/funds?sub=adjustments&userId=${encodeURIComponent(userId)}`}
+        >
           查看全部人工调整
-        </button>
-        {fullFunds ? (
-          <button type="button" onClick={() => setFullFunds(null)}>
-            收起完整资金记录
-          </button>
-        ) : null}
+        </a>
       </nav>
-      {fullFunds === "ledger" ? (
-        <AccountsPage key={userId} userId={userId} readOnly={readOnly} />
-      ) : null}
-      {fullFunds === "orders" ? (
-        <OrdersPage key={userId} userId={userId} readOnly={readOnly} />
-      ) : null}
-      {fullFunds === "adjustments" ? (
-        <AdjustmentsPage key={userId} userId={userId} readOnly={readOnly} />
-      ) : null}
       <Customer360Panel
         className={openedOrderNo ? "customer-360-panel--wide" : undefined}
         title="最近充值订单"

@@ -264,7 +264,7 @@ describe("AuditEventsPage", () => {
     });
     expect(fetchMock.mock.calls.length).toBe(requestsAfterLoad);
 
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     await waitFor(() => {
       expect(
@@ -277,7 +277,7 @@ describe("AuditEventsPage", () => {
     });
   });
 
-  it("offers the CSV export to writers but hides it from read-only roles", async () => {
+  it("offers the CSV export to writers and to auditors alike (T19)", async () => {
     installFetch();
     const { unmount } = render(<AuditEventsPage />);
     expect(
@@ -285,11 +285,13 @@ describe("AuditEventsPage", () => {
     ).toBeInTheDocument();
     unmount();
 
-    // auditor 没有导出权限：不渲染入口，而不是渲染出来点了才 403。
+    // 决策 D2：审计员是审计日志的主要使用者，可导出；导出动作同样入审计。
     installFetch();
     render(<AuditEventsPage readOnly />);
     await screen.findByText("人工调整积分");
-    expect(screen.queryByRole("button", { name: "导出 CSV" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "导出 CSV" }),
+    ).toBeInTheDocument();
     // 列表与筛选仍然可用。
     expect(screen.getByRole("button", { name: "重置" })).toBeInTheDocument();
   });
@@ -313,7 +315,7 @@ describe("AuditEventsPage", () => {
     fireEvent.change(screen.getByLabelText("审计范围"), {
       target: { value: "customer" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     await waitFor(() => {
       expect(
@@ -336,7 +338,7 @@ describe("AuditEventsPage", () => {
     fireEvent.change(screen.getByLabelText("事件类型"), {
       target: { value: "operation_rate.update" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     await waitFor(() =>
       expect(
@@ -477,7 +479,7 @@ describe("AuditEventsPage", () => {
     fireEvent.change(screen.getByLabelText("操作人用户名"), {
       target: { value: "admin_u" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([url]) => String(url).includes("admin_u")),

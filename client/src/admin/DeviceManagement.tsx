@@ -13,6 +13,7 @@ import {
 } from "../api.admin";
 import { CustomerLink } from "./CustomerLink";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import {
@@ -43,7 +44,10 @@ export function DeviceManagement({
   onCustomerChange?: (id: string | undefined) => void;
 }) {
   const [scope, setScope] = useState<DeviceListOptions>({ userId, offset: 0 });
-  const [keyword, setKeyword] = useState("");
+  // 筛选项统一走草稿，点「查询」才应用（T22/T23）：此前下拉即时生效、关键词却要
+  // 点「搜索」，同一个表单两种交互。
+  const emptyDraft = { keyword: "", platform: "", status: "", attention: "" };
+  const [draft, setDraft] = useState(emptyDraft);
   const [page, setPage] = useState<DeviceListResponse>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -100,6 +104,19 @@ export function DeviceManagement({
     setDialogError("");
     setNotice("");
     setScope(next);
+  }
+
+  function applyDraft(next: typeof emptyDraft) {
+    setDraft(next);
+    changeScope({
+      ...scope,
+      keyword: next.keyword.trim() || undefined,
+      platform: next.platform || undefined,
+      status: next.status || undefined,
+      attention: (next.attention ||
+        undefined) as DeviceListOptions["attention"],
+      offset: 0,
+    });
   }
 
   function selectCustomer(id: string | undefined) {
@@ -170,7 +187,7 @@ export function DeviceManagement({
       aria-label={global ? "登录与设备" : "客户设备"}
     >
       <header className="customer-devices__header">
-        <h2>{global ? "登录与设备" : "设备"}</h2>
+        {global ? null : <h2>设备</h2>}
         <small>
           {loading
             ? "加载中…"
@@ -186,14 +203,19 @@ export function DeviceManagement({
               type="button"
               disabled={loading || page?.summary?.[card.key] == null}
               aria-pressed={scope.attention === card.attention}
-              onClick={() =>
+              onClick={() => {
+                setDraft((current) => ({
+                  ...current,
+                  status: "",
+                  attention: card.attention,
+                }));
                 changeScope({
                   ...scope,
                   status: undefined,
                   attention: card.attention,
                   offset: 0,
-                })
-              }
+                });
+              }}
             >
               <span>{card.label}</span>
               <strong>{page?.summary?.[card.key] ?? "待核对"} 位</strong>
@@ -201,36 +223,45 @@ export function DeviceManagement({
           ))}
         </div>
       )}
-      <form
+      <FilterBar
+        ariaLabel="设备筛选"
         className="device-filters"
-        onSubmit={(event) => {
-          event.preventDefault();
-          changeScope({
-            ...scope,
-            keyword: keyword.trim() || undefined,
-            offset: 0,
-          });
-        }}
+        onReset={() => applyDraft(emptyDraft)}
+        onSubmit={() => applyDraft(draft)}
+        actions={
+          <>
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => void load()}
+            >
+              刷新
+            </button>
+            {global && scope.userId && (
+              <button type="button" onClick={() => selectCustomer(undefined)}>
+                查看全部设备
+              </button>
+            )}
+          </>
+        }
       >
         {global && (
           <label>
             公司名或用户名
             <input
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
+              value={draft.keyword}
+              onChange={(event) =>
+                setDraft({ ...draft, keyword: event.target.value })
+              }
             />
           </label>
         )}
         <label>
           系统
           <select
-            value={scope.platform ?? ""}
+            value={draft.platform}
             onChange={(event) =>
-              changeScope({
-                ...scope,
-                platform: event.target.value || undefined,
-                offset: 0,
-              })
+              setDraft({ ...draft, platform: event.target.value })
             }
           >
             <option value="">全部系统</option>
@@ -244,13 +275,9 @@ export function DeviceManagement({
         <label>
           设备状态
           <select
-            value={scope.status ?? ""}
+            value={draft.status}
             onChange={(event) =>
-              changeScope({
-                ...scope,
-                status: event.target.value || undefined,
-                offset: 0,
-              })
+              setDraft({ ...draft, status: event.target.value })
             }
           >
             <option value="">全部设备（含历史）</option>
@@ -264,14 +291,9 @@ export function DeviceManagement({
         <label>
           关注范围
           <select
-            value={scope.attention ?? ""}
+            value={draft.attention}
             onChange={(event) =>
-              changeScope({
-                ...scope,
-                attention: (event.target.value ||
-                  undefined) as DeviceListOptions["attention"],
-                offset: 0,
-              })
+              setDraft({ ...draft, attention: event.target.value })
             }
           >
             <option value="">全部</option>
@@ -281,16 +303,7 @@ export function DeviceManagement({
             <option value="frequent_swaps_24h">近24小时频繁换设备</option>
           </select>
         </label>
-        {global && <button type="submit">搜索</button>}
-        <button type="button" disabled={loading} onClick={() => void load()}>
-          刷新
-        </button>
-        {global && scope.userId && (
-          <button type="button" onClick={() => selectCustomer(undefined)}>
-            查看全部设备
-          </button>
-        )}
-      </form>
+      </FilterBar>
       {global && (
         <p className="admin-hint">
           卡片按当前公司、客户和系统范围统计去重客户，独立于分页和关注筛选；频繁换设备指近24小时内至少两台设备绑定后被解绑或禁用。

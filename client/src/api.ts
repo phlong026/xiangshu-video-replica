@@ -1858,11 +1858,15 @@ export async function downloadCustomersCsv(
     balanceMax?: number;
     attention?: string;
     lowBalanceThreshold?: number;
+    tag?: string;
+    ownerUserId?: string;
     sort?: string;
     direction?: string;
   } = {},
 ): Promise<void> {
   const query = new URLSearchParams();
+  if (options.tag) query.set("tag", options.tag);
+  if (options.ownerUserId) query.set("owner_user_id", options.ownerUserId);
   if (options.status) query.set("status", options.status);
   if (options.username) query.set("username", options.username);
   if (options.createdFrom) query.set("created_from", options.createdFrom);
@@ -1880,6 +1884,37 @@ export async function downloadCustomersCsv(
   await downloadControlCsv(
     `/api/control/customers.csv${suffix}`,
     "customers.csv",
+  );
+}
+
+/** 导出当前筛选的生成记录（整改 T33）；筛选项与列表接口同名同义。 */
+export async function downloadGenerationRecordsCsv(
+  options: {
+    userId?: string;
+    username?: string;
+    projectName?: string;
+    status?: string;
+    recordType?: string;
+    failurePhase?: string;
+    taskRef?: string;
+    createdFrom?: string;
+    createdTo?: string;
+  } = {},
+): Promise<void> {
+  const query = new URLSearchParams();
+  if (options.userId) query.set("user_id", options.userId);
+  if (options.username) query.set("username", options.username);
+  if (options.projectName) query.set("project_name", options.projectName);
+  if (options.status) query.set("status", options.status);
+  if (options.recordType) query.set("record_type", options.recordType);
+  if (options.failurePhase) query.set("failure_phase", options.failurePhase);
+  if (options.taskRef) query.set("task_ref", options.taskRef);
+  if (options.createdFrom) query.set("created_from", options.createdFrom);
+  if (options.createdTo) query.set("created_to", options.createdTo);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  await downloadControlCsv(
+    `/api/control/generation-records.csv${suffix}`,
+    "generation-records.csv",
   );
 }
 
