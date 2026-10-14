@@ -411,9 +411,14 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # submitted_at/submission_key/sync_attempts 三列 + sync_attempts CHECK +
 # submission_unknown 部分索引；columns +3、check_constraints +1、
 # timestamptz_columns +1、partial_indexes +1；digest 在全新 PG16 探针库重算。
+# 2026-10-14 管理端整改 T14/T15 与 T29 追加：support_tickets 增 priority +
+# related_ref 两列与 priority CHECK，客户运营参数增两列与对应 CHECK；
+# columns +4、check_constraints +4，tables 不变；digest 由 --print-schema 在
+# 迁到新 head 的隔离 PG16 探针库重算（两迁移自 20261013T1020 线性接续，
+# 未改写已发布链指纹）。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 388,
-    "columns": 1488,
+    "check_constraints": 392,
+    "columns": 1492,
     "foreign_keys": 216,
     "identity_columns": 0,
     "jsonb_columns": 12,
@@ -423,7 +428,7 @@ HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "tables": 133,
     "timestamptz_columns": 118,
     "triggers": 61,
-    "unique_constraints": 43,
+    "unique_constraints": 43
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -680,7 +685,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "114772521601786be9f73e73c229c1cf313b82be08d57c89e7234920cc817391"
+HEAD_SCHEMA_DIGEST = "b012239dba9b154ffd7e0b6369abe89e12a7fa62950b3740e3ab0d6fbf77ae35"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

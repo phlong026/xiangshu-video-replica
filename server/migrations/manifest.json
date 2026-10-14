@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261013T1020_publish_submission_safety"
+      "20261014T1100_customer_ops_params"
     ],
     "parents": {
       "001_core": null,
@@ -190,9 +190,11 @@
       "20261012T0600_viral_copy_upload_receipts": "20261012T0500_nullable_viral_metrics",
       "20261013T1000_billing_reconciliation_items": "20261012T0600_viral_copy_upload_receipts",
       "20261013T1010_studio_draft_tombstones": "20261013T1000_billing_reconciliation_items",
-      "20261013T1020_publish_submission_safety": "20261013T1010_studio_draft_tombstones"
+      "20261013T1020_publish_submission_safety": "20261013T1010_studio_draft_tombstones",
+      "20261014T1000_support_ticket_priority": "20261013T1020_publish_submission_safety",
+      "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority"
     },
-    "revision_count": 171
+    "revision_count": 173
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -890,6 +892,14 @@
     "20261013T1020_publish_submission_safety": {
       "file": "versions/20261013T1020_publish_submission_safety.py",
       "sha256": "59fd4eb7dcfacb7dfb8cb45762ce7a967cd05180f51b2ce626f9723af8ac6220"
+    },
+    "20261014T1000_support_ticket_priority": {
+      "file": "versions/20261014T1000_support_ticket_priority.py",
+      "sha256": "a3dfdddbc876c401e54d88c28eae788dc57869a3b219620578f573fbfbb5f5d7"
+    },
+    "20261014T1100_customer_ops_params": {
+      "file": "versions/20261014T1100_customer_ops_params.py",
+      "sha256": "750f2206e91b953be92523522c2aa5daa977357dba3f6e0547ea5c80e3533102"
     }
   },
   "task": "MIGRATION-GUARD-20260912"
