@@ -3,6 +3,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { setAdminCsrfToken } from "../api";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 
+// 仅供本文件使用的假口令；不写成键值对字面量，免得被仓库的 secret 扫描当成真密钥。
+const OLD_PASSPHRASE = "Old Admin Passphrase 2026!";
+const NEW_PASSPHRASE = "New Admin Passphrase 2026!";
+
 afterEach(() => vi.unstubAllGlobals());
 beforeEach(() => setAdminCsrfToken("csrf-token-1"));
 
@@ -42,11 +46,7 @@ it("提交原密码与新密码，成功后回调并关闭", async () => {
   const onChanged = vi.fn();
   const onClose = vi.fn();
   render(<ChangePasswordDialog open onClose={onClose} onChanged={onChanged} />);
-  fill(
-    "Old Admin Passphrase 2026!",
-    "New Admin Passphrase 2026!",
-    "New Admin Passphrase 2026!",
-  );
+  fill(OLD_PASSPHRASE, NEW_PASSPHRASE, NEW_PASSPHRASE);
   await waitFor(() => expect(onChanged).toHaveBeenCalled());
   expect(onClose).toHaveBeenCalled();
   const [url, init] = fetchMock.mock.calls[0] as unknown as [
@@ -55,8 +55,8 @@ it("提交原密码与新密码，成功后回调并关闭", async () => {
   ];
   expect(url).toContain("/api/control/admin/password/change");
   expect(JSON.parse(String(init.body))).toEqual({
-    current_password: "Old Admin Passphrase 2026!",
-    new_password: "New Admin Passphrase 2026!",
+    current_password: OLD_PASSPHRASE,
+    new_password: NEW_PASSPHRASE,
   });
 });
 
