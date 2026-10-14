@@ -854,18 +854,19 @@ def test_http_visibility_decisions_match_for_two_accounts(detail_client, route_s
         assert search.json()["total"] == int(allowed)
         with psycopg.connect(route_state) as raw:
             if allowed:
-                assert paid.json()["billing"]["charged"] == 2
-            else:
-                assert _wallet(raw, uid) == before[uid]
-                assert _detail_operations(raw, f"viral-detail:{uid}:douyin:{video_id}") == []
-                assert (
-                    raw.execute(
-                        "SELECT count(*) FROM wallet_transactions WHERE user_id=%s "
-                        "AND type IN ('RESERVE','SETTLE')",
-                        (uid,),
-                    ).fetchone()[0]
-                    == 0
-                )
+                # 查看详情免费（2026-10-13 拍板）：可见即放行，且不再产生任何计费回执。
+                assert paid.json()["billing"]["charged"] == 0
+                assert paid.json()["billing"]["billable"] is False
+            assert _wallet(raw, uid) == before[uid]
+            assert _detail_operations(raw, f"viral-detail:{uid}:douyin:{video_id}") == []
+            assert (
+                raw.execute(
+                    "SELECT count(*) FROM wallet_transactions WHERE user_id=%s "
+                    "AND type IN ('RESERVE','SETTLE')",
+                    (uid,),
+                ).fetchone()[0]
+                == 0
+            )
 
 
 @pytest.mark.parametrize(
@@ -1128,7 +1129,12 @@ def test_http_copy_waiting_for_billing_lock_rechecks_withdrawal(copy_client, rou
         _seed_copy_video(raw, uid, video_id=video_id)
     with ThreadPoolExecutor(max_workers=1) as executor:
         with psycopg.connect(route_state) as blocker:
-            blocker.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("billing:user:" + uid,))
+            # 计费锁主体已改为「钱包主人」（FIX-14）：阻塞点必须与生产代码同一把锁，
+            # 否则请求不会在权限复检之前排队，这个竞态就没被真正覆盖。
+            blocker.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("billing:wallet-owner:viral-copy:" + uid,),
+            )
             future = executor.submit(_claim_copy, copy_client, headers, video_id=video_id)
             deadline = time.monotonic() + 5
             waiting = False

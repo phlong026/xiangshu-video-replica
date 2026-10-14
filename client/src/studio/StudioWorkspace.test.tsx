@@ -3515,7 +3515,7 @@ describe("视频生成（C2 独立创作）", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "生成确认 · 视频生成",
     });
-    await screen.findByText(/9\.60 元/);
+    await screen.findByText(/960 积分/);
     fireEvent.click(
       within(dialog).getByRole("button", { name: "确认费用并提交" }),
     );
