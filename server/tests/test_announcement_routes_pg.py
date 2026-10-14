@@ -315,6 +315,49 @@ def test_lifecycle_sql_runs_and_classifies(client: TestClient) -> None:
     assert distribution.get("new") == 1 and distribution.get("active") == 1
 
 
+def test_support_ticket_priority_related_ref_and_handlers(client: TestClient) -> None:
+    """T14/T15：优先级排序、关联对象校验、可指派负责人清单与改派。"""
+    headers = _admin_session(client)
+
+    def create(**extra: object) -> object:
+        return client.post(
+            "/api/control/support-tickets",
+            json={
+                "confirm": True,
+                "reason": "登记",
+                "category": "billing",
+                "summary": "充值未到账",
+                **extra,
+            },
+            headers={**headers, IDEMPOTENCY_KEY_HEADER: f"tk-{uuid.uuid4()}"},
+        )
+
+    assert create(related_ref="随便写").status_code == 422
+    assert create(priority="P9").status_code == 422
+    low = create(priority="P3")
+    urgent = create(priority="P0", related_ref="order:W15-ORDER-1")
+    assert low.status_code == 200 and urgent.status_code == 200, urgent.text
+    listed = client.get("/api/control/support-tickets", headers=headers).json()
+    assert [item["priority"] for item in listed["items"]] == ["P0", "P3"]
+    assert listed["items"][0]["related_ref"] == "order:W15-ORDER-1"
+
+    handlers = client.get("/api/control/support-tickets/handlers", headers=headers).json()
+    admin_ids = {item["user_id"] for item in handlers["items"]}
+    assert "admin_u" in admin_ids
+    reassigned = client.patch(
+        f"/api/control/support-tickets/{low.json()['id']}",
+        json={"confirm": True, "reason": "升级", "priority": "P1", "handler_user_id": "admin_u"},
+        headers={**headers, IDEMPOTENCY_KEY_HEADER: f"tk-{uuid.uuid4()}"},
+    )
+    assert reassigned.status_code == 200, reassigned.text
+    item = next(
+        i
+        for i in client.get("/api/control/support-tickets", headers=headers).json()["items"]
+        if i["id"] == low.json()["id"]
+    )
+    assert item["priority"] == "P1" and item["handler_username"] == "admin_u"
+
+
 def test_worker_observations_aggregate_runs(client: TestClient) -> None:
     """M4：观测 SQL 在迁移库上可执行，空队列与隔离区计数形状正确。"""
     headers = _admin_session(client)

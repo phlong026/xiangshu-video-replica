@@ -100,8 +100,10 @@ REPO_ROOT = SERVER_DIR.parent
 # 与 20261006T1400_viral_collection_default_off（采集默认关）追加于生产线；
 # 20261002T1015_merge_oral_compatibility_alerts 合并 oral 兼容与告警投递两条线；
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
-# 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上，故链尾为该值。
-HEAD_REVISION = "20261008T1600_support_tickets"
+# 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上；
+# 20261014T1000_support_ticket_priority（管理端整改 T14/T15 工单优先级与关联对象）
+# 追加其上，故链尾为该值。
+HEAD_REVISION = "20261014T1000_support_ticket_priority"
 
 
 @pytest.mark.pg
@@ -404,7 +406,8 @@ HEAD_SCHEMA_COUNTS = {
     # announcement_reads / support_tickets），+列（runtime_settings.
     # publish_stats_sync_enabled、viral_runtime_controls.homepage_capacity、
     # recharge_packages.available_from/to 等）；回填迁移无新约束。
-    "columns": 1427,
+    # 20261014T1000：support_tickets +2 列（priority / related_ref）与 2 条 CHECK。
+    "columns": 1429,
     "identity_columns": 0,
     "sequences": 8,
     "jsonb_columns": 11,
@@ -412,7 +415,7 @@ HEAD_SCHEMA_COUNTS = {
     "triggers": 55,
     "partial_indexes": 41,
     "unique_constraints": 40,
-    "check_constraints": 374,
+    "check_constraints": 376,
     "foreign_keys": 208,
     "primary_keys": 127,
 }
@@ -665,7 +668,9 @@ HEAD_TABLE_NAMES = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "1e5f691104d011a2dbaffbe6631a71169fc82d603a7be5c24c6aea215182432c"
+# 20261014T1000_support_ticket_priority 追加后由 --print-schema 在全新迁移到 head 的
+# PG16 库上重算。
+HEAD_SCHEMA_DIGEST = "44b7f1cd3eb102e3f95dc06179a715fa494a71d2022f3a6510d09472f1c705d1"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

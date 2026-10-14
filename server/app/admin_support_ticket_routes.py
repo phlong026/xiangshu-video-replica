@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 
 import psycopg
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 CATEGORIES = ("billing", "generation", "publish", "content", "account", "other")
 STATUSES = ("open", "processing", "resolved")
+PRIORITIES = ("P0", "P1", "P2", "P3")
+# 关联对象：生成任务号或充值订单号，与迁移里的 CHECK 同一形状。
+_RELATED_REF = re.compile(r"^(task|order):[A-Za-z0-9_:.-]{1,100}$")
 
 _CATEGORY_LABELS = {
     "billing": "计费/资金",
@@ -51,12 +55,22 @@ class TicketCreateRequest(AdminWriteRequest):
     target_user_id: str = ""
     category: str = "other"
     summary: str = ""
+    priority: str = "P2"
+    related_ref: str = ""
 
 
 class TicketUpdateRequest(AdminWriteRequest):
     status: str = ""
     handler_user_id: str = ""
     resolution: str = ""
+    priority: str = ""
+
+
+def _validated_related_ref(value: str) -> str:
+    ref = value.strip()
+    if ref and not _RELATED_REF.match(ref):
+        raise _http(422, "TICKET_VALIDATION_FAILED", "关联对象需为生成任务号或充值订单号。")
+    return ref
 
 
 def _ticket_row(row: tuple[object, ...]) -> dict[str, object]:
@@ -76,6 +90,8 @@ def _ticket_row(row: tuple[object, ...]) -> dict[str, object]:
         "created_by": str(row[10]),
         "created_at": (row[11].isoformat() if hasattr(row[11], "isoformat") else str(row[11])),
         "updated_at": (row[12].isoformat() if hasattr(row[12], "isoformat") else str(row[12])),
+        "priority": str(row[13]),
+        "related_ref": str(row[14] or ""),
     }
 
 
@@ -83,7 +99,7 @@ _TICKET_SELECT = """
     SELECT st.id, st.target_user_id, tu.username, tu.display_name,
            st.category, st.summary, st.status, st.handler_user_id,
            hu.username, st.resolution, st.created_by_user_id,
-           st.created_at, st.updated_at
+           st.created_at, st.updated_at, st.priority, st.related_ref
     FROM support_tickets st
     LEFT JOIN users tu ON tu.id = st.target_user_id
     LEFT JOIN users hu ON hu.id = st.handler_user_id
@@ -120,7 +136,9 @@ def list_support_tickets(
     try:
         with pg_transaction() as conn:
             rows = conn.execute(
-                _TICKET_SELECT + f"{where} ORDER BY (st.status='resolved'), st.created_at DESC "
+                # 未结案在前、同组内按优先级（P0 最先），再按时间倒序。
+                _TICKET_SELECT + f"{where} ORDER BY (st.status='resolved'), st.priority, "
+                "st.created_at DESC "
                 "LIMIT %s OFFSET %s",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
@@ -139,6 +157,28 @@ def list_support_tickets(
     }
 
 
+@router.get("/support-tickets/handlers")
+def list_ticket_handlers(actor: AdminReader) -> dict[str, object]:
+    """可指派的负责人：启用中的管理员（与 PATCH 的负责人校验同口径）。
+
+    团队成员接口只对超管开放；指派工单是日常操作，这里只暴露名字与编号。
+    """
+    del actor
+    try:
+        with pg_transaction() as conn:
+            rows = conn.execute(
+                "SELECT id, username, COALESCE(display_name, '') FROM users "
+                "WHERE role = 'admin' AND is_active = 1 ORDER BY username"
+            ).fetchall()
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
+    return {
+        "items": [
+            {"user_id": str(r[0]), "username": str(r[1]), "display_name": str(r[2])} for r in rows
+        ]
+    }
+
+
 @router.post("/support-tickets")
 def create_support_ticket(
     body: TicketCreateRequest,
@@ -152,6 +192,9 @@ def create_support_ticket(
             raise _http(422, "TICKET_VALIDATION_FAILED", "问题描述必填且不超过 500 字。")
         if body.category not in CATEGORIES:
             raise _http(422, "TICKET_VALIDATION_FAILED", "问题类目无效。")
+        if body.priority not in PRIORITIES:
+            raise _http(422, "TICKET_VALIDATION_FAILED", "优先级无效。")
+        related_ref = _validated_related_ref(body.related_ref)
         target = body.target_user_id.strip() or None
         if target is not None:
             if (
@@ -165,8 +208,16 @@ def create_support_ticket(
         ticket_id = str(uuid.uuid4())
         conn.execute(
             "INSERT INTO support_tickets (id, target_user_id, category, summary, "
-            "created_by_user_id) VALUES (%s,%s,%s,%s,%s)",
-            (ticket_id, target, body.category, summary, actor.user_id),
+            "created_by_user_id, priority, related_ref) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (
+                ticket_id,
+                target,
+                body.category,
+                summary,
+                actor.user_id,
+                body.priority,
+                related_ref,
+            ),
         )
         conn.execute(
             "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, "
@@ -177,7 +228,11 @@ def create_support_ticket(
                 actor.user_id,
                 ticket_id,
                 json.dumps(
-                    {"category": body.category, "request_id": request_id},
+                    {
+                        "category": body.category,
+                        "priority": body.priority,
+                        "request_id": request_id,
+                    },
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
@@ -248,6 +303,11 @@ def update_support_ticket(
                 raise _http(422, "TICKET_VALIDATION_FAILED", "负责人必须是启用中的管理员。")
             updates.append("handler_user_id=%s")
             params.append(handler)
+        if body.priority.strip():
+            if body.priority.strip() not in PRIORITIES:
+                raise _http(422, "TICKET_VALIDATION_FAILED", "优先级无效。")
+            updates.append("priority=%s")
+            params.append(body.priority.strip())
         resolution = body.resolution.strip()
         if resolution:
             if len(resolution) > MAX_RESOLUTION:
