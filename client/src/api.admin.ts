@@ -1660,8 +1660,42 @@ export interface CustomerLifecycleResponse {
   }>;
   lifecycleRule: string;
   healthRule: string;
+  /** 低于该健康分标红（运营参数，客户列表与本页共用）。 */
+  healthAlertScore: number;
+  lowBalanceThreshold: number;
   limit: number;
   offset: number;
+}
+
+// --- 客户运营参数（整改 T29）-----------------------------------------------------
+
+export interface CustomerOpsParams {
+  low_balance_threshold: number;
+  health_alert_score: number;
+  rule: string;
+}
+
+export async function getCustomerOpsParams(): Promise<CustomerOpsParams> {
+  return adminRead("/api/control/customer-ops-params", "读取运营参数失败");
+}
+
+export async function updateCustomerOpsParams(input: {
+  lowBalanceThreshold: number;
+  healthAlertScore: number;
+  reason: string;
+  idempotencyKey?: string;
+}): Promise<CustomerOpsParams> {
+  return adminWrite(
+    "/api/control/customer-ops-params",
+    {
+      low_balance_threshold: input.lowBalanceThreshold,
+      health_alert_score: input.healthAlertScore,
+    },
+    input.reason,
+    "保存运营参数失败",
+    input.idempotencyKey,
+    "PUT",
+  );
 }
 
 export async function listCustomerLifecycle(

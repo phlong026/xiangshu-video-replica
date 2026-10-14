@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import uuid
@@ -93,6 +94,7 @@ def route_state(announcements_dsn: str) -> Iterator[str]:
 def admin_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
     from app.admin_auth_routes import router as admin_auth_router
     from app.admin_customer_lifecycle_routes import router as lifecycle_router
+    from app.admin_customer_ops_params_routes import router as ops_params_router
     from app.admin_publish_stats_routes import router as publish_stats_router
     from app.admin_support_ticket_routes import router as support_ticket_router
     from app.admin_worker_observation_routes import router as worker_observation_router
@@ -102,6 +104,7 @@ def admin_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[Fas
     app.include_router(admin_auth_router)
     app.include_router(announcement_router)
     app.include_router(lifecycle_router)
+    app.include_router(ops_params_router)
     app.include_router(worker_observation_router)
     app.include_router(support_ticket_router)
     app.include_router(publish_stats_router)
@@ -313,6 +316,93 @@ def test_lifecycle_sql_runs_and_classifies(client: TestClient) -> None:
         ]
     }
     assert distribution.get("new") == 1 and distribution.get("active") == 1
+
+
+def test_customer_ops_params_default_update_and_health_follow(
+    client: TestClient,
+) -> None:
+    """T29：运营参数默认值、写契约与审计，健康分和口径文案随阈值同步。"""
+    headers = _admin_session(client)
+    default = client.get("/api/control/customer-ops-params", headers=headers)
+    assert default.status_code == 200, default.text
+    assert default.json()["low_balance_threshold"] == 100
+    assert default.json()["health_alert_score"] == 40
+
+    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES ('rich_u', 'rich_u', 'Rich', 'customer', 1)"
+        )
+        conn.execute("INSERT INTO wallets (user_id, available_credits) VALUES ('rich_u', 500)")
+    before = {
+        item["username"]: item["health_score"]
+        for item in client.get("/api/control/customers/lifecycle", headers=headers).json()["items"]
+    }
+    # 默认线 100：余额 500 拿到「余额充足」+30，且 7 天无失败 +20。
+    assert before["rich_u"] == 50
+
+    # 审计员只读：不能改参数。
+    auditor_headers = _admin_session(client, "auditor_u")
+    denied = client.put(
+        "/api/control/customer-ops-params",
+        json={
+            "confirm": True,
+            "reason": "尝试修改",
+            "low_balance_threshold": 10,
+            "health_alert_score": 30,
+        },
+        headers={**auditor_headers, IDEMPOTENCY_KEY_HEADER: f"k-{uuid.uuid4()}"},
+    )
+    assert denied.status_code == 403
+
+    # 同一个 cookie jar：审计员登录会顶掉管理员会话，需重新登录。
+    headers = _admin_session(client)
+    # 越界参数被拒（健康分预警线需在 1–100）。
+    invalid = client.put(
+        "/api/control/customer-ops-params",
+        json={
+            "confirm": True,
+            "reason": "越界",
+            "low_balance_threshold": 10,
+            "health_alert_score": 0,
+        },
+        headers={**headers, IDEMPOTENCY_KEY_HEADER: f"k-{uuid.uuid4()}"},
+    )
+    assert invalid.status_code == 422
+
+    updated = client.put(
+        "/api/control/customer-ops-params",
+        json={
+            "confirm": True,
+            "reason": "按本月套餐调整预警线",
+            "low_balance_threshold": 1000,
+            "health_alert_score": 60,
+        },
+        headers={**headers, IDEMPOTENCY_KEY_HEADER: f"k-{uuid.uuid4()}"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["low_balance_threshold"] == 1000
+    assert (
+        client.get("/api/control/customer-ops-params", headers=headers).json()["health_alert_score"]
+        == 60
+    )
+
+    lifecycle = client.get("/api/control/customers/lifecycle", headers=headers).json()
+    after = {item["username"]: item["health_score"] for item in lifecycle["items"]}
+    # 余额 500 < 新阈值 1000：失去 +30。
+    assert after["rich_u"] == 20
+    assert lifecycle["healthAlertScore"] == 60
+    assert lifecycle["lowBalanceThreshold"] == 1000
+    assert "1000" in lifecycle["healthRule"] and "60" in lifecycle["healthRule"]
+
+    with psycopg.connect(_db_dsn()) as conn:
+        audit = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action='customer.ops_params.update'"
+        ).fetchall()
+    assert len(audit) == 1
+    meta = audit[0][0] if isinstance(audit[0][0], dict) else json.loads(audit[0][0])
+    assert meta["before"]["low_balance_threshold"] == 100
+    assert meta["after"]["low_balance_threshold"] == 1000
 
 
 def test_support_ticket_priority_related_ref_and_handlers(client: TestClient) -> None:

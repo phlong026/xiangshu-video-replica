@@ -101,6 +101,7 @@ from app.admin_write_contract import (
 )
 from app.auth import CurrentUser, Role
 from app.csv_export import spreadsheet_safe_cell
+from app.customer_ops_params import effective_low_balance_threshold
 from app.customer_session_service import revoke_session
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.db_portable import BusinessConnection
@@ -1579,6 +1580,8 @@ def list_customers(
         clauses.append("COALESCE(w.available_credits, 0) <= %s")
         params.append(max(0, balance_max))
 
+    # 未显式传阈值时取持久化的运营参数（T29），「余额不足」卡片开箱可用。
+    low_balance_threshold = effective_low_balance_threshold(low_balance_threshold)
     summary_clauses = list(clauses)
     summary_params = list(params)
     append_attention_filter(clauses, params, attention, low_balance_threshold)
@@ -1941,6 +1944,7 @@ def export_customers_csv(
             if balance_max is not None:
                 clauses.append("COALESCE(w.available_credits, 0) <= %s")
                 params.append(max(0, balance_max))
+            low_balance_threshold = effective_low_balance_threshold(low_balance_threshold)
             append_attention_filter(clauses, params, attention, low_balance_threshold)
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             # Same list sort/filter, including customer-level attention across all pages.

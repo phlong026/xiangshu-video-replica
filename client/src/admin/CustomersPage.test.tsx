@@ -242,6 +242,27 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     );
   });
 
+  it("阈值留空时用服务端运营参数：卡片可点，提示里写明生效阈值", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+      attention_counts: { low_balance: 4, recent_failure: 0, inactive: 0 },
+      low_balance_threshold: 100,
+    });
+    render(<CustomersPage />);
+    await screen.findByText(/暂无客户/);
+    expect(screen.getByRole("button", { name: /余额不足/ })).toBeEnabled();
+    expect(screen.getByLabelText("低余额阈值")).toHaveAttribute(
+      "placeholder",
+      "默认 100",
+    );
+    expect(
+      screen.getByText(/严格小于 100 积分（系统设置 → 运营参数）/),
+    ).toBeInTheDocument();
+  });
+
   it("重置清空所有筛选与「需要处理」选中并回到未筛选列表", async () => {
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
       items: [],

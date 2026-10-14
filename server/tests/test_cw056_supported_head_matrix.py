@@ -102,8 +102,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上；
 # 20261014T1000_support_ticket_priority（管理端整改 T14/T15 工单优先级与关联对象）
-# 追加其上，故链尾为该值。
-HEAD_REVISION = "20261014T1000_support_ticket_priority"
+# 与 20261014T1100_customer_ops_params（整改 T29 客户运营参数）依次追加其上，
+# 故链尾为该值。
+HEAD_REVISION = "20261014T1100_customer_ops_params"
 
 
 @pytest.mark.pg

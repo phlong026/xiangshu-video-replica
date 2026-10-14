@@ -10,6 +10,7 @@ import { type SettingsBackend, SettingsPanel } from "../SettingsPanel";
 import { AdminEnvironmentSwitch } from "./AdminEnvironmentSwitch";
 import { BillingQuoteCalculator } from "./BillingQuoteCalculator";
 import { BillingRatesManager } from "./BillingRatesManager";
+import { CustomerOpsParamsSection } from "./CustomerOpsParamsSection";
 import { CustomerPricingManager } from "./CustomerPricingManager";
 import { FeatureSwitchesSection } from "./FeatureSwitchesSection";
 import { H3AccountsManager } from "./H3AccountsManager";
@@ -28,6 +29,7 @@ import { useHashParam } from "./ui/useHashParam";
 const baseTabs = [
   { id: "pricing", label: "价格与套餐" },
   { id: "collection", label: "收款设置" },
+  { id: "ops", label: "运营参数" },
   { id: "features", label: "功能开关" },
 ];
 const technicalTab = { id: "services", label: "技术配置" };
@@ -66,6 +68,7 @@ export function SystemSettingsPage({
     | "pricing"
     | "collection"
     | "services"
+    | "ops"
     | "features"
     | "payment"
     | "rates";
@@ -159,6 +162,7 @@ export function SystemSettingsPage({
           )}
         </div>
       ) : null}
+      {tab === "ops" ? <CustomerOpsParamsSection readOnly={readOnly} /> : null}
       {tab === "features" ? (
         <FeatureSwitchesSection
           readOnly={readOnly}
