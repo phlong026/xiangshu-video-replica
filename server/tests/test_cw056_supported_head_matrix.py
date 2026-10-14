@@ -100,9 +100,10 @@ REPO_ROOT = SERVER_DIR.parent
 # 与 20261006T1400_viral_collection_default_off（采集默认关）追加于生产线；
 # 20261002T1015_merge_oral_compatibility_alerts 合并 oral 兼容与告警投递两条线；
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
-# 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上，故链尾为该值。
-# 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
-HEAD_REVISION = "20261013T1020_publish_submission_safety"
+# 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上；
+# 20261014T1000_support_ticket_priority（管理端整改 T14/T15 工单优先级与关联对象）
+# 追加其上，故链尾为该值。
+HEAD_REVISION = "20261014T1000_support_ticket_priority"
 
 
 @pytest.mark.pg
