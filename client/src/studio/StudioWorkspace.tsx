@@ -987,10 +987,12 @@ export function StudioWorkspace({
     const draft = latestDraftRef.current;
     const draftFingerprint = JSON.stringify(draft);
     const page = studioPageRef.current;
-    const isCurrent = () =>
+    const stillAuthorized = () =>
       mountedRef.current &&
       currentUserRoleRef.current !== "auditor" &&
-      permissionGenerationRef.current === permissionGeneration &&
+      permissionGenerationRef.current === permissionGeneration;
+    const isCurrent = () =>
+      stillAuthorized() &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "数字人口播" &&
       studioPageRef.current === page &&
@@ -1023,14 +1025,24 @@ export function StudioWorkspace({
         ...request,
         idempotencyKey: oralSubmissionRef.current.key,
       });
-      if (!isCurrent()) return;
-      oralSubmissionRef.current = null;
-      closeGenerationDialog();
-      if (result.status === "FAILED") {
-        notify("口播任务提交未成功，请核对素材后重试。");
-      } else {
+      // 权限类失效（卸载、切成只读审计员、权限世代变化）仍然完全静默，不能给
+      // 已失去权限的会话弹提示或跳转。
+      if (!stillAuthorized()) return;
+      if (isCurrent()) {
+        oralSubmissionRef.current = null;
+        closeGenerationDialog();
+        if (result.status === "FAILED") {
+          notify("口播任务提交未成功，请核对素材后重试。");
+        } else {
+          notify("口播任务已提交，可在任务中心查看进度。");
+          navigate("tasks");
+          refresh();
+        }
+      } else if (result.status !== "FAILED") {
+        // 仅界面上下文变了（弹窗被关闭重开、草稿被改）：服务端已受理并预扣，
+        // 不能静默吞掉（FIX-11）。保留幂等键：同内容再次提交会回放原任务而不是
+        // 重复扣费；内容改了则指纹不同，本来就是一次新的提交。
         notify("口播任务已提交，可在任务中心查看进度。");
-        navigate("tasks");
         refresh();
       }
     } catch (cause: unknown) {
@@ -1091,10 +1103,12 @@ export function StudioWorkspace({
     const dialogRevision = generationDialogRevisionRef.current;
     const permissionGeneration = permissionGenerationRef.current;
     const attempt = ++videoSubmitAttemptRef.current;
-    const isCurrent = () =>
+    const stillAuthorized = () =>
       mountedRef.current &&
       currentUserRoleRef.current !== "auditor" &&
-      permissionGenerationRef.current === permissionGeneration &&
+      permissionGenerationRef.current === permissionGeneration;
+    const isCurrent = () =>
+      stillAuthorized() &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "视频生成" &&
       studioPageRef.current === page &&
@@ -1159,12 +1173,19 @@ export function StudioWorkspace({
         ...request,
         idempotency_key: videoSubmissionRef.current.key,
       });
-      if (!isCurrent()) return;
-      videoSubmissionRef.current = null;
-      closeGenerationDialog();
-      patchDraft({ videoBatchId: result.id });
-      notify("视频生成任务已提交，可在预览区查看进度。");
-      refresh();
+      if (!stillAuthorized()) return;
+      if (isCurrent()) {
+        videoSubmissionRef.current = null;
+        closeGenerationDialog();
+        patchDraft({ videoBatchId: result.id });
+        notify("视频生成任务已提交，可在预览区查看进度。");
+        refresh();
+      } else {
+        // 同口播：任务已创建并预扣，界面上下文变了也要告知用户（FIX-11）；
+        // 保留幂等键，同参数再次提交回放原批次。
+        notify("视频生成任务已提交，可在任务中心查看进度。");
+        refresh();
+      }
     } catch (cause: unknown) {
       if (isCurrent()) {
         const message = customerVisibleErrorMessage(
@@ -2023,8 +2044,17 @@ export function StudioWorkspace({
               currentDraft.projectId === projectId &&
               (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId
             ))
-        )
+        ) {
+          // 提取期间用户已切到别的来源：文案不能写进别的来源的草稿，但转写费已产生，
+          // 不能静默丢弃（FIX-11）。文案已进共享缓存，回到原视频再点提取即可取回。
+          if (saveAccountRef.current === extractionAccount) {
+            setWalletRevision((value) => value + 1);
+            notify(
+              "文案已提取，但你已切换到其他来源，未写入当前草稿；回到原视频再点「提取文案」即可取回，不会重复收转写费。",
+            );
+          }
           return;
+        }
         if (!text) {
           // claim 未完成（未命中 / 失败）：正文拿不到就不能把空文案写进草稿，
           // 也不能假装交付已完成——失败原因原样透传，让用户照着处置。
