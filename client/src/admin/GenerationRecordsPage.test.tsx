@@ -242,7 +242,7 @@ describe("GenerationRecordsPage", () => {
     });
   });
 
-  it("uses five business groups, keeps technical details folded and hides auditor cost and thumbnails", async () => {
+  it("uses five business groups, keeps technical details folded; auditors see cost but not thumbnails or customer text", async () => {
     const statuses = [
       "CREATED",
       "QUEUED",
@@ -303,9 +303,13 @@ describe("GenerationRecordsPage", () => {
       "需人工核对",
       "需人工核对",
     ]);
+    // T18（决策 D1）：成本与毛利对审计员可见，与经营看板、成本核对同口径。
     expect(
-      within(table).queryByRole("columnheader", { name: /成本/ }),
-    ).toBeNull();
+      within(table).getByRole("columnheader", { name: /成本/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(table).getByRole("columnheader", { name: /毛利/ }),
+    ).toBeInTheDocument();
     expect(adminApi.getAdminGenerationRecordThumbnail).not.toHaveBeenCalled();
     expect(adminApi.getAdminGenerationRecordCalls).not.toHaveBeenCalled();
     for (const detail of table.querySelectorAll("details"))

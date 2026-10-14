@@ -659,8 +659,9 @@ export function GenerationRecordsPage({
                   <th>状态</th>
                   <th>耗时</th>
                   <th>扣减积分</th>
-                  {!readOnly ? <th>成本（¥）</th> : null}
-                  {!readOnly ? <th>毛利（¥）</th> : null}
+                  {/* 成本与毛利对审计员可见（T18，决策 D1），与经营看板、成本核对同口径。 */}
+                  <th>成本（¥）</th>
+                  <th>毛利（¥）</th>
                   {/* 预览列随审计员整体隐藏：媒体端点对 auditor 一律 403。 */}
                   <th>操作</th>
                 </>
@@ -704,8 +705,8 @@ export function GenerationRecordsPage({
                       ? `${item.charged_credits} 积分`
                       : "0 积分"}
                   </td>
-                  {!readOnly ? <td>{formatProviderCost(item)}</td> : null}
-                  {!readOnly ? <td>{formatTaskMargin(item)}</td> : null}
+                  <td>{formatProviderCost(item)}</td>
+                  <td>{formatTaskMargin(item)}</td>
                   <td>
                     {!readOnly ? (
                       <div className="admin-generation-records__preview-cell">
