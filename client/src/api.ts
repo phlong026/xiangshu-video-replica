@@ -6197,6 +6197,19 @@ const BRANDED_SERVICE_ERRORS: ReadonlyArray<{
   },
 ];
 
+/**
+ * 服务端自有的「提交前业务校验」错误码：形如 `H3_` 打头只是内部命名，文案是
+ * 给用户的自救指引。若让 code 参与防泄漏匹配，`H3_` 会被误认成供应商名，
+ * 把「请重写提示词」替换成「服务暂时不可用」，用户只会去等服务恢复。
+ *
+ * 只放行明确的业务校验码；`H3_PROVIDER_FAILED` 等上游失败码的 message 可能带
+ * 原始供应商文本，必须继续参与匹配。message 本身仍会被检查，所以这些码对应的
+ * 服务端文案同样不得出现供应商名。
+ */
+const CUSTOMER_ACTIONABLE_VALIDATION_CODES: ReadonlySet<string> = new Set([
+  "H3_STRUCTURE_INVALID",
+]);
+
 const CUSTOMER_ACCOUNT_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   RATE_LIMITED: "操作过于频繁，请稍后重试。",
   H3_REQUIRES_CLOUD_STORAGE:
@@ -6255,7 +6268,9 @@ export function customerVisibleErrorMessage(
     return fallback;
   }
 
-  const source = `${code} ${message}`;
+  const source = CUSTOMER_ACTIONABLE_VALIDATION_CODES.has(code)
+    ? message
+    : `${code} ${message}`;
   const branded = BRANDED_SERVICE_ERRORS.find(({ pattern }) =>
     pattern.test(source),
   );

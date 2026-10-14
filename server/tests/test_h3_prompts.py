@@ -669,6 +669,37 @@ def test_independent_r2v_rejects_replica_draft_and_freeform_prompt() -> None:
     assert [issue.code for issue in freeform] == ["H3_STRUCTURE_INVALID"] * len(freeform)
 
 
+def test_ref2va_structure_issue_messages_carry_no_provider_token() -> None:
+    """结构门禁的三种 H3_STRUCTURE_INVALID 文案都要对客户中性。
+
+    客户端防泄漏表按词边界拦 "H3"/metaso/minimax：文案里带这些词，用户唯一的
+    自救指引就会被替换成“服务暂时不可用”，误以为该等服务恢复（实际重试无效）。
+    """
+    import re
+
+    leaked = re.compile(r"metaso|minimax|(?:^|[_\W])h3(?:$|[_\W])", re.IGNORECASE)
+    sections = [
+        "subject_definitions: <Picture 1> 为主体",
+        "summary: 概述",
+        "retention_analysis: 留存分析",
+        "detailed_description: [Shot 1] At 0:02 镜头推进",
+        "overall_soundscape: 环境音",
+        "non_diegetic_music: N/A",
+    ]
+    cases = {
+        "缺少必要段落": "\n".join(sections[:3]),
+        "段落顺序不正确": "\n".join([sections[1], sections[0], *sections[2:]]),
+        "缺少镜头标记": "\n".join(sections).replace("[Shot 1]", ""),
+        "带代码围栏": "```\n" + "\n".join(sections) + "\n```",
+    }
+    for name, text in cases.items():
+        issues = prompt_issues(text, mode="Ref2VA", duration=8, labels=["<Picture 1>"], strict=True)
+        structural = [issue for issue in issues if issue.code == "H3_STRUCTURE_INVALID"]
+        assert structural, f"{name}: 应命中结构门禁"
+        for issue in issues:
+            assert not leaked.search(issue.message), f"{name}: {issue.code} 文案泄漏供应商词"
+
+
 # --- 爆款复刻文案回填：空 original_script 用分段台词兜底 -------------------------
 # 与 generation.py「full_text = original_script or "".join(spoken_texts)」的编译兜底
 # 语义对齐；落库时回填后，前端展示、提示词编译与历史恢复都自动拿到文案。
