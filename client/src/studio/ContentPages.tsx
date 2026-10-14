@@ -5025,7 +5025,9 @@ export function localDateTimeInputFromIso(value: string | undefined): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-const PUBLISH_SCHEDULE_MIN_LEAD_MS = 2 * 60 * 1000;
+// 服务端要求至少提前 2 分钟，并以服务端时钟校验；客户端多留 1 分钟余量，避免本机
+// 时钟偏慢或提交途中耗时导致刚好卡在边界被服务端 422 拒绝。
+const PUBLISH_SCHEDULE_MIN_LEAD_MS = 3 * 60 * 1000;
 const PUBLISH_SCHEDULE_MAX_LEAD_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function validatePublishSchedule(
@@ -5036,7 +5038,7 @@ export function validatePublishSchedule(
   const at = new Date(iso).getTime();
   if (Number.isNaN(at)) return "请填写有效的定时时间。";
   if (at < now.getTime() + PUBLISH_SCHEDULE_MIN_LEAD_MS)
-    return "定时发布至少需要提前 2 分钟。";
+    return "定时发布至少需要提前 3 分钟。";
   if (at > now.getTime() + PUBLISH_SCHEDULE_MAX_LEAD_MS)
     return "定时发布最多只能提前 30 天。";
   return null;
