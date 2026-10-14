@@ -6,8 +6,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export function useAutoRefresh(
   refresh: () => void,
   intervalMs = 30_000,
+  initiallyEnabled = false,
 ): { autoRefresh: boolean; toggleAutoRefresh: () => void } {
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(initiallyEnabled);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 

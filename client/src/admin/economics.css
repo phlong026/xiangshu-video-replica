@@ -263,8 +263,29 @@
 }
 .dashboard-kpis {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
+}
+/* 「今日 / 存量」分组标题独占一行，把当日发生数与存量指标分开。 */
+.dashboard-kpis .dashboard-kpi-group {
+  grid-column: 1 / -1;
+  margin: 4px 0 0;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--font-caption);
+  font-weight: 600;
+}
+.dashboard-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.dashboard-toolbar [role="status"] {
+  margin-right: auto;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--font-caption);
 }
 .dashboard-kpis .admin-summary-card {
   min-width: 0;

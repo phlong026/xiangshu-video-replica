@@ -3,10 +3,11 @@ import { useCallback, useEffect, useState } from "react";
 import { type DashboardSummary, getDashboardSummary } from "../api.admin";
 import clapperboardIcon from "../assets/icons/clapperboard.svg";
 import gaugeIcon from "../assets/icons/gauge.svg";
-import shieldIcon from "../assets/icons/shield-check.svg";
 import usersIcon from "../assets/icons/users-round.svg";
 import walletIcon from "../assets/icons/wallet.svg";
 import { PageBanner } from "./ui/PageBanner";
+import { useAutoRefresh } from "./ui/useAutoRefresh";
+import { formatDateTime } from "./ui/vocabulary";
 import "./economics.css";
 
 function fenToYuan(fen: number): string {
@@ -83,27 +84,68 @@ export function OverviewPage({
 }) {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState("");
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       setError("");
       setSummary(await getDashboardSummary());
+      setUpdatedAt(new Date().toISOString());
     } catch (cause) {
+      // 刷新失败只局部提示：已有数据继续展示并标明时间，不再整页换成报错。
       setError(cause instanceof Error ? cause.message : "读取仪表盘失败");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
+  // 总览是值班常开页：默认每 60 秒刷新一次（页面隐藏时暂停），可手动关闭。
+  const { autoRefresh, toggleAutoRefresh } = useAutoRefresh(
+    () => void load(),
+    60_000,
+    true,
+  );
 
-  if (error) {
-    return <PageBanner tone="error">{error}</PageBanner>;
-  }
+  const toolbar = (
+    <div className="dashboard-toolbar">
+      <span role="status">
+        {updatedAt
+          ? `数据更新于 ${formatDateTime(updatedAt)}`
+          : loading
+            ? "正在加载仪表盘…"
+            : ""}
+      </span>
+      <button type="button" disabled={loading} onClick={() => void load()}>
+        {loading ? "刷新中…" : "刷新"}
+      </button>
+      <button
+        type="button"
+        aria-pressed={autoRefresh}
+        onClick={toggleAutoRefresh}
+      >
+        {autoRefresh ? "自动刷新：开（60 秒）" : "自动刷新：关"}
+      </button>
+    </div>
+  );
+  const errorBanner = error ? (
+    <PageBanner tone="error">
+      {summary ? `刷新失败，下方仍是上次成功读取的数据：${error}` : error}{" "}
+      <button type="button" disabled={loading} onClick={() => void load()}>
+        重试
+      </button>
+    </PageBanner>
+  ) : null;
+
   if (!summary) {
     return (
       <section className="admin-panel" aria-label="总览仪表盘">
-        <p>正在加载仪表盘…</p>
+        {toolbar}
+        {errorBanner}
       </section>
     );
   }
@@ -207,8 +249,12 @@ export function OverviewPage({
     },
   ];
 
+  // 昨日数据取自同一份近 7 日趋势（最后一点是今天），用来给今日指标一个参照。
+  const yesterday = trend.length >= 2 ? trend[trend.length - 2] : undefined;
   return (
     <div className="dashboard-page">
+      {toolbar}
+      {errorBanner}
       {(today.legacy_cost_records ?? 0) + (today.legacy_settlements ?? 0) >
         0 && (
         <p role="status">
@@ -217,11 +263,14 @@ export function OverviewPage({
         </p>
       )}
       <div className="dashboard-kpis">
+        <h2 className="dashboard-kpi-group">今日</h2>
         <KpiCard
           icon={clapperboardIcon}
           label="今日生成"
           value={String(today.generation_count)}
-          sub={`输出 ${(today.output_seconds ?? 0).toLocaleString()} 秒`}
+          sub={`输出 ${(today.output_seconds ?? 0).toLocaleString()} 秒${
+            yesterday ? ` · 昨日成功 ${yesterday.succeeded} 条` : ""
+          }`}
         />
         <KpiCard
           icon={gaugeIcon}
@@ -235,7 +284,13 @@ export function OverviewPage({
           icon={walletIcon}
           label="今日成本"
           value={yuanOrUnknown(today.cost_fen, todos.unknown_cost_records)}
-          sub={today.cost_fen == null ? "结算或成本待核对" : "已确认成本"}
+          sub={
+            today.cost_fen == null
+              ? "结算或成本待核对"
+              : yesterday?.cost_fen != null
+                ? `已确认成本 · 昨日 ¥${fenToYuan(yesterday.cost_fen)}`
+                : "已确认成本"
+          }
           tone={today.cost_fen == null ? "warn" : undefined}
         />
         <KpiCard
@@ -253,23 +308,19 @@ export function OverviewPage({
           }
         />
         <KpiCard
-          icon={usersIcon}
-          label="有效客户"
-          value={String(today.active_customers)}
-          sub="已启用的客户账户"
-        />
-        <KpiCard
           icon={walletIcon}
           label="今日充值"
           value={`¥${fenToYuan(today.recharge_fen)}`}
           sub={`${today.recharge_orders ?? 0} 单`}
         />
+        {/* 存量指标与当日指标分开：有效客户不是「今天」发生的数。对账异常
+            只在待办里出现一次，不再与 KPI 卡重复。 */}
+        <h2 className="dashboard-kpi-group">存量</h2>
         <KpiCard
-          icon={shieldIcon}
-          label="对账异常"
-          value={String(todos.reconciliation_problems)}
-          sub="资金账务核对"
-          tone={todos.reconciliation_problems ? "warn" : undefined}
+          icon={usersIcon}
+          label="有效客户"
+          value={String(today.active_customers)}
+          sub="已启用的客户账户"
         />
       </div>
 
