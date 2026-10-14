@@ -22,7 +22,7 @@ import uuid
 import psycopg
 from fastapi import APIRouter, Request, Response
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, FundsWriter
 
 # 列表分页与 /customers/{id}/adjustments 共用同一套常量与边界函数。
 from app.admin_customer_routes import (
@@ -153,7 +153,7 @@ def mark_refund_execution(
     body: RefundExecutionRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     """登记一笔退付执行结果（幂等键防重放；同一调账只允许登记一次）。"""
 

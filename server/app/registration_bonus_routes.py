@@ -24,7 +24,7 @@ import psycopg
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, SettingsWriter
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import transaction_now_iso, write_with_idempotency
 from app.api_errors import http_error
@@ -102,7 +102,7 @@ def update_registration_bonus_settings(
     body: RegistrationBonusSettingsUpdate,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: SettingsWriter,
 ) -> dict[str, object]:
     """全量更新注册赠送积分；只影响此后新注册的主账号，不补发存量。"""
 

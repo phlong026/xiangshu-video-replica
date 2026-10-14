@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 import psycopg
 from fastapi import APIRouter, Request, Response
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, CustomerWriter
 from app.admin_customer_routes import _write_with_idempotency
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
@@ -230,7 +230,7 @@ def create_announcement(
     body: AnnouncementCreateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         title = body.title.strip()
@@ -295,7 +295,7 @@ def update_announcement(
     body: AnnouncementUpdateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """部分更新：非空字段覆盖（置顶开关用 pinned 三态区分"不修改"）。"""
 
@@ -378,7 +378,7 @@ def delete_announcement(
     announcement_id: str,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
     body: AdminWriteRequest,
 ) -> dict[str, object]:
     """软删（下线）：已读回执保留；客户端立即不可见。"""

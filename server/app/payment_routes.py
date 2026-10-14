@@ -13,7 +13,7 @@ from starlette.concurrency import run_in_threadpool
 
 # Import to trigger provider registration
 import app.zpay_provider  # noqa: F401
-from app.admin_auth_routes import AdminWriter
+from app.admin_auth_routes import FundsWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.admin_write_contract import require_write_contract as _require_write_contract
 from app.auth import CurrentUser, Database
@@ -159,7 +159,7 @@ def repair_paid_order_ledger(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     _key, reason = _require_write_contract(request, body)
     current_user = CurrentUser(

@@ -102,9 +102,10 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上；
 # 20261014T1000_support_ticket_priority（管理端整改 T14/T15 工单优先级与关联对象）
-# 与 20261014T1100_customer_ops_params（整改 T29 客户运营参数）依次追加其上，
+# 20261014T1100_customer_ops_params（整改 T29 客户运营参数）与
+# 20261014T1200_admin_role_templates（整改 T41 权限点与角色模板）依次追加其上，
 # 故链尾为该值。
-HEAD_REVISION = "20261014T1100_customer_ops_params"
+HEAD_REVISION = "20261014T1200_admin_role_templates"
 
 
 @pytest.mark.pg
@@ -401,7 +402,7 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 联合 head 在全新隔离 PG16 中重测：兼容派生表、原始素材外键与主线诊断告警 DDL 同时存在。
 # 已发布链哈希与支持的发行起点保持冻结，不因这次 merge revision 改写。
 HEAD_SCHEMA_COUNTS = {
-    "tables": 127,
+    "tables": 128,
     # 20261006T1200 给 viral_videos 增加 pushed_at 列（+1）；20261008T1000–1600
     # （ADM 批量开发）：+4 表（refund_executions / announcements /
     # announcement_reads / support_tickets），+列（runtime_settings.
@@ -409,17 +410,19 @@ HEAD_SCHEMA_COUNTS = {
     # recharge_packages.available_from/to 等）；回填迁移无新约束。
     # 20261014T1000：support_tickets +2 列（priority / related_ref）与 2 条 CHECK。
     # 20261014T1100：runtime_settings +2 列（低余额阈值 / 健康分预警线）与 2 条 CHECK。
-    "columns": 1431,
+    # 20261014T1200：+1 表 admin_role_templates（3 列、主键、permissions 的 jsonb 与 CHECK），
+    # users.admin_template +1 列与指向模板表的外键。
+    "columns": 1435,
     "identity_columns": 0,
     "sequences": 8,
-    "jsonb_columns": 11,
+    "jsonb_columns": 12,
     "timestamptz_columns": 104,
     "triggers": 55,
     "partial_indexes": 41,
     "unique_constraints": 40,
-    "check_constraints": 378,
-    "foreign_keys": 208,
-    "primary_keys": 127,
+    "check_constraints": 379,
+    "foreign_keys": 209,
+    "primary_keys": 128,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -450,16 +453,17 @@ HEAD_TABLE_NAMES = (
     "admin_adjustments",
     "admin_device_events",
     "admin_password_credentials",
+    "admin_role_templates",
     "admin_sessions",
     "admin_write_idempotency",
     "alembic_version",
-    "announcement_reads",
-    "announcements",
     "alert_deliveries",
     "alert_notify_dedup",
     "alert_settings",
     "analysis_task_attempts",
     "analysis_tasks",
+    "announcement_reads",
+    "announcements",
     "assets",
     "audit_logs",
     "billing_attempts",
@@ -537,8 +541,8 @@ HEAD_TABLE_NAMES = (
     "studio_notification_preferences",
     "studio_saved_scripts",
     "sub_account_permissions",
-    "support_tickets",
     "sub_account_quotas",
+    "support_tickets",
     "task_diagnostic_refs",
     "user_queue_cursors",
     "users",
@@ -670,9 +674,9 @@ HEAD_TABLE_NAMES = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-# 20261014T1100_customer_ops_params 追加后由 --print-schema 在全新迁移到 head 的
+# 20261014T1200_admin_role_templates 追加后由 --print-schema 在全新迁移到 head 的
 # PG16 库上重算。
-HEAD_SCHEMA_DIGEST = "eb7e16474db3b77e9310a554b97adcd16ddbf908caf3f844532ad8456e802b21"
+HEAD_SCHEMA_DIGEST = "fcfd858787a454fa6f0db85a4b00c2f2e0309815b79ded07613f41d4f58986f0"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

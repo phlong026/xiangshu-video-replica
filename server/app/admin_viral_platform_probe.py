@@ -8,7 +8,7 @@ import psycopg
 from fastapi import APIRouter, Request, Response
 from pydantic import Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, ContentWriter
 from app.admin_viral_costs import require_cost_snapshot
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.db_pg import pg_transaction
@@ -55,7 +55,7 @@ def probe_viral_platform(
     payload: PlatformProbeRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
         require_cost_snapshot(raw, payload.expected_cost_snapshot)

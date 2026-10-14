@@ -66,7 +66,12 @@ from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import Response as HttpResponse
 from pydantic import BaseModel, ConfigDict, StrictInt
 
-from app.admin_auth_routes import AdminExporter, AdminReader, AdminWriter
+from app.admin_auth_routes import (
+    AdminExporter,
+    AdminReader,
+    CustomerWriter,
+    FundsWriter,
+)
 from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE
 from app.admin_customer_metrics import (
     CUSTOMER_FACTS_CTE,
@@ -406,7 +411,7 @@ def update_customer_unit_price(
     body: CustomerUnitPriceUpdateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     """Set or clear a customer's sale price without applying a cost floor."""
 
@@ -511,7 +516,7 @@ def create_admin_adjustment(
     body: AdjustmentRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     """Create an admin adjustment.
 
@@ -1134,7 +1139,7 @@ def suspend_customer(
     body: AdminWriteRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         if user_id == actor.user_id:
@@ -1225,7 +1230,7 @@ def resume_customer(
     body: AdminWriteRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         if user_id == actor.user_id:

@@ -30,7 +30,13 @@ from app.admin_write_contract import (
 )
 from app.auth import Database, Role
 from app.billing_catalog import SERVICES
-from app.control_auth import ControlExporter, ControlSuperUser, ControlUser, ControlWriter
+from app.control_auth import (
+    ControlExporter,
+    ControlFundsWriter,
+    ControlSettingsWriter,
+    ControlSuperUser,
+    ControlUser,
+)
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
@@ -2798,7 +2804,7 @@ def verify_reconciliation(
     payload: ReconciliationVerificationRequest,
     request: Request,
     response: Response,
-    actor: ControlWriter,
+    actor: ControlFundsWriter,
 ) -> dict[str, object]:
     def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
         conn = BusinessConnection.postgres(raw)
@@ -3057,7 +3063,7 @@ def update_control_runtime_settings(
 def update_zpay_settings(
     payload: ZPaySettingsUpdate,
     conn: Database,
-    actor: ControlUser,
+    actor: ControlSettingsWriter,
     request: Request,
     response: Response,
 ) -> MaskedZPaySettings:
@@ -3087,7 +3093,7 @@ def update_zpay_settings(
 def update_control_billing_settings(
     payload: BillingSettingsUpdate,
     conn: Database,
-    actor: ControlUser,
+    actor: ControlSettingsWriter,
     request: Request,
     response: Response,
 ) -> BillingSettingsSnapshot:

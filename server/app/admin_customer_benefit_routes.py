@@ -30,7 +30,7 @@ import psycopg
 from fastapi import APIRouter, Request, Response
 from pydantic import ConfigDict, Field, StrictInt
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, FundsWriter
 from app.admin_customer_routes import (
     _current_billing_snapshot,
     _deny_admin_self_service,
@@ -133,7 +133,7 @@ def grant_customer_package(
     body: PackageGrantRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         reason = body.reason.strip()
@@ -325,7 +325,7 @@ def create_customer_discount(
     body: ManualDiscountRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         reason = body.reason.strip()
@@ -394,7 +394,7 @@ def deactivate_customer_discount(
     body: AdminWriteRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         reason = body.reason.strip()
