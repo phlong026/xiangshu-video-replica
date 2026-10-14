@@ -469,6 +469,8 @@ export function AdminApp() {
           "section",
           // 带状态筛选的跳转（工单「未结案」、订单「待支付」等）。
           "status",
+          // 队列观测「去处理」：生成记录按类型预筛选。
+          "recordType",
         ].includes(key)
       )
         allowed.delete(key);
@@ -1283,10 +1285,12 @@ export function AdminApp() {
                 navigationIntent === "failedGenerationRecords" ||
                 navigationIntent === "analysisFailures"
                   ? "FAILED"
-                  : undefined
+                  : (businessTarget.get("status") ?? undefined)
               }
               initialRecordType={
-                navigationIntent === "analysisFailures" ? "ANALYSIS" : undefined
+                navigationIntent === "analysisFailures"
+                  ? "ANALYSIS"
+                  : (businessTarget.get("recordType") ?? undefined)
               }
               initialView={
                 activeTab === "generationFailures" ? "diagnostics" : "records"
