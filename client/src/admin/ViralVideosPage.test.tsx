@@ -492,36 +492,42 @@ describe("ViralVideosPage", () => {
     );
   });
 
-  it("概览数字与采集关键词来自服务端，采集停用后不能手动触发", async () => {
+  it("首屏就是视频列表：不再内嵌概览卡片与采集计划，采集停用后不能手动触发", async () => {
     const fetchMock = installFetch({
       overview: () => ({ ...overview, collection_enabled: false }),
       controls: () => ({ ...controls, keywords: [] }),
     });
     render(<ViralVideosPage />);
-    const tiles = await screen.findByLabelText("爆款视频库概览");
-    expect(
-      within(tiles).getByText("内容池总量").closest("div"),
-    ).toHaveTextContent("12");
-    expect(
-      within(tiles).getByText("待准备 / 失败").closest("div"),
-    ).toHaveTextContent("2 / 2");
-    expect(
-      screen.getByText("尚未配置关键词，未配置时后台不会采集。"),
-    ).toBeInTheDocument();
+    await screen.findByText("庭院施工案例");
+    // 库存数字与采集计划属于「内容概览」「采集设置」（T35）。
+    expect(screen.queryByLabelText("爆款视频库概览")).toBeNull();
+    expect(screen.queryByText("采集计划与关键词")).toBeNull();
+    expect(screen.getByRole("tab", { name: "视频库" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     const collect = screen.getByRole("button", { name: "立即采集" });
     expect(collect).toBeDisabled();
     expect(collect).toHaveAttribute(
       "title",
       expect.stringContaining("采集设置"),
     );
-    // 概览与采集配置各读一次即可，不轮询。
+    // 只为「立即采集」是否可用读一次概览；不再读取采集关键词配置。
     const urls = fetchMock.mock.calls.map(([url]) => String(url));
     expect(urls.filter((url) => url.includes("/viral/overview"))).toHaveLength(
       1,
     );
     expect(urls.filter((url) => url.includes("/settings/viral"))).toHaveLength(
-      1,
+      0,
     );
+  });
+
+  it("页签写入地址：切到回收站后 ?sub=recycle，刷新仍停在回收站", async () => {
+    installFetch();
+    render(<ViralVideosPage />);
+    await screen.findByText("庭院施工案例");
+    fireEvent.click(screen.getByRole("tab", { name: "回收站" }));
+    expect(window.location.hash).toContain("sub=recycle");
   });
 
   it("立即采集走独立确认框并带上人工填写的原因", async () => {
