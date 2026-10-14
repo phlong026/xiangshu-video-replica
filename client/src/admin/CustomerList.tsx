@@ -10,8 +10,13 @@ import {
   type CustomerListItem,
   type CustomerListOptions,
   type CustomerListResponse,
+  type CustomerOwnerCandidate,
+  listCustomerOwnerCandidates,
   listCustomers,
+  listCustomerTags,
 } from "../api.admin";
+import { BatchAnnotateDialog } from "./BatchAnnotateDialog";
+import { BatchGrantDialog } from "./BatchGrantDialog";
 import { CustomerLink } from "./CustomerLink";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { FilterBar } from "./ui/FilterBar";
@@ -78,6 +83,8 @@ export function CustomerList({
     balanceMin: initial.get("balanceMin") ?? "",
     balanceMax: initial.get("balanceMax") ?? "",
     threshold: initial.get("threshold") ?? "",
+    tag: initial.get("tag") ?? "",
+    owner: initial.get("owner") ?? "",
   };
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,6 +100,16 @@ export function CustomerList({
   const [balanceMin, setBalanceMin] = useState(initialFilters.balanceMin);
   const [balanceMax, setBalanceMax] = useState(initialFilters.balanceMax);
   const [threshold, setThreshold] = useState(initialFilters.threshold);
+  const [tagDraft, setTagDraft] = useState(initialFilters.tag);
+  const [ownerDraft, setOwnerDraft] = useState(initialFilters.owner);
+  const [tagOptions, setTagOptions] = useState<string[]>([]);
+  const [ownerOptions, setOwnerOptions] = useState<CustomerOwnerCandidate[]>(
+    [],
+  );
+  // 批量操作（T30/T31）：勾选只在当前页生效，换页 / 换筛选即清空，避免误操作看不见的行。
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [annotateOpen, setAnnotateOpen] = useState(false);
+  const [grantOpen, setGrantOpen] = useState(false);
   const [sort, setSort] = useState<CustomerListOptions["sort"]>(
     (initial.get("sort") as CustomerListOptions["sort"]) || "activated",
   );
@@ -154,11 +171,14 @@ export function CustomerList({
                 filters.threshold !== ""
                   ? Number(filters.threshold)
                   : undefined,
+              tag: filters.tag || undefined,
+              ownerUserId: filters.owner || undefined,
             }
           : {}),
       });
       if (sequence !== requestId.current) return;
       setCustomers(response.items);
+      setSelected(new Set());
       setTotal(response.total);
       setAttentionCounts(response.attention_counts);
       setDefaultThreshold(response.low_balance_threshold ?? null);
@@ -194,6 +214,16 @@ export function CustomerList({
     onScopeChange,
   ]);
 
+  // 高级筛选的候选项：标签与负责人各读一次，失败不影响列表。
+  useEffect(() => {
+    void listCustomerTags()
+      .then((result) => setTagOptions(result.items.map((item) => item.tag)))
+      .catch(() => undefined);
+    void listCustomerOwnerCandidates()
+      .then((result) => setOwnerOptions(result.items))
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     loadCustomers();
     return () => {
@@ -213,6 +243,8 @@ export function CustomerList({
       balanceMin,
       balanceMax,
       threshold,
+      tag: tagDraft,
+      owner: ownerDraft,
     });
   };
 
@@ -226,6 +258,8 @@ export function CustomerList({
     setBalanceMin("");
     setBalanceMax("");
     setThreshold("");
+    setTagDraft("");
+    setOwnerDraft("");
     setAttention("");
     setOffset(0);
     setExpandedUserId(null);
@@ -238,6 +272,8 @@ export function CustomerList({
       balanceMin: "",
       balanceMax: "",
       threshold: "",
+      tag: "",
+      owner: "",
     });
   };
 
@@ -264,10 +300,19 @@ export function CustomerList({
       direction,
       lowBalanceThreshold:
         filters.threshold !== "" ? Number(filters.threshold) : undefined,
+      tag: filters.tag || undefined,
+      ownerUserId: filters.owner || undefined,
     }).catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : "导出失败"),
     );
   };
+
+  const selectedTargets = customers
+    .filter((customer) => selected.has(customer.user_id))
+    .map((customer) => ({
+      user_id: customer.user_id,
+      username: customer.username,
+    }));
 
   const focusedCustomer =
     expandedUserId === null
@@ -350,60 +395,6 @@ export function CustomerList({
             onChange={(e) => setUsernameDraft(e.target.value)}
           />
         </label>
-        <label className="admin-toolbar__field">
-          <span>注册起始</span>
-          <input
-            aria-label="注册起始"
-            type="date"
-            value={createdFrom}
-            onChange={(event) => setCreatedFrom(event.target.value)}
-          />
-        </label>
-        <label className="admin-toolbar__field">
-          <span>注册截止</span>
-          <input
-            aria-label="注册截止"
-            type="date"
-            min={createdFrom || undefined}
-            value={createdTo}
-            onChange={(event) => setCreatedTo(event.target.value)}
-          />
-        </label>
-        <label className="admin-toolbar__field">
-          <span>最低余额（积分）</span>
-          <input
-            aria-label="最低余额"
-            min="0"
-            type="number"
-            value={balanceMin}
-            onChange={(event) => setBalanceMin(event.target.value)}
-          />
-        </label>
-        <label className="admin-toolbar__field">
-          <span>最高余额（积分）</span>
-          <input
-            aria-label="最高余额"
-            min="0"
-            type="number"
-            value={balanceMax}
-            onChange={(event) => setBalanceMax(event.target.value)}
-          />
-        </label>
-        <label className="admin-toolbar__field">
-          <span>低余额阈值（积分）</span>
-          <input
-            aria-label="低余额阈值"
-            type="number"
-            min="0"
-            max="2147483647"
-            step="1"
-            placeholder={
-              defaultThreshold !== null ? `默认 ${defaultThreshold}` : "默认"
-            }
-            value={threshold}
-            onChange={(event) => setThreshold(event.target.value)}
-          />
-        </label>
         <label className="admin-toolbar__field admin-toolbar__field--select">
           <span>客户状态</span>
           <select
@@ -417,6 +408,111 @@ export function CustomerList({
             <option value="revoked">已撤销</option>
           </select>
         </label>
+        <label className="admin-toolbar__field admin-toolbar__field--select">
+          <span>负责人</span>
+          <select
+            aria-label="负责人筛选"
+            value={ownerDraft}
+            onChange={(event) => setOwnerDraft(event.target.value)}
+          >
+            <option value="">全部负责人</option>
+            <option value="none">未分配</option>
+            {ownerOptions.map((item) => (
+              <option key={item.user_id} value={item.user_id}>
+                {item.display_name || item.username}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="admin-toolbar__field admin-toolbar__field--select">
+          <span>标签</span>
+          <select
+            aria-label="标签筛选"
+            value={tagDraft}
+            onChange={(event) => setTagDraft(event.target.value)}
+          >
+            <option value="">全部标签</option>
+            {tagOptions.map((tag) => (
+              <option key={tag} value={tag}>
+                {tag}
+              </option>
+            ))}
+          </select>
+        </label>
+        {/* 高级筛选（T30）：日期与余额范围是低频条件，折叠起来让主筛选一行放得下；
+            已有生效的高级条件时默认展开，避免「看不见却在过滤」。 */}
+        <details
+          className="customer-advanced-filters"
+          open={
+            Boolean(
+              filters.createdFrom ||
+                filters.createdTo ||
+                filters.balanceMin ||
+                filters.balanceMax ||
+                filters.threshold,
+            ) || undefined
+          }
+        >
+          <summary>高级筛选</summary>
+          <div className="customer-advanced-filters__fields">
+            <label className="admin-toolbar__field">
+              <span>注册起始</span>
+              <input
+                aria-label="注册起始"
+                type="date"
+                value={createdFrom}
+                onChange={(event) => setCreatedFrom(event.target.value)}
+              />
+            </label>
+            <label className="admin-toolbar__field">
+              <span>注册截止</span>
+              <input
+                aria-label="注册截止"
+                type="date"
+                min={createdFrom || undefined}
+                value={createdTo}
+                onChange={(event) => setCreatedTo(event.target.value)}
+              />
+            </label>
+            <label className="admin-toolbar__field">
+              <span>最低余额（积分）</span>
+              <input
+                aria-label="最低余额"
+                min="0"
+                type="number"
+                value={balanceMin}
+                onChange={(event) => setBalanceMin(event.target.value)}
+              />
+            </label>
+            <label className="admin-toolbar__field">
+              <span>最高余额（积分）</span>
+              <input
+                aria-label="最高余额"
+                min="0"
+                type="number"
+                value={balanceMax}
+                onChange={(event) => setBalanceMax(event.target.value)}
+              />
+            </label>
+            <label className="admin-toolbar__field">
+              <span>低余额阈值（积分）</span>
+              <input
+                aria-label="低余额阈值"
+                type="number"
+                min="0"
+                max="2147483647"
+                step="1"
+                placeholder={
+                  defaultThreshold !== null
+                    ? `默认 ${defaultThreshold}`
+                    : "默认"
+                }
+                value={threshold}
+                onChange={(event) => setThreshold(event.target.value)}
+              />
+            </label>
+          </div>
+        </details>
       </FilterBar>
 
       <section aria-label="需要处理" className="customer-attention-cards">
@@ -472,13 +568,50 @@ export function CustomerList({
 
       {!loading && !error && customers.length > 0 && (
         <>
+          {!readOnly && selected.size > 0 ? (
+            <div
+              className="customer-batch-bar"
+              role="toolbar"
+              aria-label="批量操作"
+            >
+              <strong>已选 {selected.size} 位</strong>
+              <button type="button" onClick={() => setAnnotateOpen(true)}>
+                批量标注
+              </button>
+              <button type="button" onClick={() => setGrantOpen(true)}>
+                批量赠送积分
+              </button>
+              <button type="button" onClick={() => setSelected(new Set())}>
+                取消选择
+              </button>
+            </div>
+          ) : null}
           <div className="table-scroll admin-table-card">
             <table
               aria-label="客户列表"
-              className="customers-table admin-data-table"
+              className={`customers-table admin-data-table${readOnly ? " customers-table--readonly" : ""}`}
             >
               <thead>
                 <tr>
+                  {!readOnly ? (
+                    <th>
+                      <input
+                        aria-label="选择本页全部客户"
+                        type="checkbox"
+                        checked={
+                          customers.length > 0 &&
+                          selected.size === customers.length
+                        }
+                        onChange={(event) =>
+                          setSelected(
+                            event.target.checked
+                              ? new Set(customers.map((c) => c.user_id))
+                              : new Set(),
+                          )
+                        }
+                      />
+                    </th>
+                  ) : null}
                   <th>客户</th>
                   <th>负责人</th>
                   <th>状态与权益</th>
@@ -533,6 +666,24 @@ export function CustomerList({
               <tbody>
                 {customers.map((customer) => (
                   <tr key={customer.user_id}>
+                    {!readOnly ? (
+                      <td data-label="选择">
+                        <input
+                          aria-label={`选择 ${customer.username}`}
+                          type="checkbox"
+                          checked={selected.has(customer.user_id)}
+                          onChange={() =>
+                            setSelected((previous) => {
+                              const next = new Set(previous);
+                              if (next.has(customer.user_id))
+                                next.delete(customer.user_id);
+                              else next.add(customer.user_id);
+                              return next;
+                            })
+                          }
+                        />
+                      </td>
+                    ) : null}
                     <td data-label="客户">
                       <CustomerLink
                         userId={customer.user_id}
@@ -621,6 +772,27 @@ export function CustomerList({
           />
         </>
       )}
+      <BatchAnnotateDialog
+        open={annotateOpen}
+        targets={selectedTargets}
+        onClose={() => setAnnotateOpen(false)}
+        onFinished={() => {
+          setSelected(new Set());
+          void loadCustomers();
+          void listCustomerTags()
+            .then((result) => setTagOptions(result.items.map((i) => i.tag)))
+            .catch(() => undefined);
+        }}
+      />
+      <BatchGrantDialog
+        open={grantOpen}
+        targets={selectedTargets}
+        onClose={() => setGrantOpen(false)}
+        onFinished={() => {
+          setSelected(new Set());
+          void loadCustomers();
+        }}
+      />
     </div>
   );
 }

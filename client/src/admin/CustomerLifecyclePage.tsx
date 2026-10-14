@@ -10,7 +10,6 @@ import {
 } from "../api.admin";
 import { apiBaseUrl } from "../apiBase";
 import { CustomerLink } from "./CustomerLink";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
