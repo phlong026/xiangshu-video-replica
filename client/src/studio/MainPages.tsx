@@ -54,6 +54,7 @@ import { cacheAvailable, extractLocalVideoAudio } from "./viralCache";
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
+  VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
   ViralImportPollingTimeoutError,
   viralImportIdempotencyKey,
 } from "./viralImport";
@@ -445,7 +446,7 @@ export function WorkbenchPage() {
         return;
       if (task.status !== "SUCCEEDED" && task.status !== "FAILED") {
         throw new ViralImportPollingTimeoutError(
-          "导入任务等待超时，请稍后重试",
+          VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
         );
       }
       if (task.status !== "SUCCEEDED") {
