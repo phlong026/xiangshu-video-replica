@@ -1189,6 +1189,9 @@ export function AdminApp() {
               initialRecordType={
                 navigationIntent === "analysisFailures" ? "ANALYSIS" : undefined
               }
+              initialView={
+                activeTab === "generationFailures" ? "diagnostics" : "records"
+              }
               readOnly={readOnly}
             />
           ) : null}
