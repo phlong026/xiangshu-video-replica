@@ -10,7 +10,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 import app.wechat_native_provider  # noqa: F401 -- register the selectable provider
-from app.admin_auth_routes import AdminReader, AdminWriter, SuperAdminReader, SuperAdminWriter
+from app.admin_auth_routes import (
+    AdminReader,
+    FundsWriter,
+    SettingsWriter,
+    SuperAdminReader,
+    SuperAdminWriter,
+)
 from app.admin_write_contract import (
     AdminWriteContract,
     require_write_contract,
@@ -121,7 +127,7 @@ def reconcile_order(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: FundsWriter,
 ) -> dict[str, object]:
     require_write_contract(request, body)
     response.headers["Cache-Control"] = "no-store"
@@ -335,7 +341,7 @@ def _payment_audit(
 
 @router.post("/settings/customer-payments/wechat-native/self-check")
 def self_check_wechat_settings(
-    request: Request, response: Response, actor: AdminWriter
+    request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     """Probe WeChat once with the saved credentials (mchid + serial_no + private
     key must sign acceptably, api_v3_key must decrypt the answer). Read-only:
@@ -384,7 +390,7 @@ def self_check_wechat_settings(
 
 @router.patch("/settings/customer-payments/wechat-native")
 def save_wechat_settings(
-    body: WeChatSettingsUpdate, request: Request, response: Response, actor: AdminWriter
+    body: WeChatSettingsUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
 
@@ -419,7 +425,7 @@ def save_wechat_settings(
 
 @router.patch("/settings/customer-payments/provider")
 def save_payment_provider(
-    body: PaymentProviderUpdate, request: Request, response: Response, actor: AdminWriter
+    body: PaymentProviderUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
 
@@ -498,7 +504,7 @@ def save_payment_provider(
 
 @router.patch("/settings/customer-payments/billing", response_model=BillingSettingsSnapshot)
 def save_billing(
-    body: BillingSettingsUpdate, request: Request, response: Response, actor: AdminWriter
+    body: BillingSettingsUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
     return write_with_idempotency(
@@ -523,7 +529,7 @@ def save_billing(
 
 @router.patch("/settings/customer-payments/zpay", response_model=MaskedZPaySettings)
 def save_zpay(
-    body: ZPaySettingsUpdate, request: Request, response: Response, actor: AdminWriter
+    body: ZPaySettingsUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
     return write_with_idempotency(

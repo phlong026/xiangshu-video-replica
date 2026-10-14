@@ -14,6 +14,7 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { useCan } from "./ui/permissions";
 import { RuleNote } from "./ui/RuleNote";
 import { StatusBadge } from "./ui/StatusBadge";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
@@ -135,6 +136,9 @@ export function CustomerLifecyclePage({
   readOnly?: boolean;
   onCustomer?: (id: string) => void;
 }) {
+  // 批量赠送是资金操作：需要 funds.write（页面本身的 readOnly 只管客户类写点）。
+  const can = useCan();
+  const canGrant = !readOnly && can("funds.write");
   const [data, setData] = useState<CustomerLifecycleResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -418,7 +422,7 @@ export function CustomerLifecyclePage({
             ))}
           </select>
         </label>
-        {!readOnly && !batch && !restored.error && selected.size > 0 ? (
+        {canGrant && !batch && !restored.error && selected.size > 0 ? (
           <button type="button" onClick={() => setGrantOpen(true)}>
             批量赠送（已选 {selected.size}）
           </button>
@@ -433,7 +437,7 @@ export function CustomerLifecyclePage({
           ariaLabel="客户生命周期清单"
           headers={
             <>
-              {readOnly ? null : (
+              {!canGrant ? null : (
                 <th>
                   <input
                     type="checkbox"
@@ -453,7 +457,7 @@ export function CustomerLifecyclePage({
         >
           {items.map((item: CustomerLifecycleItem) => (
             <tr key={item.user_id}>
-              {readOnly ? null : (
+              {!canGrant ? null : (
                 <td>
                   <input
                     type="checkbox"

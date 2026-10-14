@@ -8,7 +8,7 @@ import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, FundsWriter, SettingsWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.db_pg import pg_transaction
 from app.wechat_native_client import NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS
@@ -62,7 +62,7 @@ def get_policy(response: Response, _actor: AdminReader) -> LegacyPolicy:
 
 @router.put("/settings/legacy-credit-policy", response_model=LegacyPolicy)
 def save_policy(
-    body: PolicyUpdate, request: Request, response: Response, actor: AdminWriter
+    body: PolicyUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         row = conn.execute(
@@ -180,7 +180,7 @@ def get_preview(user_id: str, response: Response, _actor: AdminReader) -> Conver
 
 @router.post("/customers/{user_id}/credit-conversion", response_model=ConversionPreview)
 def apply_conversion(
-    user_id: str, body: ConversionRequest, request: Request, response: Response, actor: AdminWriter
+    user_id: str, body: ConversionRequest, request: Request, response: Response, actor: FundsWriter
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         preview = preview_conversion(conn, user_id, applying=True)

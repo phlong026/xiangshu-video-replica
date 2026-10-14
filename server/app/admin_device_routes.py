@@ -36,7 +36,7 @@ from typing import Literal
 import psycopg
 from fastapi import APIRouter, Request, Response
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, CustomerWriter
 from app.admin_customer_metrics import utc_text_timestamp
 from app.admin_write_contract import (
     AdminWriteContract,
@@ -370,7 +370,7 @@ def admin_approve_device_pairing(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Approve a PENDING pairing via the administrator fallback lane."""
 
@@ -445,7 +445,7 @@ def admin_replace_device_pairing(
     body: ReplaceDeviceContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Replace one bound device with an approved pending pairing."""
 
@@ -512,7 +512,7 @@ def admin_unbind_device_route(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Release a bound device as the administrator (slot freed, history kept)."""
 
@@ -564,7 +564,7 @@ def admin_revoke_device_credential(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Revoke a bound device's credential permanently (the leaked-device lane)."""
 

@@ -41,6 +41,7 @@ from app.admin_auth_routes import (
     SuperAdminWriter,
     hash_admin_password,
 )
+from app.admin_permissions import EFFECTIVE_TEMPLATE_SQL
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
 from app.admin_write_contract import transaction_now_iso, write_with_idempotency
@@ -63,9 +64,11 @@ _MEMBER_SELECT = (
     "       CASE WHEN c.user_id IS NULL THEN 0 ELSE 1 END, "
     "       COALESCE((SELECT MAX(s.created_at) FROM admin_sessions s "
     "                 WHERE s.actor_user_id = u.id), ''), "
-    "       COALESCE(u.created_at, '') "
+    "       COALESCE(u.created_at, ''), "
+    f"       {EFFECTIVE_TEMPLATE_SQL}, COALESCE(t.label, ''), u.admin_template "
     "FROM users u "
     "LEFT JOIN admin_password_credentials c ON c.user_id = u.id "
+    f"LEFT JOIN admin_role_templates t ON t.template = {EFFECTIVE_TEMPLATE_SQL} "
 )
 
 
@@ -80,6 +83,11 @@ def _member_payload(row: tuple[object, ...]) -> dict[str, object]:
         "has_password": row[6] == 1,
         "last_login_at": str(row[7]),
         "created_at": str(row[8]),
+        # 角色模板（整改 T41）：template 是生效值（审计员 / 超管由角色与标记决定），
+        # assigned_template 是库里存的原值，供「调整角色」表单回显。
+        "template": str(row[9]),
+        "template_label": str(row[10]),
+        "assigned_template": None if row[11] is None else str(row[11]),
     }
 
 
@@ -141,12 +149,17 @@ def _other_active_super_admins(conn: psycopg.Connection, exclude_user_id: str) -
     return int(row[0]) if row is not None else 0
 
 
+AssignableTemplate = Literal["operations", "finance", "content"]
+
+
 class TeamMemberCreateRequest(AdminWriteRequest):
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(min_length=1, max_length=128)
     display_name: str = Field(min_length=1, max_length=80)
     role: Literal["admin", "auditor"]
+    # 管理员的角色模板（运营 / 财务 / 内容）；审计员由角色决定，不接受模板。
+    template: AssignableTemplate | None = None
     password: str = Field(
         min_length=MIN_ADMIN_PASSWORD_LENGTH, max_length=MAX_ADMIN_PASSWORD_LENGTH
     )
@@ -158,6 +171,7 @@ class TeamMemberUpdateRequest(AdminWriteRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=80)
     is_active: bool | None = None
     is_super_admin: bool | None = None
+    template: AssignableTemplate | None = None
 
 
 class TeamMemberPasswordRequest(AdminWriteRequest):
@@ -203,14 +217,19 @@ def create_team_member(
             "个字符，且不能全为空白。",
         ) from exc
 
+    if body.role == "auditor" and body.template is not None:
+        raise _http(
+            400, "TEAM_MEMBER_VALIDATION_FAILED", "审计员的权限由角色决定，不能再指定角色模板。"
+        )
+
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         if conn.execute("SELECT 1 FROM users WHERE username = %s", (username,)).fetchone():
             raise _http(409, "TEAM_MEMBER_USERNAME_TAKEN", "该登录名已被使用。")
         user_id = str(uuid.uuid4())
         conn.execute(
-            "INSERT INTO users (id, username, display_name, role, is_active, is_super_admin) "
-            "VALUES (%s, %s, %s, %s, 1, 0)",
-            (user_id, username, display_name, body.role),
+            "INSERT INTO users (id, username, display_name, role, is_active, is_super_admin, "
+            "admin_template) VALUES (%s, %s, %s, %s, 1, 0, %s)",
+            (user_id, username, display_name, body.role, body.template),
         )
         # 账号的完整性 = 用户行 + 钱包行 + 管理密码凭据；缺钱包的账号在
         # 计费/钱包路径上不是「完整账号」，与 bootstrap 首个管理员同构。
@@ -233,6 +252,7 @@ def create_team_member(
                     {
                         "username": username,
                         "role": body.role,
+                        "template": body.template,
                         "reason": body.reason.strip(),
                         "request_id": request_id,
                     },
@@ -277,7 +297,12 @@ def update_team_member(
     )
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        if body.display_name is None and body.is_active is None and body.is_super_admin is None:
+        if (
+            body.display_name is None
+            and body.is_active is None
+            and body.is_super_admin is None
+            and body.template is None
+        ):
             raise _http(400, "TEAM_MEMBER_VALIDATION_FAILED", "没有需要更新的字段。")
         # 先拿锁再读：后面的目标状态与超管计数都必须是前一笔已提交之后的数据。
         _lock_super_admin_guard(conn)
@@ -304,6 +329,11 @@ def update_team_member(
             )
 
         before = _load_member(conn, user_id)
+        if body.template is not None and before["role"] != "admin":
+            raise _http(
+                400, "TEAM_MEMBER_VALIDATION_FAILED", "审计员的权限由角色决定，不能指定角色模板。"
+            )
+        new_template = before["assigned_template"] if body.template is None else body.template
         new_display_name = (
             str(before["display_name"])
             if requested_display_name is None
@@ -314,8 +344,9 @@ def update_team_member(
         if new_active == 0 and current_active == 1:
             revoked_sessions = _revoke_all_sessions(conn, user_id, revoked_at=db_now)
         conn.execute(
-            "UPDATE users SET display_name = %s, is_active = %s, is_super_admin = %s WHERE id = %s",
-            (new_display_name, new_active, new_super, user_id),
+            "UPDATE users SET display_name = %s, is_active = %s, is_super_admin = %s, "
+            "admin_template = %s WHERE id = %s",
+            (new_display_name, new_active, new_super, new_template, user_id),
         )
         conn.execute(
             "INSERT INTO audit_logs "
@@ -333,6 +364,8 @@ def update_team_member(
                         "new_is_active": bool(new_active),
                         "old_is_super_admin": before["is_super_admin"],
                         "new_is_super_admin": bool(new_super),
+                        "old_template": before["template"],
+                        "new_template": new_template,
                         "revoked_sessions": revoked_sessions,
                         "reason": body.reason.strip(),
                         "request_id": request_id,

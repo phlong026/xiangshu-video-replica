@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { exportSummaryReportCsv } from "../api.admin";
 import { PageBanner } from "./ui/PageBanner";
+import { useCan } from "./ui/permissions";
 
 export function SummaryReportExport({
   kind,
@@ -11,6 +12,7 @@ export function SummaryReportExport({
   range: { start: string; end: string };
   disabled?: boolean;
 }) {
+  const canExport = useCan()("export");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -34,6 +36,8 @@ export function SummaryReportExport({
       setBusy(false);
     }
   }
+  // 导出是独立权限点（T41）：没有 export 的模板整块不出现，而不是点了才 403。
+  if (!canExport) return null;
   return (
     <section className="summary-export" aria-label="当前范围报表导出">
       <p>

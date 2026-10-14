@@ -28,7 +28,7 @@ import psycopg
 from fastapi import APIRouter, Request, Response
 from pydantic import ConfigDict, Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, CustomerWriter
 from app.admin_customer_routes import _write_with_idempotency, require_customer_target
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
@@ -202,7 +202,7 @@ def batch_update_customer_annotation(
     body: CustomerBatchAnnotationRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """逐户应用同一份增量，返回逐户结果；单户失败不连累其他客户，逐户写审计。"""
 
@@ -333,7 +333,7 @@ def update_customer_annotation(
     body: CustomerAnnotationUpdateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """整体替换一条标注；三字段全空即删除整行（空标注不落行）。"""
 

@@ -6,6 +6,7 @@ import {
   type RecentExport,
 } from "../api.admin";
 import { PageBanner } from "./ui/PageBanner";
+import { useCan } from "./ui/permissions";
 import { formatDateTime } from "./ui/vocabulary";
 
 /**
@@ -83,6 +84,7 @@ export function ReportsPage({
 }: {
   readOnly?: boolean;
 }) {
+  const canExport = useCan()("export");
   const today = shanghaiToday();
   const [mode, setMode] = useState<RangeMode>("month");
   const [month, setMonth] = useState(today.month);
@@ -285,7 +287,12 @@ export function ReportsPage({
           ? `当前区间：${range.start} 至 ${range.end}（共 ${days} 天）`
           : rangeProblem}
       </p>
-      <div className="admin-viral-tiles">
+      {canExport ? null : (
+        <PageBanner tone="notice">
+          当前角色没有导出权限，仅可查看导出记录。
+        </PageBanner>
+      )}
+      <div className="admin-viral-tiles" hidden={!canExport}>
         {items.map((item) => (
           <div className="admin-viral-tile" key={item.key}>
             <dt>{item.title}</dt>

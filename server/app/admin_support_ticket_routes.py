@@ -19,7 +19,7 @@ import uuid
 import psycopg
 from fastapi import APIRouter, Request, Response
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, CustomerWriter
 from app.admin_customer_routes import _write_with_idempotency
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
@@ -189,7 +189,7 @@ def create_support_ticket(
     body: TicketCreateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         summary = body.summary.strip()
@@ -263,7 +263,7 @@ def update_support_ticket(
     body: TicketUpdateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         row = conn.execute(

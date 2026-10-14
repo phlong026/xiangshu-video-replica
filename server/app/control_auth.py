@@ -198,8 +198,18 @@ def get_control_exporter(
         return get_control_user(conn, proxy_token)
 
     from app.admin_auth_routes import get_admin_actor
+    from app.admin_permissions import EXPORT, POINT_LABELS
 
     admin_actor = get_admin_actor(request)
+    if not admin_actor.can(EXPORT):
+        # 整改 T41：导出是独立权限点，由角色模板授予。
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PERMISSION_DENIED",
+                "message": f"当前角色没有「{POINT_LABELS[EXPORT]}」权限。",
+            },
+        )
     return CurrentUser(
         id=admin_actor.user_id,
         username=admin_actor.username,
@@ -208,5 +218,53 @@ def get_control_exporter(
     )
 
 
+def _require_control_point(
+    request: Request,
+    conn: Database,
+    proxy_token: str | None,
+    point: str,
+) -> CurrentUser:
+    """控制面写接口按权限点把关（整改 T41）：客户生产线先过写级角色，再看模板是否有该点。
+
+    内部 P0 线沿用代理令牌身份（它本来只认 admin，没有「模板」的概念）。
+    """
+    actor = get_control_writer(request, conn, proxy_token)
+    if not _is_customer_production():
+        return actor
+    from app.admin_auth_routes import get_admin_actor
+    from app.admin_permissions import POINT_LABELS
+
+    if not get_admin_actor(request).can(point):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PERMISSION_DENIED",
+                "message": (
+                    f"当前角色没有「{POINT_LABELS[point]}」权限，请联系超级管理员调整角色。"
+                ),
+            },
+        )
+    return actor
+
+
+# 与 admin 侧同理：按权限点给出具名依赖，静态核销表才能按名核销。
+def get_control_funds_writer(
+    request: Request,
+    conn: Database,
+    proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+) -> CurrentUser:
+    return _require_control_point(request, conn, proxy_token, "funds.write")
+
+
+def get_control_settings_writer(
+    request: Request,
+    conn: Database,
+    proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+) -> CurrentUser:
+    return _require_control_point(request, conn, proxy_token, "settings.write")
+
+
+ControlFundsWriter = Annotated[CurrentUser, Depends(get_control_funds_writer)]
+ControlSettingsWriter = Annotated[CurrentUser, Depends(get_control_settings_writer)]
 ControlWriter = Annotated[CurrentUser, Depends(get_control_writer)]
 ControlExporter = Annotated[CurrentUser, Depends(get_control_exporter)]

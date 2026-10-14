@@ -11,7 +11,7 @@ import psycopg
 from fastapi import APIRouter, Request, Response
 from pydantic import ConfigDict, Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, ContentWriter
 from app.admin_dates import SHANGHAI
 from app.admin_write_contract import AdminWriteContract, http_error, write_with_idempotency
 from app.billing_reports import date_bounds
@@ -164,7 +164,7 @@ def save_rows(
 
 @router.patch("")
 def edit_keyword(
-    payload: KeywordEdit, request: Request, response: Response, actor: AdminWriter
+    payload: KeywordEdit, request: Request, response: Response, actor: ContentWriter
 ) -> dict[str, object]:
     def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
         rows = keyword_rows(raw, lock=True)
@@ -217,7 +217,7 @@ def edit_keyword(
 
 @router.post("/batch")
 def add_keywords(
-    payload: KeywordBatch, request: Request, response: Response, actor: AdminWriter
+    payload: KeywordBatch, request: Request, response: Response, actor: ContentWriter
 ) -> dict[str, object]:
     def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
         # Create and lock the singleton even before the first keyword is configured.

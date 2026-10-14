@@ -134,11 +134,22 @@ def route_state(team_dsn: str) -> Iterator[str]:
 @pytest.fixture()
 def admin_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
     from app.admin_auth_routes import router as admin_auth_router
+    from app.admin_customer_ops_params_routes import router as ops_params_router
+    from app.admin_customer_routes import router as admin_customer_router
+    from app.admin_runtime_routes import router as admin_runtime_router
     from app.admin_team_routes import router as team_router
+    from app.announcement_routes import router as announcement_router
+    from app.export_controller import router as export_router
 
     app = FastAPI()
     app.include_router(admin_auth_router)
     app.include_router(team_router)
+    # 权限矩阵用例（T41）要探测各权限点的代表性写接口 / 导出接口。
+    app.include_router(ops_params_router)
+    app.include_router(admin_customer_router)
+    app.include_router(admin_runtime_router)
+    app.include_router(announcement_router)
+    app.include_router(export_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_ADMIN_SESSION_KEY)
@@ -180,6 +191,7 @@ def _create_member(
     username: str = "new_ops",
     display_name: str = "New Ops",
     role: str = "admin",
+    template: str | None = None,
     password: str = NEW_MEMBER_PASSWORD,
     reason: str = "新同事入职：开通管理账号",
     confirm: bool = True,
@@ -194,6 +206,8 @@ def _create_member(
         "role": role,
         "password": password,
     }
+    if template is not None:
+        body["template"] = template
     return client.post(MEMBERS_PATH, headers=headers, json=body)
 
 
@@ -205,6 +219,7 @@ def _patch_member(
     display_name: str | None = None,
     is_active: bool | None = None,
     is_super_admin: bool | None = None,
+    template: str | None = None,
     reason: str = "团队调整",
     confirm: bool = True,
     key: str | None = None,
@@ -217,6 +232,8 @@ def _patch_member(
         body["is_active"] = is_active
     if is_super_admin is not None:
         body["is_super_admin"] = is_super_admin
+    if template is not None:
+        body["template"] = template
     return client.patch(f"{MEMBERS_PATH}/{user_id}", headers=headers, json=body)
 
 
@@ -644,3 +661,156 @@ def test_reset_password_requires_super_admin(client: TestClient) -> None:
     denied = _reset_password(client, plain, "staff_u")
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "SUPER_ADMIN_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# 权限点与角色模板（整改 T41）
+# ---------------------------------------------------------------------------
+
+READS = {
+    "business.read",
+    "funds.read",
+    "customer.read",
+    "generation.read",
+    "content.read",
+    "settings.read",
+    "audit.read",
+}
+WRITES = {"funds.write", "settings.write", "customer.write", "content.write", "export"}
+
+# 五个模板的权限点，逐个钉死：改模板内容必须同时改这里（和迁移）。
+TEMPLATE_PERMISSIONS: dict[str, set[str]] = {
+    "super_admin": READS | WRITES,
+    "operations": READS | WRITES,
+    "finance": {
+        "business.read",
+        "funds.read",
+        "customer.read",
+        "settings.read",
+        "funds.write",
+        "settings.write",
+        "export",
+    },
+    "content": {"generation.read", "content.read", "customer.read", "content.write"},
+    "auditor": READS | {"export"},
+}
+
+
+def _seed_template_user(route_state: str, user_id: str, role: str, template: str | None) -> None:
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active, is_super_admin, "
+            "admin_template) VALUES (%s, %s, %s, %s, 1, 0, %s)",
+            (user_id, user_id, user_id, role, template),
+        )
+
+
+def test_seeded_templates_match_the_pinned_permission_sets(route_state: str) -> None:
+    with psycopg.connect(route_state) as conn:
+        rows = conn.execute("SELECT template, permissions FROM admin_role_templates").fetchall()
+    assert {row[0]: set(row[1]) for row in rows} == TEMPLATE_PERMISSIONS
+
+
+# 代表性写接口：每个权限点一个。权限依赖先于请求体校验，所以空 / 不完整的请求体在「有权限」
+# 时落在 4xx（非 403），在「无权限」时是 403 —— 不需要为每个接口造完整业务数据。
+PROBES: dict[str, tuple[str, str]] = {
+    "funds.write": ("POST", "/api/control/customers/nobody/adjustments"),
+    "settings.write": ("PUT", "/api/control/customer-ops-params"),
+    "customer.write": ("POST", "/api/control/announcements"),
+    "content.write": ("POST", "/api/control/viral/keywords"),
+    "export": ("POST", "/api/control/reports/summary/export"),
+}
+
+# 模板 → 各探测点是否被放行。
+EXPECTED_ALLOWED: dict[str, set[str]] = {
+    "super_admin": set(PROBES),
+    "operations": set(PROBES),
+    "finance": {"funds.write", "settings.write", "export"},
+    "content": {"content.write"},
+    "auditor": {"export"},
+}
+
+
+@pytest.mark.parametrize("template", sorted(EXPECTED_ALLOWED))
+def test_each_template_gets_exactly_its_write_points(
+    client: TestClient, route_state: str, template: str
+) -> None:
+    if template == "super_admin":
+        user_id = "super_u"
+    else:
+        user_id = f"{template}_member"
+        _seed_template_user(
+            route_state,
+            user_id,
+            "auditor" if template == "auditor" else "admin",
+            None if template == "auditor" else template,
+        )
+    session = _admin_session(client, user_id)
+    me = client.get("/api/control/admin/session").json()["actor"]
+    assert me["template"] == template
+    assert set(me["permissions"]) == TEMPLATE_PERMISSIONS[template]
+
+    for point, (method, path) in PROBES.items():
+        headers = {**session, IDEMPOTENCY_KEY_HEADER: f"key-{uuid.uuid4()}"}
+        response = client.request(
+            method, path, headers=headers, json={"confirm": True, "reason": "矩阵探测"}
+        )
+        allowed = point in EXPECTED_ALLOWED[template]
+        denied_by_point = response.status_code == 403 and response.json()["detail"]["code"] in {
+            "PERMISSION_DENIED",
+            "AUDITOR_READ_ONLY",
+        }
+        assert denied_by_point is (not allowed), (
+            template,
+            point,
+            response.status_code,
+            response.text,
+        )
+
+
+def test_create_member_with_template_and_change_it_later(
+    client: TestClient, route_state: str
+) -> None:
+    session = _admin_session(client, "super_u")
+    created = _create_member(client, session, username="fin_new", template="finance")
+    assert created.status_code == 201, created.text
+    member = created.json()
+    assert member["template"] == "finance" and member["template_label"] == "财务"
+    assert member["assigned_template"] == "finance"
+
+    changed = _patch_member(client, session, str(member["user_id"]), template="content")
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["template"] == "content"
+    with psycopg.connect(route_state) as conn:
+        audit = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE entity_id = %s "
+            "AND action = 'team.member.update'",
+            (member["user_id"],),
+        ).fetchone()
+    assert audit is not None
+    meta = audit[0] if isinstance(audit[0], dict) else json.loads(audit[0])
+    assert (meta["old_template"], meta["new_template"]) == ("finance", "content")
+
+    # 默认（不指定）= 运营，与升级前普通管理员一致。
+    plain = _create_member(client, session, username="ops_new").json()
+    assert plain["template"] == "operations" and plain["assigned_template"] is None
+
+
+def test_auditor_cannot_be_given_a_template_and_role_beats_stored_template(
+    client: TestClient, route_state: str
+) -> None:
+    session = _admin_session(client, "super_u")
+    refused = _create_member(
+        client, session, username="aud_new", role="auditor", template="finance"
+    )
+    assert refused.status_code == 400, refused.text
+    auditor = _patch_member(client, session, "auditor_u", template="finance")
+    assert auditor.status_code == 400, auditor.text
+
+    # 脏数据：审计员行上残留了模板，生效模板仍是 auditor，不会因此获得写点。
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute("UPDATE users SET admin_template = 'finance' WHERE id = 'auditor_u'")
+    _admin_session(client, "auditor_u")
+    me = client.get("/api/control/admin/session").json()["actor"]
+    assert me["template"] == "auditor"
+    assert "funds.write" not in me["permissions"]

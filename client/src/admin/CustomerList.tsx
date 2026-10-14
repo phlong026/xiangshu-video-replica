@@ -22,6 +22,7 @@ import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { useCan } from "./ui/permissions";
 import { CustomerStatusBadge } from "./ui/StatusBadge";
 import { formatDateTime, formatFen, parseUtcTimestamp } from "./ui/vocabulary";
 import "./admin-customer-detail.css";
@@ -74,6 +75,12 @@ export function CustomerList({
   onCustomer,
   onReturnToList,
 }: CustomerListProps = {}) {
+  const can = useCan();
+  const canExport = can("export");
+  // 批量操作按领域拆权限（T41）：标注 customer.write，赠送积分 funds.write。
+  const canBatchAnnotate = !readOnly && can("customer.write");
+  const canBatchGrant = !readOnly && can("funds.write");
+  const canBatch = canBatchAnnotate || canBatchGrant;
   const initial = new URLSearchParams(initialListQuery);
   const initialFilters = {
     username: initial.get("username") ?? "",
@@ -377,9 +384,11 @@ export function CustomerList({
         onReset={handleFilterReset}
         onSubmit={handleFilterSubmit}
         actions={
-          <button type="button" onClick={exportList}>
-            导出列表 CSV
-          </button>
+          canExport ? (
+            <button type="button" onClick={exportList}>
+              导出列表 CSV
+            </button>
+          ) : null
         }
       >
         <label className="admin-toolbar__field">
@@ -568,19 +577,23 @@ export function CustomerList({
 
       {!loading && !error && customers.length > 0 && (
         <>
-          {!readOnly && selected.size > 0 ? (
+          {canBatch && selected.size > 0 ? (
             <div
               className="customer-batch-bar"
               role="toolbar"
               aria-label="批量操作"
             >
               <strong>已选 {selected.size} 位</strong>
-              <button type="button" onClick={() => setAnnotateOpen(true)}>
-                批量标注
-              </button>
-              <button type="button" onClick={() => setGrantOpen(true)}>
-                批量赠送积分
-              </button>
+              {canBatchAnnotate ? (
+                <button type="button" onClick={() => setAnnotateOpen(true)}>
+                  批量标注
+                </button>
+              ) : null}
+              {canBatchGrant ? (
+                <button type="button" onClick={() => setGrantOpen(true)}>
+                  批量赠送积分
+                </button>
+              ) : null}
               <button type="button" onClick={() => setSelected(new Set())}>
                 取消选择
               </button>
@@ -589,11 +602,11 @@ export function CustomerList({
           <div className="table-scroll admin-table-card">
             <table
               aria-label="客户列表"
-              className={`customers-table admin-data-table${readOnly ? " customers-table--readonly" : ""}`}
+              className={`customers-table admin-data-table${canBatch ? "" : " customers-table--readonly"}`}
             >
               <thead>
                 <tr>
-                  {!readOnly ? (
+                  {canBatch ? (
                     <th>
                       <input
                         aria-label="选择本页全部客户"
@@ -666,7 +679,7 @@ export function CustomerList({
               <tbody>
                 {customers.map((customer) => (
                   <tr key={customer.user_id}>
-                    {!readOnly ? (
+                    {canBatch ? (
                       <td data-label="选择">
                         <input
                           aria-label={`选择 ${customer.username}`}

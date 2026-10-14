@@ -102,9 +102,10 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上；
 # 20261014T1000_support_ticket_priority（管理端整改 T14/T15 工单优先级与关联对象）
-# 与 20261014T1100_customer_ops_params（整改 T29 客户运营参数）依次追加其上，
+# 20261014T1100_customer_ops_params（整改 T29 客户运营参数）与
+# 20261014T1200_admin_role_templates（整改 T41 权限点与角色模板）依次追加其上，
 # 故链尾为该值。
-HEAD_REVISION = "20261014T1100_customer_ops_params"
+HEAD_REVISION = "20261014T1200_admin_role_templates"
 
 
 @pytest.mark.pg
@@ -411,21 +412,25 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # submitted_at/submission_key/sync_attempts 三列 + sync_attempts CHECK +
 # submission_unknown 部分索引；columns +3、check_constraints +1、
 # timestamptz_columns +1、partial_indexes +1；digest 在全新 PG16 探针库重算。
+# 2026-10-14 管理端整改 T41 追加：新增 admin_role_templates（权限点与角色模板，
+# 含主键与外键），故 tables/primary_keys/foreign_keys 各 +1、columns +4、
+# check_constraints +1、jsonb_columns +1；digest 与表名集在迁到新 head 的
+# 隔离 PG16 探针库重算。
 # 2026-10-14 管理端整改 T14/T15 与 T29 追加：support_tickets 增 priority +
 # related_ref 两列与 priority CHECK，客户运营参数增两列与对应 CHECK；
 # columns +4、check_constraints +4，tables 不变；digest 由 --print-schema 在
 # 迁到新 head 的隔离 PG16 探针库重算（两迁移自 20261013T1020 线性接续，
 # 未改写已发布链指纹）。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 392,
-    "columns": 1492,
-    "foreign_keys": 216,
+    "check_constraints": 393,
+    "columns": 1496,
+    "foreign_keys": 217,
     "identity_columns": 0,
-    "jsonb_columns": 12,
+    "jsonb_columns": 13,
     "partial_indexes": 44,
-    "primary_keys": 133,
+    "primary_keys": 134,
     "sequences": 8,
-    "tables": 133,
+    "tables": 134,
     "timestamptz_columns": 118,
     "triggers": 61,
     "unique_constraints": 43,
@@ -462,6 +467,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "admin_device_events",
     "admin_password_credentials",
     "admin_refund_allocations",
+    "admin_role_templates",
     "admin_sessions",
     "admin_write_idempotency",
     "alembic_version",
@@ -685,7 +691,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "b012239dba9b154ffd7e0b6369abe89e12a7fa62950b3740e3ab0d6fbf77ae35"
+HEAD_SCHEMA_DIGEST = "5b5e642b7a6762ce6716f5c9424b0ea43fb664eb7a07ebefdc5d71cf419b48c3"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

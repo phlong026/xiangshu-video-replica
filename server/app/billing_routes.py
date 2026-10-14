@@ -14,7 +14,13 @@ import psycopg
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import Field, model_validator
 
-from app.admin_auth_routes import AdminExporter, AdminReader, AdminWriter
+from app.admin_auth_routes import (
+    AdminExporter,
+    AdminReader,
+    AdminWriter,
+    FundsWriter,
+    SettingsWriter,
+)
 from app.admin_export_guard import guard_admin_export
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.billing_catalog import SERVICES, Tariff, read_tariff, retail_snapshot
@@ -157,7 +163,7 @@ def admin_catalog(_actor: AdminReader, response: Response) -> dict[str, Any]:
 
 @router.put("/api/control/billing/tariff")
 def update_tariff(
-    payload: TariffUpdate, request: Request, response: Response, actor: AdminWriter
+    payload: TariffUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, Any]:
     if payload.service not in SERVICES:
         raise HTTPException(422, detail="未知计费科目")
@@ -655,7 +661,7 @@ class EvidenceUpdate(AdminWriteContract):
 
 @router.post("/api/control/billing/evidence")
 def append_evidence(
-    payload: EvidenceUpdate, request: Request, response: Response, actor: AdminWriter
+    payload: EvidenceUpdate, request: Request, response: Response, actor: FundsWriter
 ) -> dict[str, Any]:
     from app.billing_evidence import record_evidence
 

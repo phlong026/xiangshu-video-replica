@@ -33,6 +33,15 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from app.admin_permissions import (
+    CONTENT_WRITE,
+    CUSTOMER_WRITE,
+    EFFECTIVE_TEMPLATE_SQL,
+    EXPORT,
+    FUNDS_WRITE,
+    POINT_LABELS,
+    SETTINGS_WRITE,
+)
 from app.api_errors import http_error as _http
 from app.db_pg import pg_transaction
 from app.ops_metrics import (
@@ -383,6 +392,18 @@ def _as_datetime(value: object) -> datetime:
     return datetime.fromisoformat(str(value))
 
 
+def _permission_set(raw: object) -> frozenset[str]:
+    """模板权限点（JSONB 数组）→ 集合；缺失或异常按没有任何权限处理。"""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return frozenset()
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(str(item) for item in raw)
+
+
 @dataclass(frozen=True)
 class AdminActor:
     user_id: str
@@ -394,6 +415,18 @@ class AdminActor:
     session_id: str
     session_expires_at: str
     last_activity_at: str
+    # 权限点（整改 T41）。None = 构造方没有给（旧调用 / 测试替身）：按角色回退到升级前语义。
+    template: str = ""
+    template_label: str = ""
+    permissions: frozenset[str] | None = None
+
+    def can(self, point: str) -> bool:
+        """是否拥有某个权限点；无权限数据时回退：管理员全部，审计员只有读与导出。"""
+        if self.permissions is not None:
+            return point in self.permissions
+        if self.role == "admin":
+            return True
+        return point == EXPORT or point.endswith(".read")
 
 
 def _admin_exchange_identifier(request: Request) -> str:
@@ -518,8 +551,11 @@ def _create_admin_session_for_actor(
 
     with pg_transaction() as conn:
         user_row = conn.execute(
-            "SELECT id, username, display_name, role, is_super_admin "
-            "FROM users WHERE id = %s AND is_active = 1",
+            "SELECT u.id, u.username, u.display_name, u.role, u.is_super_admin, "
+            f"       {EFFECTIVE_TEMPLATE_SQL}, t.label, t.permissions "
+            "FROM users u "
+            f"LEFT JOIN admin_role_templates t ON t.template = {EFFECTIVE_TEMPLATE_SQL} "
+            "WHERE u.id = %s AND u.is_active = 1",
             (actor_user_id,),
         ).fetchone()
         if user_row is None:
@@ -570,6 +606,9 @@ def _create_admin_session_for_actor(
             session_id=session_id,
             session_expires_at=expires_at.isoformat(),
             last_activity_at=db_now.isoformat(),
+            template=str(user_row[5]),
+            template_label=str(user_row[6] or ""),
+            permissions=_permission_set(user_row[7]),
         )
         # M1 review M1: credential consumption (login) is a security-critical
         # lifecycle event — same transaction as the session row so the audit
@@ -649,8 +688,10 @@ def load_admin_session(
             "ELSE s.expires_at::timestamptz END, s.last_activity_at, "
             "       s.auth_method, s.actor_user_id, u.username, u.display_name, u.role, "
             "       u.is_super_admin, "
-            "       s.created_ip_digest, s.created_ua_digest, now() AS db_now "
+            "       s.created_ip_digest, s.created_ua_digest, now() AS db_now, "
+            f"       {EFFECTIVE_TEMPLATE_SQL}, t.label, t.permissions "
             "FROM admin_sessions s JOIN users u ON u.id = s.actor_user_id "
+            f"LEFT JOIN admin_role_templates t ON t.template = {EFFECTIVE_TEMPLATE_SQL} "
             "WHERE s.session_digest = %s AND s.revoked_at IS NULL AND u.is_active = 1",
             (_sha256_hex(session_token),),
         ).fetchone()
@@ -714,6 +755,9 @@ def load_admin_session(
                 session_id=str(row[0]),
                 session_expires_at=expires_at.isoformat(),
                 last_activity_at=db_now.isoformat(),
+                template=str(row[13]),
+                template_label=str(row[14] or ""),
+                permissions=_permission_set(row[15]),
             )
             csrf_digest = str(row[1])
     if rejection is not None:
@@ -839,13 +883,60 @@ def get_admin_exporter(actor: Annotated[AdminActor, Depends(get_admin_actor)]) -
     是**每一次导出都必须留审计并过限流**（见 ``admin_export_guard``）。导出依赖
     单独命名而不是直接用 ``AdminReader``：以后想再收紧，只改这一处。
     激活码导出等含密文的下载不走这里，仍是写级。
+
+    整改 T41：导出是独立权限点 ``export``，由角色模板授予（运营 / 财务 / 审计员有，
+    内容没有），不再是「只要是管理员就能导」。
     """
+    if not actor.can(EXPORT):
+        raise _http(403, "PERMISSION_DENIED", f"当前角色没有「{POINT_LABELS[EXPORT]}」权限。")
     return actor
+
+
+def _require_point(actor: AdminActor, point: str) -> AdminActor:
+    """按权限点把关的共享校验：先过审计员只读，再看模板有没有这个点（整改 T41）。"""
+    if not actor.can(point):
+        raise _http(
+            403,
+            "PERMISSION_DENIED",
+            f"当前角色没有「{POINT_LABELS[point]}」权限，请联系超级管理员调整角色。",
+        )
+    return actor
+
+
+# 每个写点一个具名依赖，而不是工厂返回的闭包：FastAPI 内省只保留函数名，工厂闭包
+# 一律叫 "dependency"，静态核销表（test_cw027_admin_permission_matrix）就无法按名
+# 核销，「新增未分类管理路由即失败」的守卫随之失效。
+def get_funds_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, FUNDS_WRITE)
+
+
+def get_settings_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, SETTINGS_WRITE)
+
+
+def get_customer_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, CUSTOMER_WRITE)
+
+
+def get_content_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, CONTENT_WRITE)
 
 
 AdminReader = Annotated[AdminActor, Depends(get_admin_actor)]
 AdminExporter = Annotated[AdminActor, Depends(get_admin_exporter)]
 AdminWriter = Annotated[AdminActor, Depends(get_admin_writer)]
+FundsWriter = Annotated[AdminActor, Depends(get_funds_writer)]
+SettingsWriter = Annotated[AdminActor, Depends(get_settings_writer)]
+CustomerWriter = Annotated[AdminActor, Depends(get_customer_writer)]
+ContentWriter = Annotated[AdminActor, Depends(get_content_writer)]
 SuperAdminReader = Annotated[AdminActor, Depends(get_super_admin_actor)]
 SuperAdminWriter = Annotated[AdminActor, Depends(get_super_admin_writer)]
 
@@ -879,6 +970,10 @@ class AdminActorInfo(BaseModel):
     display_name: str
     role: str
     is_super_admin: bool
+    # 角色模板与权限点（整改 T41）：前端 can() 据此决定菜单与按钮。
+    template: str = ""
+    template_label: str = ""
+    permissions: list[str] = []
 
 
 class ExchangeResponse(BaseModel):
@@ -914,19 +1009,26 @@ def _set_admin_session_cookie(response: Response, session_token: str, ttl_second
     )
 
 
+def _actor_info(actor: AdminActor) -> AdminActorInfo:
+    return AdminActorInfo(
+        user_id=actor.user_id,
+        username=actor.username,
+        display_name=actor.display_name,
+        role=actor.role,
+        is_super_admin=actor.is_super_admin,
+        template=actor.template,
+        template_label=actor.template_label,
+        permissions=sorted(actor.permissions or ()),
+    )
+
+
 def _exchange_response(actor: AdminActor, csrf_token: str) -> ExchangeResponse:
     return ExchangeResponse(
         session_id=actor.session_id,
         expires_at=actor.session_expires_at,
         csrf_token=csrf_token,
         auth_method=actor.auth_method,
-        actor=AdminActorInfo(
-            user_id=actor.user_id,
-            username=actor.username,
-            display_name=actor.display_name,
-            role=actor.role,
-            is_super_admin=actor.is_super_admin,
-        ),
+        actor=_actor_info(actor),
     )
 
 
@@ -1287,13 +1389,7 @@ def get_current_admin_session(
         last_activity_at=actor.last_activity_at,
         auth_method=actor.auth_method,
         csrf_token=getattr(request.state, "admin_csrf_token", None),
-        actor=AdminActorInfo(
-            user_id=actor.user_id,
-            username=actor.username,
-            display_name=actor.display_name,
-            role=actor.role,
-            is_super_admin=actor.is_super_admin,
-        ),
+        actor=_actor_info(actor),
     )
 
 

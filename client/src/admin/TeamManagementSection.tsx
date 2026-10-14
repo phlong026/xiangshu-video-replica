@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  type AssignableTemplate,
   adminActivationErrorMessage,
   createTeamMember,
   listTeamMembers,
@@ -26,12 +27,14 @@ type PendingAction =
   | { kind: "rename"; member: TeamMember }
   | { kind: "toggleActive"; member: TeamMember }
   | { kind: "toggleSuper"; member: TeamMember }
+  | { kind: "changeTemplate"; member: TeamMember }
   | { kind: "resetPassword"; member: TeamMember };
 
 interface CreateDraft {
   username: string;
   displayName: string;
   role: TeamRole;
+  template: AssignableTemplate;
   password: string;
 }
 
@@ -39,8 +42,32 @@ const EMPTY_CREATE_DRAFT: CreateDraft = {
   username: "",
   displayName: "",
   role: "auditor",
+  template: "operations",
   password: "",
 };
+
+// 管理员可选的角色模板（审计员 / 超管不在其中）。说明写清各自能做什么，运营才分得对。
+const TEMPLATE_OPTIONS: Array<{
+  id: AssignableTemplate;
+  label: string;
+  hint: string;
+}> = [
+  {
+    id: "operations",
+    label: "运营",
+    hint: "客户、内容、资金、设置与导出全部可操作（原普通管理员）",
+  },
+  {
+    id: "finance",
+    label: "财务",
+    hint: "资金操作、价格与收款设置、导出；其余只读",
+  },
+  {
+    id: "content",
+    label: "内容",
+    hint: "内容运营与生成排查；其余只读或不可见",
+  },
+];
 
 function memberName(member: TeamMember): string {
   return member.display_name || member.username;
@@ -67,6 +94,8 @@ function dialogLevel(action: PendingAction): ConfirmLevel {
     case "toggleSuper":
     case "resetPassword":
       return "reasonAndAck";
+    case "changeTemplate":
+      return "reason";
     case "toggleActive":
       return action.member.is_active ? "reasonAndAck" : "reason";
     case "rename":
@@ -88,6 +117,8 @@ function dialogTitle(action: PendingAction): string {
       return action.member.is_super_admin
         ? `取消超级管理员：${memberName(action.member)}`
         : `设为超级管理员：${memberName(action.member)}`;
+    case "changeTemplate":
+      return `调整角色：${memberName(action.member)}`;
     case "resetPassword":
       return `重置密码：${memberName(action.member)}`;
   }
@@ -107,6 +138,8 @@ function dialogDescription(action: PendingAction): string {
       return action.member.is_super_admin
         ? "取消后该成员不再能管理团队成员，也看不到技术配置类页面。"
         : "超级管理员可以新增、停用成员并重置他人密码。";
+    case "changeTemplate":
+      return "角色决定该成员能用哪些菜单和按钮；已登录的会话需要重新登录后按新角色生效。";
     case "resetPassword":
       return "旧密码立即失效，该成员所有在线会话会被吊销；请通过安全渠道把新密码告知本人。";
   }
@@ -137,6 +170,8 @@ export function TeamManagementSection({
     useState<CreateDraft>(EMPTY_CREATE_DRAFT);
   const [displayNameDraft, setDisplayNameDraft] = useState("");
   const [passwordDraft, setPasswordDraft] = useState("");
+  const [templateDraft, setTemplateDraft] =
+    useState<AssignableTemplate>("operations");
   // 同一份内容失败后重试沿用同一幂等键：新增成员若首个请求已落库而响应丢了，
   // 换键重试只会撞上「登录名已被使用」；改了内容才换键。
   const retryRef = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -165,6 +200,12 @@ export function TeamManagementSection({
     setPasswordDraft("");
     setDisplayNameDraft(
       action.kind === "rename" ? action.member.display_name : "",
+    );
+    setTemplateDraft(
+      action.kind === "changeTemplate"
+        ? ((action.member.assigned_template as AssignableTemplate | null) ??
+            "operations")
+        : "operations",
     );
     setPending(action);
   }
@@ -215,6 +256,10 @@ export function TeamManagementSection({
           display_name: displayName,
           role: createDraft.role,
           password: createDraft.password,
+          // 审计员的权限由角色决定，不带模板。
+          ...(createDraft.role === "admin"
+            ? { template: createDraft.template }
+            : {}),
         };
         const key = keyFor(JSON.stringify(["create", fields]));
         run = async () => {
@@ -278,6 +323,23 @@ export function TeamManagementSection({
           return nextSuper
             ? `已将「${memberName(action.member)}」设为超级管理员。`
             : `已取消「${memberName(action.member)}」的超级管理员。`;
+        };
+        break;
+      }
+      case "changeTemplate": {
+        const key = keyFor(
+          JSON.stringify(["template", action.member.user_id, templateDraft]),
+        );
+        run = async () => {
+          await updateTeamMember(
+            action.member.user_id,
+            { template: templateDraft },
+            reason,
+            key,
+          );
+          return `已将「${memberName(action.member)}」的角色调整为${
+            TEMPLATE_OPTIONS.find((item) => item.id === templateDraft)?.label
+          }。`;
         };
         break;
       }
@@ -352,6 +414,7 @@ export function TeamManagementSection({
                 <th scope="col">登录名</th>
                 <th scope="col">显示名</th>
                 <th scope="col">角色</th>
+                <th scope="col">角色模板</th>
                 <th scope="col">状态</th>
                 <th scope="col">最近登录</th>
                 <th scope="col">操作</th>
@@ -375,6 +438,9 @@ export function TeamManagementSection({
                           <StatusBadge tone="info">超级管理员</StatusBadge>
                         </>
                       ) : null}
+                    </td>
+                    <td data-label="角色模板">
+                      {member.template_label || "—"}
                     </td>
                     <td data-label="状态">
                       {member.is_active ? (
@@ -408,6 +474,18 @@ export function TeamManagementSection({
                             >
                               {member.is_active ? "停用" : "启用"}
                             </button>
+                            {member.role === "admin" &&
+                            !member.is_super_admin ? (
+                              <button
+                                aria-label={`调整角色 ${member.username}`}
+                                type="button"
+                                onClick={() =>
+                                  open({ kind: "changeTemplate", member })
+                                }
+                              >
+                                调整角色
+                              </button>
+                            ) : null}
                             {member.role === "admin" ? (
                               <button
                                 aria-label={`${member.is_super_admin ? "取消超管" : "设为超管"} ${member.username}`}
@@ -500,6 +578,26 @@ export function TeamManagementSection({
                 <option value="admin">管理员</option>
               </select>
             </label>
+            {createDraft.role === "admin" ? (
+              <label>
+                角色模板
+                <select
+                  value={createDraft.template}
+                  onChange={(event) =>
+                    setCreateDraft({
+                      ...createDraft,
+                      template: event.target.value as AssignableTemplate,
+                    })
+                  }
+                >
+                  {TEMPLATE_OPTIONS.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}：{item.hint}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <label>
               初始密码（{MIN_PASSWORD_LENGTH}–{MAX_PASSWORD_LENGTH} 个字符）
               <input
@@ -524,6 +622,23 @@ export function TeamManagementSection({
               value={displayNameDraft}
               onChange={(event) => setDisplayNameDraft(event.target.value)}
             />
+          </label>
+        ) : null}
+        {pending?.kind === "changeTemplate" ? (
+          <label>
+            角色模板
+            <select
+              value={templateDraft}
+              onChange={(event) =>
+                setTemplateDraft(event.target.value as AssignableTemplate)
+              }
+            >
+              {TEMPLATE_OPTIONS.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}：{item.hint}
+                </option>
+              ))}
+            </select>
           </label>
         ) : null}
         {pending?.kind === "resetPassword" ? (

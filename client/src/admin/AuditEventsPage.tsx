@@ -22,6 +22,7 @@ import { DataTable } from "./ui/DataTable";
 import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { useCan } from "./ui/permissions";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 import "./admin-audit.css";
 
@@ -240,6 +241,7 @@ function priceChange(item: AuditLogItem) {
 const PAGE_SIZE = 20;
 
 export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
+  const canExport = useCan()("export");
   const [items, setItems] = useState<AuditLogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -375,14 +377,16 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
           /* 方案 P1：审计可导出，与列表同筛选口径（服务端 control.export 审计）。
               T19（决策 D2）起审计员也可导出——审计员本就是审计日志的主要使用者，
               导出动作同样会被记入审计。 */
-          <button
-            className="secondary-button"
-            disabled={loading}
-            type="button"
-            onClick={() => void exportCsv()}
-          >
-            导出 CSV
-          </button>
+          canExport ? (
+            <button
+              className="secondary-button"
+              disabled={loading}
+              type="button"
+              onClick={() => void exportCsv()}
+            >
+              导出 CSV
+            </button>
+          ) : null
         }
       >
         <label>
