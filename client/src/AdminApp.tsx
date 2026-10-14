@@ -448,6 +448,8 @@ export function AdminApp() {
           "sub",
           "detail",
           "section",
+          // 带状态筛选的跳转（工单「未结案」、订单「待支付」等）。
+          "status",
         ].includes(key)
       )
         allowed.delete(key);
@@ -1054,6 +1056,34 @@ export function AdminApp() {
                     rates: "systemSettings",
                     recon: "funds",
                   };
+                  // 全局待办（T11）落到带筛选的清单：条数与待办计数同口径。
+                  const filtered: Record<
+                    string,
+                    { tab: AdminTab; target: Record<string, string> }
+                  > = {
+                    pendingOrders: {
+                      tab: "funds",
+                      target: { sub: "orders", status: "PENDING" },
+                    },
+                    queueAttention: { tab: "workerObservations", target: {} },
+                    openTickets: {
+                      tab: "supportTickets",
+                      target: { status: "unresolved" },
+                    },
+                    contentFailed: {
+                      tab: "viralVideos",
+                      target: { listQuery: "libraryStatus=failed" },
+                    },
+                    activeAlerts: {
+                      tab: "systemSettings",
+                      target: { sub: "alerts" },
+                    },
+                  };
+                  const direct = filtered[destination];
+                  if (direct) {
+                    navigateAdmin(direct.tab, "", direct.target);
+                    return;
+                  }
                   navigateAdmin(
                     routes[destination] ?? (destination as AdminTab),
                     destination,
@@ -1104,6 +1134,7 @@ export function AdminApp() {
               }
               key={`funds:${businessTarget}:${navigationIntent}`}
               initialMonth={businessTarget.get("month") ?? undefined}
+              initialOrderStatus={businessTarget.get("status") ?? ""}
               onMonthChange={(month) => persistBusinessScope({ month })}
               initialAnomaly={
                 (businessTarget.get(
@@ -1173,6 +1204,8 @@ export function AdminApp() {
           ) : null}
           {activeTab === "supportTickets" ? (
             <SupportTicketsPage
+              key={`tickets:${businessTarget}`}
+              initialStatus={businessTarget.get("status") ?? ""}
               readOnly={readOnly}
               onCustomer={(userId) =>
                 navigateAdmin("customersMgmt", "customer", {

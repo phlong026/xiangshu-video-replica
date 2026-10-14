@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter
 
 from app.admin_auth_routes import AdminReader
@@ -36,6 +38,39 @@ def _minutes(alias: str, column: str = "created_at", *, text_utc: bool = True) -
     # timestamptz 再参与 now() 运算；新表（publish_records）本就是 timestamptz。
     ts = utc_text_timestamp(f"{alias}.{column}") if text_utc else f"{alias}.{column}"
     return f"EXTRACT(EPOCH FROM (now()-({ts})))/60"
+
+
+_QUARANTINE_ORAL_SQL = """
+SELECT count(*) FROM oral_tasks
+WHERE status = 'SUBMISSION_UNCERTAIN'
+   OR submission_state = 'SUBMISSION_UNKNOWN'
+"""
+_QUARANTINE_CLONES_SQL = """
+SELECT
+  (SELECT count(*) FROM oral_avatars
+    WHERE submission_state = 'SUBMISSION_UNKNOWN'),
+  (SELECT count(*) FROM oral_voices
+    WHERE submission_state = 'SUBMISSION_UNKNOWN')
+"""
+# 准备表没有租约时间列（租约在应用层轮换）：长期 RUNNING 即视为
+# 卡住的准备（正常秒级完成），10 分钟阈值远大于正常耗时的上界。
+_STUCK_PREPARATION_SQL = f"""
+SELECT count(*), COALESCE(MAX({_minutes("p")}), 0)
+FROM viral_media_preparations p
+WHERE p.status = 'RUNNING'
+  AND ({utc_text_timestamp("p.created_at")}) < now()-interval '10 minutes'
+"""
+
+
+def queue_attention_count(conn: Any) -> int:
+    """需要人工处理的队列条目数：口播隔离区（任务/分身/声音）+ 卡住的素材准备。
+
+    总览待办与本页「需要关注」共用这一口径，点进来看到的条数与待办一致。
+    """
+    oral = conn.execute(_QUARANTINE_ORAL_SQL).fetchone() or (0,)
+    clones = conn.execute(_QUARANTINE_CLONES_SQL).fetchone() or (0, 0)
+    stuck = conn.execute(_STUCK_PREPARATION_SQL).fetchone() or (0, 0)
+    return int(oral[0]) + int(clones[0]) + int(clones[1]) + int(stuck[0])
 
 
 @router.get("/worker-observations")
@@ -68,32 +103,9 @@ def read_worker_observations(actor: AdminReader) -> dict[str, object]:
                 FROM publish_records t GROUP BY status ORDER BY status
                 """
             ).fetchall()
-            quarantine_oral = conn.execute(
-                """
-                SELECT count(*) FROM oral_tasks
-                WHERE status = 'SUBMISSION_UNCERTAIN'
-                   OR submission_state = 'SUBMISSION_UNKNOWN'
-                """
-            ).fetchone() or (0,)
-            quarantine_clones = conn.execute(
-                """
-                SELECT
-                  (SELECT count(*) FROM oral_avatars
-                    WHERE submission_state = 'SUBMISSION_UNKNOWN'),
-                  (SELECT count(*) FROM oral_voices
-                    WHERE submission_state = 'SUBMISSION_UNKNOWN')
-                """
-            ).fetchone() or (0, 0)
-            # 准备表没有租约时间列（租约在应用层轮换）：长期 RUNNING 即视为
-            # 卡住的准备（正常秒级完成），10 分钟阈值远大于正常耗时的上界。
-            stale_leases = conn.execute(
-                f"""
-                SELECT count(*), COALESCE(MAX({_minutes("p")}), 0)
-                FROM viral_media_preparations p
-                WHERE p.status = 'RUNNING'
-                  AND ({utc_text_timestamp("p.created_at")}) < now()-interval '10 minutes'
-                """
-            ).fetchone() or (0, 0)
+            quarantine_oral = conn.execute(_QUARANTINE_ORAL_SQL).fetchone() or (0,)
+            quarantine_clones = conn.execute(_QUARANTINE_CLONES_SQL).fetchone() or (0, 0)
+            stale_leases = conn.execute(_STUCK_PREPARATION_SQL).fetchone() or (0, 0)
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(
             503, "WORKER_OBSERVATIONS_UNAVAILABLE", "队列观测需要 PostgreSQL 运行时。"

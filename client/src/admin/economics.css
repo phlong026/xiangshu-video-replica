@@ -274,6 +274,12 @@
   font-size: var(--font-caption);
   font-weight: 600;
 }
+.dashboard-todo-group {
+  margin: 12px 0 4px;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--font-caption);
+  font-weight: 600;
+}
 .dashboard-toolbar {
   display: flex;
   flex-wrap: wrap;

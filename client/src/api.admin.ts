@@ -4178,6 +4178,16 @@ export type DashboardSummary = {
     reconciliation_problems: number;
     unconfigured_rates?: number;
     unknown_cost_records?: number;
+    /** 工单未结案（待处理 + 处理中）。 */
+    open_tickets?: number;
+    /** 待支付充值订单（与订单页「待支付」筛选同口径）。 */
+    pending_orders?: number;
+    /** 队列需人工处理：口播隔离区 + 卡住的素材准备。 */
+    queue_attention?: number;
+    /** 内容素材准备失败条数。 */
+    content_prepare_failed?: number;
+    /** 当前命中的告警条数；告警聚合不可用时为 null。 */
+    active_alerts?: number | null;
   };
 };
 
