@@ -11,6 +11,8 @@ import { useCallback, useRef, useState } from "react";
 // - 用户主动切换时一并去掉 intent：跳转意图只对「刚跳进来那一刻」有效，
 //   留着它会让刷新后的页面又被意图拉回入口页签。
 //
+// 页签改名时用 aliases 把旧值映射到新值，保证旧链接不失效。
+//
 // 允许的键需登记在 AdminApp 的 hash 参数白名单里，否则会在加载时被清掉。
 
 function currentParams(): URLSearchParams {
@@ -50,10 +52,13 @@ export function useHashParam<T extends string>(
   fallback: T,
   allowed: readonly T[],
   preferred?: T,
+  /** 旧取值 → 新取值：改过名的页签 id 让旧书签 / 转发链接继续有效。 */
+  aliases: Readonly<Record<string, T>> = {},
 ): [T, (next: T) => void] {
   const [value, setValue] = useState<T>(() => {
     if (preferred && allowed.includes(preferred)) return preferred;
-    const fromUrl = readHashParam(key) as T;
+    const raw = readHashParam(key);
+    const fromUrl = (aliases[raw] ?? raw) as T;
     return allowed.includes(fromUrl) ? fromUrl : fallback;
   });
   const current = useRef(value);

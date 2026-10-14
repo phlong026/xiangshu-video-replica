@@ -169,3 +169,43 @@ test("no longer hosts alerts or team: they are standalone menu entries", () => {
   expect(screen.queryByRole("tab", { name: "通知与告警" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "团队与权限" })).toBeNull();
 });
+
+test("价格页配置在前、试算器后置", () => {
+  render(<SystemSettingsPage />);
+
+  const pricing = screen.getByTestId("customer-pricing");
+  const rates = screen.getByTestId("billing-rates");
+  const calculator = screen.getByRole("region", { name: /试算/ });
+  expect(
+    pricing.compareDocumentPosition(calculator) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    rates.compareDocumentPosition(calculator) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+test("带费率意图进入：滚动到费率区块并高亮", () => {
+  const scrollIntoView = vi.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+  render(<SystemSettingsPage initialTab="rates" />);
+
+  const section = document.getElementById("billing-rates-section");
+  expect(section).toHaveClass("admin-settings-highlight");
+  expect(scrollIntoView).toHaveBeenCalled();
+  expect(section).toContainElement(screen.getByTestId("billing-rates"));
+});
+
+test("收款设置页签 id 为 payment，旧 id collection（意图与地址）仍兼容", () => {
+  const { unmount } = render(<SystemSettingsPage initialTab="collection" />);
+  expect(screen.getByTestId("payment-settings")).toBeInTheDocument();
+  unmount();
+
+  window.location.hash = "#admin/systemSettings?sub=collection";
+  render(<SystemSettingsPage />);
+  expect(screen.getByTestId("payment-settings")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "价格与套餐" }));
+  fireEvent.click(screen.getByRole("tab", { name: "收款设置" }));
+  expect(window.location.hash).toContain("sub=payment");
+});

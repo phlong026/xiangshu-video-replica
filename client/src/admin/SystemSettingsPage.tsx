@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   getControlSettings,
   testControlProviderConnection,
@@ -28,7 +29,7 @@ import { useHashParam } from "./ui/useHashParam";
 // 独立入口（T27），旧的 ?sub=alerts / ?sub=team 由外壳重定向。
 const baseTabs = [
   { id: "pricing", label: "价格与套餐" },
-  { id: "collection", label: "收款设置" },
+  { id: "payment", label: "收款设置" },
   { id: "ops", label: "运营参数" },
   { id: "features", label: "功能开关" },
 ];
@@ -63,26 +64,31 @@ export function SystemSettingsPage({
   onPublishStatsChanged,
 }: {
   readOnly?: boolean;
-  /** 旧页签 id（payment/rates）在挂载时归并到 pricing，外部 intent 不用改。 */
+  /**
+   * 外部意图指定的落点。rates（总览「成本待配置」等）落在价格页并滚动高亮费率区块；
+   * collection 是「收款设置」的旧 id，仍然兼容。
+   */
   initialTab?:
     | "pricing"
+    | "payment"
     | "collection"
     | "services"
     | "ops"
     | "features"
-    | "payment"
     | "rates";
   isSuperAdmin?: boolean;
   /** 功能开关切换后通知外壳刷新菜单显隐。 */
   onPublishStatsChanged?: (enabled: boolean) => void;
 }) {
-  // 收拢归并：payment / rates 都落「价格与套餐」；非超管看不到技术配置页签，
+  // rates 落「价格与套餐」；collection 是「收款设置」的旧 id；非超管看不到技术配置页签，
   // 带着该意图进来也落回价格页而不是看一页 404。
   const normalizeTab = (value: string) => {
-    if (value === "payment" || value === "rates") return "pricing";
+    if (value === "rates") return "pricing";
+    if (value === "collection") return "payment";
     if (value === "services" && !isSuperAdmin) return "pricing";
     return value;
   };
+  const highlightRates = initialTab === "rates";
   const visibleTabs = isSuperAdmin ? [...baseTabs, technicalTab] : baseTabs;
   // 设置页签与技术配置分组都写入 URL（?sub= / ?section=），刷新不丢。
   const [tab, setTab] = useHashParam<string>(
@@ -90,7 +96,15 @@ export function SystemSettingsPage({
     "pricing",
     visibleTabs.map(({ id }) => id),
     initialTab ? normalizeTab(initialTab) : undefined,
+    { collection: "payment" },
   );
+  // 带费率意图进来：滚动到费率区块并短暂高亮，运营一眼看到要配置的位置。
+  const ratesRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (highlightRates && tab === "pricing") {
+      ratesRef.current?.scrollIntoView?.({ block: "start" });
+    }
+  }, [highlightRates, tab]);
   const [serviceTab, setServiceTab] = useHashParam<string>(
     "section",
     "providers",
@@ -106,14 +120,21 @@ export function SystemSettingsPage({
       />
       {tab === "pricing" ? (
         <>
-          <BillingQuoteCalculator readOnly={readOnly} />
+          {/* 配置在前、试算器后置：试算是验证配置的工具，不该挡在配置之前。 */}
           <CustomerPricingManager readOnly={readOnly} />
           <RechargePackageManager readOnly={readOnly} />
-          <BillingRatesManager readOnly={readOnly} />
+          <div
+            id="billing-rates-section"
+            ref={ratesRef}
+            className={highlightRates ? "admin-settings-highlight" : undefined}
+          >
+            <BillingRatesManager readOnly={readOnly} />
+          </div>
           <RegistrationBonusSection readOnly={readOnly} />
+          <BillingQuoteCalculator readOnly={readOnly} />
         </>
       ) : null}
-      {tab === "collection" ? (
+      {tab === "payment" ? (
         <PaymentSettingsSection readOnly={readOnly} />
       ) : null}
       {tab === "services" ? (
