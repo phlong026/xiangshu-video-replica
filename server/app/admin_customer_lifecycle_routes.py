@@ -70,12 +70,9 @@ def list_customer_lifecycle(
     """生命周期分层清单 + 分布汇总；stage 为空时返回全部分层。"""
     del actor
     bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
-    params: list[object] = []
-    stage_filter = ""
-    # rows 查询对投影列 stage 过滤需包一层子查询；分布查询在 grouped 外层 WHERE。
-    if stage.strip():
-        stage_filter = "WHERE stage = %s"
-        params.append(stage.strip())
+    # rows 查询对投影列 stage 过滤需包一层子查询。分布统计刻意**不**套用 stage：
+    # 它是页面顶部的分层卡片，选中某层后其余卡片仍要可点（此前一并过滤，
+    # 选中后只剩一张卡片）；清单总数也直接取自同一份分布，保证卡片数与分页同源。
     row_params: list[object] = []
     row_filter = ""
     if stage.strip():
@@ -130,16 +127,18 @@ def list_customer_lifecycle(
                   ) recharge ON TRUE
                   {CUSTOMER_METRICS_JOINS}
                   WHERE u.role = 'customer' AND u.is_active = 1
-                ) grouped {stage_filter} GROUP BY stage ORDER BY stage
-                """,
-                tuple(params),
+                ) grouped GROUP BY stage ORDER BY stage
+                """
             ).fetchall()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(
             503, "CUSTOMER_LIFECYCLE_UNAVAILABLE", "客户运营分析需要 PostgreSQL 运行时。"
         ) from exc
+    stage_counts = {str(r[0]): int(r[1]) for r in distribution}
+    total = stage_counts.get(stage.strip(), 0) if stage.strip() else sum(stage_counts.values())
     return {
         "items": _lifecycle_rows(rows),
+        "total": total,
         "distribution": [
             {"stage": str(r[0]), "count": int(r[1]), "min_score": int(r[2]), "max_score": int(r[3])}
             for r in distribution

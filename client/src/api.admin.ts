@@ -1605,6 +1605,8 @@ export interface CustomerLifecycleItem {
 
 export interface CustomerLifecycleResponse {
   items: CustomerLifecycleItem[];
+  /** 当前分层（未选即全部）的客户总数，分页据此计算页数。 */
+  total: number;
   distribution: Array<{
     stage: string;
     count: number;
