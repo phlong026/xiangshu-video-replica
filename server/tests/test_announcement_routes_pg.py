@@ -241,6 +241,19 @@ def test_lifecycle_sql_runs_and_classifies(client: TestClient) -> None:
     new_items = result.json()["items"]
     assert [item["username"] for item in new_items] == ["customer_u"]
     assert new_items[0]["stage"] == "new"
+    # 选中分层后：total 为该层人数（分页靠它算页数），分布仍覆盖全部分层，
+    # 页面顶部其余分层卡片不能因筛选消失。
+    assert result.json()["total"] == 1
+    filtered_stages = {row["stage"] for row in result.json()["distribution"]}
+    assert filtered_stages == {"new", "active"}
+
+    paged = client.get(
+        "/api/control/customers/lifecycle",
+        params={"limit": 1, "offset": 1},
+        headers=headers,
+    ).json()
+    assert paged["total"] == 2
+    assert len(paged["items"]) == 1
 
     active = client.get(
         "/api/control/customers/lifecycle", params={"stage": "active"}, headers=headers
