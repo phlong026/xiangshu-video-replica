@@ -9,6 +9,7 @@ import { DataTable } from "./ui/DataTable";
 import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { useCan } from "./ui/permissions";
 import { StatusBadge } from "./ui/StatusBadge";
 import { useAutoRefresh } from "./ui/useAutoRefresh";
 import {
@@ -41,6 +42,7 @@ export function AccountsPage({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [exporting, setExporting] = useState(false);
+  const canExport = useCan()("export");
   // 草稿与已提交筛选分开（T22）：点「查询」才发请求，导出沿用已提交的筛选。
   const emptyFilters = {
     username: "",
@@ -130,13 +132,15 @@ export function AccountsPage({
         actions={
           <>
             {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
-            <button
-              type="button"
-              disabled={exporting || loading}
-              onClick={() => void exportTransactions()}
-            >
-              导出账务流水 CSV
-            </button>
+            {canExport ? (
+              <button
+                type="button"
+                disabled={exporting || loading}
+                onClick={() => void exportTransactions()}
+              >
+                导出账务流水 CSV
+              </button>
+            ) : null}
             <button
               aria-pressed={autoRefresh}
               type="button"

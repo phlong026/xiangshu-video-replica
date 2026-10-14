@@ -9,6 +9,7 @@ import {
 import { CostQueues } from "./CostQueues";
 import { SourceActionPanorama } from "./SourceActionPanorama";
 import { PageBanner } from "./ui/PageBanner";
+import { useCan } from "./ui/permissions";
 import { RuleNote } from "./ui/RuleNote";
 import { TabBar } from "./ui/TabBar";
 import { useHashParam } from "./ui/useHashParam";
@@ -193,6 +194,7 @@ export function BillingEconomics({
   initialQuery?: string;
   onQueryChange?: (query: string) => void;
 }) {
+  const canExport = useCan()("export");
   const costView = view === "cost";
   const detailRequest = useRef(0);
   const seed = () =>
@@ -495,13 +497,15 @@ export function BillingEconomics({
           <button type="submit" disabled={busy}>
             查询
           </button>
-          <button
-            type="button"
-            disabled={busy || !operations}
-            onClick={() => void exportRows()}
-          >
-            导出当前查询 CSV
-          </button>
+          {canExport ? (
+            <button
+              type="button"
+              disabled={busy || !operations}
+              onClick={() => void exportRows()}
+            >
+              导出当前查询 CSV
+            </button>
+          ) : null}
         </div>
       </form>
       {error && <PageBanner tone="error">{error}</PageBanner>}

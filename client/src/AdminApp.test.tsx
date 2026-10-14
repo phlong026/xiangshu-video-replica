@@ -27,6 +27,45 @@ const adminActor = {
   is_super_admin: true,
 };
 
+// 五个角色模板的权限点（整改 T41）。与迁移 20261014T1200 预置的模板逐字一致——
+// 服务端测试钉住同一份，这里钉住「同样的权限点在界面上长什么样」。
+const READ_POINTS = [
+  "business.read",
+  "funds.read",
+  "customer.read",
+  "generation.read",
+  "content.read",
+  "settings.read",
+  "audit.read",
+];
+const WRITE_POINTS = [
+  "funds.write",
+  "settings.write",
+  "customer.write",
+  "content.write",
+  "export",
+];
+const TEMPLATE_PERMISSIONS = {
+  super_admin: [...READ_POINTS, ...WRITE_POINTS],
+  operations: [...READ_POINTS, ...WRITE_POINTS],
+  finance: [
+    "business.read",
+    "funds.read",
+    "customer.read",
+    "settings.read",
+    "funds.write",
+    "settings.write",
+    "export",
+  ],
+  content: [
+    "generation.read",
+    "content.read",
+    "customer.read",
+    "content.write",
+  ],
+  auditor: [...READ_POINTS, "export"],
+} as const;
+
 const adminSession = {
   session_id: "session-1",
   expires_at: "2026-08-28T00:00:00+00:00",
@@ -181,10 +220,22 @@ function installFetch(options?: {
   isSuperAdmin?: boolean;
   /** 发布成效开关；默认关闭，菜单不出现该入口。 */
   publishStatsEnabled?: boolean;
+  /** 以某个角色模板登录（带该模板的权限点）；不传则沿用旧夹具（无 permissions）。 */
+  template?: keyof typeof TEMPLATE_PERMISSIONS;
 }) {
   const sessionState = options?.session ?? "missing";
-  const activeSession =
-    options?.role === "auditor"
+  const templateActor = options?.template
+    ? {
+        ...adminActor,
+        role: options.template === "auditor" ? "auditor" : "admin",
+        is_super_admin: options.template === "super_admin",
+        template: options.template,
+        permissions: [...TEMPLATE_PERMISSIONS[options.template]],
+      }
+    : null;
+  const activeSession = templateActor
+    ? { ...adminSession, actor: templateActor }
+    : options?.role === "auditor"
       ? {
           ...adminSession,
           actor: { ...adminActor, role: "auditor", is_super_admin: false },
@@ -1579,6 +1630,205 @@ describe("AdminApp", () => {
         );
       expect(listCall?.searchParams.get("task_ref")).toBe("TASK-9");
     });
+  });
+
+  // 每个模板可见的菜单（总览人人有；发布成效需开关、接口调用日志与团队仅超管，另测）。
+  const MENU_BY_TEMPLATE: Record<keyof typeof TEMPLATE_PERMISSIONS, string[]> =
+    {
+      super_admin: [
+        "总览",
+        "经营看板",
+        "成本核对",
+        "资金中心",
+        "报表中心",
+        "客户列表",
+        "客户运营",
+        "公告与消息",
+        "工单反馈",
+        "登录与设备",
+        "生成记录",
+        "失败诊断",
+        "队列观测",
+        "告警总览",
+        "接口调用日志",
+        "内容概览",
+        "视频库",
+        "首页编排",
+        "客户需求洞察",
+        "采集设置",
+        "管理操作日志",
+        "团队与权限",
+        "系统设置",
+      ],
+      operations: [
+        "总览",
+        "经营看板",
+        "成本核对",
+        "资金中心",
+        "报表中心",
+        "客户列表",
+        "客户运营",
+        "公告与消息",
+        "工单反馈",
+        "登录与设备",
+        "生成记录",
+        "失败诊断",
+        "队列观测",
+        "告警总览",
+        "内容概览",
+        "视频库",
+        "首页编排",
+        "客户需求洞察",
+        "采集设置",
+        "管理操作日志",
+        "系统设置",
+      ],
+      finance: [
+        "总览",
+        "经营看板",
+        "成本核对",
+        "资金中心",
+        "报表中心",
+        "客户列表",
+        "客户运营",
+        "公告与消息",
+        "工单反馈",
+        "登录与设备",
+        "系统设置",
+      ],
+      content: [
+        "总览",
+        "客户列表",
+        "客户运营",
+        "公告与消息",
+        "工单反馈",
+        "登录与设备",
+        "生成记录",
+        "失败诊断",
+        "队列观测",
+        "告警总览",
+        "内容概览",
+        "视频库",
+        "首页编排",
+        "客户需求洞察",
+        "采集设置",
+      ],
+      auditor: [
+        "总览",
+        "经营看板",
+        "成本核对",
+        "资金中心",
+        "报表中心",
+        "客户列表",
+        "客户运营",
+        "公告与消息",
+        "工单反馈",
+        "登录与设备",
+        "生成记录",
+        "失败诊断",
+        "队列观测",
+        "告警总览",
+        "内容概览",
+        "视频库",
+        "首页编排",
+        "客户需求洞察",
+        "采集设置",
+        "管理操作日志",
+        "系统设置",
+      ],
+    };
+
+  it.each(
+    Object.keys(MENU_BY_TEMPLATE) as Array<keyof typeof MENU_BY_TEMPLATE>,
+  )("%s 模板：左侧菜单只出现该模板可读的入口", async (template) => {
+    installFetch({ session: "valid", template });
+    render(<AdminApp />);
+    const nav = await screen.findByRole("navigation", { name: "管理端导航" });
+    const links = within(nav)
+      .getAllByRole("link")
+      .map((link) => link.getAttribute("aria-label"));
+    expect(links).toEqual(MENU_BY_TEMPLATE[template]);
+  });
+
+  it("没有读权限的页面即使手输地址也不渲染，给出说明", async () => {
+    window.history.replaceState(null, "", "#admin/funds");
+    installFetch({ session: "valid", template: "content" });
+    render(<AdminApp />);
+    expect(
+      await screen.findByText(/当前角色没有查看此页面的权限/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "收款订单" })).toBeNull();
+  });
+
+  // 按钮级：同一个页面，不同模板看到的操作不同。
+  it.each([
+    ["finance", true],
+    ["operations", true],
+    ["auditor", true],
+    ["content", false],
+  ] as const)("%s 模板：客户列表导出按钮 %s", async (template, visible) => {
+    window.history.replaceState(null, "", "#admin/customersMgmt");
+    installFetch({ session: "valid", template });
+    render(<AdminApp />);
+    await screen.findByRole("heading", { level: 1, name: "客户列表" });
+    await screen.findByRole("form", { name: "客户筛选" });
+    expect(
+      screen.queryByRole("button", { name: "导出列表 CSV" }) !== null,
+    ).toBe(visible);
+  });
+
+  it.each([
+    ["finance", true],
+    ["operations", true],
+    ["auditor", false],
+  ] as const)(
+    "%s 模板：资金中心订单页——查单 / 补单类写操作 %s",
+    async (template, writable) => {
+      window.history.replaceState(null, "", "#admin/funds?sub=orders");
+      installFetch({ session: "valid", template });
+      render(<AdminApp />);
+      await screen.findByRole("tab", { name: "收款订单" });
+      // 订单页的导出按钮三者都有（审计员有 export 点）；写类操作只有 funds.write 才有。
+      expect(
+        await screen.findByRole("button", { name: "导出充值订单 CSV" }),
+      ).toBeInTheDocument();
+      const manual = screen.queryAllByRole("button", { name: /手动查单|查单/ });
+      expect(manual.length > 0).toBe(writable);
+    },
+  );
+
+  it.each([
+    ["operations", true],
+    ["finance", false],
+    ["content", false],
+  ] as const)(
+    "%s 模板：公告页「发布公告」按钮 %s（customer.write）",
+    async (template, visible) => {
+      window.history.replaceState(null, "", "#admin/announcements");
+      installFetch({ session: "valid", template });
+      render(<AdminApp />);
+      await screen.findByRole("heading", { level: 1, name: "公告与消息" });
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "发布公告" }) !== null,
+        ).toBe(visible),
+      );
+    },
+  );
+
+  it("财务模板能改系统设置；内容模板看不到系统设置入口", async () => {
+    window.history.replaceState(null, "", "#admin/systemSettings");
+    installFetch({ session: "valid", template: "finance" });
+    const { unmount } = render(<AdminApp />);
+    await screen.findByRole("heading", { level: 1, name: "系统设置" });
+    expect(screen.getByRole("tab", { name: "运营参数" })).toBeInTheDocument();
+    unmount();
+
+    installFetch({ session: "valid", template: "content" });
+    render(<AdminApp />);
+    expect(
+      await screen.findByText(/当前角色没有查看此页面的权限/),
+    ).toBeInTheDocument();
   });
 
   it("每个导航分组至少两项", async () => {

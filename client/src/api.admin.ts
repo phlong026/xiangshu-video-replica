@@ -511,6 +511,10 @@ export type AdminActorInfo = {
    * 界面只用它决定是否露出「团队与权限」——真正的拦截在服务端（403）。
    */
   is_super_admin?: boolean;
+  /** 角色模板与权限点（整改 T41）；旧服务端 / 夹具可能没有，缺失时按角色回退。 */
+  template?: string;
+  template_label?: string;
+  permissions?: string[];
 };
 
 export type AdminExchangeResult = {
@@ -2740,19 +2744,29 @@ export interface TeamMember {
   /** 空串 = 从未登录。 */
   last_login_at: string;
   created_at: string;
+  /** 生效的角色模板（审计员 / 超管由角色与标记决定）与其中文名（整改 T41）。 */
+  template?: string;
+  template_label?: string;
+  /** 库里存的原值：null = 沿用旧语义（普通管理员即运营）。 */
+  assigned_template?: string | null;
 }
+
+/** 可分配给管理员的角色模板；超管由标记决定、审计员由角色决定。 */
+export type AssignableTemplate = "operations" | "finance" | "content";
 
 export interface TeamMemberCreateFields {
   username: string;
   display_name: string;
   role: TeamRole;
   password: string;
+  template?: AssignableTemplate;
 }
 
 export interface TeamMemberUpdateFields {
   display_name?: string;
   is_active?: boolean;
   is_super_admin?: boolean;
+  template?: AssignableTemplate;
 }
 
 export function listTeamMembers(): Promise<{ items: TeamMember[] }> {

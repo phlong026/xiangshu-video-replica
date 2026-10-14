@@ -34,6 +34,9 @@ type Member = {
   has_password: boolean;
   last_login_at: string;
   created_at: string;
+  template?: string;
+  template_label?: string;
+  assigned_template?: string | null;
 };
 
 function member(overrides: Partial<Member> & { user_id: string }): Member {
@@ -61,6 +64,9 @@ const OPS = member({
   user_id: "u-ops",
   username: "ops",
   display_name: "运营小张",
+  template: "finance",
+  template_label: "财务",
+  assigned_template: "finance",
 });
 const AUDITOR = member({
   user_id: "u-audit",
@@ -282,6 +288,8 @@ describe("TeamManagementSection（P2-4 团队与权限）", () => {
       username: "newbie",
       display_name: "新同事",
       role: "admin",
+      // 管理员默认角色模板 = 运营（与升级前普通管理员一致）。
+      template: "operations",
       password: NEW_MEMBER_CREDENTIAL,
       confirm: true,
       reason: "新同事入职",
@@ -299,6 +307,62 @@ describe("TeamManagementSection（P2-4 团队与权限）", () => {
     fireEvent.click(screen.getByRole("button", { name: "新增成员" }));
     expect(await screen.findByLabelText(/初始密码/)).toHaveValue("");
     expect(screen.getByLabelText("登录名")).toHaveValue("");
+  });
+
+  it("列表显示角色模板；管理员可调整角色，审计员与超管没有该入口（T41）", async () => {
+    const harness = installFetch({});
+    await renderTeam();
+
+    const row = (name: string) =>
+      within(screen.getByText(name).closest("tr") as HTMLElement);
+    expect(row("ops").getByText("财务")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "调整角色 audit" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "调整角色 root" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "调整角色 ops" }));
+    await screen.findByRole("dialog", { name: "调整角色：运营小张" });
+    // 回显库里存的模板。
+    expect(screen.getByLabelText("角色模板")).toHaveValue("finance");
+    fireEvent.change(screen.getByLabelText("角色模板"), {
+      target: { value: "content" },
+    });
+    submitDialog("岗位调整");
+
+    await waitFor(() => expect(harness.writes()).toHaveLength(1));
+    const [patch] = harness.writes();
+    expect(patch.method).toBe("PATCH");
+    expect(patch.url).toBe("/api/control/team/members/u-ops");
+    expect(patch.body).toEqual({
+      template: "content",
+      confirm: true,
+      reason: "岗位调整",
+    });
+    expect(await screen.findByText(/角色调整为内容/)).toBeInTheDocument();
+  });
+
+  it("新增审计员不带模板；选管理员才出现角色模板选择", async () => {
+    const harness = installFetch({});
+    await renderTeam();
+
+    fireEvent.click(screen.getByRole("button", { name: "新增成员" }));
+    await screen.findByRole("dialog", { name: "新增团队成员" });
+    expect(screen.queryByLabelText("角色模板")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("登录名"), {
+      target: { value: "aud2" },
+    });
+    fireEvent.change(screen.getByLabelText("显示名"), {
+      target: { value: "审计二" },
+    });
+    fireEvent.change(screen.getByLabelText(/初始密码/), {
+      target: { value: NEW_MEMBER_CREDENTIAL },
+    });
+    submitDialog("新增审计", { ack: true, confirm: "确认新增" });
+    await waitFor(() => expect(harness.writes()).toHaveLength(1));
+    expect(harness.writes()[0].body).not.toHaveProperty("template");
   });
 
   it("deactivating a member asks for acknowledgement and says sessions are revoked", async () => {
