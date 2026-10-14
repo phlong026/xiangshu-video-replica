@@ -11,15 +11,18 @@ from __future__ import annotations
 import csv
 import gzip
 import io
+import json
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.admin_auth_routes import AdminExporter
+from app.admin_auth_routes import AdminExporter, AdminReader
+from app.admin_customer_metrics import utc_text_timestamp
 from app.admin_export_guard import guard_admin_export
 from app.csv_export import spreadsheet_safe_cell
 from app.db_pg import pg_transaction
@@ -29,8 +32,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/control", tags=["admin-export"])
 
-_MAX_EXPORT_DAYS = 90
+# 92 天：一个自然季度最长 92 天（7–9 月 / 10–12 月），账务明细要能按季导出。
+_MAX_EXPORT_DAYS = 92
 _SUPPORTED_FORMATS = ("csv",)
+_BEIJING = ZoneInfo("Asia/Shanghai")
 
 
 class ExportRequest(BaseModel):
@@ -50,7 +55,7 @@ def validate_request(request: ExportRequest) -> tuple[bool, str]:
     if request.start_date > request.end_date:
         return False, "start_date must be before or equal to end_date"
     if (request.end_date - request.start_date).days > _MAX_EXPORT_DAYS:
-        return False, "Date range cannot exceed 90 days"
+        return False, "Date range cannot exceed 92 days"
     if request.format not in _SUPPORTED_FORMATS:
         return False, f"Unsupported format: {request.format}"
     return True, ""
@@ -62,9 +67,13 @@ def generate_csv_content(conn: BusinessConnection, request: ExportRequest) -> by
     费用过滤不能用 SELECT 别名（WHERE 阶段不可见），重复 cost 表达式。
     billing_tariffs 未配置的服务按 0 费用计（LEFT JOIN 产出 NULL）。
     """
-    # 含 end_date 当天：右开区间到次日零点
-    start_inclusive = request.start_date
-    end_exclusive = request.end_date + timedelta(days=1)
+    # 含 end_date 当天：右开区间到次日零点。账务日按北京时间自然日切分，与看板、
+    # 月报同一日界；wallet_transactions.created_at 是文本时间戳，必须先转 timestamptz 再比较
+    # （此前直接拿日期去比文本列，在真实 PG 上报 operator does not exist）。
+    start_inclusive = datetime.combine(request.start_date, time.min, tzinfo=_BEIJING)
+    end_exclusive = datetime.combine(
+        request.end_date + timedelta(days=1), time.min, tzinfo=_BEIJING
+    )
     service_filter = [] if request.service_types == ["all"] else request.service_types
 
     rows = conn.execute(
@@ -73,7 +82,7 @@ def generate_csv_content(conn: BusinessConnection, request: ExportRequest) -> by
             wt.id,
             wt.user_id,
             u.username AS username,
-            DATE(wt.created_at) AS billing_date,
+            DATE(timezone('Asia/Shanghai', {created_ts})) AS billing_date,
             bo.service AS service_type,
             wt.available_delta AS credits_delta,
             ABS(wt.available_delta) AS credits_used,
@@ -84,13 +93,15 @@ def generate_csv_content(conn: BusinessConnection, request: ExportRequest) -> by
         JOIN billing_operations bo ON wt.billing_operation_id = bo.id
         LEFT JOIN billing_tariffs s ON s.service = bo.service
         LEFT JOIN users u ON wt.user_id = u.id
-        WHERE wt.created_at >= %s AND wt.created_at < %s
+        WHERE {created_ts} >= %s AND {created_ts} < %s
           AND (%s::text[] IS NULL OR bo.service = ANY(%s::text[]))
           AND (%s::text[] IS NULL OR wt.user_id = ANY(%s::text[]))
-          AND (%s IS NULL OR ABS(wt.available_delta) * COALESCE(s.unit_cost_fen, 0) / 100.0 >= %s)
-          AND (%s IS NULL OR ABS(wt.available_delta) * COALESCE(s.unit_cost_fen, 0) / 100.0 <= %s)
-        ORDER BY wt.created_at DESC, wt.id
-        """,
+          AND (%s::numeric IS NULL
+               OR ABS(wt.available_delta) * COALESCE(s.unit_cost_fen, 0) / 100.0 >= %s::numeric)
+          AND (%s::numeric IS NULL
+               OR ABS(wt.available_delta) * COALESCE(s.unit_cost_fen, 0) / 100.0 <= %s::numeric)
+        ORDER BY {created_ts} DESC, wt.id
+        """.replace("{created_ts}", utc_text_timestamp("wt.created_at")),
         (
             start_inclusive,
             end_exclusive,
@@ -141,6 +152,57 @@ def generate_csv_content(conn: BusinessConnection, request: ExportRequest) -> by
             ]
         )
     return gzip.compress(output.getvalue().encode("utf-8"))
+
+
+# 导出审计里的 entity_id → 面向运营的中文名；未登记的类型原样显示，便于发现新导出。
+_EXPORT_KIND_LABELS = {
+    "billing_statistics": "账务明细",
+    "summary_business": "经营报表",
+    "summary_funds": "资金报表",
+    "wallet_transactions": "积分流水",
+    "recharge_orders": "充值订单",
+    "audit_log": "管理操作日志",
+    "generation_records": "生成记录",
+    "customers": "客户清单",
+    "adjustments": "人工调整",
+}
+_RECENT_EXPORT_LIMIT = 10
+
+
+@router.get("/reports/exports/recent")
+def recent_exports(actor: AdminReader) -> dict[str, object]:
+    """最近 10 次导出（谁、何时、什么范围），来自 ``control.export`` 审计。
+
+    报表中心展示它，导出不再是「点完就没人知道」；只给筛选范围，不含导出内容。
+    """
+    del actor
+    with pg_transaction() as raw:
+        rows = raw.execute(
+            "SELECT al.created_at, COALESCE(NULLIF(u.display_name, ''), u.username, "
+            "al.actor_user_id), al.entity_id, al.metadata_json "
+            "FROM audit_logs al LEFT JOIN users u ON u.id = al.actor_user_id "
+            "WHERE al.action = 'control.export' ORDER BY al.created_at DESC, al.id DESC "
+            "LIMIT %s",
+            (_RECENT_EXPORT_LIMIT,),
+        ).fetchall()
+    items: list[dict[str, object]] = []
+    for created_at, who, kind, metadata in rows:
+        parsed = json.loads(metadata) if isinstance(metadata, str) else (metadata or {})
+        filters = parsed.get("filters") if isinstance(parsed, dict) else None
+        items.append(
+            {
+                "at": created_at.isoformat()
+                if hasattr(created_at, "isoformat")
+                else str(created_at),
+                "actor": str(who or ""),
+                "kind": str(kind),
+                "label": _EXPORT_KIND_LABELS.get(str(kind), str(kind)),
+                "filters": {str(k): str(v) for k, v in filters.items() if v not in (None, "")}
+                if isinstance(filters, dict)
+                else {},
+            }
+        )
+    return {"items": items}
 
 
 @router.post("/reports/export")
