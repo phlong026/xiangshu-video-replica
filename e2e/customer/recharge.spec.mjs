@@ -19,7 +19,9 @@ test("customer wallet creates a recharge order under the customer session", asyn
         json: {
           order_no: orderNo,
           amount_fen: 10_000,
-          credits: 10,
+          // 必须与 seed_codes.py 的 e2e-package-100 套餐一致（100 元 = 1000 积分）：
+          // 客户端 assertPaymentMatches 逐字段核对，不一致就拒绝渲染二维码。
+          credits: 1_000,
           qr_image_url:
             "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
           payment_url: "https://payment.invalid/e2e",
