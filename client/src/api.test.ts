@@ -2063,6 +2063,46 @@ describe("customer-visible service errors", () => {
     expect(customerVisibleErrorMessage(error)).toBe(expected);
   });
 
+  // 参考生视频的提示词结构门禁（422 H3_STRUCTURE_INVALID）是用户可自救的业务校验：
+  // 错误码里的 `H3_` 只是内部命名，不能被当成供应商名而把重写指引换成「服务不可用」。
+  it.each([
+    "提示词缺少当前模式的必要段落。请用「生成标准提示词」重写，或按六段式结构手动修改。",
+    "提示词段落顺序不正确。请用「生成标准提示词」重写，或按六段式结构手动修改。",
+    "请使用完整提示词正文和 [Shot 1] 镜头标记，不要带代码围栏。",
+  ])(
+    "keeps the prompt-structure guidance instead of branding it: %s",
+    (message) => {
+      expect(
+        customerVisibleErrorMessage({
+          code: "H3_STRUCTURE_INVALID",
+          message,
+          requestId: "request-structure-1",
+        }),
+      ).toBe(message);
+    },
+  );
+
+  it("still brands provider failures that share the H3_ code prefix", () => {
+    expect(
+      customerVisibleErrorMessage({
+        code: "H3_PROVIDER_FAILED",
+        message: "upstream failed",
+        requestId: "request-provider-1",
+      }),
+    ).toBe(
+      "视频生成服务暂时不可用，请稍后重试；如持续失败，请联系客服。 问题编号：request-provider-1",
+    );
+  });
+
+  it("still brands a structure error whose message itself leaks the provider token", () => {
+    expect(
+      customerVisibleErrorMessage({
+        code: "H3_STRUCTURE_INVALID",
+        message: "请使用完整 H3 正文和镜头标记。",
+      }),
+    ).toBe("视频生成服务暂时不可用，请稍后重试；如持续失败，请联系客服。");
+  });
+
   it("keeps actionable non-branded errors and adds request ids only after mapping", () => {
     expect(
       customerVisibleErrorMessage({
