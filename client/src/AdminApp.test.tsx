@@ -1522,6 +1522,28 @@ describe("AdminApp", () => {
     ).toBeNull();
   });
 
+  it("队列观测「去处理」的地址把类型与状态带进生成记录筛选", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "#admin/generationRecords?recordType=ORAL_VIDEO&status=SUBMISSION_UNCERTAIN",
+    );
+    const fetchMock = installFetch({ session: "valid" });
+    render(<AdminApp />);
+    await screen.findByRole("heading", { level: 1, name: "生成记录" });
+    await waitFor(() => {
+      const listCall = fetchMock.mock.calls
+        .map(([url]) => new URL(String(url)))
+        .find((url) =>
+          url.pathname.endsWith("/api/control/generation-records"),
+        );
+      expect(listCall?.searchParams.get("record_type")).toBe("ORAL_VIDEO");
+      expect(listCall?.searchParams.get("status")).toBe(
+        "UNKNOWN,SUBMISSION_UNCERTAIN",
+      );
+    });
+  });
+
   it("每个导航分组至少两项", async () => {
     installFetch({ session: "valid", isSuperAdmin: false });
     render(<AdminApp />);
