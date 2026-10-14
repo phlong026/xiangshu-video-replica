@@ -1,4 +1,3 @@
-import { useState } from "react";
 import {
   getControlSettings,
   testControlProviderConnection,
@@ -20,6 +19,7 @@ import { RechargePackageManager } from "./RechargePackageManager";
 import { RegistrationBonusSection } from "./RegistrationBonusSection";
 import { TeamManagementSection } from "./TeamManagementSection";
 import { TabBar } from "./ui/TabBar";
+import { useHashParam } from "./ui/useHashParam";
 
 // 方案 P1「价格与套餐一页化」：兑换比例 / 业务单价 / 充值套餐 / 试算器收拢
 // 到一个页签，讲清任一客户的扣费规则；收款设置单独一页（商户配置是另一类
@@ -57,7 +57,7 @@ const controlBackend: SettingsBackend = {
  */
 export function SystemSettingsPage({
   readOnly = false,
-  initialTab = "pricing",
+  initialTab,
   isSuperAdmin = false,
   currentUserId = "",
 }: {
@@ -83,11 +83,21 @@ export function SystemSettingsPage({
     if (value === "team" && !isSuperAdmin) return "pricing";
     return value;
   };
-  const [tab, setTab] = useState<string>(normalizeTab(initialTab));
-  const [serviceTab, setServiceTab] = useState("providers");
   const visibleTabs = isSuperAdmin
     ? [baseTabs[0], baseTabs[1], teamTab, baseTabs[2], technicalTab]
     : baseTabs;
+  // 设置页签与技术配置分组都写入 URL（?sub= / ?section=），刷新不丢。
+  const [tab, setTab] = useHashParam<string>(
+    "sub",
+    "pricing",
+    visibleTabs.map(({ id }) => id),
+    initialTab ? normalizeTab(initialTab) : undefined,
+  );
+  const [serviceTab, setServiceTab] = useHashParam<string>(
+    "section",
+    "providers",
+    ["providers", "runtime"],
+  );
   return (
     <div>
       <TabBar

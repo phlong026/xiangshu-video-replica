@@ -454,6 +454,24 @@ describe("AdminApp", () => {
     },
   );
 
+  it("资金中心子页签写入地址，刷新后仍停在该页签", async () => {
+    window.history.replaceState(null, "", "/admin#admin/funds?sub=refunds");
+    installFetch({ session: "valid" });
+    const { unmount } = render(<AdminApp />);
+    expect(
+      await screen.findByRole("tab", { name: "退款管理", selected: true }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "人工调整" }));
+    expect(window.location.hash).toBe("#admin/funds?sub=adjustments");
+    unmount();
+
+    // 模拟刷新：同一地址重新挂载。
+    render(<AdminApp />);
+    expect(
+      await screen.findByRole("tab", { name: "人工调整", selected: true }),
+    ).toBeInTheDocument();
+  });
+
   it("刷新资金对账地址保留异常清单意图", () => {
     expect(adminRouteFromHash("#admin/funds?intent=recon")).toEqual({
       tab: "funds",

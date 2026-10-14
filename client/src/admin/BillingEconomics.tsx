@@ -9,6 +9,7 @@ import {
 import { CostQueues } from "./CostQueues";
 import { SourceActionPanorama } from "./SourceActionPanorama";
 import { TabBar } from "./ui/TabBar";
+import { useHashParam } from "./ui/useHashParam";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 import { ViralCollectionBilling } from "./ViralCollectionBilling";
 
@@ -211,7 +212,12 @@ export function BillingEconomics({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [section, setSection] = useState("details");
+  // 成本核对三视图写入 URL（?sub=），与 billingQuery 一起可分享。
+  const [section, setSection] = useHashParam<string>("sub", "details", [
+    "details",
+    "collections",
+    "actions",
+  ]);
   const name = (key: string) =>
     catalog.find((item) => item.service === key)?.name ?? key;
   useEffect(() => {

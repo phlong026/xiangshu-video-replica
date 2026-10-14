@@ -25,6 +25,7 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { type BadgeTone, StatusBadge } from "./ui/StatusBadge";
+import { useHashParam } from "./ui/useHashParam";
 import { CONTENT_FUNNEL_LABELS, CONTENT_STATE_LABELS } from "./ui/vocabulary";
 import { ViralOperationCostSummary } from "./ViralOperationCostSummary";
 import { ViralRecycleBin } from "./ViralRecycleBin";
@@ -987,8 +988,18 @@ export function ViralVideosPage({
     }
   }
   // 实时搜索：数据接口，命中视频直接并入内容池（不扣客户积分）。
-  const [upstreamOpen, setUpstreamOpen] = useState(Boolean(initialSearch));
-  const [recycleOpen, setRecycleOpen] = useState(false);
+  // 视频库 / 实时搜索入库 / 回收站 三视图写入 URL（?sub=），刷新不丢；
+  // 需求洞察带关键词跳来时直接落在实时搜索。
+  const [libraryView, setLibraryView] = useHashParam<
+    "library" | "upstream" | "recycle"
+  >(
+    "sub",
+    "library",
+    ["library", "upstream", "recycle"],
+    initialSearch ? "upstream" : undefined,
+  );
+  const upstreamOpen = libraryView === "upstream";
+  const recycleOpen = libraryView === "recycle";
   const [upstreamKeyword, setUpstreamKeyword] = useState(
     initialSearch?.keyword ?? "",
   );
@@ -1799,9 +1810,7 @@ export function ViralVideosPage({
           aria-selected={!upstreamOpen && !recycleOpen}
           type="button"
           onClick={() => {
-            setSelected([]);
-            setUpstreamOpen(false);
-            setRecycleOpen(false);
+            setLibraryView("library");
             if (filters.status === "blocked")
               changeFilters({ status: "", offset: 0 });
           }}
@@ -1814,9 +1823,7 @@ export function ViralVideosPage({
             aria-selected={upstreamOpen}
             type="button"
             onClick={() => {
-              setSelected([]);
-              setUpstreamOpen(true);
-              setRecycleOpen(false);
+              setLibraryView("upstream");
             }}
           >
             实时搜索入库
@@ -1827,9 +1834,7 @@ export function ViralVideosPage({
           aria-selected={recycleOpen}
           type="button"
           onClick={() => {
-            setRecycleOpen(true);
-            setSelected([]);
-            setUpstreamOpen(false);
+            setLibraryView("recycle");
           }}
         >
           回收站
@@ -2206,9 +2211,7 @@ export function ViralVideosPage({
             onChange={(value) => {
               changeFilters({ status: value as Filters["status"], offset: 0 });
               if (value === "blocked") {
-                setRecycleOpen(true);
-                setSelected([]);
-                setUpstreamOpen(false);
+                setLibraryView("recycle");
               }
             }}
           />
