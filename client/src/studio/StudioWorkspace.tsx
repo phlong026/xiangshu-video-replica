@@ -1924,15 +1924,30 @@ export function StudioWorkspace({
     }
     const explicitSource =
       importedProjectId !== undefined || importedAssetId !== undefined;
+    // sourceId 存的是展示用来源（资产 ID 或爆款视频 ID），不能当项目 ID 用：
+    // 早先 `projectId ?? sourceId` 会拿爆款 ID 去请求 /api/projects/{id}，必然 404。
     const projectId = explicitSource
       ? importedProjectId
-      : (state.draft.projectId ?? state.draft.sourceId);
+      : state.draft.projectId;
     const assetId = explicitSource
       ? importedAssetId
       : (state.draft.sourceAssetId ??
         projectSourceAssetId(
           data.projects.find((project) => project.id === projectId),
         ));
+    if (
+      !explicitSource &&
+      state.draft.sourceId &&
+      assetId &&
+      state.draft.sourceId !== assetId
+    ) {
+      // 当前来源是爆款视频（草稿里还残留着上一个项目）：再点「提取文案」会去转写
+      // 旧项目的视频并收转写费。来源对不上就停下，让用户回到该视频重新提取。
+      notify(
+        "当前文案来源是爆款视频，请回到该视频详情页重新提取文案，或重新上传视频。",
+      );
+      return;
+    }
     if (!projectId || !assetId) {
       notify("请先上传视频来源，再提取文案。");
       openLive("projects");
