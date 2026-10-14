@@ -112,6 +112,9 @@ class ProjectResponse(BaseModel):
     analysis_task_id: str | None = None
     analysis_error_message: str | None = None
     analysis_retryable: bool = False
+    # 桌面端对 >15 秒视频只上传抽出的音轨（reference_audio），它不是复刻参考视频，
+    # 不能占 reference_asset_id；单独下发，刷新后仍能从项目恢复「提取文案」的来源。
+    script_source_asset_id: str | None = None
 
 
 class AssetResponse(BaseModel):
@@ -484,7 +487,15 @@ def list_projects(
                 END AS analysis_status,
                 latest_analysis_task.id AS analysis_task_id,
                 latest_analysis_task.error_message_redacted AS analysis_error_message,
-                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
+                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable,
+                (
+                    SELECT script_assets.id FROM assets AS script_assets
+                    WHERE script_assets.project_id = projects.id
+                        AND script_assets.kind = 'reference_audio'
+                        AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
+                    ORDER BY script_assets.created_at DESC, script_assets.id DESC
+                    LIMIT 1
+                ) AS script_source_asset_id
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -547,7 +558,15 @@ def list_projects(
                 END AS analysis_status,
                 latest_analysis_task.id AS analysis_task_id,
                 latest_analysis_task.error_message_redacted AS analysis_error_message,
-                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
+                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable,
+                (
+                    SELECT script_assets.id FROM assets AS script_assets
+                    WHERE script_assets.project_id = projects.id
+                        AND script_assets.kind = 'reference_audio'
+                        AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
+                    ORDER BY script_assets.created_at DESC, script_assets.id DESC
+                    LIMIT 1
+                ) AS script_source_asset_id
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -878,7 +897,15 @@ def project_detail_row(
             END AS analysis_status,
             latest_analysis_task.id AS analysis_task_id,
             latest_analysis_task.error_message_redacted AS analysis_error_message,
-            COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
+            COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable,
+            (
+                SELECT script_assets.id FROM assets AS script_assets
+                WHERE script_assets.project_id = projects.id
+                    AND script_assets.kind = 'reference_audio'
+                    AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
+                ORDER BY script_assets.created_at DESC, script_assets.id DESC
+                LIMIT 1
+            ) AS script_source_asset_id
         FROM projects
         LEFT JOIN assets AS reference_assets ON reference_assets.id = (
             SELECT assets.id
@@ -1390,6 +1417,11 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
     analysis_retryable = (
         False if "analysis_retryable" not in row.keys() else bool(row["analysis_retryable"])
     )
+    script_source_asset_id = (
+        None
+        if "script_source_asset_id" not in row.keys() or row["script_source_asset_id"] is None
+        else str(row["script_source_asset_id"])
+    )
     return ProjectResponse(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
@@ -1401,6 +1433,7 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
         analysis_task_id=analysis_task_id,
         analysis_error_message=analysis_error_message,
         analysis_retryable=analysis_retryable,
+        script_source_asset_id=script_source_asset_id,
     )
 
 

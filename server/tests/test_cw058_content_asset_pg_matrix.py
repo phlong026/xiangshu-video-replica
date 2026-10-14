@@ -2508,6 +2508,33 @@ def test_provider_result_url_probe_maps_statuses(monkeypatch: pytest.MonkeyPatch
     assert generation.provider_result_url_expired("fake://h3-results/a.mp4") is None
 
 
+def test_project_list_exposes_audio_only_script_source(
+    lane_env: str, pg: psycopg.Connection
+) -> None:
+    """FIX-05：只上传了抽出音轨的项目，刷新后仍能从项目列表拿到「提取文案」来源；
+    音轨不冒充复刻参考视频（reference_asset_id 保持为空）。"""
+    from app.auth import get_current_user
+    from app.main import app
+
+    seed_project(pg, "audio-only-project", "employee_1")
+    pg.execute(
+        "INSERT INTO assets(id,project_id,kind,storage_uri,sha256,size_bytes,content_type,"
+        "created_by_user_id,metadata_json) VALUES ('audio-source','audio-only-project',"
+        "'reference_audio','fake://cw058-tests/projects/audio-only-project/a.m4a','abc',10,"
+        "'audio/mp4','employee_1','{}')"
+    )
+    pg.commit()
+    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    try:
+        projects = TestClient(app).get("/api/projects").json()
+    finally:
+        app.dependency_overrides.clear()
+    row = next(item for item in projects if item["id"] == "audio-only-project")
+    assert row["reference_asset_id"] is None
+    assert row["reference_upload_status"] == "NOT_STARTED"
+    assert row["script_source_asset_id"] == "audio-source"
+
+
 def test_cancel_batch_visible_but_not_own_is_forbidden_not_missing(
     lane_env: str, pg: psycopg.Connection
 ) -> None:

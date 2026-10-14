@@ -93,6 +93,7 @@ import {
   WorkbenchPage,
 } from "./MainPages";
 import { PeoplePage, PersonPage } from "./PeoplePages";
+import { projectSourceAssetId } from "./projectSource";
 import { constrainReferenceVideoPrompt } from "./referencePrompt";
 import {
   buildOralInput,
@@ -1929,9 +1930,9 @@ export function StudioWorkspace({
     const assetId = explicitSource
       ? importedAssetId
       : (state.draft.sourceAssetId ??
-        data.projects.find((project) => project.id === projectId)
-          ?.reference_asset_id ??
-        undefined);
+        projectSourceAssetId(
+          data.projects.find((project) => project.id === projectId),
+        ));
     if (!projectId || !assetId) {
       notify("请先上传视频来源，再提取文案。");
       openLive("projects");

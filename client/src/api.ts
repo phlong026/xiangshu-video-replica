@@ -339,6 +339,8 @@ export type Project = {
   analysis_task_id?: string | null;
   analysis_error_message?: string | null;
   analysis_retryable?: boolean;
+  /** 只上传了抽出音轨的项目：音轨不是复刻参考视频，单独作为「提取文案」来源下发。 */
+  script_source_asset_id?: string | null;
 };
 
 export type UploadIntent = {

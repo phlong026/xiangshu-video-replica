@@ -451,7 +451,8 @@ export async function loadProjectDraft(
 ): Promise<{ draft: StudioDraft; errors: string[] }> {
   const draft = createDraft();
   draft.projectId = project.id;
-  draft.sourceId = project.reference_asset_id ?? undefined;
+  draft.sourceId =
+    project.reference_asset_id ?? project.script_source_asset_id ?? undefined;
   draft.script.title = project.name;
 
   const [analysisResult, scriptResult] = await Promise.allSettled([
@@ -1042,11 +1043,16 @@ export async function uploadWorkbenchSourceVideo(
       analysisTaskId = completed.analysis_task_id ?? undefined;
       analysisTaskStatus = completed.analysis_task_status ?? undefined;
     }
-    const uploadedProject: Project = {
-      ...project,
-      reference_asset_id: assetId,
-      reference_upload_status: "READY",
-    };
+    // 桌面端对 >15 秒视频只上传抽出的音轨：它只能用于提取文案，服务端也不把它算作
+    // 复刻参考视频。本地状态与服务端口径保持一致，否则刷新后项目「来源」凭空消失。
+    const audioOnly = /\.(m4a|mp3|wav|aac)$/i.test(file.name);
+    const uploadedProject: Project = audioOnly
+      ? { ...project, script_source_asset_id: assetId }
+      : {
+          ...project,
+          reference_asset_id: assetId,
+          reference_upload_status: "READY",
+        };
     // 上传路径不经过 loadProjects，拿不到签名预览地址；缺了它左栏来源视频只能退化成
     // 纯文字占位。取不到地址与 loadProjects 的降级一致，不阻断已经成功的上传。
     const url = await signedUrl(assetId, getAssetDownloadUrl).catch(
@@ -1056,7 +1062,17 @@ export async function uploadWorkbenchSourceVideo(
       projectId: project.id,
       assetId,
       project: uploadedProject,
-      asset: projectAsset(uploadedProject, url),
+      asset: audioOnly
+        ? {
+            id: assetId,
+            name: `${project.name} · 来源音轨`,
+            kind: "audio",
+            url,
+            group: project.name,
+            source: "项目上传",
+            saved: true,
+          }
+        : projectAsset(uploadedProject, url),
       analysisTaskId,
       analysisTaskStatus,
     };
