@@ -937,7 +937,9 @@ export function AdminApp() {
                           (actor.role === "admin" && actor.is_super_admin),
                       )
                       .map((tab) => (
-                        <button
+                        // 真链接（整改 T09）：中键、Ctrl/⌘ 点击或右键「在新标签页
+                        // 打开」交给浏览器；普通左键仍走站内导航，保留上下文。
+                        <a
                           aria-current={
                             activeTab === tab.id ? "page" : undefined
                           }
@@ -948,8 +950,18 @@ export function AdminApp() {
                               : "admin-tab"
                           }
                           key={tab.id}
-                          type="button"
-                          onClick={() => {
+                          href={`#admin/${tab.id}`}
+                          onClick={(event) => {
+                            if (
+                              event.button !== 0 ||
+                              event.metaKey ||
+                              event.ctrlKey ||
+                              event.shiftKey ||
+                              event.altKey
+                            ) {
+                              return;
+                            }
+                            event.preventDefault();
                             const inBusiness =
                               ["analytics", "costReview"].includes(activeTab) &&
                               ["analytics", "costReview"].includes(tab.id);
@@ -982,7 +994,7 @@ export function AdminApp() {
                             <span>{tab.label}</span>
                             <small>{tab.helper}</small>
                           </span>
-                        </button>
+                        </a>
                       ))}
                   </div>
                 </section>
