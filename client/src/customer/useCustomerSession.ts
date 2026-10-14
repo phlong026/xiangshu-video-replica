@@ -574,7 +574,7 @@ export function useCustomerSession(
       window.removeEventListener(CUSTOMER_SESSION_REPLACED_EVENT, onReplaced);
       window.removeEventListener(CUSTOMER_SESSION_REVOKED_EVENT, onRevoked);
     };
-  }, [clearLifecycleCredentials]);
+  }, [clearLifecycleCredentials, store.loadRememberedLogin]);
 
   // Keep the lease alive while the workspace is live. A failing heartbeat
   // ends through the lifecycle events above (the transport dispatches them
