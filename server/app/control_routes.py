@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast
 
@@ -3199,6 +3199,106 @@ def export_recharge_orders_csv(
     )
 
 
+@router.get("/generation-records.csv")
+def export_generation_records_csv(
+    conn: Database,
+    actor: ControlExporter,
+    username: str | None = None,
+    user_id: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    status: str | None = None,
+    status_group: Literal["queued", "running", "succeeded", "failed", "attention"] | None = None,
+    record_type: GenerationRecordType | None = None,
+    failure_phase: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    task_ref: Annotated[str | None, Query(max_length=200)] = None,
+    project_name: Annotated[str | None, Query(max_length=100)] = None,
+    limit: int = Query(default=2000, ge=1, le=2000),
+) -> Response:
+    """导出当前筛选的生成记录（整改 T33）。
+
+    与列表同一份筛选与同一条查询（直接调用 ``list_generation_records``，口径不会
+    和页面各走各的）；与账务导出同一道门：审计员可导出，必留审计并限流。
+    不导出上游服务名与第三方任务号——对外材料里不出现数据源信息；成本只给金额与
+    状态，状态不是「已核实」时不以 0 代替。
+    """
+    _guard_ledger_export(
+        conn,
+        actor,
+        kind="generation_records",
+        filters={
+            key: str(value)
+            for key, value in [
+                ("username", username),
+                ("user_id", user_id),
+                ("status", status),
+                ("status_group", status_group),
+                ("record_type", record_type),
+                ("failure_phase", failure_phase),
+                ("created_from", created_from),
+                ("created_to", created_to),
+                ("task_ref", task_ref),
+                ("project_name", project_name),
+            ]
+            if value
+        },
+        row_limit=limit,
+    )
+    page = list_generation_records(
+        conn=conn,
+        _actor=actor,
+        username=username,
+        user_id=user_id,
+        status=status,
+        status_group=status_group,
+        record_type=record_type,
+        failure_phase=failure_phase,
+        diagnostics=False,
+        failure_category=None,
+        created_from=created_from,
+        created_to=created_to,
+        task_ref=task_ref,
+        project_name=project_name,
+        limit=limit,
+        offset=0,
+    )
+    # 列名 → 记录字段。成本列对外叫 cost / cost_status：导出件里不带 provider 字样。
+    columns = (
+        ("record_id", "record_id"),
+        ("short_ref", "short_ref"),
+        ("record_type", "record_type"),
+        ("operation", "operation"),
+        ("username", "username"),
+        ("display_name", "display_name"),
+        ("project_name", "project_name"),
+        ("status", "status"),
+        ("charged_credits", "charged_credits"),
+        ("cost", "provider_cost"),
+        ("cost_status", "provider_cost_status"),
+        ("failure_category", "failure_category"),
+        ("error_code", "error_code"),
+        ("error_message", "error_message"),
+        ("advice", "advice"),
+        ("created_at", "created_at"),
+        ("completed_at", "completed_at"),
+        ("failed_at", "failed_at"),
+    )
+    headers = tuple(header for header, _field in columns)
+    rows = [
+        tuple(
+            "" if getattr(item, field) is None else getattr(item, field)
+            for _header, field in columns
+        )
+        for item in page.items
+    ]
+    return _csv_response(
+        filename="generation-records.csv",
+        headers=headers,
+        rows=rows,
+        total=page.total,
+    )
+
+
 @router.get("/wallet-transactions.csv")
 def export_wallet_transactions_csv(
     conn: Database,
@@ -4349,7 +4449,7 @@ def _csv_response(
     *,
     filename: str,
     headers: tuple[str, ...],
-    rows: list[sqlite3.Row],
+    rows: Sequence[Sequence[object]],
     total: int | None = None,
 ) -> Response:
     output = io.StringIO()
