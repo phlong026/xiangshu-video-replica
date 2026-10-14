@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   archiveGenerationTask,
   downloadGenerationTaskResult,
+  isResultUrlExpired,
   openVideoDownloadFolder,
   VideoDownloadUnconfirmedError,
 } from "./api";
@@ -351,12 +352,46 @@ describe("desktop video download feedback", () => {
             );
           }),
       );
+    // 下载失败后复查一次直链（FIX-02）：直链仍有效时保留原始下载错误。
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ url: "https://provider.example/slow.mp4" }),
+    });
     const rejected = expect(
       downloadGenerationTaskResult("task-slow", "video.mp4"),
     ).rejects.toThrow();
     await vi.advanceTimersByTimeAsync(60_001);
     await rejected;
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[2][0])).toContain(
+      "/api/generation-tasks/task-slow/preview-url?verify=true",
+    );
     expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+  });
+
+  it("直链已失效时把下载失败改为明确的「文件已失效」（FIX-02）", async () => {
+    fetchMock
+      .mockReset()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://provider.example/gone.mp4" }),
+      })
+      .mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({}) })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 410,
+        json: async () => ({
+          detail: {
+            code: "RESULT_URL_EXPIRED",
+            message: "成片文件已失效：生成服务提供的下载链接已过期。",
+          },
+        }),
+      });
+    const error = await downloadGenerationTaskResult(
+      "task-gone",
+      "video.mp4",
+    ).catch((cause: unknown) => cause);
+    expect(isResultUrlExpired(error)).toBe(true);
+    expect((error as Error).message).toContain("成片文件已失效");
   });
 });

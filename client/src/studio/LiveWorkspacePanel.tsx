@@ -4,6 +4,7 @@ import { useState } from "react";
 import "../legacy-panels.css";
 import type { CurrentUser, GenerationBatch, Project } from "../api";
 import { CharacterLibrary } from "../CharacterLibrary";
+import { isSubAccountType, resolveAccountType } from "../customer/accountType";
 import { CustomerRechargeDialog } from "../customer/CustomerRechargeDialog";
 import { CustomerWalletPanel } from "../customer/CustomerWalletPanel";
 import { ProjectsPage } from "../ProjectsPage";
@@ -105,6 +106,12 @@ export function LiveWorkspacePanel({
             onRechargeRequested={(amountYuan, packageId) =>
               openRecharge(amountYuan, packageId)
             }
+            isSubAccount={isSubAccountType(
+              resolveAccountType(
+                customerAccount?.profile?.account_type,
+                customerAccount?.identity,
+              ),
+            )}
           />
         ) : (
           <WalletPanel currentUserId={currentUser.id} />

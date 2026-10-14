@@ -1162,3 +1162,17 @@ test("403 on default initialization is remembered: no replay on reload (prefligh
   );
   expect(mocks.initialize).toHaveBeenCalledTimes(1);
 });
+
+test("子账号不出现「充值积分」按钮，改为提示联系母账号（FIX-04）", async () => {
+  const sub = render(
+    <CustomerCenterPage account={setup({ profile: subProfile() })} />,
+  );
+  expect(await screen.findByText("125")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "充值积分" })).toBeNull();
+  expect(screen.getByText(/充值需由母账号操作/)).toBeVisible();
+  sub.unmount();
+
+  render(<CustomerCenterPage account={setup()} />);
+  expect(await screen.findByText("125")).toBeVisible();
+  expect(screen.getByRole("button", { name: "充值积分" })).toBeVisible();
+});

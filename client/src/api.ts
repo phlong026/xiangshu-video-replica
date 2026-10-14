@@ -353,6 +353,8 @@ export type Project = {
   analysis_task_id?: string | null;
   analysis_error_message?: string | null;
   analysis_retryable?: boolean;
+  /** 只上传了抽出音轨的项目：音轨不是复刻参考视频，单独作为「提取文案」来源下发。 */
+  script_source_asset_id?: string | null;
 };
 
 export type UploadIntent = {
@@ -364,6 +366,9 @@ export type UploadIntent = {
   headers: Record<string, string>;
   expires_at: string | null;
   upload_required?: boolean;
+  /** 去重复用（无需上传）且用途为复刻时，服务端已自动排队的 AI 拆解任务。 */
+  analysis_task_id?: string | null;
+  analysis_task_status?: string | null;
 };
 
 export type MaterialItem = components["schemas"]["MaterialItem"];
@@ -2346,13 +2351,32 @@ export async function createGenerationResultPreviewUrl(
 
 // 直链交付不复制成片到云存储。URL 仅通过任务所属权限接口按需签发，
 // 不进入批次详情，避免被列表、日志或跨用户缓存意外暴露。
+/** 成片直链已失效（服务端 410）。直链目前长期有效，但不排除日后改为限时签名。 */
+export const RESULT_URL_EXPIRED_CODE = "RESULT_URL_EXPIRED";
+export const RESULT_URL_EXPIRED_MESSAGE =
+  "成片文件已失效：生成服务提供的下载链接已过期，无法再预览、下载或保存。如需帮助，请联系客服并提供任务编号。";
+/** 拿到直链交付的成片时给用户的提醒：直链可能有有效期，尽快落到本地或素材库。 */
+export const DIRECT_RESULT_RETENTION_HINT =
+  "成片由生成服务以直链交付，链接可能存在有效期，请尽快下载到本地或保存到素材库，以免失效后无法找回。";
+
+export function isResultUrlExpired(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === RESULT_URL_EXPIRED_CODE
+  );
+}
+
 export async function createGenerationTaskPreviewUrl(
   taskId: string,
+  options: { verify?: boolean } = {},
 ): Promise<string> {
   const { url } = await requestGenerationJson<
     components["schemas"]["GenerationTaskPreviewUrlResponse"]
   >(
-    `/api/generation-tasks/${encodeURIComponent(taskId)}/preview-url`,
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/preview-url${
+      options.verify ? "?verify=true" : ""
+    }`,
     "获取生成结果播放地址失败",
   );
   if (!url) {
@@ -2389,10 +2413,23 @@ export async function downloadGenerationTaskResult(
     }
     return downloadGenerationResult(task.result_asset_id, filename);
   }
-  return downloadVideoToFile(
-    () => createGenerationTaskPreviewUrl(taskId),
-    filename,
-  );
+  try {
+    return await downloadVideoToFile(
+      () => createGenerationTaskPreviewUrl(taskId),
+      filename,
+    );
+  } catch (error) {
+    // 桌面端直接从直链下载：失败时复查一次直链，已失效就明确告诉用户「文件已失效」；
+    // 复查本身失败（网络等）不掩盖原始下载错误。
+    if (!(error instanceof VideoDownloadUnconfirmedError)) {
+      await createGenerationTaskPreviewUrl(taskId, { verify: true }).catch(
+        (verifyError: unknown) => {
+          if (isResultUrlExpired(verifyError)) throw verifyError;
+        },
+      );
+    }
+    throw error;
+  }
 }
 
 export type VideoDownloadResult =
@@ -2729,8 +2766,17 @@ async function pollGenerationReconcileOperation(
   throw new Error("任务仍在后台对账，请稍后返回查看。");
 }
 
-export async function listProjects(): Promise<Project[]> {
-  return requestApiJson<Project[]>("/api/projects", "项目列表暂不可用");
+/** 项目列表；不传 limit 返回全部，工作台首屏只取最近若干个（FIX-16）。 */
+export async function listProjects(
+  options: { limit?: number; offset?: number } = {},
+): Promise<Project[]> {
+  const query = new URLSearchParams();
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.offset) query.set("offset", String(options.offset));
+  return requestApiJson<Project[]>(
+    `/api/projects${query.size ? `?${query}` : ""}`,
+    "项目列表暂不可用",
+  );
 }
 
 export async function createProject(name: string): Promise<Project> {
@@ -6020,6 +6066,17 @@ function generationRequestError(error: unknown, errorPrefix: string): Error {
     mapped.code = code;
     return mapped;
   }
+  if (status === 410 && code === RESULT_URL_EXPIRED_CODE) {
+    // 直链已失效：重试必然失败，原样透传服务端「文件已失效」说明，并保留 code 供界面识别。
+    const mapped = new Error(
+      error instanceof Error && error.message
+        ? error.message
+        : RESULT_URL_EXPIRED_MESSAGE,
+    ) as RequestError;
+    mapped.status = status;
+    mapped.code = code;
+    return mapped;
+  }
   const referenceMessage =
     status === 422 && code === "INDEPENDENT_REFERENCE_DURATION_INVALID"
       ? "参考视频/音频每段须为2–15秒；缺少时长的历史素材请重新上传后选取。"
@@ -8587,7 +8644,7 @@ export type ViralCopyStatus = {
   /** 共享缓存里有没有这条视频的文案：true = 现在获取即可秒回。 */
   available: boolean;
   updatedAt: string | null;
-  /** 历史口径字段：交付已免费（2026-10-04），仅反映该账号过去是否付过获取费。 */
+  /** 反映该付费账号是否已为这条详情付过费（查看详情已于 2026-10-13 起免费，仅历史购买会置位）。 */
   purchased: boolean;
 };
 
@@ -8611,7 +8668,8 @@ export function fetchViralCopy(
 }
 
 /**
- * 获取共享文案：命中缓存即返回正文并按 viral_copy 科目扣费（2026-10-06 拍板）.
+ * 获取共享文案：命中缓存即返回正文。计费口径（2026-10-08）：转写者本人取自己的产出免费、
+ * 已购复看免费，非转写者首次获取按 viral_copy 科目扣一次（服务端 charge_viral_copy 为准）.
  *
  * 同一账号同一条视频只扣一次：复看时 charged=0 且 deduped=true。未命中返回
  * `text=null` 且分文不扣，调用方再走本地抽音轨转写（那一步按秒计 ASR 费）。

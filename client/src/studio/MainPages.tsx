@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CustomerProfile,
+  createGenerationTaskPreviewUrl,
   createViralImportTask,
   customerVisibleErrorMessage,
+  DIRECT_RESULT_RETENTION_HINT,
   getPublishSummary,
   getStudioNotificationPreferences,
   getViralImportTask,
+  isResultUrlExpired,
+  RESULT_URL_EXPIRED_MESSAGE,
   resolveViralLink,
   updateStudioNotificationPreferences,
   type ViralImportTask,
@@ -31,6 +35,7 @@ import {
 import { PlatformLogo } from "./PlatformLogo";
 import { readPageCache, writePageCache } from "./pageCache";
 import { draftFromTask } from "./state";
+import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioData, StudioTask, StudioVideo } from "./types";
 import {
   Button,
@@ -49,6 +54,7 @@ import { cacheAvailable, extractLocalVideoAudio } from "./viralCache";
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
+  VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
   ViralImportPollingTimeoutError,
   viralImportIdempotencyKey,
 } from "./viralImport";
@@ -58,6 +64,7 @@ const statusNames: Record<StudioTask["status"], string> = {
   queued: "排队中",
   failed: "待处理",
   completed: "已完成",
+  partial: "部分完成",
   uncertain: "状态待确认",
   cancelled: "已取消",
 };
@@ -76,6 +83,7 @@ function taskDetailPatch(task: StudioTask, returnTo: "workbench" | "tasks") {
 const statusHints: Partial<Record<StudioTask["status"], string>> = {
   queued: "等待开始",
   failed: "生成失败",
+  partial: "部分成片未生成成功",
   uncertain: "状态待确认",
 };
 
@@ -85,6 +93,7 @@ const statusIcons: Record<StudioTask["status"], string> = {
   failed: "warning",
   uncertain: "warning",
   completed: "check",
+  partial: "check",
   cancelled: "close",
 };
 
@@ -437,7 +446,7 @@ export function WorkbenchPage() {
         return;
       if (task.status !== "SUCCEEDED" && task.status !== "FAILED") {
         throw new ViralImportPollingTimeoutError(
-          "导入任务等待超时，请稍后重试",
+          VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
         );
       }
       if (task.status !== "SUCCEEDED") {
@@ -1135,8 +1144,16 @@ export function WorkbenchPage() {
 }
 
 export function TasksPage() {
-  const { data, navigate, openLive, review, notify, refresh, updateData } =
-    useStudio();
+  const {
+    data,
+    navigate,
+    openLive,
+    review,
+    notify,
+    refresh,
+    updateData,
+    user,
+  } = useStudio();
   const [status, setStatus] = useState("all");
   const [kind, setKind] = useState("全部");
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -1154,7 +1171,7 @@ export function TasksPage() {
       ? ["running", "queued"].includes(task.status)
       : status === "attention"
         ? ["failed", "uncertain"].includes(task.status)
-        : task.status === "completed");
+        : ["completed", "partial"].includes(task.status));
   const tasks = data.tasks.filter(
     (task) => matchesStatus(task) && (kind === "全部" || kind === task.type),
   );
@@ -1428,7 +1445,11 @@ export function TasksPage() {
                     )}
                     {task.status === "queued" &&
                     (task.backendKind !== "oral_task" ||
-                      task.backendStatus === "QUEUED") ? (
+                      task.backendStatus === "QUEUED") &&
+                    // 委派项目里他人提交的批次只能查看，取消（释放对方预扣）仅限提交者。
+                    (!task.createdByUserId ||
+                      !user.id ||
+                      task.createdByUserId === user.id) ? (
                       <Button
                         variant="quiet"
                         disabled={cancellingId === task.id}
@@ -1446,7 +1467,7 @@ export function TasksPage() {
                           )
                         }
                       >
-                        {task.status === "completed" ? "查看结果" : "查看详情"}
+                        {taskHasDeliverable(task) ? "查看结果" : "查看详情"}
                       </Button>
                     )}
                     {/* 两类任务都有账号级隐藏接口：仅从列表移除，不取消任务。 */}
@@ -1573,7 +1594,8 @@ export function TaskDetailPage() {
   const [previewLoad, setPreviewLoad] = useState<{
     key?: string;
     asset?: StudioAsset;
-    status: "idle" | "loading" | "empty" | "error" | "ready";
+    /** expired：直链交付的成片已失效（服务端 410），重试也无法恢复。 */
+    status: "idle" | "loading" | "empty" | "error" | "ready" | "expired";
   }>({ status: "idle" });
   const [detailLoad, setDetailLoad] = useState<{
     key?: string;
@@ -1699,8 +1721,7 @@ export function TaskDetailPage() {
   const previewStatus =
     previewLoad.key === previewContextKey ? previewLoad.status : "idle";
   const previewResult = useCallback(async () => {
-    if (!task || !taskIsVerified || review || task.status !== "completed")
-      return;
+    if (!task || !taskIsVerified || review || !taskHasDeliverable(task)) return;
     const requestedTask = task;
     const requestedContext = previewContextKey;
     const requestId = ++previewRequestRef.current;
@@ -1736,19 +1757,25 @@ export function TaskDetailPage() {
         ),
       }));
       setPreviewLoad({ key: requestedContext, status: "ready", asset });
-    } catch {
+    } catch (cause) {
       if (
         requestId === previewRequestRef.current &&
         previewContextRef.current === requestedContext
       )
-        setPreviewLoad({ key: requestedContext, status: "error" });
+        setPreviewLoad({
+          key: requestedContext,
+          status: isResultUrlExpired(cause) ? "expired" : "error",
+        });
     }
   }, [task, taskIsVerified, review, previewContextKey, updateData]);
+  // 部分完成 / 待核对的批次里已成功的成片同样可看、可存、可发布，
+  // 不能只认「已完成」，否则已付费的成片在详情页不可见。
+  const taskDeliverable = task ? taskHasDeliverable(task) : false;
   useEffect(() => {
     if (
       !review &&
       taskIsVerified &&
-      task?.status === "completed" &&
+      taskDeliverable &&
       !result?.url &&
       previewStatus === "idle"
     )
@@ -1756,7 +1783,7 @@ export function TaskDetailPage() {
   }, [
     review,
     taskIsVerified,
-    task?.status,
+    taskDeliverable,
     result?.url,
     previewStatus,
     previewResult,
@@ -1867,6 +1894,15 @@ export function TaskDetailPage() {
         notify(
           error instanceof Error ? error.message : "保存成片失败，请重试。",
         );
+        if (isResultUrlExpired(error)) {
+          // 直链已失效：重新读取也拿不到，直接进入「文件已失效」态。
+          setPreviewLoad({
+            key: requestedContext,
+            status: "expired",
+            asset: result,
+          });
+          return;
+        }
         // 超时不代表服务端停止归档；只重新读取结果，不重发保存或生成请求。
         await previewResult();
       }
@@ -1928,15 +1964,19 @@ export function TaskDetailPage() {
         <Status task={task} />
       </header>
       <p>
-        {task.status === "completed"
-          ? "作品已生成完成，可查看与管理生成结果"
-          : "任务状态实时以服务端记录为准"}
+        {task.status === "partial"
+          ? `本批已有 ${task.deliverableCount ?? 0} 条成片可查看，其余未生成成功，失败部分暂扣的积分会自动退回。`
+          : task.status === "uncertain" && taskDeliverable
+            ? "已生成的成片可正常查看；其余任务的提交结果待核对，暂扣的积分会在核对后结算或退回。"
+            : taskDeliverable
+              ? "作品已生成完成，可查看与管理生成结果"
+              : "任务状态实时以服务端记录为准"}
       </p>
       <div className="studio-result-grid">
         <Media
           asset={
-            (task.status === "completed" && result) ||
-            (task.status === "completed" && task.poster
+            (taskDeliverable && result) ||
+            (taskDeliverable && task.poster
               ? {
                   id: task.id,
                   name: task.title,
@@ -1949,9 +1989,7 @@ export function TaskDetailPage() {
               : undefined)
           }
           alt={
-            task.status === "completed"
-              ? task.title
-              : "任务处理中或待核对，尚无可预览成片"
+            taskDeliverable ? task.title : "任务处理中或待核对，尚无可预览成片"
           }
           className="studio-result-preview"
           onError={(failedUrl) => {
@@ -1965,6 +2003,25 @@ export function TaskDetailPage() {
               key: previewContextKey,
               status: "error",
               asset: result,
+            });
+            // 直链交付的成片播放失败时复查一次直链：已失效就明确告诉用户，
+            // 而不是一直提示「预览加载失败，请重试」。
+            const directTaskId =
+              result && !result.saved ? result.generationTaskId : undefined;
+            if (!directTaskId || review) return;
+            const requestedContext = previewContextKey;
+            void createGenerationTaskPreviewUrl(directTaskId, {
+              verify: true,
+            }).catch((cause: unknown) => {
+              if (
+                isResultUrlExpired(cause) &&
+                previewContextRef.current === requestedContext
+              )
+                setPreviewLoad({
+                  key: requestedContext,
+                  status: "expired",
+                  asset: result,
+                });
             });
           }}
         />
@@ -1982,16 +2039,20 @@ export function TaskDetailPage() {
         <Panel>
           <h2>动作</h2>
           <div className="studio-result-actions">
-            {!review && result?.generationTaskId && !result.saved && (
-              <Button
-                onClick={() => void saveResult()}
-                disabled={actionBusy === "archive"}
-              >
-                {actionBusy === "archive" ? "正在保存成片…" : "保存到素材库"}
-              </Button>
-            )}
             {!review &&
-              task.status === "completed" &&
+              result?.generationTaskId &&
+              !result.saved &&
+              previewStatus !== "expired" && (
+                <Button
+                  onClick={() => void saveResult()}
+                  disabled={actionBusy === "archive"}
+                >
+                  {actionBusy === "archive" ? "正在保存成片…" : "保存到素材库"}
+                </Button>
+              )}
+            {!review &&
+              taskDeliverable &&
+              previewStatus !== "expired" &&
               (!result?.url || previewStatus === "error") && (
                 <Button
                   variant="primary"
@@ -2010,15 +2071,13 @@ export function TaskDetailPage() {
               )}
             <Button
               onClick={() => void downloadResult()}
-              disabled={
-                task.status !== "completed" || actionBusy === "download"
-              }
+              disabled={!taskDeliverable || actionBusy === "download"}
             >
               <Icon name="download" />
               {actionBusy === "download" ? "正在下载…" : "下载成片"}
             </Button>
             <Button
-              disabled={!result?.saved || task.status !== "completed"}
+              disabled={!result?.saved || !taskDeliverable}
               onClick={() =>
                 navigate("materials", {
                   selectedAssetId: result?.id,
@@ -2031,7 +2090,7 @@ export function TaskDetailPage() {
             </Button>
             <Button
               variant="primary"
-              disabled={!result?.saved || task.status !== "completed"}
+              disabled={!result?.saved || !taskDeliverable}
               onClick={() =>
                 navigate("publishing", { selectedAssetId: result?.id })
               }
@@ -2044,12 +2103,16 @@ export function TaskDetailPage() {
             <Hint>该批次暂时没有可预览的成功结果。</Hint>
           )}
           {previewStatus === "error" && <Hint>预览加载失败，请重试。</Hint>}
-          {result && !result.saved && (
+          {previewStatus === "expired" && (
+            <Hint>{RESULT_URL_EXPIRED_MESSAGE}</Hint>
+          )}
+          {result && !result.saved && previewStatus !== "expired" && (
             <Hint>
+              {DIRECT_RESULT_RETENTION_HINT}
               保存到素材库后可复用和创建发布草稿，保存不会重新生成或扣积分。
             </Hint>
           )}
-          {!review && task.status === "completed" && (
+          {!review && taskDeliverable && (
             <Hint>
               预览仅展示首个可用结果；完整结果与下载请进入“历史任务与下载”。
             </Hint>

@@ -1822,7 +1822,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
   });
 
-  it("导入轮询超时后清除旧键，允许用户发起新任务", async () => {
+  it("导入轮询超时后保留旧键，再点接回同一导入任务而不新建项目（FIX-09）", async () => {
     vi.useFakeTimers();
     try {
       createViralImportTask.mockResolvedValue({
@@ -1861,15 +1861,13 @@ describe("V1.4 内容与运营页面", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(120_000);
       });
-      expect(
-        screen.getByText("导入任务等待超时，请稍后重试"),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/导入仍在后台进行/)).toBeInTheDocument();
 
       createViralImportTask.mockResolvedValueOnce({
-        id: "new-import",
+        id: "stalled-import",
         status: "SUCCEEDED",
-        projectId: "new-project",
-        sourceAssetId: "new-asset",
+        projectId: "stalled-project",
+        sourceAssetId: "stalled-asset",
         canTranscribe: true,
         canAnalyze: true,
       });
@@ -1877,7 +1875,8 @@ describe("V1.4 内容与运营页面", () => {
       await act(async () => {});
 
       expect(createViralImportTask).toHaveBeenCalledTimes(2);
-      expect(createViralImportTask.mock.calls[1][3]).not.toBe(firstKey);
+      // 同一幂等键：服务端回放原任务，不会再建一个导入任务和空壳项目。
+      expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
     } finally {
       vi.useRealTimers();
     }
@@ -3569,13 +3568,12 @@ describe("V1.4 内容与运营页面", () => {
       await screen.findByRole("heading", { name: "刷新恢复的视频" }),
     ).toBeInTheDocument();
     expect(openViralVideoDetail).toHaveBeenCalledWith("douyin", "native-dy-1");
-    // 详情与互动统计同批返回：本次扣一次费，页面给出计费回执。
-    expect(
-      await screen.findByText(/本次查看详情扣除 2 积分/),
-    ).toBeInTheDocument();
+    // 查看详情免费：即便旧服务端回执里带了扣费数字，页面也不再展示计费回执。
+    expect(screen.queryByText(/查看详情扣除/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/积分/)).not.toBeInTheDocument();
   });
 
-  it("此前已购买过的视频再次查看详情时给出免费回执", async () => {
+  it("已下架视频仍可查看详情，页面不出现任何计费回执", async () => {
     window.history.replaceState(
       null,
       "",
@@ -3583,10 +3581,14 @@ describe("V1.4 内容与运营页面", () => {
     );
     const base = studio();
     openViralVideoDetail.mockResolvedValue(
-      viralDetailView(viralItem(1, { title: "此前已购买的视频" }), {
-        charged: 0,
-        deduped: true,
-      }),
+      viralDetailView(
+        viralItem(1, { title: "已下架的视频", availability: "hidden" }),
+        {
+          charged: 0,
+          deduped: false,
+          billable: false,
+        },
+      ),
     );
     useStudio.mockReturnValue(
       studio({
@@ -3598,39 +3600,9 @@ describe("V1.4 内容与运营页面", () => {
     render(<ViralDetailPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "此前已购买的视频" }),
+      await screen.findByRole("heading", { name: "已下架的视频" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("该视频此前已购买过详情，本次查看不再扣积分。"),
-    ).toBeInTheDocument();
-  });
-
-  it("已下架视频仍可查看详情但不计费，回执明确说明未扣费", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/?viralPlatform=douyin&viralVideoId=native-dy-1#studio/viral-detail",
-    );
-    const base = studio();
-    openViralVideoDetail.mockResolvedValue(
-      viralDetailView(viralItem(1, { availability: "hidden" }), {
-        charged: 0,
-        deduped: false,
-        billable: false,
-      }),
-    );
-    useStudio.mockReturnValue(
-      studio({
-        review: false,
-        data: { ...base.data, videos: [] },
-        state: { ...base.state, page: "viral-detail" },
-      }),
-    );
-    render(<ViralDetailPage />);
-
-    expect(
-      await screen.findByText("该视频当前不可用，本次查看详情未计费。"),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/未计费|扣积分|扣除/)).not.toBeInTheDocument();
   });
 
   it("查看详情失败时不展示计费回执，只提示失败原因", async () => {
@@ -6541,7 +6513,7 @@ describe("V1.4 内容与运营页面", () => {
     const timeInput = screen.getByLabelText("定时发布时间");
     fireEvent.change(timeInput, { target: { value: "2020-01-01T10:00" } });
     fireEvent.click(screen.getByRole("button", { name: "定时发布" }));
-    await screen.findByText("定时发布至少需要提前 2 分钟。");
+    await screen.findByText("定时发布至少需要提前 3 分钟。");
     expect(createPublishRecord).toHaveBeenCalledTimes(1);
     const future = new Date(Date.now() + 3 * 60 * 60 * 1000);
     future.setSeconds(0, 0);

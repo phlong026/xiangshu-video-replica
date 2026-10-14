@@ -17,6 +17,7 @@ from app.customer_fence import BusinessDbDep
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.generation import (
+    RESULT_URL_EXPIRED_STATUSES,
     ApplySavedPromptRequest,
     BatchResult,
     BatchStatusFilter,
@@ -63,12 +64,14 @@ from app.generation import (
     lock_prompt_version,
     persist_generation_result_archive,
     preview_prompt_text,
+    provider_result_url_expired,
     regenerate_generation_batch,
     regenerate_generation_task,
     release_generation_result_archive_claim,
     rename_generation_batch,
     renew_generation_result_archive_claim,
     require_batch_access,
+    result_url_expired_error,
     retry_generation_task,
     revise_prompt_version,
     save_prompt_to_library,
@@ -818,6 +821,10 @@ def read_generation_task_preview_url(
     task_id: str,
     conn: Database,
     actor: AuthenticatedUser,
+    verify: bool = Query(
+        default=False,
+        description="播放/下载失败后由客户端带上：服务端探测直链是否已失效。",
+    ),
 ) -> GenerationTaskPreviewUrlResponse:
     task = conn.execute(
         """
@@ -854,6 +861,8 @@ def read_generation_task_preview_url(
                 status_code=503, detail={"code": "FAKE_RESULT_UNAVAILABLE"}
             ) from exc
         result_url = "data:video/mp4;base64," + base64.b64encode(content).decode("ascii")
+    elif verify and provider_result_url_expired(result_url):
+        raise result_url_expired_error()
     return GenerationTaskPreviewUrlResponse(url=result_url)
 
 
@@ -867,7 +876,13 @@ def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaSto
                 return get_task_result(conn, task_id)
             provider = h3_provider_for_task(conn, str(prepared["provider"]), task_id=task_id)
         # Download only the existing result; no generation submission or billing operation.
-        content = provider.download_result(str(prepared["provider_result_url"]))
+        try:
+            content = provider.download_result(str(prepared["provider_result_url"]))
+        except H3ProviderFailed as exc:
+            # 直链已失效时重试必然失败：如实告知「文件已失效」，不再提示「请重试」。
+            if exc.http_status in RESULT_URL_EXPIRED_STATUSES:
+                raise result_url_expired_error() from exc
+            raise
         if not content or len(content) > MAX_UPLOAD_BYTES or content[4:8] != b"ftyp":
             raise VideoProbeFailed("invalid MP4 result")
         metadata = FFprobeVideoProbe().probe(content, filename="result.mp4")

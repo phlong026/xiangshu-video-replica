@@ -2563,6 +2563,37 @@ describe("V1.4 workspace integration", () => {
       ).toBe("提取出的乡墅口播原文");
     });
 
+    it("来源是爆款视频而草稿残留旧项目时不去转写旧项目的视频（FIX-06）", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("workbench");
+      state.draft.projectId = "old-project";
+      state.draft.sourceAssetId = "old-asset";
+      state.draft.sourceId = "douyin-viral-1";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      expect(
+        await screen.findByText(/当前文案来源是爆款视频/),
+      ).toBeInTheDocument();
+      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+    });
+
+    it("草稿只有来源 ID 没有项目时不把来源 ID 当项目 ID 请求（FIX-06）", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("workbench");
+      state.draft.sourceId = "asset-only";
+      state.draft.sourceAssetId = "asset-only";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      expect(
+        await screen.findByText("请先上传视频来源，再提取文案。"),
+      ).toBeInTheDocument();
+      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+    });
+
     it.each(["success", "failure"])(
       "文案提取 %s 后刷新结算或退款余额",
       async (outcome) => {
@@ -3465,6 +3496,41 @@ describe("视频生成（C2 独立创作）", () => {
       within(dialog).queryByText("尚未提交 · 未扣费"),
     ).not.toBeInTheDocument();
     expect(api.createIndependentVideoTask).toHaveBeenCalledOnce();
+  });
+
+  it("提交期间改了草稿，任务已受理的结果也不静默丢弃（FIX-11）", async () => {
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    let accept: (value: { id: string }) => void = () => {};
+    api.createIndependentVideoTask.mockReturnValueOnce(
+      new Promise((resolve) => {
+        accept = resolve as (value: { id: string }) => void;
+      }),
+    );
+    render(<StudioWorkspace currentUser={reviewUser} />);
+    await openVideoPage();
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "乡墅庭院" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 视频生成",
+    });
+    await screen.findByText(/960 积分/);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
+    );
+    // 请求在途时用户改了提示词：草稿指纹变化，isCurrent() 为假。
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "改过的提示词" },
+    });
+    accept({ id: "batch-accepted" });
+    // 任务已受理 → 仍然给出提示，用户知道去任务中心看。
+    expect(
+      await screen.findByText(/视频生成任务已提交，可在任务中心查看进度/),
+    ).toBeInTheDocument();
   });
 
   it("非法草稿时长钳位到 15 秒提交，不再静默回落 8 秒（preflight P1-4）", async () => {

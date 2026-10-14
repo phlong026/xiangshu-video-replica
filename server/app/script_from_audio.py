@@ -95,7 +95,8 @@ class ScriptFromAudioTaskResponse(BaseModel):
     result: ScriptFromAudioResult | None
     viral_source: ScriptFromAudioViralSource | None = None
     # True = 正文只按 claim 回执下发，客户端在任务成功后调
-    # POST /api/viral/videos/copy/claim（首次扣「获取文案」费，复看免费）。
+    # POST /api/viral/videos/copy/claim（转写者本人免费，非转写者首次获取扣一次，
+    # 复看免费；口径见 viral_routes.charge_viral_copy）。
     copy_claim_required: bool = False
     error_code: str | None
     error_message: str | None

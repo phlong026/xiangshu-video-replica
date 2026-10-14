@@ -146,6 +146,9 @@ class UploadIntentResponse(BaseModel):
     headers: dict[str, str]
     expires_at: str | None
     upload_required: bool
+    # 仅去重复用且用途为复刻时有值：自动排队的 AI 拆解任务（见 media.create_upload_intent）。
+    analysis_task_id: str | None = None
+    analysis_task_status: str | None = None
 
 
 class CompleteUploadResponse(BaseModel):
@@ -656,6 +659,8 @@ def create_asset_upload_intent(
         headers=intent.headers,
         expires_at=intent.expires_at,
         upload_required=intent.upload_required,
+        analysis_task_id=intent.analysis_task_id,
+        analysis_task_status=intent.analysis_task_status,
     )
     if is_customer:
         return JSONResponse(content=result.model_dump(mode="json", exclude={"storage_key"}))

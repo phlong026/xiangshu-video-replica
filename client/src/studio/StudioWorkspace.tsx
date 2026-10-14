@@ -77,9 +77,11 @@ import {
   loadSavedScriptList,
   loadStudioData,
   loadViralVideos,
+  mergePolledTasks,
   persistCloudDraft,
   persistSavedScript,
   publishScriptVersion,
+  refreshStaleTasks,
   reloadStats,
   reloadTasks,
   sameTasks,
@@ -94,6 +96,7 @@ import {
   WorkbenchPage,
 } from "./MainPages";
 import { PeoplePage, PersonPage } from "./PeoplePages";
+import { projectSourceAssetId } from "./projectSource";
 import {
   isCurrentQuote,
   isQuoteRejection,
@@ -349,6 +352,9 @@ export function StudioWorkspace({
   const [data, setData] = useState<StudioData>(() =>
     review && reviewData ? reviewData : emptyData,
   );
+  // 任务轮询在定时器闭包里读取最新任务清单（含「加载更多」出来的历史任务）。
+  const tasksRef = useRef(data.tasks);
+  tasksRef.current = data.tasks;
   const [revision, setRevision] = useState(0);
   const [notice, setNotice] = useState("");
   const noticeTimerRef = useRef<number>(undefined);
@@ -1080,10 +1086,12 @@ export function StudioWorkspace({
     const draft = latestDraftRef.current;
     const draftFingerprint = JSON.stringify(draft);
     const page = studioPageRef.current;
-    const isCurrent = () =>
+    const stillAuthorized = () =>
       mountedRef.current &&
       currentUserRoleRef.current !== "auditor" &&
-      permissionGenerationRef.current === permissionGeneration &&
+      permissionGenerationRef.current === permissionGeneration;
+    const isCurrent = () =>
+      stillAuthorized() &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "数字人口播" &&
       studioPageRef.current === page &&
@@ -1120,14 +1128,24 @@ export function StudioWorkspace({
         quoteToken: oralQuote.quote_token,
         maxCredits: oralQuote.max_credits,
       });
-      if (!isCurrent()) return;
-      oralSubmissionRef.current = null;
-      closeGenerationDialog();
-      if (result.status === "FAILED") {
-        notify("口播任务提交未成功，请核对素材后重试。");
-      } else {
+      // 权限类失效（卸载、切成只读审计员、权限世代变化）仍然完全静默，不能给
+      // 已失去权限的会话弹提示或跳转。
+      if (!stillAuthorized()) return;
+      if (isCurrent()) {
+        oralSubmissionRef.current = null;
+        closeGenerationDialog();
+        if (result.status === "FAILED") {
+          notify("口播任务提交未成功，请核对素材后重试。");
+        } else {
+          notify("口播任务已提交，可在任务中心查看进度。");
+          navigate("tasks");
+          refresh();
+        }
+      } else if (result.status !== "FAILED") {
+        // 仅界面上下文变了（弹窗被关闭重开、草稿被改）：服务端已受理并预扣，
+        // 不能静默吞掉（FIX-11）。保留幂等键：同内容再次提交会回放原任务而不是
+        // 重复扣费；内容改了则指纹不同，本来就是一次新的提交。
         notify("口播任务已提交，可在任务中心查看进度。");
-        navigate("tasks");
         refresh();
       }
     } catch (cause: unknown) {
@@ -1193,10 +1211,12 @@ export function StudioWorkspace({
     const dialogRevision = generationDialogRevisionRef.current;
     const permissionGeneration = permissionGenerationRef.current;
     const attempt = ++videoSubmitAttemptRef.current;
-    const isCurrent = () =>
+    const stillAuthorized = () =>
       mountedRef.current &&
       currentUserRoleRef.current !== "auditor" &&
-      permissionGenerationRef.current === permissionGeneration &&
+      permissionGenerationRef.current === permissionGeneration;
+    const isCurrent = () =>
+      stillAuthorized() &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "视频生成" &&
       studioPageRef.current === page &&
@@ -1265,12 +1285,19 @@ export function StudioWorkspace({
         quote_token: videoQuote.quote_token,
         max_credits: videoQuote.max_credits,
       });
-      if (!isCurrent()) return;
-      videoSubmissionRef.current = null;
-      closeGenerationDialog();
-      patchDraft({ videoBatchId: result.id });
-      notify("视频生成任务已提交，可在预览区查看进度。");
-      refresh();
+      if (!stillAuthorized()) return;
+      if (isCurrent()) {
+        videoSubmissionRef.current = null;
+        closeGenerationDialog();
+        patchDraft({ videoBatchId: result.id });
+        notify("视频生成任务已提交，可在预览区查看进度。");
+        refresh();
+      } else {
+        // 同口播：任务已创建并预扣，界面上下文变了也要告知用户（FIX-11）；
+        // 保留幂等键，同参数再次提交回放原批次。
+        notify("视频生成任务已提交，可在任务中心查看进度。");
+        refresh();
+      }
     } catch (cause: unknown) {
       if (isCurrent()) {
         const message = customerVisibleErrorMessage(
@@ -1373,15 +1400,14 @@ export function StudioWorkspace({
       if (document.hidden) return;
       retryWallet();
       void reloadTasks(currentUser)
-        .then((tasks) => {
+        .then(async (firstPage) => {
+          // 第一页之外（「加载更多」出来）仍在进行中的任务按 ID 补刷（FIX-07）。
+          const stale = await refreshStaleTasks(tasksRef.current, firstPage);
+          const tasks = [...firstPage, ...stale];
           setData((previous) => {
             // MATERIAL-PERF-D（P1-3）：任务无实质变化时返回原引用，跳过
             // 全树重渲染（此前每 20s 必然重渲染整个工作区）。
-            const refreshedIds = new Set(tasks.map((task) => task.id));
-            const merged = [
-              ...tasks,
-              ...previous.tasks.filter((task) => !refreshedIds.has(task.id)),
-            ];
+            const merged = mergePolledTasks(previous.tasks, tasks);
             if (sameTasks(previous.tasks, merged)) return previous;
             return { ...previous, tasks: merged };
           });
@@ -1621,7 +1647,7 @@ export function StudioWorkspace({
           const deliveryKey = JSON.stringify([saveAccountRef.current, task.id]);
           if (deliveredExtractionTasksRef.current.has(deliveryKey)) return;
           // 普通任务正文随任务接口下发；爆款任务正文为 null，凭任务里带的视频身份
-          // 回「获取文案」取一次（交付免费，2026-10-04 拍板）。
+          // 回「获取文案」取一次（计费以服务端回执为准：转写者本人免费，非转写者首次扣一次）。
           const text = task.result?.text ?? "";
           const viralSource = task.copyClaimRequired
             ? task.viralSource
@@ -2078,15 +2104,30 @@ export function StudioWorkspace({
     }
     const explicitSource =
       importedProjectId !== undefined || importedAssetId !== undefined;
+    // sourceId 存的是展示用来源（资产 ID 或爆款视频 ID），不能当项目 ID 用：
+    // 早先 `projectId ?? sourceId` 会拿爆款 ID 去请求 /api/projects/{id}，必然 404。
     const projectId = explicitSource
       ? importedProjectId
-      : (state.draft.projectId ?? state.draft.sourceId);
+      : state.draft.projectId;
     const assetId = explicitSource
       ? importedAssetId
       : (state.draft.sourceAssetId ??
-        data.projects.find((project) => project.id === projectId)
-          ?.reference_asset_id ??
-        undefined);
+        projectSourceAssetId(
+          data.projects.find((project) => project.id === projectId),
+        ));
+    if (
+      !explicitSource &&
+      state.draft.sourceId &&
+      assetId &&
+      state.draft.sourceId !== assetId
+    ) {
+      // 当前来源是爆款视频（草稿里还残留着上一个项目）：再点「提取文案」会去转写
+      // 旧项目的视频并收转写费。来源对不上就停下，让用户回到该视频重新提取。
+      notify(
+        "当前文案来源是爆款视频，请回到该视频详情页重新提取文案，或重新上传视频。",
+      );
+      return;
+    }
     if (!projectId || !assetId) {
       notify("请先上传视频来源，再提取文案。");
       openLive("projects");
@@ -2172,7 +2213,17 @@ export function StudioWorkspace({
           }
           extractingRef.current = false;
           endCopyExtractionProgress();
-          if (!scopeStillCurrent()) return;
+          if (!scopeStillCurrent()) {
+            // FIX-11：任务已被服务端受理、转写费已产生，用户此时切走不能静默丢弃结果；
+            // 文案已进共享缓存，回原视频再点「提取文案」即可免费取回。
+            if (saveAccountRef.current === extractionAccount) {
+              setWalletRevision((value) => value + 1);
+              notify(
+                "文案已提取，但你已切换到其他来源，未写入当前草稿；回到原视频再点「提取文案」即可取回，不会重复收转写费。",
+              );
+            }
+            return;
+          }
           const currentDraft = latestDraftRef.current;
           if (!text) {
             // claim 未完成（未命中 / 失败）：正文拿不到就不能把空文案写进草稿，
@@ -2256,7 +2307,7 @@ export function StudioWorkspace({
       },
     });
     navigate("copy", { returnTo: "workbench" });
-    // 「获取文案」收费（2026-10-06 拍板）：命中缓存秒回同样按 viral_copy 扣费
+    // 「获取文案」计费（2026-10-08 口径）：命中缓存秒回同样按 viral_copy 扣费
     // （同账号同视频只扣一次）；回执 charged>0 时刷新钱包余额展示。
     if (billing.charged > 0) {
       setWalletRevision((value) => value + 1);

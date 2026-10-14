@@ -10,7 +10,6 @@ import type {
   MaterialTagItem,
   MaterialUsageSection,
   MaterialUsagesResponse,
-  ViralDetailBilling,
   ViralImportPurpose,
   ViralImportTask,
   ViralPlatform,
@@ -76,6 +75,7 @@ import {
 } from "./localPublishAccounts";
 import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
 import { PublishRecordsPanel } from "./PublishRecordsPanel";
+import { taskHasDeliverable } from "./taskResults";
 import type {
   StudioAsset,
   StudioContextValue,
@@ -115,6 +115,7 @@ import {
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
+  VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
   ViralImportPollingTimeoutError,
   viralImportIdempotencyKey,
 } from "./viralImport";
@@ -2008,7 +2009,9 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
     }
     if (request !== requestRef.current) return undefined;
     if (task.status === "SUCCEEDED" || task.status === "FAILED") return task;
-    throw new ViralImportPollingTimeoutError("导入任务等待超时，请稍后重试");
+    throw new ViralImportPollingTimeoutError(
+      VIRAL_IMPORT_POLLING_TIMEOUT_MESSAGE,
+    );
   };
 
   return {
@@ -2106,10 +2109,9 @@ export function ViralDetailPage() {
   const [detailAvailability, setDetailAvailability] =
     useState<ViralVideoItem["availability"]>("available");
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
-  // 「查看详情」计费回执：进入详情即调一次（服务端按付费账号去重，重复查看免费），
-  // 详情与互动统计字段在同一响应里返回，因此只算一次费用。
-  const [detailBilling, setDetailBilling] = useState<ViralDetailBilling>();
-  const [detailBillingError, setDetailBillingError] = useState<string>();
+  // 查看详情免费（2026-10-13 拍板）：进入详情读一次服务端权威数据（含互动统计），
+  // 不再展示计费回执；失败时只透传原因。
+  const [detailError, setDetailError] = useState<string>();
   const detailAccountRef = useRef(accountId);
   const detailRequestRef = useRef(0);
   detailAccountRef.current = accountId;
@@ -2123,8 +2125,7 @@ export function ViralDetailPage() {
     setDetailFavorite(undefined);
     setDetailAvailability("available");
     setDetailStatus("idle");
-    setDetailBilling(undefined);
-    setDetailBillingError(undefined);
+    setDetailError(undefined);
   }, [accountId]);
 
   useEffect(() => {
@@ -2144,13 +2145,12 @@ export function ViralDetailPage() {
       detailRequestRef.current === requestId;
     setDetailStatus("loading");
     void openViralVideoDetail(detailParams.platform, detailParams.videoId)
-      .then(({ item, billing }) => {
+      .then(({ item }) => {
         if (!isCurrent()) return;
         const restored = studioVideoFromViral(item);
         setDetailAvailability(item.availability ?? "available");
         setDetailFavorite(Boolean(item.isFavorite));
-        setDetailBilling(billing);
-        setDetailBillingError(undefined);
+        setDetailError(undefined);
         setRemoteVideo(restored);
         setDetailStatus("idle");
         updateData((current) => ({
@@ -2170,7 +2170,7 @@ export function ViralDetailPage() {
         // 条目仍可阅读（这些字段浏览列表本就免费可见）。
         const message =
           cause instanceof Error ? cause.message : "查看详情失败，请重试。";
-        setDetailBillingError(message);
+        setDetailError(message);
       });
     return () => {
       if (detailRequestRef.current === requestId) {
@@ -2255,7 +2255,7 @@ export function ViralDetailPage() {
       sourceAssetId: task.sourceAssetId,
     });
     // Web 降级链路（本地无缓存，素材由服务端导入）：同样带上视频身份，转写完成后
-    // 走一次「获取文案」取正文（交付免费，2026-10-04 拍板）。
+    // 走一次「获取文案」取正文（计费以服务端 claim 回执为准）。
     // 没有平台标识就没法关联文案，只能按普通转写处理（这类条目本就进不了爆款列表）。
     const copyClaim =
       video.platformKey && video.nativeId
@@ -2440,18 +2440,9 @@ export function ViralDetailPage() {
             <span>时长 {video.duration}</span>
           </div>
           <ViralStatisticsNote video={video} />
-          {detailBilling && (
-            <p className="viral-media-status is-ready" role="status">
-              {detailBilling.billable === false
-                ? "该视频当前不可用，本次查看详情未计费。"
-                : detailBilling.deduped
-                  ? "该视频此前已购买过详情，本次查看不再扣积分。"
-                  : `本次查看详情扣除 ${detailBilling.charged} 积分（含互动统计，再次查看不再扣费）。`}
-            </p>
-          )}
-          {detailBillingError && (
+          {detailError && (
             <p className="viral-media-status is-error" role="status">
-              {detailBillingError}
+              {detailError}
             </p>
           )}
           {refreshNotice && (
@@ -5037,7 +5028,9 @@ export function localDateTimeInputFromIso(value: string | undefined): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-const PUBLISH_SCHEDULE_MIN_LEAD_MS = 2 * 60 * 1000;
+// 服务端要求至少提前 2 分钟，并以服务端时钟校验；客户端多留 1 分钟余量，避免本机
+// 时钟偏慢或提交途中耗时导致刚好卡在边界被服务端 422 拒绝。
+const PUBLISH_SCHEDULE_MIN_LEAD_MS = 3 * 60 * 1000;
 const PUBLISH_SCHEDULE_MAX_LEAD_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function validatePublishSchedule(
@@ -5048,7 +5041,7 @@ export function validatePublishSchedule(
   const at = new Date(iso).getTime();
   if (Number.isNaN(at)) return "请填写有效的定时时间。";
   if (at < now.getTime() + PUBLISH_SCHEDULE_MIN_LEAD_MS)
-    return "定时发布至少需要提前 2 分钟。";
+    return "定时发布至少需要提前 3 分钟。";
   if (at > now.getTime() + PUBLISH_SCHEDULE_MAX_LEAD_MS)
     return "定时发布最多只能提前 30 天。";
   return null;
@@ -5087,7 +5080,7 @@ export function PublishPage() {
   notifyRef.current = notify;
   const completedResultIds = new Set(
     data.tasks
-      .filter((task) => task.status === "completed" && task.resultId)
+      .filter((task) => taskHasDeliverable(task) && task.resultId)
       .map((task) => task.resultId),
   );
   const [cloudRevision, setCloudRevision] = useState<number | null>(

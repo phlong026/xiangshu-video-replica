@@ -438,10 +438,62 @@ class H3ProviderFailed(RuntimeError):
         self.http_status = http_status
         # 服务商给出的失败原话（已脱敏、截断）；落进任务的错误说明供管理端排查。
         self.provider_reason = provider_reason
+        # 上游 HTTP 状态码：成片直链下载据此区分「链接已失效」与临时故障。
+        self.http_status = http_status
 
 
 class H3ProviderSettingsUnavailable(RuntimeError):
     pass
+
+
+# 成片「直链交付」：供应商结果地址目前长期有效，但不能排除日后改为限时签名。
+# 下载 / 探测时上游回这些状态码，即视为链接已失效——此时重试必然失败，必须如实告诉
+# 用户「文件已失效」，而不是让他反复点「请重试」。
+RESULT_URL_EXPIRED_STATUSES = frozenset({403, 404, 410})
+RESULT_URL_EXPIRED_CODE = "RESULT_URL_EXPIRED"
+RESULT_URL_EXPIRED_MESSAGE = (
+    "成片文件已失效：生成服务提供的下载链接已过期，无法再预览、下载或保存。"
+    "如需帮助，请联系客服并提供任务编号。"
+)
+RESULT_URL_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def result_url_expired_error() -> HTTPException:
+    return HTTPException(
+        status_code=410,
+        detail={"code": RESULT_URL_EXPIRED_CODE, "message": RESULT_URL_EXPIRED_MESSAGE},
+    )
+
+
+def provider_result_url_expired(url: str) -> bool | None:
+    """探测供应商成片直链是否已失效：True 已失效，False 可用，None 无法判断。
+
+    只发 HEAD、不下载正文；网络错误、超时等临时故障一律返回 None，不能误报失效。
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    try:
+        _require_public_https_host(parsed.hostname)
+    except H3ProviderFailed:
+        return None
+    try:
+        # 与其他供应商调用一样留调用记录，管理端可查到探测结果。
+        recorded_urlopen(
+            Request(url, method="HEAD"),
+            timeout=RESULT_URL_PROBE_TIMEOUT_SECONDS,
+            provider="metaso",
+            endpoint=endpoint_from_url(url),
+            read_limit=0,
+        )
+        return False
+    except HTTPError as exc:
+        if exc.code in RESULT_URL_EXPIRED_STATUSES:
+            return True
+        # 部分对象存储不支持 HEAD（405/501）：无法判断，交给真实下载决定。
+        return None
+    except (TimeoutError, URLError, OSError):
+        return None
 
 
 class ProviderRequestContractError(ValueError):
@@ -7213,12 +7265,7 @@ def cancel_generation_batch(
     ).fetchone()
     if batch is None:
         raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
-    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
-        raise generation_error(
-            404,
-            "BATCH_NOT_FOUND",
-            "Generation batch does not exist.",
-        )
+    # 先按可见范围鉴权：看不到的批次一律 404，不泄露存在性。
     require_batch_access(
         conn,
         actor=actor,
@@ -7226,6 +7273,14 @@ def cancel_generation_batch(
         created_by_user_id=str(batch["created_by_user_id"]),
         action="generation_batch.cancel",
     )
+    # 委派项目里能看到他人提交的批次，但取消（释放对方的预扣）只允许提交者本人；
+    # 此前这里回 404「批次不存在」，用户明明看得到却被告知不存在。
+    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
+        raise generation_error(
+            403,
+            "BATCH_CANCEL_FORBIDDEN",
+            "只能取消自己提交的任务。",
+        )
     if str(batch["status"]) in TERMINAL_STATUSES:
         raise generation_error(
             409,
@@ -7299,7 +7354,8 @@ def cancel_generation_batch(
             entity_type="generation_batch",
             entity_id=batch_id,
             metadata={
-                "project_id": str(batch["project_id"]),
+                # 独立创作批次没有项目：写 None 而不是字符串 "None"。
+                "project_id": batch["project_id"],
                 "cancelled_task_count": len(task_rows),
             },
             commit=False,

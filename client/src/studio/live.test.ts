@@ -96,18 +96,192 @@ import {
   loadMoreGenerationTasks,
   loadMoreOralTasks,
   loadMorePeople,
+  loadPeopleEntries,
   loadPersonAssets,
   loadProjectDraft,
   loadStudioData,
   loadStudioTaskDetail,
   loadTaskPreview,
+  mergePolledTasks,
   publishScriptVersion,
+  refreshStaleTasks,
   reloadTasks,
   removeStudioGenerationTask,
   retryStudioTask,
   sameTasks,
+  studioTaskStatus,
 } from "./live";
 import type { StudioTask } from "./types";
+
+describe("studioTaskStatus（FIX-01 批次展示态）", () => {
+  const progress = (counts: Record<string, number>) => ({
+    total_count: 4,
+    terminal_count: 4,
+    progress_percent: 100,
+    counts,
+  });
+
+  it("部分成功、其余失败 → 部分完成；全部失败 → 失败", () => {
+    expect(
+      studioTaskStatus({
+        status: "COMPLETED_WITH_FAILURES",
+        progress: progress({ succeeded: 3, failed: 1, needs_attention: 0 }),
+      }),
+    ).toBe("partial");
+    expect(
+      studioTaskStatus({
+        status: "COMPLETED_WITH_FAILURES",
+        progress: progress({ succeeded: 0, failed: 4, needs_attention: 0 }),
+      }),
+    ).toBe("failed");
+  });
+
+  it("提交结果不确定 / 成片未入库的批次是待核对，不是失败", () => {
+    expect(
+      studioTaskStatus({
+        status: "NEEDS_ATTENTION",
+        progress: progress({ succeeded: 2, needs_attention: 1 }),
+      }),
+    ).toBe("uncertain");
+    // 旧服务端只给 needs_attention_count 时同样识别。
+    expect(
+      studioTaskStatus({
+        status: "RUNNING",
+        progress: progress({}),
+        needs_attention_count: 1,
+      }),
+    ).toBe("uncertain");
+  });
+
+  it("运行中的批次里有子任务失败，仍按服务端状态显示生成中", () => {
+    expect(
+      studioTaskStatus({
+        status: "RUNNING",
+        progress: progress({ running: 2, failed: 1, needs_attention: 0 }),
+      }),
+    ).toBe("running");
+    expect(studioTaskStatus({ status: "QUEUED", progress: progress({}) })).toBe(
+      "queued",
+    );
+    expect(
+      studioTaskStatus({ status: "SUCCEEDED", progress: progress({}) }),
+    ).toBe("completed");
+    expect(
+      studioTaskStatus({ status: "CANCELLED", progress: progress({}) }),
+    ).toBe("cancelled");
+  });
+});
+
+describe("loadPeopleEntries 并发加载（FIX-16）", () => {
+  it("所有人物的签名地址请求同时发出，结果仍按原顺序组装", async () => {
+    vi.resetAllMocks();
+    api.listOralAvatars.mockResolvedValue([]);
+    api.listOralVoices.mockResolvedValue([]);
+    const resolvers: Array<(value: { url: string }) => void> = [];
+    api.getCachedCharacterAssetUrl.mockImplementation(
+      () =>
+        new Promise<{ url: string }>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const entry = (id: string) =>
+      ({
+        identity_id: id,
+        display_name: `人物${id}`,
+        role: "",
+        views: [{ asset_id: `face-${id}`, view_type: "FRONT_FACE" }],
+        contact_sheet_asset_id: null,
+        status: "PUBLISHED",
+        scene_look_count: 0,
+      }) as unknown as SimpleLibraryEntry;
+
+    const loading = loadPeopleEntries(
+      [entry("a"), entry("b"), entry("c")],
+      null,
+      3,
+    );
+    // 串行实现下这里只会发出 1 个请求（要等第一个人物完成才轮到下一个）。
+    await vi.waitFor(() => expect(resolvers).toHaveLength(3));
+    for (const [index, resolve] of resolvers.entries()) {
+      resolve({ url: `/signed/${index}` });
+    }
+    const result = await loading;
+    expect(result.people.map((person) => person.id)).toEqual(["a", "b", "c"]);
+    expect(result.errors).toEqual([]);
+  });
+});
+
+describe("任务轮询补刷与合并（FIX-07）", () => {
+  const base: StudioTask = {
+    id: "batch-old",
+    backendKind: "generation_batch",
+    backendId: "batch-old",
+    batchId: "batch-old",
+    title: "翻页加载的旧任务",
+    type: "视频生成",
+    status: "running",
+    submitted: "2026-09-01T10:00:00Z",
+    createdByUserId: "user-1",
+  };
+
+  it("只补刷第一页之外仍在进行中的任务，终态任务不再请求", async () => {
+    const oralRunning: StudioTask = {
+      ...base,
+      id: "oral-deep-2",
+      backendKind: "oral_task",
+      backendId: "deep-2",
+      batchId: undefined,
+      type: "数字人口播",
+    };
+    const finished: StudioTask = {
+      ...oralRunning,
+      id: "oral-done",
+      backendId: "done",
+      status: "completed",
+    };
+    api.getOralTask.mockReset();
+    api.getOralTask.mockResolvedValue({
+      id: "deep-2",
+      status: "SUCCEEDED",
+      title: "翻页加载的旧任务",
+      mode: "TTS",
+      identity_id: "person-1",
+      avatar_id: "avatar-1",
+      voice_id: "voice-1",
+      script_text: "正文",
+      audio_asset_id: null,
+      result_asset_id: "oral-result",
+      duration_sec: 30,
+      estimated_cost_fen: 100,
+      created_at: "2026-09-08T00:00:00Z",
+      updated_at: "2026-09-08T00:01:00Z",
+    } satisfies OralTaskRecord);
+    const refreshed = await refreshStaleTasks([oralRunning, finished], []);
+    expect(api.getOralTask).toHaveBeenCalledExactlyOnceWith("deep-2");
+    expect(refreshed).toEqual([
+      expect.objectContaining({
+        id: "oral-deep-2",
+        status: "completed",
+        submitted: base.submitted,
+        createdByUserId: "user-1",
+      }),
+    ]);
+  });
+
+  it("合并时原位更新并保持排序，新任务放最前", () => {
+    const second: StudioTask = { ...base, id: "batch-2", title: "第二条" };
+    const fresh: StudioTask = { ...base, id: "batch-new", title: "新任务" };
+    const merged = mergePolledTasks(
+      [base, second],
+      [{ ...second, status: "completed" }, fresh],
+    );
+    expect(merged.map((task) => [task.id, task.status])).toEqual([
+      ["batch-new", "running"],
+      ["batch-old", "running"],
+      ["batch-2", "completed"],
+    ]);
+  });
+});
 
 it("sameTasks 判定任务清单是否无实质变化（P1-3）", () => {
   const task = {
@@ -123,6 +297,7 @@ it("sameTasks 判定任务清单是否无实质变化（P1-3）", () => {
     false,
   );
   expect(sameTasks([task], [{ ...task, progress: 60 }])).toBe(false);
+  expect(sameTasks([task], [{ ...task, deliverableCount: 1 }])).toBe(false);
   expect(sameTasks([task], [{ ...task, title: "已重命名视频" }])).toBe(false);
   expect(sameTasks([task], [])).toBe(false);
   // 退回金额可能比状态晚一拍落账：它变了就不能沿用旧引用，否则失败卡片永远停在「还没退」。
@@ -1243,20 +1418,20 @@ describe("真实 Studio 只读适配器", () => {
     );
   });
 
-  it("部分成功且仍需处理的批次不会冒充已完成", async () => {
+  it("部分成功的批次显示为部分完成并带出可交付条数，不冒充已完成也不整批判失败", async () => {
     api.listGenerationBatches.mockResolvedValue({
       ...batchPage,
       items: [
         {
           ...batchPage.items[0],
           status: "COMPLETED_WITH_FAILURES",
-          needs_attention_count: 1,
+          needs_attention_count: 0,
           has_results: true,
           progress: {
             total_count: 2,
             terminal_count: 2,
             progress_percent: 100,
-            counts: { SUCCEEDED: 1, FAILED: 1 },
+            counts: { succeeded: 1, failed: 1, needs_attention: 0 },
           },
           tasks: [
             {
@@ -1298,7 +1473,8 @@ describe("真实 Studio 只读适配器", () => {
     expect(data.tasks).toEqual([
       expect.objectContaining({
         id: "batch-1",
-        status: "failed",
+        status: "partial",
+        deliverableCount: 1,
         progress: 100,
         resultId: "result-1",
       }),
@@ -2472,6 +2648,57 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
 
     expect(result.projectId).toBe("p-ok");
     expect(api.deleteProject).not.toHaveBeenCalled();
+  });
+
+  it("只上传抽出的音轨时不把它伪装成复刻参考视频（FIX-05）", async () => {
+    const audio = new File(["bytes"], "长视频.m4a", { type: "audio/mp4" });
+    mockUploadStart("p-audio", "a-audio");
+    api.uploadReferenceVideo.mockResolvedValue(undefined);
+    api.completeVideoUpload.mockResolvedValue({
+      asset_id: "a-audio",
+      project_id: "p-audio",
+      status: "uploaded",
+      analysis_task_id: null,
+      analysis_task_status: null,
+    });
+    api.getAssetDownloadUrl.mockResolvedValue({ url: "/signed/a-audio.m4a" });
+
+    const result = await live.uploadWorkbenchSourceVideo(
+      audio,
+      () => {},
+      undefined,
+      "script",
+    );
+
+    expect(result.project).toMatchObject({ script_source_asset_id: "a-audio" });
+    expect(result.project?.reference_asset_id ?? null).toBeNull();
+    expect(result.asset).toMatchObject({ id: "a-audio", kind: "audio" });
+  });
+
+  it("命中去重复用时沿用意图回执里自动排队的拆解任务（FIX-08）", async () => {
+    api.createProject.mockResolvedValue({ id: "p-dedup", name: "断线素材" });
+    api.createVideoUploadIntent.mockResolvedValue({
+      asset_id: "a-dedup",
+      project_id: "p-dedup",
+      method: null,
+      url: null,
+      headers: {},
+      expires_at: null,
+      upload_required: false,
+      analysis_task_id: "analysis-dedup",
+      analysis_task_status: "PENDING",
+    });
+    api.getAssetDownloadUrl.mockResolvedValue({ url: "/signed/a-dedup.mp4" });
+
+    const result = await live.uploadWorkbenchSourceVideo(file, () => {});
+
+    expect(api.uploadReferenceVideo).not.toHaveBeenCalled();
+    expect(api.completeVideoUpload).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      assetId: "a-dedup",
+      analysisTaskId: "analysis-dedup",
+      analysisTaskStatus: "PENDING",
+    });
   });
 });
 

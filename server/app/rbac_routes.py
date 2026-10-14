@@ -17,7 +17,7 @@ from typing import Annotated, Any, cast
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import content_store
@@ -112,6 +112,9 @@ class ProjectResponse(BaseModel):
     analysis_task_id: str | None = None
     analysis_error_message: str | None = None
     analysis_retryable: bool = False
+    # 桌面端对 >15 秒视频只上传抽出的音轨（reference_audio），它不是复刻参考视频，
+    # 不能占 reference_asset_id；单独下发，刷新后仍能从项目恢复「提取文案」的来源。
+    script_source_asset_id: str | None = None
 
 
 class AssetResponse(BaseModel):
@@ -450,7 +453,13 @@ def write_login_failure(
 def list_projects(
     conn: Database,
     actor: AuthenticatedUser,
+    # 可选分页（FIX-16）：不传 limit 时返回全部，保持旧客户端行为不变；工作台首屏只
+    # 需要最近若干个项目，不必每次拉全量再在前端截断。
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> list[ProjectResponse]:
+    page_sql = "" if limit is None else " LIMIT %s OFFSET %s"
+    page_params: tuple[int, ...] = () if limit is None else (limit, offset)
     if actor.role in {"admin", "auditor"}:
         rows = conn.execute(
             """
@@ -484,7 +493,15 @@ def list_projects(
                 END AS analysis_status,
                 latest_analysis_task.id AS analysis_task_id,
                 latest_analysis_task.error_message_redacted AS analysis_error_message,
-                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
+                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable,
+                (
+                    SELECT script_assets.id FROM assets AS script_assets
+                    WHERE script_assets.project_id = projects.id
+                        AND script_assets.kind = 'reference_audio'
+                        AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
+                    ORDER BY script_assets.created_at DESC, script_assets.id DESC
+                    LIMIT 1
+                ) AS script_source_asset_id
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -513,6 +530,8 @@ def list_projects(
                 )
             ORDER BY projects.created_at DESC, projects.id DESC
             """
+            + page_sql,
+            page_params,
         ).fetchall()
     else:
         rows = conn.execute(
@@ -547,7 +566,15 @@ def list_projects(
                 END AS analysis_status,
                 latest_analysis_task.id AS analysis_task_id,
                 latest_analysis_task.error_message_redacted AS analysis_error_message,
-                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
+                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable,
+                (
+                    SELECT script_assets.id FROM assets AS script_assets
+                    WHERE script_assets.project_id = projects.id
+                        AND script_assets.kind = 'reference_audio'
+                        AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
+                    ORDER BY script_assets.created_at DESC, script_assets.id DESC
+                    LIMIT 1
+                ) AS script_source_asset_id
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -576,8 +603,9 @@ def list_projects(
                 )
             WHERE projects.owner_user_id = %s
             ORDER BY projects.created_at DESC, projects.id DESC
-            """,
-            (actor.id,),
+            """
+            + page_sql,
+            (actor.id, *page_params),
         ).fetchall()
     return [project_response(row) for row in rows]
 
@@ -878,7 +906,15 @@ def project_detail_row(
             END AS analysis_status,
             latest_analysis_task.id AS analysis_task_id,
             latest_analysis_task.error_message_redacted AS analysis_error_message,
-            COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
+            COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable,
+            (
+                SELECT script_assets.id FROM assets AS script_assets
+                WHERE script_assets.project_id = projects.id
+                    AND script_assets.kind = 'reference_audio'
+                    AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
+                ORDER BY script_assets.created_at DESC, script_assets.id DESC
+                LIMIT 1
+            ) AS script_source_asset_id
         FROM projects
         LEFT JOIN assets AS reference_assets ON reference_assets.id = (
             SELECT assets.id
@@ -1390,6 +1426,11 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
     analysis_retryable = (
         False if "analysis_retryable" not in row.keys() else bool(row["analysis_retryable"])
     )
+    script_source_asset_id = (
+        None
+        if "script_source_asset_id" not in row.keys() or row["script_source_asset_id"] is None
+        else str(row["script_source_asset_id"])
+    )
     return ProjectResponse(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
@@ -1401,6 +1442,7 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
         analysis_task_id=analysis_task_id,
         analysis_error_message=analysis_error_message,
         analysis_retryable=analysis_retryable,
+        script_source_asset_id=script_source_asset_id,
     )
 
 

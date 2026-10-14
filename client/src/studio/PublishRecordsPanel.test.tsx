@@ -190,11 +190,15 @@ describe("publish schedule helpers", () => {
     expect(localDateTimeInputFromIso(undefined)).toBe("");
   });
 
-  it("validates lead time against the server's 2 minute / 30 day window", () => {
+  it("validates lead time with a 1-minute margin over the server's 2 minute / 30 day window", () => {
     const now = new Date("2026-09-17T00:00:00Z");
     expect(validatePublishSchedule(null, now)).toBeNull();
     expect(validatePublishSchedule("2026-09-17T00:01:00Z", now)).toBe(
-      "定时发布至少需要提前 2 分钟。",
+      "定时发布至少需要提前 3 分钟。",
+    );
+    // 服务端门槛是 2 分钟：客户端在 2–3 分钟之间就先拦下，留出时钟误差余量。
+    expect(validatePublishSchedule("2026-09-17T00:02:30Z", now)).toBe(
+      "定时发布至少需要提前 3 分钟。",
     );
     expect(validatePublishSchedule("2026-09-17T00:03:00Z", now)).toBeNull();
     expect(validatePublishSchedule("2026-10-20T00:00:00Z", now)).toBe(

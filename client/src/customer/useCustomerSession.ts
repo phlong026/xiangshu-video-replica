@@ -244,6 +244,16 @@ export function useCustomerSession(
   const [sessionRuntime, setSessionRuntime] =
     useState<CustomerSessionRuntime | null>(null);
   const sessionTokenRef = useRef<string | null>(null);
+  // 静默续登（FIX-10）：过期事件期间的单飞标记，以及给事件回调读最新值的 ref。
+  const silentReloginRef = useRef(false);
+  // 「用户是否记住了密码」的同步提示：没记住时过期事件与以前一样同步落终屏；真正的
+  // 凭据仍在静默重登时现读金库，这里只做是否值得尝试的判断。
+  const rememberedHintRef = useRef(false);
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+  const loginWithPasswordRef = useRef<
+    ((input: AccountAccessInput) => Promise<void>) | undefined
+  >(undefined);
   const sessionGenerationRef = useRef(0);
   const latestHeartbeatRequestIdRef = useRef(0);
   const bootstrappedRef = useRef(false);
@@ -452,6 +462,20 @@ export function useCustomerSession(
     };
   }, [establishSession, store]);
 
+  // 冷启动恢复进工作台时没有经过密码登录，预读一次金库得知是否记住了密码。
+  useEffect(() => {
+    let active = true;
+    void store
+      .loadRememberedLogin()
+      .then((login) => {
+        if (active && login) rememberedHintRef.current = true;
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [store]);
+
   // The three lifecycle events (§10.1) arrive on window — dispatched by the
   // customer transport on any 401 that ends the session. Each one also does
   // the right thing to the persisted credential: expired/replaced keep the
@@ -487,12 +511,45 @@ export function useCustomerSession(
       setSessionRuntime(null);
       clearLifecycleCredentials(false);
     };
-    const onExpired = () => {
+    const finishExpired = () => {
       clearSession();
       // 传输层过期没有定制文案；清掉旧 notice 避免上一次「改密成功」的
       // 说明冒充本次过期原因（P2-2）。
       setExpiredNotice(null);
       dispatch({ type: "session-expired" });
+    };
+    const onExpired = () => {
+      // 电脑休眠 / WebView 冻结后租约（90 秒，写入验收合同，不能拉长）必然过期。用户
+      // 若本来就勾选了「记住密码」，凭据已在本机金库里：先静默重登一次，成功则无缝
+      // 接上（FIX-10）；没记住、重登失败（冲突、断网、改过密码）一律回到原有的
+      // 「登录已过期」终屏。只对「过期」重登，「被顶替」绝不重登，否则两台设备会互踢。
+      if (silentReloginRef.current) return;
+      if (!rememberedHintRef.current) {
+        finishExpired();
+        return;
+      }
+      silentReloginRef.current = true;
+      void (async () => {
+        let restored = false;
+        try {
+          const remembered = await store.loadRememberedLogin();
+          if (remembered && screenRef.current === "workspace") {
+            const login = loginWithPasswordRef.current;
+            await login?.({
+              mode: "login",
+              username: remembered.username,
+              password: remembered.password,
+              remember: true,
+            });
+            restored = login !== undefined;
+          }
+        } catch {
+          restored = false;
+        } finally {
+          silentReloginRef.current = false;
+        }
+        if (!restored) finishExpired();
+      })();
     };
     const onReplaced = () => {
       clearSession();
@@ -517,7 +574,7 @@ export function useCustomerSession(
       window.removeEventListener(CUSTOMER_SESSION_REPLACED_EVENT, onReplaced);
       window.removeEventListener(CUSTOMER_SESSION_REVOKED_EVENT, onRevoked);
     };
-  }, [clearLifecycleCredentials]);
+  }, [clearLifecycleCredentials, store.loadRememberedLogin]);
 
   // Keep the lease alive while the workspace is live. A failing heartbeat
   // ends through the lifecycle events above (the transport dispatches them
@@ -618,6 +675,7 @@ export function useCustomerSession(
         );
         passwordAttemptRef.current = null;
         registeredUsernameRef.current = null;
+        rememberedHintRef.current = input.remember;
         sessionTokenRef.current = response.session_token;
         sessionGenerationRef.current += 1;
         setSessionToken(response.session_token);
@@ -649,6 +707,7 @@ export function useCustomerSession(
     },
     [store, noteLease],
   );
+  loginWithPasswordRef.current = loginWithPassword;
 
   // A guard for concurrent retries: while a login attempt is in flight, further
   // clicks are ignored until the in-flight request completes. This avoids

@@ -187,8 +187,14 @@ export type StudioTask = {
     | "queued"
     | "failed"
     | "completed"
+    /** 批次已结束，部分成片可交付、其余失败（失败部分已自动退回积分）。 */
+    | "partial"
     | "uncertain"
     | "cancelled";
+  /** 生成批次中已可交付（已归档或直链可用）的成片条数；口播任务不填。 */
+  deliverableCount?: number;
+  /** 批次提交者；委派项目里可见他人提交的批次，但只有提交者本人能取消。 */
+  createdByUserId?: string;
   progress?: number;
   submitted: string;
   poster?: string;
@@ -424,7 +430,7 @@ export type StudioContextValue = {
   confirmFinalDraft: () => void;
   /** 上传来源视频 → 提取文案（script-from-audio）→ 回填草稿并跳文案工坊。
    * 爆款来源额外带 `copyClaim`（视频的平台与原生 ID）：转写完成后凭它回获取接口
-   * 取正文（交付免费，2026-10-04 拍板）；转写费落在 ASR 科目。 */
+   * 取正文（计费以服务端 claim 回执为准）；转写费落在 ASR 科目。 */
   extractScriptFromUpload: (
     projectId?: string,
     assetId?: string,

@@ -452,7 +452,8 @@ export async function loadProjectDraft(
 ): Promise<{ draft: StudioDraft; errors: string[] }> {
   const draft = createDraft();
   draft.projectId = project.id;
-  draft.sourceId = project.reference_asset_id ?? undefined;
+  draft.sourceId =
+    project.reference_asset_id ?? project.script_source_asset_id ?? undefined;
   draft.script.title = project.name;
 
   const [analysisResult, scriptResult] = await Promise.allSettled([
@@ -519,7 +520,10 @@ async function loadProjects(): Promise<{
   assets: StudioAsset[];
   errors: string[];
 }> {
-  const projects = (await listProjects()).slice(0, projectLimit);
+  const projects = (await listProjects({ limit: projectLimit })).slice(
+    0,
+    projectLimit,
+  );
   const previewProjects = projects
     .filter(
       (project) =>
@@ -734,6 +738,12 @@ async function loadPeople(): Promise<{
   return loadPeopleEntries(page.items, page.next_cursor, page.total);
 }
 
+type SettledEntryData = [
+  PromiseSettledResult<string | undefined>,
+  PromiseSettledResult<string | undefined>,
+  PromiseSettledResult<OralIdentityAssets>,
+];
+
 export async function loadPeopleEntries(
   entries: SimpleLibraryEntry[],
   nextCursor: string | null,
@@ -743,19 +753,27 @@ export async function loadPeopleEntries(
   const people: StudioPerson[] = [];
   const assets: StudioAsset[] = [];
 
-  for (const entry of entries) {
-    const face =
-      entry.views.find((view) => view.view_type === "FRONT_FACE") ??
-      entry.views[0];
-    const requests = await Promise.allSettled([
-      face
-        ? signedUrl(face.asset_id, getCachedCharacterAssetUrl)
-        : Promise.resolve(undefined),
-      entry.contact_sheet_asset_id
-        ? signedUrl(entry.contact_sheet_asset_id, getCachedCharacterAssetUrl)
-        : Promise.resolve(undefined),
-      loadOralIdentityAssets(entry.identity_id),
-    ]);
+  // 各人物的签名地址与口播资产互不依赖：先全部并发取回，再按原顺序组装。早先逐个
+  // await，首屏耗时随人数线性增长（FIX-16）；组装仍按列表顺序，错误顺序也不变。
+  const fetched = await Promise.all(
+    entries.map((entry): Promise<SettledEntryData> => {
+      const face =
+        entry.views.find((view) => view.view_type === "FRONT_FACE") ??
+        entry.views[0];
+      return Promise.allSettled([
+        face
+          ? signedUrl(face.asset_id, getCachedCharacterAssetUrl)
+          : Promise.resolve(undefined),
+        entry.contact_sheet_asset_id
+          ? signedUrl(entry.contact_sheet_asset_id, getCachedCharacterAssetUrl)
+          : Promise.resolve(undefined),
+        loadOralIdentityAssets(entry.identity_id),
+      ]);
+    }),
+  );
+  for (const [index, entry] of entries.entries()) {
+    const requests = fetched[index];
+    if (!requests) continue;
     const portrait =
       requests[0].status === "fulfilled" ? requests[0].value : undefined;
     const sheetUrl =
@@ -807,16 +825,39 @@ export async function loadMorePeople(cursor: string) {
   return loadPeopleEntries(page.items, page.next_cursor, page.total);
 }
 
-function studioTaskStatus(
-  batch: Pick<GenerationBatchListItem, "status" | "needs_attention_count">,
-): StudioTask["status"] {
+type BatchStatusView = Pick<GenerationBatchListItem, "status" | "progress"> & {
+  needs_attention_count?: number;
+};
+
+/** 已可交付的成片条数：服务端只把「已归档 / 直链可用」的成功任务计入 succeeded。 */
+function batchDeliverableCount(
+  batch: Pick<GenerationBatchListItem, "progress">,
+) {
+  return batch.progress.counts.succeeded ?? 0;
+}
+
+/** 批次状态 → 任务中心展示态。
+ *
+ * 列表与详情共用服务端 progress 计数（needs_attention 已排除被付费重生成替代的
+ * 子任务、也不含普通失败），保证同一批次在两处显示一致。
+ * - 提交结果不确定 / 付费成片未能入库：积分冻结待核对，显示「待核对」而不是
+ *   「失败」，避免用户误以为失败而重复提交、再次预扣。
+ * - 部分子任务成功、其余失败：显示「部分完成」，成功的成片照常可看。 */
+export function studioTaskStatus(batch: BatchStatusView): StudioTask["status"] {
   const status = batch.status.toUpperCase();
-  if (status === "SUBMISSION_UNCERTAIN") return "uncertain";
   if (status === "CANCELLED") return "cancelled";
-  if (batch.needs_attention_count > 0) return "failed";
+  if (
+    status === "SUBMISSION_UNCERTAIN" ||
+    status === "NEEDS_ATTENTION" ||
+    (batch.progress.counts.needs_attention ??
+      batch.needs_attention_count ??
+      0) > 0
+  )
+    return "uncertain";
   if (status === "SUCCEEDED") return "completed";
-  if (status === "COMPLETED_WITH_FAILURES") return "failed";
-  if (status === "NEEDS_ATTENTION" || status === "FAILED") return "failed";
+  if (status === "COMPLETED_WITH_FAILURES")
+    return batchDeliverableCount(batch) > 0 ? "partial" : "failed";
+  if (status === "FAILED") return "failed";
   if (status === "PENDING" || status === "QUEUED") return "queued";
   return "running";
 }
@@ -842,6 +883,7 @@ export function sameTasks(a: StudioTask[], b: StudioTask[]): boolean {
       task.title === other.title &&
       task.status === other.status &&
       task.progress === other.progress &&
+      task.deliverableCount === other.deliverableCount &&
       task.submitted === other.submitted &&
       // 退回金额可能比状态晚一拍落账；不比较它，轮询会一直沿用旧引用，
       // 失败卡片就永远停在「还没退」。
@@ -871,6 +913,8 @@ function studioTask(batch: GenerationBatchListItem): StudioTask {
     title: batch.display_name?.trim() || batch.project_name || batch.id,
     type: CREATION_KIND_LABELS[batch.creation_kind] ?? "视频生成",
     status: studioTaskStatus(batch),
+    deliverableCount: batchDeliverableCount(batch),
+    createdByUserId: batch.created_by_user_id,
     credits: taskCredits(batch.credits),
     progress: batch.progress.progress_percent,
     submitted: batch.created_at,
@@ -881,11 +925,6 @@ function studioTask(batch: GenerationBatchListItem): StudioTask {
 }
 
 function studioTaskFromBatch(batch: GenerationBatch): StudioTask {
-  const needsAttention = batch.tasks.filter((task) =>
-    ["FAILED", "NEEDS_ATTENTION", "SUBMISSION_UNCERTAIN"].includes(
-      task.status.toUpperCase(),
-    ),
-  ).length;
   return {
     id: batch.id,
     backendKind: "generation_batch",
@@ -895,10 +934,8 @@ function studioTaskFromBatch(batch: GenerationBatch): StudioTask {
     projectId: batch.project_id,
     title: batch.display_name?.trim() || batch.project_name || batch.id,
     type: CREATION_KIND_LABELS[batch.creation_kind] ?? "视频生成",
-    status: studioTaskStatus({
-      status: batch.status,
-      needs_attention_count: needsAttention,
-    }),
+    status: studioTaskStatus(batch),
+    deliverableCount: batchDeliverableCount(batch),
     credits: taskCredits(batch.credits),
     progress: batch.progress.progress_percent,
     submitted:
@@ -991,6 +1028,65 @@ export async function reloadTasks(
   ];
 }
 
+const POLLED_ACTIVE_STATUSES = new Set<StudioTask["status"]>([
+  "running",
+  "queued",
+  "uncertain",
+]);
+/** 每轮最多补刷几条翻页加载出来的进行中任务，避免历史很多时一次打出一串请求。 */
+const STALE_TASK_REFRESH_LIMIT = 10;
+
+/** 轮询只取第一页；「加载更多」出来的旧任务若仍在进行中，按 ID 逐条补刷（FIX-07），
+ * 否则它们会永远停在旧状态。单条失败静默跳过，下一轮再试。 */
+export async function refreshStaleTasks(
+  previous: StudioTask[],
+  refreshed: StudioTask[],
+): Promise<StudioTask[]> {
+  const refreshedIds = new Set(refreshed.map((task) => task.id));
+  const stale = previous
+    .filter(
+      (task) =>
+        !refreshedIds.has(task.id) &&
+        task.backendKind !== undefined &&
+        POLLED_ACTIVE_STATUSES.has(task.status),
+    )
+    .slice(0, STALE_TASK_REFRESH_LIMIT);
+  const results = await Promise.allSettled(
+    stale.map((task) =>
+      loadStudioTaskDetail(
+        task.backendKind as "generation_batch" | "oral_task",
+        task.backendId || task.batchId || task.id,
+      ),
+    ),
+  );
+  return results.flatMap((result, index) => {
+    const old = stale[index];
+    if (result.status !== "fulfilled" || !old) return [];
+    // 详情接口不带列表口径的提交时间与提交者，沿用列表里的值，避免无谓抖动。
+    return [
+      {
+        ...old,
+        ...result.value,
+        submitted: old.submitted,
+        createdByUserId: old.createdByUserId,
+      },
+    ];
+  });
+}
+
+/** 合并轮询结果：已知任务原位更新、保持既有排序，新出现的任务放到最前。 */
+export function mergePolledTasks(
+  previous: StudioTask[],
+  refreshed: StudioTask[],
+): StudioTask[] {
+  const byId = new Map(refreshed.map((task) => [task.id, task]));
+  const known = new Set(previous.map((task) => task.id));
+  return [
+    ...refreshed.filter((task) => !known.has(task.id)),
+    ...previous.map((task) => byId.get(task.id) ?? task),
+  ];
+}
+
 /** Workbench quick upload: create a project, PUT the raw video to cloud
  * storage through the presigned intent, and hand back the source identity so
  * 后续复刻/文案提取都拿这个来源继续，而不是把大视频当解析输入。 */
@@ -1011,8 +1107,11 @@ export async function uploadWorkbenchSourceVideo(
   const project = await createProject((base || file.name).slice(0, 120));
   try {
     const intent = await createVideoUploadIntent(project.id, file, purpose);
-    let analysisTaskId: string | undefined;
-    let analysisTaskStatus: string | undefined;
+    // 命中去重复用时没有 complete 这一步，自动拆解任务随意图回执带回（FIX-08）。
+    let analysisTaskId: string | undefined =
+      intent.analysis_task_id ?? undefined;
+    let analysisTaskStatus: string | undefined =
+      intent.analysis_task_status ?? undefined;
     let assetId = intent.asset_id;
     if (intent.upload_required !== false) {
       await uploadReferenceVideo(intent, file, onProgress, signal);
@@ -1021,11 +1120,16 @@ export async function uploadWorkbenchSourceVideo(
       analysisTaskId = completed.analysis_task_id ?? undefined;
       analysisTaskStatus = completed.analysis_task_status ?? undefined;
     }
-    const uploadedProject: Project = {
-      ...project,
-      reference_asset_id: assetId,
-      reference_upload_status: "READY",
-    };
+    // 桌面端对 >15 秒视频只上传抽出的音轨：它只能用于提取文案，服务端也不把它算作
+    // 复刻参考视频。本地状态与服务端口径保持一致，否则刷新后项目「来源」凭空消失。
+    const audioOnly = /\.(m4a|mp3|wav|aac)$/i.test(file.name);
+    const uploadedProject: Project = audioOnly
+      ? { ...project, script_source_asset_id: assetId }
+      : {
+          ...project,
+          reference_asset_id: assetId,
+          reference_upload_status: "READY",
+        };
     // 上传路径不经过 loadProjects，拿不到签名预览地址；缺了它左栏来源视频只能退化成
     // 纯文字占位。取不到地址与 loadProjects 的降级一致，不阻断已经成功的上传。
     const url = await signedUrl(assetId, getAssetDownloadUrl).catch(
@@ -1035,7 +1139,17 @@ export async function uploadWorkbenchSourceVideo(
       projectId: project.id,
       assetId,
       project: uploadedProject,
-      asset: projectAsset(uploadedProject, url),
+      asset: audioOnly
+        ? {
+            id: assetId,
+            name: `${project.name} · 来源音轨`,
+            kind: "audio",
+            url,
+            group: project.name,
+            source: "项目上传",
+            saved: true,
+          }
+        : projectAsset(uploadedProject, url),
       analysisTaskId,
       analysisTaskStatus,
     };
@@ -1724,7 +1838,7 @@ export async function loadPersonAssets(
 
 /** 提取文案管线（script-from-audio）：提交任务 → 每 2 秒轮询 → 终态返回。
  * 成功返回转写结果；爆款任务的正文为 null——服务端任务接口不下发正文，调用方要凭
- * 任务的 viral_source 回「获取文案」claim 取（那里才是交付点，交付免费）。失败抛出带
+ * 任务的 viral_source 回「获取文案」claim 取（那里才是交付点，计费见 charge_viral_copy）。失败抛出带
  * 服务端文案的 Error（含 SUBMISSION_UNCERTAIN）。 */
 export type ScriptExtractionResult = {
   text: string | null;
@@ -1786,8 +1900,8 @@ export type ViralCopyReceipt =
 /**
  * 桌面端爆款文案提取：先取共享文案（命中即秒回正文），未命中才本地抽音轨上传。
  *
- * 交付免费（2026-10-04 拍板）：文案一旦进了共享缓存，谁取都不再收「获取文案」费
- * ——秒回省下的是整次转写；未命中时走本地抽音轨上传，转写费由 ASR 科目另计。
+ * 计费以服务端 claim 回执为准（2026-10-08 口径：转写者本人免费，非转写者首次获取扣一次）；
+ * 秒回省下的是整次转写，未命中时走本地抽音轨上传，转写费由 ASR 科目另计。
  *
  * 与工作台上传链路的区别只有「素材从哪来」：这里上传的是客户端自己从**本地缓存的
  * 原视频**里抽出的单声道音轨，平台因此不必为文案留存原片（设计 §5.3 / §8）。
@@ -1839,7 +1953,7 @@ export async function startViralCopyExtraction(video: {
 }
 
 /**
- * 转写完成后取回文案：爆款任务的交付点（交付免费，2026-10-04 拍板）.
+ * 转写完成后取回文案：爆款任务的交付点（计费以服务端 claim 回执为准，2026-10-08 口径）.
  *
  * 他已为这次转写付过 ASR 按秒费用，交付本身不再另收「获取文案」费。未命中缓存或
  * 获取失败返回 null——服务端任务接口不下发正文，调用方提示用户重新提取补齐。

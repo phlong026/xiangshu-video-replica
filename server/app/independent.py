@@ -291,8 +291,20 @@ def create_independent_batch(
     mode_upper = _MODE_UPPPER[request.mode]
     _validate_independent_mode_assets(request)
 
+    request_hash = _independent_request_hash(request)
+    existing = _find_independent_batch(conn, actor_id=actor.id, key=request.idempotency_key)
+    if existing is not None:
+        if str(existing["request_hash"]) != request_hash:
+            raise generation_error(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "This idempotency key was already used for a different request.",
+            )
+        return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
     # 与复刻流同源的生产红线：客户生产禁止模拟任务；metaso 需配置就绪并
-    # 遵守付费试用限额。仅对“真正的新提交”生效，幂等回放在此之前返回。
+    # 遵守付费试用限额。仅对“真正的新提交”生效——幂等回放已在上面返回，
+    # 否则网络超时后用同一个键重放会被限额误拒，而任务其实已经建好。
     if request.provider == "fake_h3" and is_customer_production():
         raise generation_error(
             503,
@@ -305,17 +317,6 @@ def create_independent_batch(
             user_id=actor.id,
             requested_quantity=request.quantity,
         )
-
-    request_hash = _independent_request_hash(request)
-    existing = _find_independent_batch(conn, actor_id=actor.id, key=request.idempotency_key)
-    if existing is not None:
-        if str(existing["request_hash"]) != request_hash:
-            raise generation_error(
-                409,
-                "IDEMPOTENCY_CONFLICT",
-                "This idempotency key was already used for a different request.",
-            )
-        return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
 
     runtime = read_runtime_limits(conn)
     if request.quantity > runtime["max_generation_count_per_batch"]:

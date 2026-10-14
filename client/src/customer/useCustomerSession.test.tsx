@@ -342,6 +342,134 @@ describe("useCustomerSession", () => {
     },
   );
 
+  describe("过期后静默续登（FIX-10）", () => {
+    function rememberedStore() {
+      const store = memoryStore({ deviceToken: "device-token-1" });
+      store.loadRememberedLogin = async () => ({
+        username: "alice",
+        password: testPasswordText,
+      });
+      return store;
+    }
+
+    function stubCrypto() {
+      vi.stubGlobal("crypto", {
+        randomUUID: () => webcrypto.randomUUID(),
+        subtle: { digest: vi.fn().mockResolvedValue(new ArrayBuffer(32)) },
+      });
+    }
+
+    it("记住了密码：租约过期后静默重登，不弹「登录已过期」", async () => {
+      stubCrypto();
+      const store = rememberedStore();
+      const fetchMock = stubFetch((url) => {
+        if (url.endsWith("/api/customer/sessions/login")) {
+          return jsonResponse(loginBody, 201);
+        }
+        if (url.endsWith("/api/customer/login")) {
+          return jsonResponse({
+            ...activationBody,
+            session_token: renewedSessionTokenText,
+          });
+        }
+        if (url.endsWith("/sessions/heartbeat"))
+          return jsonResponse(heartbeatBody);
+        return jsonResponse({}, 500);
+      });
+      const { result } = renderHook(() => useCustomerSession(store));
+      await waitFor(() => expect(result.current.screen).toBe("workspace"));
+      // 冷启动恢复路径：等金库预读完成再触发过期。
+      await act(async () => {});
+
+      act(() =>
+        window.dispatchEvent(new Event(CUSTOMER_SESSION_EXPIRED_EVENT)),
+      );
+      await waitFor(() =>
+        expect(
+          fetchMock.mock.calls.some(([url]) =>
+            String(url).endsWith("/api/customer/login"),
+          ),
+        ).toBe(true),
+      );
+      await act(async () => {});
+      expect(result.current.screen).toBe("workspace");
+      expect(result.current.user?.userId).toBe("user-1");
+      expect(await store.loadSessionToken()).toBe(renewedSessionTokenText);
+    });
+
+    it("静默重登失败（改过密码 / 冲突 / 断网）：回到原有的登录已过期终屏", async () => {
+      stubCrypto();
+      const store = rememberedStore();
+      stubFetch((url) => {
+        if (url.endsWith("/api/customer/sessions/login")) {
+          return jsonResponse(loginBody, 201);
+        }
+        if (url.endsWith("/api/customer/login")) {
+          return jsonResponse({ detail: { code: "INVALID_CREDENTIALS" } }, 401);
+        }
+        return jsonResponse({}, 500);
+      });
+      const { result } = renderHook(() => useCustomerSession(store));
+      await waitFor(() => expect(result.current.screen).toBe("workspace"));
+      await act(async () => {});
+
+      act(() =>
+        window.dispatchEvent(new Event(CUSTOMER_SESSION_EXPIRED_EVENT)),
+      );
+      await waitFor(() =>
+        expect(result.current.screen).toBe("session-expired"),
+      );
+      expect(result.current.user).toBeNull();
+    });
+
+    it("被其他设备顶替绝不重登，否则两台设备会互相踢", async () => {
+      stubCrypto();
+      const store = rememberedStore();
+      const fetchMock = stubFetch((url) => {
+        if (url.endsWith("/api/customer/sessions/login")) {
+          return jsonResponse(loginBody, 201);
+        }
+        return jsonResponse({}, 500);
+      });
+      const { result } = renderHook(() => useCustomerSession(store));
+      await waitFor(() => expect(result.current.screen).toBe("workspace"));
+      await act(async () => {});
+
+      act(() =>
+        window.dispatchEvent(new Event(CUSTOMER_SESSION_REPLACED_EVENT)),
+      );
+      expect(result.current.screen).toBe("session-replaced");
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).endsWith("/api/customer/login"),
+        ),
+      ).toBe(false);
+    });
+
+    it("没记住密码时过期事件与以前一样同步落终屏", async () => {
+      const store = memoryStore({ deviceToken: "device-token-1" });
+      const fetchMock = stubFetch((url) => {
+        if (url.endsWith("/api/customer/sessions/login")) {
+          return jsonResponse(loginBody, 201);
+        }
+        return jsonResponse({}, 500);
+      });
+      const { result } = renderHook(() => useCustomerSession(store));
+      await waitFor(() => expect(result.current.screen).toBe("workspace"));
+      await act(async () => {});
+
+      act(() =>
+        window.dispatchEvent(new Event(CUSTOMER_SESSION_EXPIRED_EVENT)),
+      );
+      expect(result.current.screen).toBe("session-expired");
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).endsWith("/api/customer/login"),
+        ),
+      ).toBe(false);
+    });
+  });
+
   it("boots onto the login screen without a stored credential", async () => {
     const store = memoryStore();
     const fetchMock = stubFetch(() => jsonResponse({}));

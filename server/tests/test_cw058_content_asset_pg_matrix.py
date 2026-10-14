@@ -1928,6 +1928,90 @@ def test_media_upload_dedup_reuses_owned_hash_never_foreign_on_pg(
     assert foreign_results[0] is True
 
 
+def test_media_upload_dedup_enforces_target_purpose_and_enqueues_replica_analysis_on_pg(
+    lane_env: str, pg: psycopg.Connection
+) -> None:
+    """FIX-08：去重复用按「本次用途」把关。
+
+    - 复刻用途复用：与正常 complete 一样自动排队 AI 拆解，任务号随意图回执带回；
+    - 以「提取文案」上传的长视频（>15 秒）再拿去复刻：按复刻 4–15 秒门禁拒绝，
+      不能借去重绕过时长限制。
+    """
+    seed_project(pg, "dedup-source", "employee_1")
+    seed_project(pg, "dedup-replica", "employee_1")
+    seed_project(pg, "dedup-long-source", "employee_1")
+    seed_project(pg, "dedup-long-replica", "employee_1")
+    storage = FakeStorageAdapter(provider="fake", bucket="cw058-tests")
+    content = b"dedup-video-bytes"
+    content_sha = hashlib.sha256(content).hexdigest()
+    with pg_transaction() as raw:
+        _upload_and_complete(
+            BusinessConnection.postgres(raw),
+            storage,
+            actor_id="employee_1",
+            project_id="dedup-source",
+            content=content,
+            sha256=content_sha,
+        )
+    with pg_transaction() as raw:
+        reused = create_upload_intent(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            project_id="dedup-replica",
+            filename="reference.mp4",
+            content_type="video/mp4",
+            size_bytes=len(content),
+            sha256=content_sha,
+            purpose="replica",
+        )
+    assert reused.upload_required is False
+    assert reused.analysis_task_id is not None
+    task = pg.execute(
+        "SELECT project_id, asset_id, status FROM analysis_tasks WHERE id = %s",
+        (reused.analysis_task_id,),
+    ).fetchone()
+    assert task == ("dedup-replica", reused.asset_id, "PENDING")
+
+    long_content = b"long-script-video-bytes"
+    long_sha = hashlib.sha256(long_content).hexdigest()
+    with pg_transaction() as raw:
+        bus = BusinessConnection.postgres(raw)
+        intent = create_upload_intent(
+            bus,
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            project_id="dedup-long-source",
+            filename="reference.mp4",
+            content_type="video/mp4",
+            size_bytes=len(long_content),
+            sha256=long_sha,
+            purpose="script",
+        )
+        storage.put_object(intent.storage_key, long_content, content_type="video/mp4")
+        complete_upload(
+            bus,
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            probe=FakeVideoProbe(duration_seconds=42.0),
+            asset_id=intent.asset_id,
+        )
+    with pytest.raises(HTTPException) as exc, pg_transaction() as raw:
+        create_upload_intent(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            project_id="dedup-long-replica",
+            filename="reference.mp4",
+            content_type="video/mp4",
+            size_bytes=len(long_content),
+            sha256=long_sha,
+            purpose="replica",
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == "VIDEO_DURATION_OUT_OF_RANGE"
+
+
 def test_media_completion_rolls_back_atomically_when_enqueue_fails_on_pg(
     lane_env: str,
     pg: psycopg.Connection,
@@ -2094,6 +2178,7 @@ def test_direct_generation_archive_is_owned_idempotent_and_does_not_rebill(
         "other-resolution",
         "other-ratio",
         "missing-ratio",
+        "expired",
     ],
 )
 def test_archive_http_rechecks_before_commit_and_preserves_billing(
@@ -2164,6 +2249,8 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
             downloads.append(url)
             if outcome == "download":
                 raise H3ProviderFailed("temporary download failure")
+            if outcome == "expired":
+                raise H3ProviderFailed("H3 provider returned HTTP 404", http_status=404)
             if outcome == "changed":
                 pg.execute(
                     "UPDATE generation_tasks SET provider_result_url='https://cdn.example/new.mp4' "
@@ -2259,9 +2346,14 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
                 "claim-stolen": 409,
                 "claim-stolen-at-put": 409,
                 "renew-commit-failed": 401,
+                # 直链失效：如实告知文件已失效，而不是 503「请重试」（FIX-02）。
+                "expired": 410,
             }.get(outcome, 503)
         )
         assert result.status_code == expected, result.text
+        if outcome == "expired":
+            assert result.json()["detail"]["code"] == "RESULT_URL_EXPIRED"
+            assert "已失效" in result.json()["detail"]["message"]
         if outcome in successful:
             replay = client.post("/api/generation-tasks/archive-http-task/archive")
             assert replay.status_code == 200
@@ -2317,6 +2409,198 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
             ).fetchone() == ("https://cdn.example/result.mp4",)
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    ("verify", "probe", "expected"),
+    [
+        (False, True, 200),
+        (True, False, 200),
+        (True, None, 200),
+        (True, True, 410),
+    ],
+)
+def test_preview_url_verify_reports_expired_direct_result(
+    lane_env: str,
+    pg: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    verify: bool,
+    probe: bool | None,
+    expected: int,
+) -> None:
+    """FIX-02：播放失败后带 verify 复查，直链已失效回 410 RESULT_URL_EXPIRED；
+    不带 verify 时不探测，探测结论不明（None）时照常返回地址，不误报失效。"""
+    from app.auth import get_current_user
+    from app.main import app
+
+    seed_project(pg, "preview-expiry-project", "employee_1")
+    pg.execute(
+        "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+        "request_hash,request_snapshot_json,status) VALUES "
+        "('preview-expiry-batch','preview-expiry-project','employee_1','preview-expiry-key',"
+        "'h','{}','SUCCEEDED')"
+    )
+    pg.execute(
+        "INSERT INTO generation_tasks(id,batch_id,provider,model,status,archive_status,"
+        "provider_result_url) VALUES ('preview-expiry-task','preview-expiry-batch','metaso',"
+        "'MiniMax-H3','SUCCEEDED','DIRECT','https://cdn.example/result.mp4')"
+    )
+    pg.commit()
+    probes: list[str] = []
+
+    def fake_probe(url: str) -> bool | None:
+        probes.append(url)
+        return probe
+
+    monkeypatch.setattr("app.generation_routes.provider_result_url_expired", fake_probe)
+    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get(
+            "/api/generation-tasks/preview-expiry-task/preview-url",
+            params={"verify": "true"} if verify else {},
+        )
+        assert response.status_code == expected, response.text
+        assert probes == (["https://cdn.example/result.mp4"] if verify else [])
+        if expected == 410:
+            assert response.json()["detail"]["code"] == "RESULT_URL_EXPIRED"
+        else:
+            assert response.json()["url"] == "https://cdn.example/result.mp4"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_provider_result_url_probe_maps_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """探测只把 403/404/410 判为失效；405 与网络错误判为「无法判断」。"""
+    from urllib.error import HTTPError, URLError
+
+    from app import generation
+
+    monkeypatch.setattr(generation, "_require_public_https_host", lambda _host: None)
+    outcomes: list[BaseException | None] = []
+
+    def fake_urlopen(*_args, **_kwargs):
+        error = outcomes.pop(0)
+        if error is not None:
+            raise error
+        return b"", {}, 200
+
+    monkeypatch.setattr(generation, "recorded_urlopen", fake_urlopen)
+    url = "https://cdn.example/result.mp4"
+
+    def http_error(code: int) -> HTTPError:
+        return HTTPError(url, code, "x", hdrs=None, fp=None)  # type: ignore[arg-type]
+
+    cases: list[tuple[BaseException | None, bool | None]] = [
+        (None, False),
+        (http_error(404), True),
+        (http_error(403), True),
+        (http_error(410), True),
+        (http_error(405), None),
+        (http_error(500), None),
+        (URLError("down"), None),
+        (TimeoutError(), None),
+    ]
+    for error, expected in cases:
+        outcomes.append(error)
+        assert generation.provider_result_url_expired(url) is expected
+    assert generation.provider_result_url_expired("http://cdn.example/a.mp4") is None
+    assert generation.provider_result_url_expired("fake://h3-results/a.mp4") is None
+
+
+def test_project_list_exposes_audio_only_script_source(
+    lane_env: str, pg: psycopg.Connection
+) -> None:
+    """FIX-05：只上传了抽出音轨的项目，刷新后仍能从项目列表拿到「提取文案」来源；
+    音轨不冒充复刻参考视频（reference_asset_id 保持为空）。"""
+    from app.auth import get_current_user
+    from app.main import app
+
+    seed_project(pg, "audio-only-project", "employee_1")
+    pg.execute(
+        "INSERT INTO assets(id,project_id,kind,storage_uri,sha256,size_bytes,content_type,"
+        "created_by_user_id,metadata_json) VALUES ('audio-source','audio-only-project',"
+        "'reference_audio','fake://cw058-tests/projects/audio-only-project/a.m4a','abc',10,"
+        "'audio/mp4','employee_1','{}')"
+    )
+    pg.commit()
+    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    try:
+        projects = TestClient(app).get("/api/projects").json()
+    finally:
+        app.dependency_overrides.clear()
+    row = next(item for item in projects if item["id"] == "audio-only-project")
+    assert row["reference_asset_id"] is None
+    assert row["reference_upload_status"] == "NOT_STARTED"
+    assert row["script_source_asset_id"] == "audio-source"
+
+
+def test_project_list_optional_pagination(lane_env: str, pg: psycopg.Connection) -> None:
+    """FIX-16：/api/projects 不传 limit 返回全部（旧客户端不变）；传 limit/offset 按创建时间
+    倒序分页，且只含本人项目。"""
+    from app.auth import get_current_user
+    from app.main import app
+
+    for index in range(5):
+        seed_project(pg, f"page-project-{index}", "employee_1")
+        pg.execute(
+            "UPDATE projects SET created_at = %s WHERE id = %s",
+            (f"2026-01-0{index + 1} 00:00:00", f"page-project-{index}"),
+        )
+    seed_project(pg, "page-project-foreign", "employee_2")
+    pg.commit()
+    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    try:
+        client = TestClient(app)
+        everything = [item["id"] for item in client.get("/api/projects").json()]
+        assert everything == [f"page-project-{index}" for index in (4, 3, 2, 1, 0)]
+        first = [item["id"] for item in client.get("/api/projects?limit=2").json()]
+        assert first == ["page-project-4", "page-project-3"]
+        second = [item["id"] for item in client.get("/api/projects?limit=2&offset=2").json()]
+        assert second == ["page-project-2", "page-project-1"]
+        assert client.get("/api/projects?limit=0").status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_cancel_batch_visible_but_not_own_is_forbidden_not_missing(
+    lane_env: str, pg: psycopg.Connection
+) -> None:
+    """FIX-12：项目主人看得到他人在本项目提交的批次，取消时应明确「只能取消自己的」，
+    而不是 404「批次不存在」；看不到的人仍是 404。"""
+    from app.generation import cancel_generation_batch
+
+    seed_project(pg, "cancel-owner-project", "employee_1")
+    pg.execute(
+        "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+        "request_hash,request_snapshot_json,status) VALUES "
+        "('cancel-other-batch','cancel-owner-project','employee_2','cancel-other-key',"
+        "'h','{}','QUEUED')"
+    )
+    pg.execute(
+        "INSERT INTO generation_tasks(id,batch_id,provider,model,status) VALUES "
+        "('cancel-other-task','cancel-other-batch','fake_h3','MiniMax-H3','PENDING')"
+    )
+    pg.commit()
+    with pytest.raises(HTTPException) as owner_exc, pg_transaction() as raw:
+        cancel_generation_batch(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_1", "employee"),
+            batch_id="cancel-other-batch",
+        )
+    assert owner_exc.value.status_code == 403
+    assert owner_exc.value.detail["code"] == "BATCH_CANCEL_FORBIDDEN"
+    with pytest.raises(HTTPException) as stranger_exc, pg_transaction() as raw:
+        cancel_generation_batch(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_3", "employee"),
+            batch_id="cancel-other-batch",
+        )
+    assert stranger_exc.value.status_code == 404
+    status = pg.execute(
+        "SELECT status FROM generation_batches WHERE id='cancel-other-batch'"
+    ).fetchone()
+    assert status == ("QUEUED",)
 
 
 def test_archive_retry_while_first_request_runs_deduplicates_expensive_work(

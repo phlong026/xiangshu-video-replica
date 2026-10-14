@@ -728,6 +728,110 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(updateData).not.toHaveBeenCalled();
   });
 
+  it("部分完成的生成批次在详情页照常加载已成功的成片（FIX-01）", async () => {
+    const partial: StudioTask = {
+      ...taskA,
+      type: "视频生成",
+      backendKind: "generation_batch",
+      backendId: taskA.id,
+      status: "partial",
+      deliverableCount: 3,
+    };
+    loadStudioTaskDetail.mockResolvedValue(partial);
+    loadTaskPreview.mockReturnValue(new Promise(() => {}));
+    useStudio.mockReturnValue(
+      studio(taskA.id, {
+        state: {
+          ...createState("task-detail"),
+          selectedTaskId: taskA.id,
+          selectedTaskKind: "generation_batch",
+          selectedTaskBackendId: taskA.id,
+        },
+        data: data([partial]),
+      }),
+    );
+    render(<TaskDetailPage />);
+
+    await waitFor(() => expect(loadTaskPreview).toHaveBeenCalled());
+    expect(screen.getByText("部分完成")).toBeInTheDocument();
+    expect(
+      screen.getByText(/本批已有 3 条成片可查看，其余未生成成功/),
+    ).toBeInTheDocument();
+  });
+
+  it("没有成功成片的待核对批次不请求预览，也不显示为失败", async () => {
+    const uncertain: StudioTask = {
+      ...taskA,
+      type: "视频生成",
+      backendKind: "generation_batch",
+      backendId: taskA.id,
+      status: "uncertain",
+      deliverableCount: 0,
+    };
+    loadStudioTaskDetail.mockResolvedValue(uncertain);
+    useStudio.mockReturnValue(
+      studio(taskA.id, {
+        state: {
+          ...createState("task-detail"),
+          selectedTaskId: taskA.id,
+          selectedTaskKind: "generation_batch",
+          selectedTaskBackendId: taskA.id,
+        },
+        data: data([uncertain]),
+      }),
+    );
+    render(<TaskDetailPage />);
+
+    expect(await screen.findByText("状态待确认")).toBeInTheDocument();
+    expect(loadTaskPreview).not.toHaveBeenCalled();
+  });
+
+  it("直链成片提醒及时保存；保存时发现直链已失效则改为「文件已失效」（FIX-02）", async () => {
+    const direct: StudioAsset = {
+      id: "direct-task-a",
+      name: "张工建房预算 · 首个可用结果",
+      kind: "video",
+      url: "https://provider.example/a.mp4",
+      group: "任务结果",
+      source: "任务中心",
+      saved: false,
+      generationTaskId: "provider-result-a",
+      delivery: "direct",
+    };
+    let value = studio();
+    useStudio.mockImplementation(() => value);
+    loadTaskPreview.mockResolvedValue(direct);
+    const view = render(<TaskDetailPage />);
+    await waitFor(() => expect(value.updateData).toHaveBeenCalledOnce());
+    const update = vi.mocked(value.updateData).mock.calls[0][0];
+    value = { ...value, data: update(value.data) };
+    view.rerender(<TaskDetailPage />);
+    expect(
+      screen.getByText(/链接可能存在有效期，请尽快下载到本地/),
+    ).toBeVisible();
+
+    saveTaskPreview.mockRejectedValueOnce(
+      Object.assign(
+        new Error("成片文件已失效：生成服务提供的下载链接已过期。"),
+        {
+          code: "RESULT_URL_EXPIRED",
+          status: 410,
+        },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存到素材库" }));
+    expect(
+      await screen.findByText(
+        /成片文件已失效：生成服务提供的下载链接已过期，无法再预览/,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "保存到素材库" }),
+    ).not.toBeInTheDocument();
+    // 失效后不再反复重新读取预览。
+    expect(loadTaskPreview).toHaveBeenCalledTimes(1);
+  });
+
   it("审核示例不请求真实预览接口", () => {
     useStudio.mockReturnValue(studio(taskA.id, { review: true }));
     render(<TaskDetailPage />);
@@ -2290,6 +2394,34 @@ describe("V1.4 任务中心列表", () => {
     fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
     expect(cancelStudioTask).not.toHaveBeenCalled();
     expect(value.notify).toHaveBeenCalledWith("审核示例不执行真实取消。");
+  });
+
+  it("委派项目里他人提交的排队批次不出现取消入口（FIX-12）", () => {
+    const others: StudioTask = {
+      ...taskA,
+      id: "batch-others",
+      type: "视频生成",
+      backendKind: "generation_batch",
+      backendId: "batch-others",
+      status: "queued",
+      createdByUserId: "someone-else",
+    };
+    const mine: StudioTask = {
+      ...others,
+      id: "batch-mine",
+      backendId: "batch-mine",
+      title: "我的排队任务",
+      createdByUserId: "account-a",
+    };
+    useStudio.mockReturnValue(
+      studio(taskA.id, {
+        state: createState("tasks"),
+        data: data([others, mine]),
+        user: { id: "account-a" } as StudioContextValue["user"],
+      }),
+    );
+    render(<TasksPage />);
+    expect(screen.getAllByRole("button", { name: "取消任务" })).toHaveLength(1);
   });
 
   it("非排队行不出现取消入口", () => {
