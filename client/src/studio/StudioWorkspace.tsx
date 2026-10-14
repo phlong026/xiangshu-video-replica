@@ -1500,7 +1500,7 @@ export function StudioWorkspace({
         if (task.status === "SUCCEEDED") {
           extractingRef.current = false;
           // 普通任务正文随任务接口下发；爆款任务正文为 null，凭任务里带的视频身份
-          // 回「获取文案」取一次（交付免费，2026-10-04 拍板）。
+          // 回「获取文案」取一次（计费以服务端回执为准：转写者本人免费，非转写者首次扣一次）。
           const text = task.result?.text ?? "";
           const viralSource = task.copyClaimRequired
             ? task.viralSource
@@ -2000,7 +2000,7 @@ export function StudioWorkspace({
     )
       .then(async ({ text: taskText }) => {
         // 爆款链路：转写完成只代表结果进了共享缓存，正文凭视频身份回「获取文案」
-        // 交付（2026-10-04 拍板：交付不再计费）。正文也只在 claim 回执里——服务端
+        // 交付（计费以服务端 claim 回执为准，见 charge_viral_copy）。正文也只在 claim 回执里——服务端
         // 任务接口对爆款任务不下发正文，这里没有「取不到就退回任务结果」的旁路；
         // 欠下的交付由下次「提取文案」补齐（桌面端 claim-first 秒回，不再走转写）。
         let text = taskText;
@@ -2137,7 +2137,7 @@ export function StudioWorkspace({
       },
     });
     navigate("copy", { returnTo: "workbench" });
-    // 「获取文案」收费（2026-10-06 拍板）：命中缓存秒回同样按 viral_copy 扣费
+    // 「获取文案」计费（2026-10-08 口径）：命中缓存秒回同样按 viral_copy 扣费
     // （同账号同视频只扣一次）；回执 charged>0 时刷新钱包余额展示。
     if (billing.charged > 0) {
       setWalletRevision((value) => value + 1);

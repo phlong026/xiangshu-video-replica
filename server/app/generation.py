@@ -7011,7 +7011,8 @@ def cancel_generation_batch(
             entity_type="generation_batch",
             entity_id=batch_id,
             metadata={
-                "project_id": str(batch["project_id"]),
+                # 独立创作批次没有项目：写 None 而不是字符串 "None"。
+                "project_id": batch["project_id"],
                 "cancelled_task_count": len(task_rows),
             },
             commit=False,
