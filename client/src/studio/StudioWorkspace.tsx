@@ -77,9 +77,11 @@ import {
   loadSavedScriptList,
   loadStudioData,
   loadViralVideos,
+  mergePolledTasks,
   persistCloudDraft,
   persistSavedScript,
   publishScriptVersion,
+  refreshStaleTasks,
   reloadStats,
   reloadTasks,
   sameTasks,
@@ -350,6 +352,9 @@ export function StudioWorkspace({
   const [data, setData] = useState<StudioData>(() =>
     review && reviewData ? reviewData : emptyData,
   );
+  // 任务轮询在定时器闭包里读取最新任务清单（含「加载更多」出来的历史任务）。
+  const tasksRef = useRef(data.tasks);
+  tasksRef.current = data.tasks;
   const [revision, setRevision] = useState(0);
   const [notice, setNotice] = useState("");
   const noticeTimerRef = useRef<number>(undefined);
@@ -1374,15 +1379,14 @@ export function StudioWorkspace({
       if (document.hidden) return;
       retryWallet();
       void reloadTasks(currentUser)
-        .then((tasks) => {
+        .then(async (firstPage) => {
+          // 第一页之外（「加载更多」出来）仍在进行中的任务按 ID 补刷（FIX-07）。
+          const stale = await refreshStaleTasks(tasksRef.current, firstPage);
+          const tasks = [...firstPage, ...stale];
           setData((previous) => {
             // MATERIAL-PERF-D（P1-3）：任务无实质变化时返回原引用，跳过
             // 全树重渲染（此前每 20s 必然重渲染整个工作区）。
-            const refreshedIds = new Set(tasks.map((task) => task.id));
-            const merged = [
-              ...tasks,
-              ...previous.tasks.filter((task) => !refreshedIds.has(task.id)),
-            ];
+            const merged = mergePolledTasks(previous.tasks, tasks);
             if (sameTasks(previous.tasks, merged)) return previous;
             return { ...previous, tasks: merged };
           });

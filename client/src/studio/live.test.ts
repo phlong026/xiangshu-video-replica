@@ -101,7 +101,9 @@ import {
   loadStudioData,
   loadStudioTaskDetail,
   loadTaskPreview,
+  mergePolledTasks,
   publishScriptVersion,
+  refreshStaleTasks,
   reloadTasks,
   removeStudioGenerationTask,
   retryStudioTask,
@@ -166,6 +168,78 @@ describe("studioTaskStatus（FIX-01 批次展示态）", () => {
     expect(
       studioTaskStatus({ status: "CANCELLED", progress: progress({}) }),
     ).toBe("cancelled");
+  });
+});
+
+describe("任务轮询补刷与合并（FIX-07）", () => {
+  const base: StudioTask = {
+    id: "batch-old",
+    backendKind: "generation_batch",
+    backendId: "batch-old",
+    batchId: "batch-old",
+    title: "翻页加载的旧任务",
+    type: "视频生成",
+    status: "running",
+    submitted: "2026-09-01T10:00:00Z",
+    createdByUserId: "user-1",
+  };
+
+  it("只补刷第一页之外仍在进行中的任务，终态任务不再请求", async () => {
+    const oralRunning: StudioTask = {
+      ...base,
+      id: "oral-deep-2",
+      backendKind: "oral_task",
+      backendId: "deep-2",
+      batchId: undefined,
+      type: "数字人口播",
+    };
+    const finished: StudioTask = {
+      ...oralRunning,
+      id: "oral-done",
+      backendId: "done",
+      status: "completed",
+    };
+    api.getOralTask.mockReset();
+    api.getOralTask.mockResolvedValue({
+      id: "deep-2",
+      status: "SUCCEEDED",
+      title: "翻页加载的旧任务",
+      mode: "TTS",
+      identity_id: "person-1",
+      avatar_id: "avatar-1",
+      voice_id: "voice-1",
+      script_text: "正文",
+      audio_asset_id: null,
+      result_asset_id: "oral-result",
+      duration_sec: 30,
+      estimated_cost_fen: 100,
+      created_at: "2026-09-08T00:00:00Z",
+      updated_at: "2026-09-08T00:01:00Z",
+    } satisfies OralTaskRecord);
+    const refreshed = await refreshStaleTasks([oralRunning, finished], []);
+    expect(api.getOralTask).toHaveBeenCalledExactlyOnceWith("deep-2");
+    expect(refreshed).toEqual([
+      expect.objectContaining({
+        id: "oral-deep-2",
+        status: "completed",
+        submitted: base.submitted,
+        createdByUserId: "user-1",
+      }),
+    ]);
+  });
+
+  it("合并时原位更新并保持排序，新任务放最前", () => {
+    const second: StudioTask = { ...base, id: "batch-2", title: "第二条" };
+    const fresh: StudioTask = { ...base, id: "batch-new", title: "新任务" };
+    const merged = mergePolledTasks(
+      [base, second],
+      [{ ...second, status: "completed" }, fresh],
+    );
+    expect(merged.map((task) => [task.id, task.status])).toEqual([
+      ["batch-new", "running"],
+      ["batch-old", "running"],
+      ["batch-2", "completed"],
+    ]);
   });
 });
 
