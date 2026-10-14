@@ -501,11 +501,25 @@ def test_oral_compatibility_allows_1801_seconds_without_a_duration_limit(
 def test_generated_video_size_limit_precedes_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(media_tools, "GENERATED_VIDEO_MAX_BYTES", 8)
-    with pytest.raises(media_tools.MediaValidationFailed):
+    """超限必须在调用 ffprobe/ffmpeg 之前就被拒。
+
+    上限走的是 `max_bytes` 形参（默认值在 def 时已绑定），因此这里**显式传入**：
+    早先只 patch 模块常量，patch 根本不生效，用例即使删掉大小校验也会因为内容不是
+    合法视频而照样抛 MediaValidationFailed——等于没有保护。
+    """
+
+    def unexpected(tool: str) -> str:
+        raise AssertionError(f"超限内容不应触发媒体工具调用：{tool}")
+
+    monkeypatch.setattr(media_tools, "resolve_media_binary", unexpected)
+    with pytest.raises(media_tools.MediaValidationFailed) as excinfo:
         media_tools.normalize_generated_video(
-            b"\x00\x00\x00\x18ftypisom", target_width=144, target_height=256
+            b"\x00\x00\x00\x18ftypisom",
+            target_width=144,
+            target_height=256,
+            max_bytes=8,
         )
+    assert "大小上限" in str(excinfo.value)
 
 
 def test_generated_video_oversize_message_names_the_limit() -> None:
