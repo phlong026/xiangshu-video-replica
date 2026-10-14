@@ -193,6 +193,8 @@ export type StudioTask = {
     | "cancelled";
   /** 生成批次中已可交付（已归档或直链可用）的成片条数；口播任务不填。 */
   deliverableCount?: number;
+  /** 批次提交者；委派项目里可见他人提交的批次，但只有提交者本人能取消。 */
+  createdByUserId?: string;
   progress?: number;
   submitted: string;
   poster?: string;

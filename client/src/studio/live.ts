@@ -896,6 +896,7 @@ function studioTask(batch: GenerationBatchListItem): StudioTask {
     type: CREATION_KIND_LABELS[batch.creation_kind] ?? "视频生成",
     status: studioTaskStatus(batch),
     deliverableCount: batchDeliverableCount(batch),
+    createdByUserId: batch.created_by_user_id,
     credits: taskCredits(batch.credits),
     progress: batch.progress.progress_percent,
     submitted: batch.created_at,

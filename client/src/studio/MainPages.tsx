@@ -1143,8 +1143,16 @@ export function WorkbenchPage() {
 }
 
 export function TasksPage() {
-  const { data, navigate, openLive, review, notify, refresh, updateData } =
-    useStudio();
+  const {
+    data,
+    navigate,
+    openLive,
+    review,
+    notify,
+    refresh,
+    updateData,
+    user,
+  } = useStudio();
   const [status, setStatus] = useState("all");
   const [kind, setKind] = useState("全部");
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -1436,7 +1444,11 @@ export function TasksPage() {
                     )}
                     {task.status === "queued" &&
                     (task.backendKind !== "oral_task" ||
-                      task.backendStatus === "QUEUED") ? (
+                      task.backendStatus === "QUEUED") &&
+                    // 委派项目里他人提交的批次只能查看，取消（释放对方预扣）仅限提交者。
+                    (!task.createdByUserId ||
+                      !user.id ||
+                      task.createdByUserId === user.id) ? (
                       <Button
                         variant="quiet"
                         disabled={cancellingId === task.id}

@@ -7265,12 +7265,7 @@ def cancel_generation_batch(
     ).fetchone()
     if batch is None:
         raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
-    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
-        raise generation_error(
-            404,
-            "BATCH_NOT_FOUND",
-            "Generation batch does not exist.",
-        )
+    # 先按可见范围鉴权：看不到的批次一律 404，不泄露存在性。
     require_batch_access(
         conn,
         actor=actor,
@@ -7278,6 +7273,14 @@ def cancel_generation_batch(
         created_by_user_id=str(batch["created_by_user_id"]),
         action="generation_batch.cancel",
     )
+    # 委派项目里能看到他人提交的批次，但取消（释放对方的预扣）只允许提交者本人；
+    # 此前这里回 404「批次不存在」，用户明明看得到却被告知不存在。
+    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
+        raise generation_error(
+            403,
+            "BATCH_CANCEL_FORBIDDEN",
+            "只能取消自己提交的任务。",
+        )
     if str(batch["status"]) in TERMINAL_STATUSES:
         raise generation_error(
             409,
