@@ -40,6 +40,9 @@ const customers: CustomerLifecycleResponse = {
   distribution: [],
   lifecycleRule: "生命周期规则",
   healthRule: "健康分规则",
+  // 客户运营参数（T29）：页面据这两项标红健康分与低余额，夹具给中性值。
+  healthAlertScore: 40,
+  lowBalanceThreshold: 100,
   limit: 20,
   offset: 0,
 };

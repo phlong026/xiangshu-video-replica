@@ -171,8 +171,6 @@ def list_customer_lifecycle(
         raise _http(
             503, "CUSTOMER_LIFECYCLE_UNAVAILABLE", "客户运营分析需要 PostgreSQL 运行时。"
         ) from exc
-    stage_counts = {str(r[0]): int(r[1]) for r in distribution}
-    total = stage_counts.get(stage.strip(), 0) if stage.strip() else sum(stage_counts.values())
     return {
         "items": _lifecycle_rows(rows),
         "total": total_count,

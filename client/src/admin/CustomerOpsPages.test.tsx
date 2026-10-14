@@ -148,8 +148,9 @@ it("客户运营页：分布卡+分层清单+勾选批量赠送逐户调账", as
     target: { value: "十月激活活动" },
   });
   fireEvent.click(screen.getByRole("button", { name: "确认发放" }));
+  // 本页沿用主线既有的内联赠送流程（含批次恢复），完成文案与之一致。
   await waitFor(() =>
-    expect(screen.getByText(/已向 2 名客户完成积分赠送/)).toBeInTheDocument(),
+    expect(screen.getByText(/已向 2 名客户各赠送 50 积分/)).toBeInTheDocument(),
   );
   const grants = (
     fetchMock as unknown as ReturnType<typeof vi.fn>

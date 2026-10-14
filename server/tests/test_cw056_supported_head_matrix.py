@@ -428,7 +428,7 @@ HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "tables": 133,
     "timestamptz_columns": 118,
     "triggers": 61,
-    "unique_constraints": 43
+    "unique_constraints": 43,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：

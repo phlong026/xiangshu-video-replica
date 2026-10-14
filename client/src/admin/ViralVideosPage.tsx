@@ -1782,42 +1782,6 @@ export function ViralVideosPage({
           </ul>
         </section>
       )}
-      <div role="tablist" aria-label="视频库页签" className="admin-tabs">
-        <button
-          role="tab"
-          aria-selected={!upstreamOpen && !recycleOpen}
-          type="button"
-          onClick={() => {
-            setLibraryView("library");
-            if (filters.status === "blocked")
-              changeFilters({ status: "", offset: 0 });
-          }}
-        >
-          视频库
-        </button>
-        {!readOnly ? (
-          <button
-            role="tab"
-            aria-selected={upstreamOpen}
-            type="button"
-            onClick={() => {
-              setLibraryView("upstream");
-            }}
-          >
-            实时搜索入库
-          </button>
-        ) : null}
-        <button
-          role="tab"
-          aria-selected={recycleOpen}
-          type="button"
-          onClick={() => {
-            setLibraryView("recycle");
-          }}
-        >
-          回收站
-        </button>
-      </div>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
       {statisticsProgress ? (
