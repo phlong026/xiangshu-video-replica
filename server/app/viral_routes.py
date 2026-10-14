@@ -1074,9 +1074,11 @@ def charge_viral_copy(
         entity_id=video_id,
     )
     require_priced_viral_service(conn, VIRAL_COPY_SERVICE, error_code="VIRAL_COPY_UNPRICED")
+    # 锁的主体必须与去重主体（付费账号 = 钱包主人）一致：按操作者加锁时，同一母账号
+    # 下两个子账号并发首提会各自通过「未购买」判断、各扣一次（计费行按操作者唯一）。
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtext(%s))",
-        ("billing:user:" + actor.id,),
+        ("billing:wallet-owner:viral-copy:" + wallet_owner_id,),
     )
     if _copy_purchased(conn, source_id):
         return 0, True

@@ -2491,6 +2491,32 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
     expect(result.projectId).toBe("p-ok");
     expect(api.deleteProject).not.toHaveBeenCalled();
   });
+
+  it("命中去重复用时沿用意图回执里自动排队的拆解任务（FIX-08）", async () => {
+    api.createProject.mockResolvedValue({ id: "p-dedup", name: "断线素材" });
+    api.createVideoUploadIntent.mockResolvedValue({
+      asset_id: "a-dedup",
+      project_id: "p-dedup",
+      method: null,
+      url: null,
+      headers: {},
+      expires_at: null,
+      upload_required: false,
+      analysis_task_id: "analysis-dedup",
+      analysis_task_status: "PENDING",
+    });
+    api.getAssetDownloadUrl.mockResolvedValue({ url: "/signed/a-dedup.mp4" });
+
+    const result = await live.uploadWorkbenchSourceVideo(file, () => {});
+
+    expect(api.uploadReferenceVideo).not.toHaveBeenCalled();
+    expect(api.completeVideoUpload).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      assetId: "a-dedup",
+      analysisTaskId: "analysis-dedup",
+      analysisTaskStatus: "PENDING",
+    });
+  });
 });
 
 describe("startViralCopyExtraction（爆款文案：本地抽音轨上传）", () => {

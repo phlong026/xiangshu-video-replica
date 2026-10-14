@@ -1928,6 +1928,90 @@ def test_media_upload_dedup_reuses_owned_hash_never_foreign_on_pg(
     assert foreign_results[0] is True
 
 
+def test_media_upload_dedup_enforces_target_purpose_and_enqueues_replica_analysis_on_pg(
+    lane_env: str, pg: psycopg.Connection
+) -> None:
+    """FIX-08：去重复用按「本次用途」把关。
+
+    - 复刻用途复用：与正常 complete 一样自动排队 AI 拆解，任务号随意图回执带回；
+    - 以「提取文案」上传的长视频（>15 秒）再拿去复刻：按复刻 4–15 秒门禁拒绝，
+      不能借去重绕过时长限制。
+    """
+    seed_project(pg, "dedup-source", "employee_1")
+    seed_project(pg, "dedup-replica", "employee_1")
+    seed_project(pg, "dedup-long-source", "employee_1")
+    seed_project(pg, "dedup-long-replica", "employee_1")
+    storage = FakeStorageAdapter(provider="fake", bucket="cw058-tests")
+    content = b"dedup-video-bytes"
+    content_sha = hashlib.sha256(content).hexdigest()
+    with pg_transaction() as raw:
+        _upload_and_complete(
+            BusinessConnection.postgres(raw),
+            storage,
+            actor_id="employee_1",
+            project_id="dedup-source",
+            content=content,
+            sha256=content_sha,
+        )
+    with pg_transaction() as raw:
+        reused = create_upload_intent(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            project_id="dedup-replica",
+            filename="reference.mp4",
+            content_type="video/mp4",
+            size_bytes=len(content),
+            sha256=content_sha,
+            purpose="replica",
+        )
+    assert reused.upload_required is False
+    assert reused.analysis_task_id is not None
+    task = pg.execute(
+        "SELECT project_id, asset_id, status FROM analysis_tasks WHERE id = %s",
+        (reused.analysis_task_id,),
+    ).fetchone()
+    assert task == ("dedup-replica", reused.asset_id, "PENDING")
+
+    long_content = b"long-script-video-bytes"
+    long_sha = hashlib.sha256(long_content).hexdigest()
+    with pg_transaction() as raw:
+        bus = BusinessConnection.postgres(raw)
+        intent = create_upload_intent(
+            bus,
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            project_id="dedup-long-source",
+            filename="reference.mp4",
+            content_type="video/mp4",
+            size_bytes=len(long_content),
+            sha256=long_sha,
+            purpose="script",
+        )
+        storage.put_object(intent.storage_key, long_content, content_type="video/mp4")
+        complete_upload(
+            bus,
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            probe=FakeVideoProbe(duration_seconds=42.0),
+            asset_id=intent.asset_id,
+        )
+    with pytest.raises(HTTPException) as exc, pg_transaction() as raw:
+        create_upload_intent(
+            BusinessConnection.postgres(raw),
+            actor=actor("employee_1", "employee"),
+            storage=storage,
+            project_id="dedup-long-replica",
+            filename="reference.mp4",
+            content_type="video/mp4",
+            size_bytes=len(long_content),
+            sha256=long_sha,
+            purpose="replica",
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == "VIDEO_DURATION_OUT_OF_RANGE"
+
+
 def test_media_completion_rolls_back_atomically_when_enqueue_fails_on_pg(
     lane_env: str,
     pg: psycopg.Connection,

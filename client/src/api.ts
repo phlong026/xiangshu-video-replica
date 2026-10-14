@@ -350,6 +350,9 @@ export type UploadIntent = {
   headers: Record<string, string>;
   expires_at: string | null;
   upload_required?: boolean;
+  /** 去重复用（无需上传）且用途为复刻时，服务端已自动排队的 AI 拆解任务。 */
+  analysis_task_id?: string | null;
+  analysis_task_status?: string | null;
 };
 
 export type MaterialItem = components["schemas"]["MaterialItem"];

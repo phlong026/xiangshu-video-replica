@@ -1028,8 +1028,11 @@ export async function uploadWorkbenchSourceVideo(
   const project = await createProject((base || file.name).slice(0, 120));
   try {
     const intent = await createVideoUploadIntent(project.id, file, purpose);
-    let analysisTaskId: string | undefined;
-    let analysisTaskStatus: string | undefined;
+    // 命中去重复用时没有 complete 这一步，自动拆解任务随意图回执带回（FIX-08）。
+    let analysisTaskId: string | undefined =
+      intent.analysis_task_id ?? undefined;
+    let analysisTaskStatus: string | undefined =
+      intent.analysis_task_status ?? undefined;
     let assetId = intent.asset_id;
     if (intent.upload_required !== false) {
       await uploadReferenceVideo(intent, file, onProgress, signal);

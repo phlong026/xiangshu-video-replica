@@ -630,6 +630,62 @@ def test_copy_purchase_is_shared_across_sub_account(detail_client, route_state) 
         ]
 
 
+def test_concurrent_sub_account_copy_claims_charge_once(detail_client, route_state) -> None:
+    """FIX-14：同一母账号下两个子账号并发首提，只能扣一次。
+
+    计费行按操作者唯一、早先的锁也按操作者加，两个子账号会各自通过「未购买」判断。
+    这里用两条真实 PG 连接复现并发：A 扣费后不提交，B 必须等 A 提交再看到「已购买」。
+    """
+    import threading
+    import time
+
+    from app.auth import CurrentUser
+    from app.viral_routes import charge_viral_copy
+
+    master_headers, master_id = account(detail_client, "copy_race_master")
+    _first_headers, first_id = account(detail_client, "copy_race_a")
+    _second_headers, second_id = account(detail_client, "copy_race_b")
+    with psycopg.connect(route_state) as raw:
+        for child in (first_id, second_id):
+            raw.execute(
+                "UPDATE users SET account_type='SUB', parent_user_id=%s WHERE id=%s",
+                (master_id, child),
+            )
+        _seed_copy_video(raw, master_id, video_id="v-copy-race")
+    del master_headers
+
+    def actor(uid: str) -> CurrentUser:
+        return CurrentUser(id=uid, username=uid, display_name=uid, role="customer")
+
+    results: dict[str, tuple[int, bool]] = {}
+    with psycopg.connect(route_state) as first_raw:
+        first = BusinessConnection.postgres(first_raw)
+        results["first"] = charge_viral_copy(
+            first, actor=actor(first_id), platform="douyin", video_id="v-copy-race"
+        )
+
+        def second_claim() -> None:
+            with psycopg.connect(route_state) as second_raw:
+                results["second"] = charge_viral_copy(
+                    BusinessConnection.postgres(second_raw),
+                    actor=actor(second_id),
+                    platform="douyin",
+                    video_id="v-copy-race",
+                )
+
+        worker = threading.Thread(target=second_claim)
+        worker.start()
+        time.sleep(0.5)
+        # A 尚未提交：B 必须被同一把钱包主人锁挡住。
+        assert worker.is_alive()
+        first_raw.commit()
+        worker.join(timeout=10)
+    assert results["first"] == (2, False)
+    assert results["second"] == (0, True)
+    with psycopg.connect(route_state) as raw:
+        assert _wallet(raw, master_id) == (48, 0)
+
+
 def test_copy_claim_rejects_unknown_video_and_platform_without_charge(
     detail_client, route_state
 ) -> None:
