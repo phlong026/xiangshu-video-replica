@@ -14,17 +14,17 @@ const QUEUE_LABELS: Array<{
   label: string;
   hint: string;
 }> = [
-  { key: "video", label: "视频任务", hint: "generation worker（H3 生成）" },
-  { key: "oral", label: "口播任务", hint: "oral worker（数字人口播）" },
+  { key: "video", label: "视频任务", hint: "视频生成后台进程" },
+  { key: "oral", label: "口播任务", hint: "数字人口播后台进程" },
   {
     key: "viralRefresh",
     label: "采集/转存",
-    hint: "viral-collection worker（搜索与素材准备）",
+    hint: "搜索与素材准备后台进程",
   },
   {
     key: "publish",
     label: "发布队列",
-    hint: "publish worker（抖音/视频号投递）",
+    hint: "抖音/视频号投递后台进程",
   },
 ];
 
@@ -67,7 +67,7 @@ export function WorkerObservationsPage({
     >
       <header>
         <p className="admin-hint">
-          三个 worker 与发布队列的实时积压。高龄任务超过阈值先查 worker 进程
+          各类后台任务队列的实时积压。高龄任务超过阈值先查对应后台进程
           与日志；隔离区任务冻结了客户积分，按失败诊断页的建议人工核对。
         </p>
         {!readOnly ? (

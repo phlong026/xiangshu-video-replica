@@ -130,7 +130,7 @@ export const FAILURE_CATEGORY_LABELS: LabelMap = {
   CUSTOMER_ASSET: "客户素材",
   CONTENT_REVIEW: "内容审核",
   PROVIDER_BUSY: "系统繁忙",
-  PROVIDER_FAULT: "服务商故障",
+  PROVIDER_FAULT: "上游服务故障",
   CONFIG: "配置问题",
   DEFECT: "系统缺陷",
   // 主动取消、检查点自愈、对账已恢复这类**流程状态**：不是故障，不需要按故障处理。

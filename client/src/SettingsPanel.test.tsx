@@ -663,7 +663,9 @@ describe("SettingsPanel", () => {
     fireEvent.click(deepseek.getByRole("button", { name: "付费探针" }));
 
     // 现状必须如实说明：供应商客户端未接入，执行不会产生费用。
-    expect(deepseek.getByText(/真实供应商客户端尚未接入/)).toBeInTheDocument();
+    expect(
+      deepseek.getByText(/真实上游服务客户端尚未接入/),
+    ).toBeInTheDocument();
     expect(deepseek.getByText(/也不会产生任何费用/)).toBeInTheDocument();
 
     // 服务端要求非空 reason：空原因不得发起调用。
@@ -685,7 +687,7 @@ describe("SettingsPanel", () => {
       ),
     );
     expect(
-      await deepseek.findByText("付费探针通过：供应商账号可完成一次计费调用"),
+      await deepseek.findByText("付费探针通过：上游服务账号可完成一次计费调用"),
     ).toBeInTheDocument();
     // 成功后确认面板收起（原因输入框随面板一起消失）。
     expect(deepseek.queryByLabelText("操作原因（必填，写入审计）")).toBeNull();
@@ -721,7 +723,7 @@ describe("SettingsPanel", () => {
 
     const alert = await deepseek.findByRole("alert");
     expect(alert).toHaveTextContent(
-      "付费探针未执行：该服务尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。",
+      "付费探针未执行：该服务尚未接入真实上游服务客户端（服务端 501 未实现），未产生任何费用。",
     );
     // 现状下不得出现「会产生真实费用」这类不成立的提示。
     expect(alert).not.toHaveTextContent(/已产生费用/);
@@ -787,7 +789,7 @@ describe("SettingsPanel", () => {
     ]) {
       const card = providerCard(container, provider);
       fireEvent.click(card.getByRole("button", { name: "付费探针" }));
-      expect(card.getByText(/真实供应商客户端尚未接入/)).toBeInTheDocument();
+      expect(card.getByText(/真实上游服务客户端尚未接入/)).toBeInTheDocument();
       expect(card.getByText(/也不会产生任何费用/)).toBeInTheDocument();
     }
   });

@@ -292,15 +292,15 @@ export function SourceActionPanorama({
               </div>
               {detail.operations.map((operation) => (
                 <section key={operation.id}>
-                  <h5>{name(operation.service)} 供应商调用</h5>
+                  <h5>{name(operation.service)} 上游服务调用</h5>
                   <table
                     className="admin-data-table"
-                    aria-label={`${name(operation.service)} 供应商调用`}
+                    aria-label={`${name(operation.service)} 上游服务调用`}
                   >
                     <thead>
                       <tr>
                         <th>业务</th>
-                        <th>服务商</th>
+                        <th>上游服务</th>
                         <th>用量</th>
                         <th>成本</th>
                         <th>凭据</th>

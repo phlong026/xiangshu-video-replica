@@ -94,7 +94,7 @@ export function FailureDiagnostics({
     <section aria-label="全类型失败诊断">
       <h3>失败诊断与待归类队列</h3>
       <details>
-        <summary>技术详情：待归类服务商错误码</summary>
+        <summary>技术详情：待归类上游服务错误码</summary>
         <button
           type="button"
           onClick={() => {

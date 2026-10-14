@@ -19,7 +19,7 @@ vi.mock("./AnalysisDiagnosticPanel", () => ({
 vi.mock("./RecordCallsPanel", () => ({ RecordCallsPanel: () => null }));
 afterEach(() => vi.clearAllMocks());
 
-it("待归类供应商错误码按需读取，不混入客户提示词", async () => {
+it("待归类上游服务错误码按需读取，不混入客户提示词", async () => {
   vi.mocked(getAdminGenerationRecords).mockResolvedValue({
     items: [],
     total: 0,

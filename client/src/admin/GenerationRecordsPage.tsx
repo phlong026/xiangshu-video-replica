@@ -251,8 +251,8 @@ export function GenerationRecordsPage({
       // 服务端按供应商真实回执裁决，两种结局对运营的含义完全不同，分开说清。
       setNotice(
         result.result === "RESUMED"
-          ? `已对账：任务 ${result.task_id} 供应商侧已受理，已回到生成队列继续处理。`
-          : `已对账：任务 ${result.task_id} 供应商侧未成功，已置为失败并走计费退回。`,
+          ? `已对账：任务 ${result.task_id} 上游服务侧已受理，已回到生成队列继续处理。`
+          : `已对账：任务 ${result.task_id} 上游服务侧未成功，已置为失败并走计费退回。`,
       );
       setPendingReconcile(null);
       await loadRecords();
@@ -505,7 +505,7 @@ export function GenerationRecordsPage({
               任务编号
               <input
                 aria-label="生成任务编号"
-                placeholder="任务编号、8 位错误编号或第三方任务号；重号用服务商:凭证"
+                placeholder="任务编号、8 位错误编号或第三方任务号；重号用上游服务:凭证"
                 value={taskRef}
                 onChange={(event) => setTaskRef(event.target.value)}
               />
@@ -870,12 +870,12 @@ export function GenerationRecordsPage({
                           ) : null}
                           <dt>结果引用</dt>
                           <dd>{item.result_reference ?? "—"}</dd>
-                          <dt>供应商任务凭证</dt>
+                          <dt>上游服务任务凭证</dt>
                           <dd>
                             {item.provider_reference ? (
                               <CopyDiagnosticReference
                                 value={item.provider_reference}
-                                label="供应商任务凭证"
+                                label="上游服务任务凭证"
                               />
                             ) : (
                               "—"
@@ -885,13 +885,13 @@ export function GenerationRecordsPage({
                           <dd>{item.error_code ?? "—"}</dd>
                           {item.provider_error_code ? (
                             <>
-                              <dt>服务商错误码</dt>
+                              <dt>上游服务错误码</dt>
                               <dd>{item.provider_error_code}</dd>
                             </>
                           ) : null}
                           {!readOnly && item.provider_message ? (
                             <>
-                              <dt>服务商原话</dt>
+                              <dt>上游服务原话</dt>
                               <dd>{item.provider_message}</dd>
                             </>
                           ) : null}
@@ -1038,7 +1038,7 @@ export function GenerationRecordsPage({
         confirmLabel="重新对账"
         description={
           pendingReconcile
-            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并退回生成冻结积分。同一任务重复对账会被拒绝。`
+            ? `将向图像上游服务核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并退回生成冻结积分。同一任务重复对账会被拒绝。`
             : undefined
         }
         error={reconcileError}
@@ -1060,7 +1060,7 @@ export function GenerationRecordsPage({
           pendingRetry
             ? pendingRetry.retry_path === "ARCHIVE_ONLY"
               ? `恢复任务 ${pendingRetry.record_id} 的已有成片归档，不重新生成或扣费；服务端再次核对条件。`
-              : `将按原规则重新入队任务 ${pendingRetry.record_id} 并预扣积分；服务端再次核对未触达服务商条件，不满足时拒绝。`
+              : `将按原规则重新入队任务 ${pendingRetry.record_id} 并预扣积分；服务端再次核对未触达上游服务条件，不满足时拒绝。`
             : undefined
         }
         error={retryError}

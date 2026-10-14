@@ -748,7 +748,7 @@ export function BillingRatesManager({
           {platformServices.length > 0 && (
             <div className="admin-table-scroll admin-table-card billing-rates-table">
               <p>
-                平台科目（不向客户收费）：质量检查等科目只核算服务商成本，不向客户扣分；
+                平台科目（不向客户收费）：质量检查等科目只核算上游服务成本，不向客户扣分；
                 云存储与支付服务按零费用核算。
               </p>
               <table

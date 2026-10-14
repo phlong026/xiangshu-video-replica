@@ -16,6 +16,7 @@ import {
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { RuleNote } from "./ui/RuleNote";
 import { StatusBadge } from "./ui/StatusBadge";
 import { ViralDemandCustomers } from "./ViralDemandCustomers";
 import { ViralOperationCostSummary } from "./ViralOperationCostSummary";
@@ -374,20 +375,22 @@ export function ViralDiscoveriesPage({
         {error && <PageBanner tone="error">{error}</PageBanner>}
         {notice && <PageBanner tone="notice">{notice}</PageBanner>}
         {aggregate && (
-          <p className="admin-hint">
-            统计区间：{aggregate.from ?? date} 至 {aggregate.to ?? date}
-            （上海时间）。
-            {aggregate.countingRule ?? "历史命中记录不能还原真实搜索次数。"}
-            {aggregate.measurementStartedAt &&
-              `真实搜索从 ${displayTime(aggregate.measurementStartedAt)} 开始记录；更早的数据未知。`}
-          </p>
+          <RuleNote>
+            <p className="admin-hint">
+              统计区间：{aggregate.from ?? date} 至 {aggregate.to ?? date}
+              （上海时间）。
+              {aggregate.countingRule ?? "历史命中记录不能还原真实搜索次数。"}
+              {aggregate.measurementStartedAt &&
+                `真实搜索从 ${displayTime(aggregate.measurementStartedAt)} 开始记录；更早的数据未知。`}
+            </p>
+            {aggregate.inventoryRule ? (
+              <p className="admin-hint">库存口径：{aggregate.inventoryRule}</p>
+            ) : null}
+            {aggregate.priorityRule ? (
+              <p className="admin-hint">备货排序：{aggregate.priorityRule}</p>
+            ) : null}
+          </RuleNote>
         )}
-        {aggregate?.inventoryRule ? (
-          <p className="admin-hint">库存口径：{aggregate.inventoryRule}</p>
-        ) : null}
-        {aggregate?.priorityRule ? (
-          <p className="admin-hint">备货排序：{aggregate.priorityRule}</p>
-        ) : null}
         <form
           className="admin-toolbar admin-viral-toolbar"
           onSubmit={(event) => {
@@ -801,7 +804,7 @@ export function ViralDiscoveriesPage({
         title={pending?.action === "archive" ? "准备单条视频" : "更新首页展示"}
         description={
           pending?.action === "archive"
-            ? "后台将获取此视频并准备到已配置的云存储，可能产生供应商调用费用。不会重新搜索或修改首页展示。请填写操作原因。"
+            ? "后台将获取此视频并准备到已配置的云存储，可能产生上游服务调用费用。不会重新搜索或修改首页展示。请填写操作原因。"
             : pending?.action === "unfeature"
               ? "取消后首页不再展示，视频仍保留在爆款列表。请填写操作原因。"
               : "已归档视频会自动补齐封面后展示到首页。请填写操作原因。"

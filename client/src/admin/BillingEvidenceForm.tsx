@@ -60,7 +60,7 @@ export function BillingEvidenceForm({
     >
       <p>
         {attemptId
-          ? "按供应商账单补录本次调用总成本，原始调用记录保留。"
+          ? "按上游服务账单补录本次调用总成本，原始调用记录保留。"
           : "仅可为已成功交付且缺少时长的任务补录实际时长；按受理时售价结算，最多扣已生成冻结的积分。"}
       </p>
       <label>
@@ -79,7 +79,7 @@ export function BillingEvidenceForm({
         <input
           value={reference}
           onChange={(e) => setReference(e.target.value)}
-          placeholder="供应商账单号或媒体检测记录"
+          placeholder="上游服务账单号或媒体检测记录"
           maxLength={500}
           required
         />
