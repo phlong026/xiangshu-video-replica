@@ -6334,7 +6334,7 @@ describe("V1.4 内容与运营页面", () => {
     const timeInput = screen.getByLabelText("定时发布时间");
     fireEvent.change(timeInput, { target: { value: "2020-01-01T10:00" } });
     fireEvent.click(screen.getByRole("button", { name: "定时发布" }));
-    await screen.findByText("定时发布至少需要提前 2 分钟。");
+    await screen.findByText("定时发布至少需要提前 3 分钟。");
     expect(createPublishRecord).toHaveBeenCalledTimes(1);
     const future = new Date(Date.now() + 3 * 60 * 60 * 1000);
     future.setSeconds(0, 0);

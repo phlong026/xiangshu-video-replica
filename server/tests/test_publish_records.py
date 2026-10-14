@@ -412,6 +412,40 @@ def test_cancel_retry_sync_delete_follow_the_state_machine(
     assert client.get(f"{BASE}/{queued}").status_code == 404
 
 
+def test_retry_checks_account_and_keeps_future_schedule(
+    client: TestClient, pg: psycopg.Connection
+) -> None:
+    """FIX-17：账号失效时重试直接提示重新扫码；原定时间未到的定时发布重试后仍按原时间发。"""
+    account = seed_account(pg)
+    future = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="failed")
+    past = seed_record(pg, account_id=account, video_id=seed_asset(pg), status="failed")
+    pg.execute(
+        "UPDATE publish_records SET scheduled_at = clock_timestamp() + interval '2 hours' "
+        "WHERE id = %s",
+        (future,),
+    )
+    pg.execute(
+        "UPDATE publish_records SET scheduled_at = clock_timestamp() - interval '2 hours' "
+        "WHERE id = %s",
+        (past,),
+    )
+    pg.commit()
+    kept = client.post(f"{BASE}/{future}/retry")
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["record"]["scheduled_at"] is not None
+    immediate = client.post(f"{BASE}/{past}/retry")
+    assert immediate.status_code == 200, immediate.text
+    assert immediate.json()["record"]["scheduled_at"] is None
+
+    invalid_account = seed_account(pg, status="invalid")
+    stale = seed_record(pg, account_id=invalid_account, video_id=seed_asset(pg), status="failed")
+    rejected = client.post(f"{BASE}/{stale}/retry")
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "PUBLISH_ACCOUNT_INVALID"
+    status = pg.execute("SELECT status FROM publish_records WHERE id = %s", (stale,)).fetchone()
+    assert status[0] == "failed"
+
+
 def test_summary_counts_and_stat_totals(client: TestClient, pg: psycopg.Connection) -> None:
     account = seed_account(pg)
     seed_record(pg, account_id=account, video_id=seed_asset(pg))

@@ -449,15 +449,29 @@ def cancel_record(
 def retry_record(
     conn: BusinessConnection, *, actor: CurrentUser, record_id: str
 ) -> PublishRecordResponse:
+    record = _require_owned_record(conn, actor_id=actor.id, record_id=record_id)
+    if str(record["status"]) == "failed" and record["account_id"] is not None:
+        # 账号登录态失效导致的失败，重新入队只会立刻再失败一次：先让用户重新扫码。
+        account = conn.execute(
+            "SELECT status FROM publish_browser_accounts WHERE id = %s AND user_id = %s",
+            (record["account_id"], actor.id),
+        ).fetchone()
+        if account is None or str(account["status"]) != "connected":
+            raise _error(
+                409, "PUBLISH_ACCOUNT_INVALID", "发布账号登录态已失效，请重新扫码后再重试。"
+            )
     return _transition(
         conn,
         actor=actor,
         record_id=record_id,
         action="publish.record.retry",
         from_statuses=("failed",),
+        # 原定时间还没到的定时发布，重试后仍按原时间发；已过时的才改为立即发布。
         assignments=(
             "status = 'queued', attempt_count = 0, error_message = NULL, "
-            "scheduled_at = NULL, lease_owner = NULL, lease_expires_at = NULL"
+            "scheduled_at = CASE WHEN scheduled_at > clock_timestamp() "
+            "THEN scheduled_at ELSE NULL END, "
+            "lease_owner = NULL, lease_expires_at = NULL"
         ),
         params=(),
         conflict_message="只有失败的发布可以重试。",
