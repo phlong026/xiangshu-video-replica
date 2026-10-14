@@ -9,6 +9,7 @@ import {
 import { AnalyticsPage } from "./admin/AnalyticsPage";
 import { AnnouncementsPage } from "./admin/AnnouncementsPage";
 import { AuditCenterPage } from "./admin/AuditCenterPage";
+import { ChangePasswordDialog } from "./admin/ChangePasswordDialog";
 import { CustomerLifecyclePage } from "./admin/CustomerLifecyclePage";
 import { CustomersManagementPage } from "./admin/CustomersManagementPage";
 import { ExternalCallsPage } from "./admin/ExternalCallsPage";
@@ -374,6 +375,7 @@ export function AdminApp() {
   } | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const [isCompactNavigation, setIsCompactNavigation] = useState(() =>
     typeof window !== "undefined"
       ? window.innerWidth < compactNavigationBreakpoint
@@ -892,6 +894,9 @@ export function AdminApp() {
         </div>
         <div className="admin-session">
           <time dateTime={shanghaiDate()}>{shanghaiDate()}</time>
+          <button type="button" onClick={() => setChangePasswordOpen(true)}>
+            修改密码
+          </button>
           <button type="button" onClick={() => void signOut()}>
             退出登录
           </button>
@@ -1017,6 +1022,14 @@ export function AdminApp() {
         <div className="admin-workspace">
           {error ? <PageBanner tone="error">{error}</PageBanner> : null}
           {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
+          <ChangePasswordDialog
+            open={changePasswordOpen}
+            onClose={() => setChangePasswordOpen(false)}
+            onChanged={() => {
+              setError("");
+              setNotice("密码已修改；你在其它设备上的管理登录已退出。");
+            }}
+          />
 
           <header className="admin-page-heading">
             <span>{activeGroupLabel}</span>

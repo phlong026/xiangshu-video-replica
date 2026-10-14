@@ -1092,6 +1092,77 @@ def test_password_session_cannot_reset_password_without_recovery_exchange(
     assert reset.json()["detail"]["code"] == "ADMIN_PASSWORD_RECOVERY_REQUIRED"
 
 
+def test_logged_in_admin_changes_own_password_and_other_sessions_end(
+    client: TestClient,
+    clean_sessions: str,
+) -> None:
+    """T17：已登录管理员凭原密码自助改密；其它会话吊销、当前会话保留、留审计。"""
+    original = "Initial Admin Passphrase 2026!"
+    changed = "Rotated Admin Passphrase 2026!"
+    exchange = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": _issue("admin_u")},
+    )
+    assert (
+        client.put(
+            "/api/control/admin/password",
+            headers={ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]},
+            json={"password": original},
+        ).status_code
+        == 204
+    )
+    other = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": original},
+    )
+    assert other.status_code == 201
+    other_session = other.json()["session_id"]
+    current = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": original},
+    )
+    csrf = {ADMIN_CSRF_HEADER: current.json()["csrf_token"]}
+
+    wrong = client.post(
+        "/api/control/admin/password/change",
+        headers=csrf,
+        json={"current_password": "not the password at all", "new_password": changed},
+    )
+    assert wrong.status_code == 422
+    assert wrong.json()["detail"]["code"] == "ADMIN_PASSWORD_CURRENT_INVALID"
+    same = client.post(
+        "/api/control/admin/password/change",
+        headers=csrf,
+        json={"current_password": original, "new_password": original},
+    )
+    assert same.json()["detail"]["code"] == "ADMIN_PASSWORD_UNCHANGED"
+
+    ok = client.post(
+        "/api/control/admin/password/change",
+        headers=csrf,
+        json={"current_password": original, "new_password": changed},
+    )
+    assert ok.status_code == 204, ok.text
+    # 当前会话保留，可继续操作。
+    assert client.get("/api/control/admin/session").status_code == 200
+    with psycopg.connect(clean_sessions) as conn:
+        revoked = conn.execute(
+            "SELECT revoked_at IS NOT NULL FROM admin_sessions WHERE id = %s",
+            (other_session,),
+        ).fetchone()
+        audited = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action = 'admin_password.change' "
+            "AND actor_user_id = 'admin_u'"
+        ).fetchone()
+    assert revoked == (True,)
+    assert audited == (1,)
+    relogin = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": changed},
+    )
+    assert relogin.status_code == 201
+
+
 def test_exchange_rejects_expired_credential(client: TestClient) -> None:
     credential = issue_exchange_credential(
         "admin_u", ttl_seconds=60, now=datetime.now(UTC) - timedelta(seconds=120)

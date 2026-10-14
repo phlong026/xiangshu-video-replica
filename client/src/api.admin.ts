@@ -591,6 +591,25 @@ export async function recoverAdminPassword(password: string): Promise<void> {
   clearAdminCsrfToken();
 }
 
+/** 已登录管理员自助改密（整改 T17）：必须提供原密码；其它会话随之失效。 */
+export async function changeOwnAdminPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl("/api/control/admin/password/change", {
+    method: "POST",
+    headers: { [CSRF_HEADER]: csrf },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "修改密码失败");
+  }
+}
+
 export async function deleteAdminSession(): Promise<void> {
   const csrf = requireCsrfToken();
   const response = await requestControl("/api/control/admin/session", {
@@ -946,6 +965,8 @@ const CODE_MESSAGES: Record<string, string> = {
   ADMIN_ROLE_REQUIRED: "仅管理员或审计员可登录管理端",
   ADMIN_LOGIN_INVALID: "管理员账号或密码错误",
   ADMIN_PASSWORD_INVALID: "密码需为 12 至 128 个字符",
+  ADMIN_PASSWORD_CURRENT_INVALID: "原密码不正确",
+  ADMIN_PASSWORD_UNCHANGED: "新密码不能与原密码相同",
   ADMIN_PASSWORD_RECOVERY_REQUIRED: "请先使用一次性恢复凭据验证身份",
   ADMIN_PASSWORD_RECOVERY_ONLY: "请先设置密码，再使用账号和密码登录后台",
   ADMIN_SESSION_INVALID: "会话已失效，请重新登录",
@@ -1802,6 +1823,26 @@ export interface SupportTicket {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** P0–P3，P0 最紧急；未结案工单按此排序。 */
+  priority?: string;
+  /** 关联对象：`task:<任务号>` 或 `order:<订单号>`，空串表示无。 */
+  related_ref?: string;
+}
+
+export interface TicketHandler {
+  user_id: string;
+  username: string;
+  display_name: string;
+}
+
+/** 可指派的工单负责人：启用中的管理员。 */
+export async function listTicketHandlers(): Promise<{
+  items: TicketHandler[];
+}> {
+  return adminRead(
+    "/api/control/support-tickets/handlers",
+    "读取可指派负责人失败",
+  );
 }
 
 export async function listSupportTickets(
@@ -1835,6 +1876,8 @@ export async function createSupportTicket(input: {
   targetUserId: string;
   category: string;
   summary: string;
+  priority?: string;
+  relatedRef?: string;
   reason: string;
   idempotencyKey?: string;
 }): Promise<{ id: string }> {
@@ -1844,6 +1887,8 @@ export async function createSupportTicket(input: {
       target_user_id: input.targetUserId,
       category: input.category,
       summary: input.summary,
+      priority: input.priority ?? "P2",
+      related_ref: input.relatedRef ?? "",
     },
     input.reason,
     "登记工单失败",
@@ -1853,14 +1898,21 @@ export async function createSupportTicket(input: {
 
 export async function updateSupportTicket(input: {
   id: string;
-  status: string;
-  resolution: string;
+  status?: string;
+  resolution?: string;
+  priority?: string;
+  handlerUserId?: string;
   reason: string;
   idempotencyKey?: string;
 }): Promise<{ id: string }> {
   return adminWrite(
     `/api/control/support-tickets/${encodeURIComponent(input.id)}`,
-    { status: input.status, resolution: input.resolution },
+    {
+      status: input.status ?? "",
+      resolution: input.resolution ?? "",
+      priority: input.priority ?? "",
+      handler_user_id: input.handlerUserId ?? "",
+    },
     input.reason,
     "更新工单失败",
     input.idempotencyKey,
