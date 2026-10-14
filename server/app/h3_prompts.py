@@ -457,7 +457,9 @@ def prompt_issues(
     ):
         add("H3_STRUCTURE_INVALID", "提示词段落顺序不正确。")
     if "```" in text or "[Shot 1]" not in text:
-        add("H3_STRUCTURE_INVALID", "请使用完整 H3 正文和镜头标记，不带代码围栏。")
+        # 客户可见文案不得出现供应商/模型代号：客户端防泄漏表会按词边界拦 "H3"，
+        # 一旦命中，这条唯一的自救指引就会被替换成“服务暂时不可用”。
+        add("H3_STRUCTURE_INVALID", "请使用完整提示词正文和 [Shot 1] 镜头标记，不要带代码围栏。")
     if mode in ("I2VA", "FL2VA", "L2VA"):
         first_line = text.splitlines()[0] if text else ""
         if "Picture 1" not in first_line or (mode == "FL2VA" and "Picture 2" not in first_line):
