@@ -30,7 +30,7 @@ from app.admin_write_contract import (
 )
 from app.auth import Database, Role
 from app.billing_catalog import SERVICES
-from app.control_auth import ControlSuperUser, ControlUser, ControlWriter
+from app.control_auth import ControlExporter, ControlSuperUser, ControlUser, ControlWriter
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
@@ -1680,9 +1680,10 @@ def list_generation_records(
     page = records[offset : offset + limit]
     _attach_failure_explanations(conn, page)
     if _actor.role == "auditor":
+        # 整改 T18（决策 D1）：审计员可见成本与毛利——经营看板、成本核对对审计员
+        # 本就展示金额，这里单独脱敏只会让三处口径互相矛盾；故 provider_cost 不再
+        # 置空。错误原文、上游说明、媒体预览仍属客户内容，继续对审计员脱敏。
         for record in page:
-            record.provider_cost = None
-            record.provider_cost_status = "UNAVAILABLE"
             record.error_message = None
             record.provider_message = None
             record.upstream_reason = None
@@ -3115,11 +3116,9 @@ def update_control_billing_settings(
 @router.get("/recharge-orders.csv")
 def export_recharge_orders_csv(
     conn: Database,
-    # B3 (2026-09-22 review): bulk export is a data-egress action, not a view —
-    # it requires write-level authority (auditor 403 AUDITOR_READ_ONLY), the
-    # same policy customers.csv already applied. Auditors keep their read-only
-    # views of these rows on the pages; only the one-shot full dump is removed.
-    actor: ControlWriter,
+    # B3 (2026-09-22) 曾要求导出写级权限；整改 T19（决策 D2）改为审计员也可
+    # 导出，前提是每次导出都经 _guard_ledger_export 留审计并过限流。
+    actor: ControlExporter,
     status: OrderStatus | None = None,
     user_id: str | None = None,
     username: str | None = None,
@@ -3203,9 +3202,8 @@ def export_recharge_orders_csv(
 @router.get("/wallet-transactions.csv")
 def export_wallet_transactions_csv(
     conn: Database,
-    # B3 (2026-09-22 review): same write-level gate as recharge-orders.csv —
-    # one GET pulls the whole wallet ledger out of the platform in bulk.
-    actor: ControlWriter,
+    # 与 recharge-orders.csv 同一导出门（T19）：审计员可导出，必留审计并限流。
+    actor: ControlExporter,
     user_id: str | None = None,
     type: TransactionType | None = None,
     username: str | None = None,

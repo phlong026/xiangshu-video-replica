@@ -340,12 +340,15 @@ def test_direct_result_refuses_private_host_before_connection(api, seeded, monke
     assert result.status_code == 502 and called == []
 
 
-def test_auditor_cannot_read_direct_result_thumbnail_or_cost(
+def test_auditor_cannot_read_media_or_error_text_but_sees_cost(
     api_auditor, seeded, monkeypatch
 ) -> None:
+    """T18（决策 D1）：成本对审计员可见；媒体与错误原文属客户内容，继续脱敏。"""
     from app.admin_generation_routes import UrlFetcher
 
     _seed_direct_result(seeded)
+    with psycopg.connect(seeded, autocommit=True) as conn:
+        conn.execute("UPDATE generation_tasks SET actual_cost = 1.25 WHERE id = 't-direct'")
     monkeypatch.setattr(UrlFetcher, "fetch", lambda *a: pytest.fail("auditor must not fetch media"))
     assert api_auditor.get(_content_url("VIDEO", "t-direct")).status_code == 403
     assert (
@@ -353,7 +356,9 @@ def test_auditor_cannot_read_direct_result_thumbnail_or_cost(
         == 403
     )
     item = api_auditor.get("/api/control/generation-records?record_type=VIDEO").json()["items"][0]
-    assert item["has_preview"] is False and item["provider_cost"] is None
+    assert item["has_preview"] is False
+    # 成本不再对审计员置空（此前为 None / UNAVAILABLE）。
+    assert item["provider_cost"] == 1.25 and item["provider_cost_status"] == "ESTIMATED"
     assert item["provider_message"] is None and item["error_message"] is None
     assert _audit_count(seeded, "t-direct") == 0
 
