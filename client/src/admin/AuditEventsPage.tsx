@@ -469,18 +469,16 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
             重置
           </button>
           {/* 方案 P1：审计可导出，与列表同筛选口径（服务端 control.export 审计）。
-              整表导出是数据出境动作，服务端只放行写级角色；只读角色（auditor）
-              不渲染入口，免得点了才收到 403。 */}
-          {readOnly ? null : (
-            <button
-              className="secondary-button"
-              disabled={loading}
-              type="button"
-              onClick={() => void exportCsv()}
-            >
-              导出 CSV
-            </button>
-          )}
+              T19（决策 D2）起审计员也可导出——审计员本就是审计日志的主要使用者，
+              导出动作同样会被记入审计。 */}
+          <button
+            className="secondary-button"
+            disabled={loading}
+            type="button"
+            onClick={() => void exportCsv()}
+          >
+            导出 CSV
+          </button>
         </div>
       </form>
 

@@ -19,7 +19,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.admin_auth_routes import AdminWriter
+from app.admin_auth_routes import AdminExporter
+from app.admin_export_guard import guard_admin_export
 from app.csv_export import spreadsheet_safe_cell
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
@@ -143,7 +144,7 @@ def generate_csv_content(conn: BusinessConnection, request: ExportRequest) -> by
 
 
 @router.post("/reports/export")
-def export_statistics(request: ExportRequest, actor: AdminWriter) -> Response:
+def export_statistics(request: ExportRequest, actor: AdminExporter) -> Response:
     """导出计费统计报表（CSV，gzip 压缩）。
 
     只读查询走 REPEATABLE READ 快照，导出行集与账务时点一致。
@@ -151,6 +152,12 @@ def export_statistics(request: ExportRequest, actor: AdminWriter) -> Response:
     valid, message = validate_request(request)
     if not valid:
         raise HTTPException(status_code=400, detail=message)
+    # 导出对审计员开放（T19）：每次导出留审计并过限流。
+    guard_admin_export(
+        actor,
+        kind="billing_statistics",
+        filters={"start": request.start_date, "end": request.end_date, "format": request.format},
+    )
 
     with pg_transaction(isolation="REPEATABLE READ") as raw:
         conn = BusinessConnection.postgres(raw)
@@ -182,12 +189,17 @@ class SummaryExportRequest(BaseModel):
 
 
 @router.post("/reports/summary/export")
-def export_summary(request: SummaryExportRequest, actor: AdminWriter) -> Response:
+def export_summary(request: SummaryExportRequest, actor: AdminExporter) -> Response:
     """直接复用看板事实与日界；未知金额留中文标识，避免导出变成零。"""
     from app.admin_dashboard_routes import business_overview, funds_summary
 
     if request.end_date < request.start_date or (request.end_date - request.start_date).days > 366:
         raise HTTPException(422, detail="报表区间应为有效日期且最多 366 天")
+    guard_admin_export(
+        actor,
+        kind=f"summary_{request.kind}",
+        filters={"start": request.start_date, "end": request.end_date},
+    )
     report = (
         business_overview(request.start_date, request.end_date, actor)
         if request.kind == "business"

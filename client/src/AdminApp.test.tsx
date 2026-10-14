@@ -775,7 +775,7 @@ describe("AdminApp", () => {
     });
   });
 
-  it("does not offer auditors the funds actions that the server would reject", async () => {
+  it("审计员看不到真正的资金写操作，但可以导出（T19）", async () => {
     installFetch({ role: "auditor" });
     render(<AdminApp />);
     await signInWithPassword();
@@ -788,16 +788,17 @@ describe("AdminApp", () => {
       ),
     ).toBeInTheDocument();
 
-    // 查单补单与整表导出都是写级动作：只读角色看不到入口，而不是点了才 403。
+    // 查单补单是写级动作：只读角色看不到入口，而不是点了才 403。
     expect(screen.queryByRole("button", { name: "查单补单" })).toBeNull();
+    // 整表导出对审计员开放（决策 D2）：服务端每次导出留审计并限流。
     expect(
-      screen.queryByRole("button", { name: "导出充值订单 CSV" }),
-    ).toBeNull();
+      screen.getByRole("button", { name: "导出充值订单 CSV" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "积分流水" }));
     await screen.findByRole("table", { name: "账务流水列表" });
     expect(
-      screen.queryByRole("button", { name: "导出账务流水 CSV" }),
-    ).toBeNull();
+      screen.getByRole("button", { name: "导出账务流水 CSV" }),
+    ).toBeInTheDocument();
   });
 
   it("saves ZPay and price settings while deployment URLs stay server-owned", async () => {

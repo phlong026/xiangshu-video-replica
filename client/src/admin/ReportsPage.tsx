@@ -23,7 +23,7 @@ function parseMonth(month: string): { start: string; end: string } | null {
   return { start, end };
 }
 
-export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
+export function ReportsPage({ readOnly: _readOnly = false }: { readOnly?: boolean }) {
   const [month, setMonth] = useState(() =>
     new Intl.DateTimeFormat("en-CA", {
       timeZone: "Asia/Shanghai",
@@ -85,7 +85,7 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
   ];
 
   async function download(item: (typeof items)[number]) {
-    if (readOnly || busy || !range) return;
+    if (busy || !range) return;
     setBusy(item.key);
     setError("");
     try {
@@ -137,7 +137,7 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
             <dd>
               <button
                 type="button"
-                disabled={readOnly || busy !== "" || monthInvalid}
+                disabled={busy !== "" || monthInvalid}
                 onClick={() => void download(item)}
               >
                 {busy === item.key ? "正在导出…" : "导出 CSV"}

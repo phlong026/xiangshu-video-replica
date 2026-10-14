@@ -196,17 +196,14 @@ export function OrdersPage({
         >
           {autoRefresh ? "自动刷新：开（30 秒）" : "自动刷新：关"}
         </button>
-        {/* 整表导出是写级动作（服务端 ControlWriter）：auditor 不渲染入口，
-            而不是渲染出来点了才 403。 */}
-        {readOnly ? null : (
-          <button
-            type="button"
-            disabled={exporting || loading || Boolean(orderNo)}
-            onClick={() => void exportRechargeOrders()}
-          >
-            导出充值订单 CSV
-          </button>
-        )}
+        {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
+        <button
+          type="button"
+          disabled={exporting || loading || Boolean(orderNo)}
+          onClick={() => void exportRechargeOrders()}
+        >
+          导出充值订单 CSV
+        </button>
       </div>
 
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}

@@ -1014,7 +1014,7 @@ def test_summary_export_matches_selected_range_and_preserves_unknown(
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_summary_export_rejects_auditor_csrf_and_invalid_range(
+def test_summary_export_allows_auditor_but_requires_csrf_and_valid_range(
     client: TestClient, admin_headers: dict[str, str]
 ) -> None:
     body = {"kind": "business", "start_date": "2026-10-01", "end_date": "2026-10-01"}
@@ -1035,16 +1035,25 @@ def test_summary_export_rejects_auditor_csrf_and_invalid_range(
         ).status_code
         == 422
     )
+    # 整改 T19（决策 D2）：审计员可导出汇总报表；CSRF 仍是写类请求的前提，
+    # 导出本身必须留审计（见下方断言）。
     session = password_admin_session(client, "auditor_u")
     assert session.status_code == 201
     assert (
-        client.post(
-            "/api/control/reports/summary/export",
-            headers={ADMIN_CSRF_HEADER: session.json()["csrf_token"]},
-            json=body,
-        ).status_code
-        == 403
+        client.post("/api/control/reports/summary/export", json=body).status_code == 403
+    )  # 缺 CSRF 头
+    exported = client.post(
+        "/api/control/reports/summary/export",
+        headers={ADMIN_CSRF_HEADER: session.json()["csrf_token"]},
+        json=body,
     )
+    assert exported.status_code == 200, exported.text
+    with psycopg.connect(_w15_dsn()) as conn:
+        audited = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action = 'control.export' "
+            "AND actor_user_id = 'auditor_u' AND entity_id = 'summary_business'"
+        ).fetchone()
+    assert audited == (1,)
 
 
 def test_fake_payment_confirmation_persists_actual_method_not_preselected_channel(

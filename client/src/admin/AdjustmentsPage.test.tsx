@@ -69,7 +69,7 @@ describe("AdjustmentsPage (ADM-02 / T33)", () => {
     expect(screen.getByText("第 1 / 1 页（共 2 条）")).toBeInTheDocument();
   });
 
-  it("hides the whole-table CSV export from read-only roles", async () => {
+  it("whole-table CSV export is available to read-only roles too (T19)", async () => {
     // 不带 userId 是资金中心里的全量视图，走 listAllAdminAdjustments。
     vi.mocked(adminApi.listAllAdminAdjustments).mockResolvedValue({
       items: [],
@@ -88,7 +88,9 @@ describe("AdjustmentsPage (ADM-02 / T33)", () => {
       expect(adminApi.listAllAdminAdjustments).toHaveBeenCalledTimes(2),
     );
     expect(screen.getByRole("button", { name: "查询" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "导出 CSV" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "导出 CSV" }),
+    ).toBeInTheDocument();
   });
 
   it("shows loading state while fetching adjustments", () => {
