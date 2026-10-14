@@ -1088,6 +1088,9 @@ export interface CustomerListOptions {
   direction?: "asc" | "desc";
   attention?: "low_balance" | "recent_failure" | "inactive" | "";
   lowBalanceThreshold?: number;
+  /** 按标签 / 负责人筛选（整改 T30）；负责人传 "none" 表示未分配。 */
+  tag?: string;
+  ownerUserId?: string;
 }
 
 /**
@@ -1120,6 +1123,8 @@ export async function listCustomers(
   if (options.attention) params.set("attention", options.attention);
   if (options.lowBalanceThreshold !== undefined)
     params.set("low_balance_threshold", String(options.lowBalanceThreshold));
+  if (options.tag) params.set("tag", options.tag);
+  if (options.ownerUserId) params.set("owner_user_id", options.ownerUserId);
 
   const response = await requestControl(
     `/api/control/customers?${params.toString()}`,
@@ -1309,6 +1314,49 @@ export async function listCustomerOwnerCandidates(): Promise<{
   return adminRead<{ items: CustomerOwnerCandidate[] }>(
     "/api/control/customers/owner-candidates",
     "读取负责人候选失败",
+  );
+}
+
+/** 已用过的标签及使用客户数：列表筛选与批量打标签的候选。 */
+export async function listCustomerTags(): Promise<{
+  items: Array<{ tag: string; count: number }>;
+}> {
+  return adminRead("/api/control/customers/tags", "读取标签失败");
+}
+
+export interface BatchAnnotationResult {
+  results: Array<{ user_id: string; ok: boolean; message: string }>;
+  succeeded: number;
+  failed: number;
+}
+
+/**
+ * 批量标注（整改 T30）：对多名客户增量加 / 去标签、改负责人，逐户返回结果。
+ * setOwner=false 表示不动负责人；setOwner=true 且 ownerUserId=null 表示清空。
+ */
+export function batchAnnotateCustomers(
+  input: {
+    userIds: string[];
+    addTags: string[];
+    removeTags: string[];
+    setOwner: boolean;
+    ownerUserId: string | null;
+  },
+  reason: string,
+  idempotencyKey?: string,
+): Promise<BatchAnnotationResult> {
+  return adminWrite<BatchAnnotationResult>(
+    "/api/control/customers/batch-annotation",
+    {
+      user_ids: input.userIds,
+      add_tags: input.addTags,
+      remove_tags: input.removeTags,
+      set_owner: input.setOwner,
+      owner_user_id: input.ownerUserId,
+    },
+    reason,
+    "批量标注失败",
+    idempotencyKey,
   );
 }
 

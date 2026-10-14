@@ -35,7 +35,8 @@ vi.mock("../api.admin", () => ({
   fetchCustomerUnitPrice: vi.fn(),
   updateCustomerUnitPrice: vi.fn(),
   fetchCustomerAnnotation: vi.fn(),
-  listCustomerOwnerCandidates: vi.fn(),
+  listCustomerOwnerCandidates: vi.fn().mockResolvedValue({ items: [] }),
+  listCustomerTags: vi.fn().mockResolvedValue({ items: [] }),
   updateCustomerAnnotation: vi.fn(),
   createCustomerAdjustment: vi.fn(),
   listAdminRechargeOrders: vi.fn(),
@@ -478,7 +479,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       offset: 0,
     });
 
-    render(<CustomersPage />);
+    render(<CustomersPage readOnly />);
 
     await waitFor(() => {
       expect(screen.getByText("customer-1")).toBeInTheDocument();
@@ -539,7 +540,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       offset: 0,
     });
 
-    render(<CustomersPage />);
+    render(<CustomersPage readOnly />);
 
     const row = await screen.findByRole("row", { name: /customer-1/ });
     const cells = within(row)
@@ -999,6 +1000,19 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       Array.from({ length: columns }, (_, index) => index + 1),
     );
     expect(rules.reduce((sum, rule) => sum + Number(rule[2]), 0)).toBe(100);
+
+    // 只读态没有勾选列，列宽由 .customers-table--readonly 的另一组规则负责。
+    const readonlyRules = [
+      ...(desktop as string).matchAll(
+        /\.customers-table--readonly th:nth-child\((\d+)\)\s*\{\s*width:\s*(\d+)%/g,
+      ),
+    ];
+    expect(readonlyRules.map((rule) => Number(rule[1]))).toEqual(
+      Array.from({ length: columns - 1 }, (_, index) => index + 1),
+    );
+    expect(readonlyRules.reduce((sum, rule) => sum + Number(rule[2]), 0)).toBe(
+      100,
+    );
   });
 
   it("shows loading state while fetching customers", () => {

@@ -1815,11 +1815,15 @@ export async function downloadCustomersCsv(
     balanceMax?: number;
     attention?: string;
     lowBalanceThreshold?: number;
+    tag?: string;
+    ownerUserId?: string;
     sort?: string;
     direction?: string;
   } = {},
 ): Promise<void> {
   const query = new URLSearchParams();
+  if (options.tag) query.set("tag", options.tag);
+  if (options.ownerUserId) query.set("owner_user_id", options.ownerUserId);
   if (options.status) query.set("status", options.status);
   if (options.username) query.set("username", options.username);
   if (options.createdFrom) query.set("created_from", options.createdFrom);

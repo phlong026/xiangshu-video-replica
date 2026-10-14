@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from fastapi import HTTPException
@@ -92,3 +93,36 @@ def append_attention_filter(
         clauses.append("COALESCE(recent.failed_7d,0)>0")
     elif attention == "inactive":
         clauses.append(INACTIVE_SQL)
+
+
+# 「未分配」负责人的哨兵值：筛选「谁都没在跟」的客户是批量分配负责人的入口。
+OWNER_FILTER_NONE = "none"
+
+
+def append_annotation_filters(
+    clauses: list[str], params: list[object], tag: str, owner_user_id: str
+) -> None:
+    """按标签 / 负责人筛选客户（整改 T30）。
+
+    用 EXISTS 子查询而不是 JOIN：列表、总数、待办汇总三条查询共用同一组 clauses，
+    其中后两条并不 JOIN 标注表，子查询在三处都成立。
+    """
+    tag = tag.strip()
+    if tag:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM customer_annotations ca "
+            "WHERE ca.user_id = aca.user_id AND ca.tags_json @> %s::jsonb)"
+        )
+        params.append(json.dumps([tag], ensure_ascii=False))
+    owner = owner_user_id.strip()
+    if owner == OWNER_FILTER_NONE:
+        clauses.append(
+            "NOT EXISTS (SELECT 1 FROM customer_annotations ca "
+            "WHERE ca.user_id = aca.user_id AND ca.owner_user_id IS NOT NULL)"
+        )
+    elif owner:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM customer_annotations ca "
+            "WHERE ca.user_id = aca.user_id AND ca.owner_user_id = %s)"
+        )
+        params.append(owner)

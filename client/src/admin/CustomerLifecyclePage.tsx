@@ -3,12 +3,11 @@ import {
   type CustomerLifecycleItem,
   type CustomerLifecycleResponse,
   type CustomerRetentionResponse,
-  createCustomerAdjustment,
   listCustomerLifecycle,
   readCustomerRetention,
 } from "../api.admin";
+import { BatchGrantDialog } from "./BatchGrantDialog";
 import { CustomerLink } from "./CustomerLink";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
@@ -49,10 +48,6 @@ export function CustomerLifecyclePage({
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [grantOpen, setGrantOpen] = useState(false);
-  const [grantCredits, setGrantCredits] = useState("100");
-  const [grantRef, setGrantRef] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [progress, setProgress] = useState("");
   const [retention, setRetention] = useState<CustomerRetentionResponse | null>(
     null,
   );
@@ -106,49 +101,6 @@ export function CustomerLifecyclePage({
       else next.add(user_id);
       return next;
     });
-  }
-
-  async function confirmGrant(reason: string) {
-    const credits = Number.parseInt(grantCredits, 10);
-    if (!Number.isFinite(credits) || credits <= 0) {
-      setError("赠送积分必须是正整数。");
-      return;
-    }
-    const targets =
-      data?.items.filter((item) => selected.has(item.user_id)) ?? [];
-    setSaving(true);
-    setError("");
-    setProgress("");
-    const done: string[] = [];
-    try {
-      for (const item of targets) {
-        setProgress(
-          `正在发放（${done.length + 1}/${targets.length}）：${item.username}`,
-        );
-        await createCustomerAdjustment(
-          item.user_id,
-          {
-            sourceDocumentType: "FREE_GRANT",
-            sourceDocumentRef: grantRef.trim() || `batch-${Date.now()}`,
-            credits,
-          },
-          reason,
-        );
-        done.push(item.username);
-      }
-      setNotice(`已向 ${done.length} 名客户各赠送 ${credits} 积分。`);
-      setGrantOpen(false);
-      setGrantRef("");
-      await load();
-    } catch (cause) {
-      setError(
-        `发放中断：${done.length}/${targets.length} 完成（${done.join("、") || "无"}）。` +
-          (cause instanceof Error ? cause.message : ""),
-      );
-    } finally {
-      setSaving(false);
-      setProgress("");
-    }
   }
 
   return (
@@ -337,35 +289,18 @@ export function CustomerLifecyclePage({
           <p className="admin-hint">{retention.rule}</p>
         </section>
       ) : null}
-      <ConfirmDialog
+      <BatchGrantDialog
         open={grantOpen}
-        title="批量赠送积分"
-        confirmLabel="确认发放"
-        description={`将向 ${selected.size} 名客户逐户赠送积分并逐户留痕；发放过程不可中途撤销。`}
-        busy={saving}
-        error={progress || error}
-        level="reason"
-        onClose={() => !saving && setGrantOpen(false)}
-        onConfirm={(reason) => void confirmGrant(reason)}
-      >
-        <label>
-          每户赠送积分（正整数）
-          <input
-            type="number"
-            min={1}
-            value={grantCredits}
-            onChange={(event) => setGrantCredits(event.target.value)}
-          />
-        </label>
-        <label>
-          发放单号（可追溯）
-          <input
-            value={grantRef}
-            onChange={(event) => setGrantRef(event.target.value)}
-            placeholder="如：十月激活活动"
-          />
-        </label>
-      </ConfirmDialog>
+        targets={(data?.items ?? [])
+          .filter((item) => selected.has(item.user_id))
+          .map((item) => ({ user_id: item.user_id, username: item.username }))}
+        onClose={() => setGrantOpen(false)}
+        onFinished={(ids) => {
+          setNotice(`已向 ${ids.length} 名客户完成积分赠送。`);
+          setSelected(new Set());
+          void load();
+        }}
+      />
     </section>
   );
 }
