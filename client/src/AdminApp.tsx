@@ -1039,7 +1039,7 @@ export function AdminApp() {
             <>
               <OverviewPage
                 readOnly={readOnly}
-                onNavigate={(destination) => {
+                onNavigate={(destination, target = {}) => {
                   const routes: Record<string, AdminTab> = {
                     customerAdjustments: "customersMgmt",
                     customerPackage: "customersMgmt",
@@ -1086,6 +1086,7 @@ export function AdminApp() {
                   navigateAdmin(
                     routes[destination] ?? (destination as AdminTab),
                     destination,
+                    target,
                   );
                 }}
               />

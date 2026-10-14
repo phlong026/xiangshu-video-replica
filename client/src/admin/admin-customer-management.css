@@ -185,3 +185,26 @@
 .admin-announcement-preview--promo {
   border-left-color: var(--admin-gold, #c6a45f);
 }
+
+/* 客户选择器（CustomerPicker）：联想结果是一列按钮，选中后显示为一行摘要。 */
+.admin-customer-picker {
+  display: grid;
+  gap: 6px;
+}
+.admin-customer-picker--chosen {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+.admin-customer-picker__options {
+  display: grid;
+  gap: 4px;
+  max-height: 240px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.admin-customer-picker__options button {
+  width: 100%;
+  text-align: left;
+}
