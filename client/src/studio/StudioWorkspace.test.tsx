@@ -3498,6 +3498,41 @@ describe("视频生成（C2 独立创作）", () => {
     expect(api.createIndependentVideoTask).toHaveBeenCalledOnce();
   });
 
+  it("提交期间改了草稿，任务已受理的结果也不静默丢弃（FIX-11）", async () => {
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    let accept: (value: { id: string }) => void = () => {};
+    api.createIndependentVideoTask.mockReturnValueOnce(
+      new Promise((resolve) => {
+        accept = resolve as (value: { id: string }) => void;
+      }),
+    );
+    render(<StudioWorkspace currentUser={reviewUser} />);
+    await openVideoPage();
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "乡墅庭院" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 视频生成",
+    });
+    await screen.findByText(/9\.60 元/);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
+    );
+    // 请求在途时用户改了提示词：草稿指纹变化，isCurrent() 为假。
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "改过的提示词" },
+    });
+    accept({ id: "batch-accepted" });
+    // 任务已受理 → 仍然给出提示，用户知道去任务中心看。
+    expect(
+      await screen.findByText(/视频生成任务已提交，可在任务中心查看进度/),
+    ).toBeInTheDocument();
+  });
+
   it("非法草稿时长钳位到 15 秒提交，不再静默回落 8 秒（preflight P1-4）", async () => {
     // 上线前检查 P1-4：云草稿恢复链不校验 duration，旧客户端写入的超界值
     // 到达独立创作页后，提交/报价必须按 4–15 钳位（20 → 15），与复刻路径
