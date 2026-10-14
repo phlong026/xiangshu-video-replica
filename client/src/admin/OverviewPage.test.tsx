@@ -92,8 +92,9 @@ describe("OverviewPage", () => {
     expect(screen.getByText("近 7 日生成与成本")).toBeInTheDocument();
     expect(screen.getByText("成本（元）")).toBeInTheDocument();
     expect(screen.getByText("成功生成数（条）")).toBeInTheDocument();
-    expect(screen.getAllByRole("img", { name: /图标/ })).toHaveLength(7);
-    expect(screen.getByText("资金账务核对")).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: /图标/ })).toHaveLength(6);
+    // 对账异常只在待办里出现一次，不再重复成 KPI 卡。
+    expect(screen.queryByRole("region", { name: "对账异常" })).toBeNull();
     expect(screen.queryByText("点击下钻资金流水")).toBeNull();
 
     // 待办计数
@@ -179,6 +180,41 @@ describe("OverviewPage", () => {
     render(<OverviewPage />);
 
     expect(await screen.findByText(/network down/)).toBeInTheDocument();
+  });
+
+  it("首次读取失败给出重试，重试成功后展示数据与更新时间", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => summaryPayload,
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<OverviewPage />);
+    expect(await screen.findByText(/network down/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(await screen.findByText("328")).toBeInTheDocument();
+    expect(screen.getByText(/数据更新于/)).toBeInTheDocument();
+    expect(screen.queryByText(/network down/)).toBeNull();
+  });
+
+  it("刷新失败时保留上次数据，只局部提示", async () => {
+    const fetchMock = installFetch();
+    render(<OverviewPage />);
+    expect(await screen.findByText("328")).toBeInTheDocument();
+    fetchMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("gateway timeout")),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    expect(
+      await screen.findByText(/刷新失败，下方仍是上次成功读取的数据/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("328")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "自动刷新：开（60 秒）" }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
   it("keeps unsettled and legacy costs unknown in cards and chart", async () => {
