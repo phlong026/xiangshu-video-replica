@@ -2094,6 +2094,7 @@ def test_direct_generation_archive_is_owned_idempotent_and_does_not_rebill(
         "other-resolution",
         "other-ratio",
         "missing-ratio",
+        "expired",
     ],
 )
 def test_archive_http_rechecks_before_commit_and_preserves_billing(
@@ -2164,6 +2165,8 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
             downloads.append(url)
             if outcome == "download":
                 raise H3ProviderFailed("temporary download failure")
+            if outcome == "expired":
+                raise H3ProviderFailed("H3 provider returned HTTP 404", http_status=404)
             if outcome == "changed":
                 pg.execute(
                     "UPDATE generation_tasks SET provider_result_url='https://cdn.example/new.mp4' "
@@ -2259,9 +2262,14 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
                 "claim-stolen": 409,
                 "claim-stolen-at-put": 409,
                 "renew-commit-failed": 401,
+                # 直链失效：如实告知文件已失效，而不是 503「请重试」（FIX-02）。
+                "expired": 410,
             }.get(outcome, 503)
         )
         assert result.status_code == expected, result.text
+        if outcome == "expired":
+            assert result.json()["detail"]["code"] == "RESULT_URL_EXPIRED"
+            assert "已失效" in result.json()["detail"]["message"]
         if outcome in successful:
             replay = client.post("/api/generation-tasks/archive-http-task/archive")
             assert replay.status_code == 200
@@ -2317,6 +2325,103 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
             ).fetchone() == ("https://cdn.example/result.mp4",)
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    ("verify", "probe", "expected"),
+    [
+        (False, True, 200),
+        (True, False, 200),
+        (True, None, 200),
+        (True, True, 410),
+    ],
+)
+def test_preview_url_verify_reports_expired_direct_result(
+    lane_env: str,
+    pg: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    verify: bool,
+    probe: bool | None,
+    expected: int,
+) -> None:
+    """FIX-02：播放失败后带 verify 复查，直链已失效回 410 RESULT_URL_EXPIRED；
+    不带 verify 时不探测，探测结论不明（None）时照常返回地址，不误报失效。"""
+    from app.auth import get_current_user
+    from app.main import app
+
+    seed_project(pg, "preview-expiry-project", "employee_1")
+    pg.execute(
+        "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+        "request_hash,request_snapshot_json,status) VALUES "
+        "('preview-expiry-batch','preview-expiry-project','employee_1','preview-expiry-key',"
+        "'h','{}','SUCCEEDED')"
+    )
+    pg.execute(
+        "INSERT INTO generation_tasks(id,batch_id,provider,model,status,archive_status,"
+        "provider_result_url) VALUES ('preview-expiry-task','preview-expiry-batch','metaso',"
+        "'MiniMax-H3','SUCCEEDED','DIRECT','https://cdn.example/result.mp4')"
+    )
+    pg.commit()
+    probes: list[str] = []
+
+    def fake_probe(url: str) -> bool | None:
+        probes.append(url)
+        return probe
+
+    monkeypatch.setattr("app.generation_routes.provider_result_url_expired", fake_probe)
+    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get(
+            "/api/generation-tasks/preview-expiry-task/preview-url",
+            params={"verify": "true"} if verify else {},
+        )
+        assert response.status_code == expected, response.text
+        assert probes == (["https://cdn.example/result.mp4"] if verify else [])
+        if expected == 410:
+            assert response.json()["detail"]["code"] == "RESULT_URL_EXPIRED"
+        else:
+            assert response.json()["url"] == "https://cdn.example/result.mp4"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_provider_result_url_probe_maps_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """探测只把 403/404/410 判为失效；405 与网络错误判为「无法判断」。"""
+    from urllib.error import HTTPError, URLError
+
+    from app import generation
+
+    monkeypatch.setattr(generation, "_require_public_https_host", lambda _host: None)
+    outcomes: list[BaseException | None] = []
+
+    def fake_urlopen(*_args, **_kwargs):
+        error = outcomes.pop(0)
+        if error is not None:
+            raise error
+        return b"", {}, 200
+
+    monkeypatch.setattr(generation, "recorded_urlopen", fake_urlopen)
+    url = "https://cdn.example/result.mp4"
+
+    def http_error(code: int) -> HTTPError:
+        return HTTPError(url, code, "x", hdrs=None, fp=None)  # type: ignore[arg-type]
+
+    cases: list[tuple[BaseException | None, bool | None]] = [
+        (None, False),
+        (http_error(404), True),
+        (http_error(403), True),
+        (http_error(410), True),
+        (http_error(405), None),
+        (http_error(500), None),
+        (URLError("down"), None),
+        (TimeoutError(), None),
+    ]
+    for error, expected in cases:
+        outcomes.append(error)
+        assert generation.provider_result_url_expired(url) is expected
+    assert generation.provider_result_url_expired("http://cdn.example/a.mp4") is None
+    assert generation.provider_result_url_expired("fake://h3-results/a.mp4") is None
 
 
 def test_archive_retry_while_first_request_runs_deduplicates_expensive_work(

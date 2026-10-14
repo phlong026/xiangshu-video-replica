@@ -438,10 +438,62 @@ class H3ProviderFailed(RuntimeError):
         self.http_status = http_status
         # 服务商给出的失败原话（已脱敏、截断）；落进任务的错误说明供管理端排查。
         self.provider_reason = provider_reason
+        # 上游 HTTP 状态码：成片直链下载据此区分「链接已失效」与临时故障。
+        self.http_status = http_status
 
 
 class H3ProviderSettingsUnavailable(RuntimeError):
     pass
+
+
+# 成片「直链交付」：供应商结果地址目前长期有效，但不能排除日后改为限时签名。
+# 下载 / 探测时上游回这些状态码，即视为链接已失效——此时重试必然失败，必须如实告诉
+# 用户「文件已失效」，而不是让他反复点「请重试」。
+RESULT_URL_EXPIRED_STATUSES = frozenset({403, 404, 410})
+RESULT_URL_EXPIRED_CODE = "RESULT_URL_EXPIRED"
+RESULT_URL_EXPIRED_MESSAGE = (
+    "成片文件已失效：生成服务提供的下载链接已过期，无法再预览、下载或保存。"
+    "如需帮助，请联系客服并提供任务编号。"
+)
+RESULT_URL_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def result_url_expired_error() -> HTTPException:
+    return HTTPException(
+        status_code=410,
+        detail={"code": RESULT_URL_EXPIRED_CODE, "message": RESULT_URL_EXPIRED_MESSAGE},
+    )
+
+
+def provider_result_url_expired(url: str) -> bool | None:
+    """探测供应商成片直链是否已失效：True 已失效，False 可用，None 无法判断。
+
+    只发 HEAD、不下载正文；网络错误、超时等临时故障一律返回 None，不能误报失效。
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    try:
+        _require_public_https_host(parsed.hostname)
+    except H3ProviderFailed:
+        return None
+    try:
+        # 与其他供应商调用一样留调用记录，管理端可查到探测结果。
+        recorded_urlopen(
+            Request(url, method="HEAD"),
+            timeout=RESULT_URL_PROBE_TIMEOUT_SECONDS,
+            provider="metaso",
+            endpoint=endpoint_from_url(url),
+            read_limit=0,
+        )
+        return False
+    except HTTPError as exc:
+        if exc.code in RESULT_URL_EXPIRED_STATUSES:
+            return True
+        # 部分对象存储不支持 HEAD（405/501）：无法判断，交给真实下载决定。
+        return None
+    except (TimeoutError, URLError, OSError):
+        return None
 
 
 class ProviderRequestContractError(ValueError):

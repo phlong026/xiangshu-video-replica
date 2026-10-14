@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { formatDateTime as formatTimestamp } from "./admin/ui/vocabulary";
 import {
   customerVisibleErrorMessage,
+  DIRECT_RESULT_RETENTION_HINT,
   type GenerationBatch,
   type GenerationTask,
   type GenerationTaskSummary,
@@ -816,6 +817,14 @@ function StageSummary({
           </div>
         ) : null}
       </dl>
+      {outcome === "completed" &&
+      task.archive_status === "DIRECT" &&
+      !task.result_asset_id ? (
+        // 直链交付的成片可能有有效期：拿到结果时就提醒落地保存（FIX-02）。
+        <p className="video-stage-retention" role="note">
+          {DIRECT_RESULT_RETENTION_HINT}
+        </p>
+      ) : null}
     </aside>
   );
 }

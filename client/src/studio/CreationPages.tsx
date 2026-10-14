@@ -13,6 +13,7 @@ import {
   cancelAnalysisTask,
   capturePromptSession,
   customerVisibleErrorMessage,
+  DIRECT_RESULT_RETENTION_HINT,
   type GenerationRatio,
   type GenerationVersionState,
   getAnalysisTask,
@@ -3761,6 +3762,12 @@ function VideoProgressView({ task }: { task: StudioTask }) {
       {partialNote ? (
         <p className={`creation-progress-credits is-${partialNote.tone}`}>
           {partialNote.text}
+        </p>
+      ) : null}
+      {completed ? (
+        // 拿到成片的第一时间提醒：直链可能有有效期，失效后无法找回（FIX-02）。
+        <p className="creation-progress-copy" role="note">
+          {DIRECT_RESULT_RETENTION_HINT}
         </p>
       ) : null}
     </div>
