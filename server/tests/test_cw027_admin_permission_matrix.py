@@ -255,6 +255,14 @@ ADMIN_WRITE_AUTHORITIES = {
     # 矩阵按「携带管理级权限」核销；role+is_super_admin 的具体判定在
     # test_admin_team_routes.py 有专测。
     "get_super_admin_writer",
+    # 整改 T41：按权限点把关的写依赖。每个写点一个具名函数（不是工厂闭包），
+    # 核销表因此能按名核销；缺点即 403 PERMISSION_DENIED。
+    "get_funds_writer",
+    "get_settings_writer",
+    "get_customer_writer",
+    "get_content_writer",
+    "get_control_funds_writer",
+    "get_control_settings_writer",
 }
 ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {
     "get_admin_actor",

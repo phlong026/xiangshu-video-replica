@@ -69,6 +69,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from app.admin_auth_routes import (
     AdminExporter,
     AdminReader,
+    AdminWriter,
     CustomerWriter,
     FundsWriter,
 )

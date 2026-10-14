@@ -192,9 +192,10 @@
       "20261013T1010_studio_draft_tombstones": "20261013T1000_billing_reconciliation_items",
       "20261013T1020_publish_submission_safety": "20261013T1010_studio_draft_tombstones",
       "20261014T1000_support_ticket_priority": "20261013T1020_publish_submission_safety",
-      "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority"
+      "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority",
+      "20261014T1200_admin_role_templates": "20261014T1100_customer_ops_params"
     },
-    "revision_count": 173
+    "revision_count": 174
   },
   "manifest_schema_version": 1,
   "naming_policy": {

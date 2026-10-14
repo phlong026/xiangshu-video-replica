@@ -23,7 +23,7 @@ import os
 import secrets
 import string
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -892,28 +892,51 @@ def get_admin_exporter(actor: Annotated[AdminActor, Depends(get_admin_actor)]) -
     return actor
 
 
-def _require_write_point(point: str) -> Callable[..., AdminActor]:
-    """按权限点把关的写依赖：先过审计员只读，再看模板有没有这个点（整改 T41）。"""
+def _require_point(actor: AdminActor, point: str) -> AdminActor:
+    """按权限点把关的共享校验：先过审计员只读，再看模板有没有这个点（整改 T41）。"""
+    if not actor.can(point):
+        raise _http(
+            403,
+            "PERMISSION_DENIED",
+            f"当前角色没有「{POINT_LABELS[point]}」权限，请联系超级管理员调整角色。",
+        )
+    return actor
 
-    def dependency(actor: Annotated[AdminActor, Depends(get_admin_writer)]) -> AdminActor:
-        if not actor.can(point):
-            raise _http(
-                403,
-                "PERMISSION_DENIED",
-                f"当前角色没有「{POINT_LABELS[point]}」权限，请联系超级管理员调整角色。",
-            )
-        return actor
 
-    return dependency
+# 每个写点一个具名依赖，而不是工厂返回的闭包：FastAPI 内省只保留函数名，工厂闭包
+# 一律叫 "dependency"，静态核销表（test_cw027_admin_permission_matrix）就无法按名
+# 核销，「新增未分类管理路由即失败」的守卫随之失效。
+def get_funds_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, FUNDS_WRITE)
+
+
+def get_settings_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, SETTINGS_WRITE)
+
+
+def get_customer_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, CUSTOMER_WRITE)
+
+
+def get_content_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    return _require_point(actor, CONTENT_WRITE)
 
 
 AdminReader = Annotated[AdminActor, Depends(get_admin_actor)]
 AdminExporter = Annotated[AdminActor, Depends(get_admin_exporter)]
 AdminWriter = Annotated[AdminActor, Depends(get_admin_writer)]
-FundsWriter = Annotated[AdminActor, Depends(_require_write_point(FUNDS_WRITE))]
-SettingsWriter = Annotated[AdminActor, Depends(_require_write_point(SETTINGS_WRITE))]
-CustomerWriter = Annotated[AdminActor, Depends(_require_write_point(CUSTOMER_WRITE))]
-ContentWriter = Annotated[AdminActor, Depends(_require_write_point(CONTENT_WRITE))]
+FundsWriter = Annotated[AdminActor, Depends(get_funds_writer)]
+SettingsWriter = Annotated[AdminActor, Depends(get_settings_writer)]
+CustomerWriter = Annotated[AdminActor, Depends(get_customer_writer)]
+ContentWriter = Annotated[AdminActor, Depends(get_content_writer)]
 SuperAdminReader = Annotated[AdminActor, Depends(get_super_admin_actor)]
 SuperAdminWriter = Annotated[AdminActor, Depends(get_super_admin_writer)]
 
