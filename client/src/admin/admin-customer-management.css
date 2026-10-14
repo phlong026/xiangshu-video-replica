@@ -378,3 +378,21 @@
   align-items: flex-start;
   text-align: left;
 }
+
+/* 订单页对账提示：一行内联，数字按钮去掉卡片外观。 */
+.admin-recon-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  margin: 0 0 8px;
+}
+
+.admin-recon-line button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}

@@ -191,7 +191,10 @@ export function OrdersPage({
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
       {reconciliation && !userId && !orderNo ? (
-        <div className="admin-metrics">
+        // 对账提示收成一行（T40）：四个数字原先占满一排大卡片，把筛选和订单表挤到下面；
+        // 有异常的数字标红，点击仍跳到对应清单。
+        <nav className="admin-recon-line" aria-label="对账提示">
+          <span>对账提示：</span>
           <button
             type="button"
             onClick={() => applyFilters({ ...emptyFilters, status: "PENDING" })}
@@ -228,10 +231,12 @@ export function OrdersPage({
               }}
             >
               <small>{label} </small>
-              <strong>{value}</strong>
+              <strong className={value > 0 ? "is-danger-text" : undefined}>
+                {value}
+              </strong>
             </button>
           ))}
-        </div>
+        </nav>
       ) : null}
 
       <FilterBar

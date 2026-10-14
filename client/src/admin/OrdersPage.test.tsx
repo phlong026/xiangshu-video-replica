@@ -176,6 +176,16 @@ describe("OrdersPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("对账提示收成一行：异常数字标红，仍可点击进入清单（T40）", async () => {
+    installFetch();
+    render(<OrdersPage />);
+
+    const line = await screen.findByLabelText("对账提示");
+    expect(line.tagName).toBe("NAV");
+    expect(line).toHaveTextContent("待支付订单 1");
+    expect(line.querySelectorAll("button")).toHaveLength(4);
+  });
+
   it("filters by order status on submit", async () => {
     const fetchMock = installFetch();
     render(<OrdersPage />);
