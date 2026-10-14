@@ -319,3 +319,17 @@
   align-items: center;
   gap: 8px 12px;
 }
+
+/* 带意图跳转到的设置区块：短暂高亮，提示「就是这里」。 */
+.admin-settings-highlight {
+  border-radius: 8px;
+  outline: 2px solid var(--admin-accent, #2563eb);
+  outline-offset: 4px;
+  animation: admin-settings-highlight-fade 3s ease-out forwards;
+}
+
+@keyframes admin-settings-highlight-fade {
+  to {
+    outline-color: transparent;
+  }
+}
