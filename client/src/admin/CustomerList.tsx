@@ -14,6 +14,7 @@ import {
 } from "../api.admin";
 import { CustomerLink } from "./CustomerLink";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { CustomerStatusBadge } from "./ui/StatusBadge";
@@ -197,8 +198,7 @@ export function CustomerList({
     };
   }, [loadCustomers]);
 
-  const handleFilterSubmit = (e: FormEvent) => {
-    e.preventDefault();
+  const handleFilterSubmit = () => {
     setOffset(0);
     setExpandedUserId(null);
     setLinkedCustomerId("");
@@ -210,6 +210,31 @@ export function CustomerList({
       balanceMin,
       balanceMax,
       threshold,
+    });
+  };
+
+  // 重置（T22/T23）：清空全部草稿与已提交筛选，一并取消「需要处理」卡片的选中，
+  // 回到未筛选的客户列表。
+  const handleFilterReset = () => {
+    setUsernameDraft("");
+    setStatusFilter("all");
+    setCreatedFrom("");
+    setCreatedTo("");
+    setBalanceMin("");
+    setBalanceMax("");
+    setThreshold("");
+    setAttention("");
+    setOffset(0);
+    setExpandedUserId(null);
+    setLinkedCustomerId("");
+    setFilters({
+      username: "",
+      status: "all",
+      createdFrom: "",
+      createdTo: "",
+      balanceMin: "",
+      balanceMax: "",
+      threshold: "",
     });
   };
 
@@ -298,9 +323,16 @@ export function CustomerList({
         </PageBanner>
       ) : null}
 
-      <form
-        className="admin-toolbar customer-list-filters"
+      <FilterBar
+        ariaLabel="客户筛选"
+        className="customer-list-filters"
+        onReset={handleFilterReset}
         onSubmit={handleFilterSubmit}
+        actions={
+          <button type="button" onClick={exportList}>
+            导出列表 CSV
+          </button>
+        }
       >
         <label className="admin-toolbar__field">
           {/* 关键字同时匹配用户名与公司名称（服务端 u.username OR
@@ -380,15 +412,7 @@ export function CustomerList({
             <option value="revoked">已撤销</option>
           </select>
         </label>
-        <div className="customer-list-filters__actions">
-          <button className="admin-toolbar__secondary" type="submit">
-            筛选
-          </button>
-          <button type="button" onClick={exportList}>
-            导出列表 CSV
-          </button>
-        </div>
-      </form>
+      </FilterBar>
 
       <section aria-label="需要处理" className="customer-attention-cards">
         {(

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { adminRead } from "../api.admin";
 import { ALERT_LABELS } from "./AlertRuleEditor";
+import { PageBanner } from "./ui/PageBanner";
 
 type Delivery = {
   id: string;
@@ -57,7 +58,7 @@ export function AlertDeliveryStatus() {
       <button type="button" onClick={() => setReload((x) => x + 1)}>
         刷新通知状态
       </button>
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {report?.configuration?.map((c) => (
         <p key={c.key}>
           {ALERT_LABELS[c.key] ?? "告警"}：

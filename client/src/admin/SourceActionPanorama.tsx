@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { adminRead } from "../api.admin";
 import { billingStates, billingUnit } from "./billingTypes";
+import { PageBanner } from "./ui/PageBanner";
 import { formatFen, formatRelativeTime } from "./ui/vocabulary";
 
 type Action = {
@@ -148,7 +149,7 @@ export function SourceActionPanorama({
       >
         刷新操作
       </button>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {!list && !error && <p role="status">正在读取操作…</p>}
       {list && (
         <>

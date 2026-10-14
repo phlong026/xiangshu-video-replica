@@ -359,7 +359,6 @@ export function ViralDiscoveriesPage({
       >
         <header className="admin-viral-heading">
           <div>
-            <h2>客户需求洞察</h2>
             <p className="admin-hint">
               客户在前台搜索爆款时用过的关键词与命中的视频会记录在这里；按词下钻后可直接准备、展示到首页。
             </p>

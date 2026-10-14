@@ -70,8 +70,6 @@ export function ViralOverviewPage({
       aria-label="内容概览"
     >
       <header>
-        <span className="admin-viral-eyebrow">内容运营</span>
-        <h2>内容概览</h2>
         <p className="admin-hint">
           先看当前内容与待办，再进入视频库挑选内容、安排首页和采集。
         </p>

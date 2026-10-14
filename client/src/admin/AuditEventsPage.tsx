@@ -19,6 +19,7 @@ import {
   BILLING_SERVICE_NAMES,
 } from "./auditVocabulary";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
@@ -310,8 +311,7 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
     };
   }, [loadLog]);
 
-  function handleFilter(event: FormEvent) {
-    event.preventDefault();
+  function handleFilter() {
     // offset 归零与筛选词提交合入同一批次，effect 只会跑一次。
     setOffset(0);
     setFilters({
@@ -365,9 +365,25 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
     <section aria-label="审计事件" className="admin-panel">
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
 
-      <form
-        className="admin-form admin-filter-grid audit-filter-grid"
+      <FilterBar
+        ariaLabel="审计筛选"
+        busy={loading}
+        className="audit-filter-grid"
+        onReset={handleReset}
         onSubmit={handleFilter}
+        actions={
+          /* 方案 P1：审计可导出，与列表同筛选口径（服务端 control.export 审计）。
+              T19（决策 D2）起审计员也可导出——审计员本就是审计日志的主要使用者，
+              导出动作同样会被记入审计。 */
+          <button
+            className="secondary-button"
+            disabled={loading}
+            type="button"
+            onClick={() => void exportCsv()}
+          >
+            导出 CSV
+          </button>
+        }
       >
         <label>
           范围
@@ -456,31 +472,7 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
             onChange={(event) => setToDraft(event.target.value)}
           />
         </label>
-        <div className="audit-filter-actions">
-          <button disabled={loading} type="submit">
-            {loading ? "加载中…" : "筛选"}
-          </button>
-          <button
-            className="secondary-button"
-            disabled={loading}
-            type="button"
-            onClick={handleReset}
-          >
-            重置
-          </button>
-          {/* 方案 P1：审计可导出，与列表同筛选口径（服务端 control.export 审计）。
-              T19（决策 D2）起审计员也可导出——审计员本就是审计日志的主要使用者，
-              导出动作同样会被记入审计。 */}
-          <button
-            className="secondary-button"
-            disabled={loading}
-            type="button"
-            onClick={() => void exportCsv()}
-          >
-            导出 CSV
-          </button>
-        </div>
-      </form>
+      </FilterBar>
 
       {items.length === 0 && !loading ? (
         <PageBanner tone="notice">暂无审计事件。</PageBanner>

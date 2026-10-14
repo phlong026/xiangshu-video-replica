@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { adminRead } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 import { formatFen } from "./ui/vocabulary";
 
 type OverviewMetrics = {
@@ -401,7 +402,7 @@ export function BusinessDashboard({
           </>
         )}
       </form>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {busy && <p role="status">正在计算…</p>}
       {metrics && prev && (
         <>

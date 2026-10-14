@@ -5636,12 +5636,6 @@ button.activation-generator__submit {
   :is(span, dt, dd, label, small) {
   font-size: var(--font-caption);
 }
-.admin-shell--control span.admin-viral-eyebrow {
-  display: block;
-  margin-bottom: 7px;
-  color: var(--admin-gold);
-  letter-spacing: 0.18em;
-}
 .admin-viral-headacts {
   display: flex;
   flex-wrap: wrap;

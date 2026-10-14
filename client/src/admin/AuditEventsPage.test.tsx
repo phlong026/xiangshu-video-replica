@@ -264,7 +264,7 @@ describe("AuditEventsPage", () => {
     });
     expect(fetchMock.mock.calls.length).toBe(requestsAfterLoad);
 
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     await waitFor(() => {
       expect(
@@ -315,7 +315,7 @@ describe("AuditEventsPage", () => {
     fireEvent.change(screen.getByLabelText("审计范围"), {
       target: { value: "customer" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     await waitFor(() => {
       expect(
@@ -338,7 +338,7 @@ describe("AuditEventsPage", () => {
     fireEvent.change(screen.getByLabelText("事件类型"), {
       target: { value: "operation_rate.update" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     await waitFor(() =>
       expect(
@@ -479,7 +479,7 @@ describe("AuditEventsPage", () => {
     fireEvent.change(screen.getByLabelText("操作人用户名"), {
       target: { value: "admin_u" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([url]) => String(url).includes("admin_u")),

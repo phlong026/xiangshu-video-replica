@@ -337,7 +337,6 @@ export function CustomerLifecyclePage({
   return (
     <section className="admin-panel admin-lifecycle-page" aria-label="客户运营">
       <header>
-        <h2>客户运营</h2>
         <p className="admin-hint">
           生命周期分层与健康分定位需要激活的客户；勾选后可批量赠送积分
           （逐户调账、逐户留痕，失败会中断并列出已成功名单）。

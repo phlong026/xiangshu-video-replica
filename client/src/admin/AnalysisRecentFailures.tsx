@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { getAdminGenerationRecords } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime } from "./ui/vocabulary";
 
 /** 近 7 天失败拆解清单（方案 P1 失败诊断改造）：进入页签先看到默认清单，
@@ -55,7 +56,7 @@ export function AnalysisRecentFailures({
         默认清单按失败时间倒序；需要定点排查时点行上的「诊断」，或在下方输入
         任务编号 / 问题编号。
       </p>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {loading && <p role="status">正在加载…</p>}
       {!loading && !error && items.length === 0 ? (
         <p>近 7 天没有失败的拆解任务。</p>

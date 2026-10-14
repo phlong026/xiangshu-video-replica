@@ -16,6 +16,7 @@ import { RecordCallsPanel } from "./RecordCallsPanel";
 import { RecordThumbnail } from "./RecordThumbnail";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -95,13 +96,12 @@ export function GenerationRecordsPage({
   const [projectName, setProjectName] = useState("");
   // 意图带来的单状态（如总览「失败任务」的 FAILED）归一到所属组：
   // 下拉只表达 5 组，单值会让 select 显示成空选项。
-  const [status, setStatus] = useState(() =>
-    initialStatus
-      ? (GENERATION_STATUS_FILTERS.find(({ value }) =>
-          value.split(",").includes(initialStatus),
-        )?.value ?? initialStatus)
-      : initialStatus,
-  );
+  const initialStatusGroup = initialStatus
+    ? (GENERATION_STATUS_FILTERS.find(({ value }) =>
+        value.split(",").includes(initialStatus),
+      )?.value ?? initialStatus)
+    : initialStatus;
+  const [status, setStatus] = useState(initialStatusGroup);
   const [recordType, setRecordType] = useState(initialRecordType);
   const [failurePhase, setFailurePhase] = useState("");
   const [taskRef, setTaskRef] = useState(initialTaskRef);
@@ -446,10 +446,30 @@ export function GenerationRecordsPage({
             记录视频、口播、图片和 AI
             评分调用。上游未返回精确成本时会明确标注，不以零成本代替。
           </p>
-          <form
-            className="admin-toolbar"
-            onSubmit={(event) => {
-              event.preventDefault();
+          <FilterBar
+            ariaLabel="生成记录筛选"
+            onReset={() => {
+              setUsername(initialUsername);
+              setProjectName("");
+              setStatus(initialStatusGroup);
+              setRecordType(initialRecordType);
+              setFailurePhase("");
+              setTaskRef(initialTaskRef);
+              setCreatedFrom("");
+              setCreatedTo("");
+              setOffset(0);
+              setFilters({
+                username: initialUsername,
+                projectName: "",
+                status: initialStatusGroup,
+                recordType: initialRecordType,
+                failurePhase: "",
+                taskRef: initialTaskRef,
+                createdFrom: "",
+                createdTo: "",
+              });
+            }}
+            onSubmit={() => {
               setOffset(0);
               setFilters({
                 username,
@@ -567,8 +587,7 @@ export function GenerationRecordsPage({
                 onChange={(event) => setCreatedTo(event.target.value)}
               />
             </label>
-            <button type="submit">查询</button>
-          </form>
+          </FilterBar>
 
           {!loading && summary === null ? (
             <PageBanner tone="notice">
@@ -1116,9 +1135,7 @@ export function GenerationRecordsPage({
               )}`}
             </p>
             {preview.error ? (
-              <p className="settings-error" role="alert">
-                {preview.error}
-              </p>
+              <PageBanner tone="error">{preview.error}</PageBanner>
             ) : preview.url ? (
               VIDEO_PREVIEW_TYPES.has(preview.record.record_type) ? (
                 <video

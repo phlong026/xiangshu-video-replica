@@ -8,17 +8,17 @@ import {
 } from "react";
 import { AnalyticsPage } from "./admin/AnalyticsPage";
 import { AnnouncementsPage } from "./admin/AnnouncementsPage";
-import { AuditCenterPage } from "./admin/AuditCenterPage";
+import { AuditEventsPage } from "./admin/AuditEventsPage";
 import { ChangePasswordDialog } from "./admin/ChangePasswordDialog";
 import { CustomerLifecyclePage } from "./admin/CustomerLifecyclePage";
-import { CustomersManagementPage } from "./admin/CustomersManagementPage";
+import { CustomerList } from "./admin/CustomerList";
+import { DeviceManagement } from "./admin/DeviceManagement";
 import { ExternalCallsPage } from "./admin/ExternalCallsPage";
 import { FundsPage } from "./admin/FundsPage";
 import { GenerationRecordsPage } from "./admin/GenerationRecordsPage";
 import { OverviewPage } from "./admin/OverviewPage";
 import { PublishStatsPage } from "./admin/PublishStatsPage";
 import { ReportsPage } from "./admin/ReportsPage";
-import { SessionsPage } from "./admin/SessionsPage";
 import { SupportTicketsPage } from "./admin/SupportTicketsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { shanghaiDate } from "./admin/ui/vocabulary";
@@ -1173,7 +1173,8 @@ export function AdminApp() {
             /* 总览快捷入口（开通套餐 / 赠送积分 / 退款扣减）都落在本页：把
                intent 透传下去，客户管理页才能定位到对应表单，否则点完只是
                换了个页签、没有下文。 */
-            <CustomersManagementPage
+            <CustomerList
+              embedded
               key={`customers:${navigationIntent}:${businessTarget}`}
               initialCustomerId={businessTarget.get("userId") ?? ""}
               initialIntent={navigationIntent}
@@ -1236,7 +1237,7 @@ export function AdminApp() {
             <WorkerObservationsPage readOnly={readOnly} />
           ) : null}
           {activeTab === "sessions" ? (
-            <SessionsPage readOnly={readOnly} />
+            <DeviceManagement global key="all" readOnly={readOnly} />
           ) : null}
           {activeTab === "generationRecords" ||
           activeTab === "generationFailures" ? (
@@ -1270,7 +1271,7 @@ export function AdminApp() {
             />
           ) : null}
           {activeTab === "auditCenter" ? (
-            <AuditCenterPage readOnly={readOnly} />
+            <AuditEventsPage readOnly={readOnly} />
           ) : null}
           {activeTab === "viralOverview" ? (
             <ViralOverviewPage readOnly={readOnly} />

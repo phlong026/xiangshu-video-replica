@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { exportSummaryReportCsv } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 
 export function SummaryReportExport({
   kind,
@@ -56,7 +57,7 @@ export function SummaryReportExport({
             ? "导出当前经营报表 CSV"
             : "导出月度资金报表 CSV"}
       </button>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {notice && <p role="status">{notice}</p>}
     </section>
   );

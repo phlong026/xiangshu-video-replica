@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getGenerationRecordHistory } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import {
   formatDateTime,
@@ -43,7 +44,7 @@ export function RecordStatusHistory({
     <section aria-label="任务状态历史">
       <h5>状态历史</h5>
       {loading ? <p role="status">正在读取状态历史…</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {data ? (
         <>
           <p>

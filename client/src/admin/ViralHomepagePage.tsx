@@ -204,8 +204,6 @@ export function ViralHomepagePage({
   return (
     <section className="admin-panel admin-homepage-page" aria-label="首页编排">
       <header>
-        <span className="admin-viral-eyebrow">内容运营</span>
-        <h2>首页编排</h2>
         <p className="admin-hint">
           此顺序对应客户的默认“首页推荐”；客户主动选“最新”时按发布时间排列。排期采用北京时间。
         </p>

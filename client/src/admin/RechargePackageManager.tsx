@@ -12,6 +12,7 @@ import {
   packageBenefitLabel,
 } from "../rechargePackageDisplay";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { PageBanner } from "./ui/PageBanner";
 
 const INTERFACE_KEYS = Object.keys(DISCOUNT_INTERFACE_LABELS);
 
@@ -262,7 +263,7 @@ export function RechargePackageManager({
         再次购买带权益套餐时最近一次生效；未配置折扣的档位不影响已有权益。
       </p>
       {error ? (
-        <div role="alert">
+        <PageBanner tone="error">
           {error}{" "}
           <button
             disabled={busy}
@@ -271,7 +272,7 @@ export function RechargePackageManager({
           >
             刷新套餐
           </button>
-        </div>
+        </PageBanner>
       ) : null}
       {notice ? <p role="status">{notice}</p> : null}
       {!packages ? (

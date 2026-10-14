@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { adminRead } from "../api.admin";
+import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 
 type Page<T> = { items: T[]; total: number };
@@ -114,7 +115,7 @@ export function ViralCollectionBilling({ query }: { query: string }) {
       >
         刷新采集账单
       </button>
-      {error && <p role="alert">{error}</p>}
+      {error && <PageBanner tone="error">{error}</PageBanner>}
       {!page && !error && <p role="status">正在读取采集账单…</p>}
       {page && (
         <>

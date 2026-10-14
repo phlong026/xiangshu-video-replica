@@ -7,6 +7,8 @@ import {
 import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
 import { RecordCallsPanel } from "./RecordCallsPanel";
 import { RecordStatusHistory } from "./RecordStatusHistory";
+import { FilterBar } from "./ui/FilterBar";
+import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import {
   FAILURE_CATEGORY_LABELS,
@@ -127,9 +129,14 @@ export function FailureDiagnostics({
       <p>
         默认查看近7天创建的失败或待核对任务，优先按实测失败时间排序；旧记录回退到完成或创建时间，真实失败时刻未知。
       </p>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
+      <FilterBar
+        ariaLabel="诊断筛选"
+        onReset={() => {
+          setOffset(0);
+          setDraft({ username: "", from: "", to: "" });
+          setFilters({ username: "", from: "", to: "" });
+        }}
+        onSubmit={() => {
           setOffset(0);
           setFilters(draft);
         }}
@@ -161,8 +168,7 @@ export function FailureDiagnostics({
             onChange={(event) => setDraft({ ...draft, to: event.target.value })}
           />
         </label>
-        <button type="submit">查询诊断</button>
-      </form>
+      </FilterBar>
       <label>
         诊断任务类型
         <select
@@ -207,7 +213,7 @@ export function FailureDiagnostics({
         刷新诊断队列
       </button>
       {loading ? <p role="status">正在读取诊断…</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {page?.items.length === 0 ? <p>当前条件没有待处理任务。</p> : null}
       {page?.items.map((item) => (
         <article key={`${item.record_type}:${item.record_id}`}>

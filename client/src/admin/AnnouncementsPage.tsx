@@ -8,7 +8,7 @@ import {
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
-import { PageBanner } from "./ui/PageBanner";
+import { ListPage } from "./ui/ListPage";
 import { Pagination } from "./ui/Pagination";
 import { type BadgeTone, StatusBadge } from "./ui/StatusBadge";
 import { formatDateTime } from "./ui/vocabulary";
@@ -214,24 +214,123 @@ export function AnnouncementsPage({
 
   const isNew = editing === "new";
   return (
-    <section
-      className="admin-panel admin-announcements-page"
-      aria-label="公告与消息"
-    >
-      <header>
-        <h2>公告与消息</h2>
-        <p className="admin-hint">
-          面向全部客户的运营触达：维护通知、活动与价格变更。可设生效区间（北京
-          时间）；客户进入工作台时展示并回传已读，置顶公告排在最前。
-        </p>
-      </header>
-      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
-      {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
-      {!readOnly && editing === null ? (
-        <button type="button" onClick={openCreate}>
-          发布公告
-        </button>
-      ) : null}
+    <>
+      <ListPage
+        ariaLabel="公告与消息"
+        className="admin-announcements-page"
+        error={error}
+        notice={notice}
+        loading={loading}
+        hasItems={items.length > 0}
+        loadingText="正在读取公告…"
+        emptyText="还没有公告；点「发布公告」发出第一条。"
+        actions={
+          <>
+            <header>
+              <p className="admin-hint">
+                面向全部客户的运营触达：维护通知、活动与价格变更。可设生效区间（北京
+                时间）；客户进入工作台时展示并回传已读，置顶公告排在最前。
+              </p>
+            </header>
+            {!readOnly && editing === null ? (
+              <button type="button" onClick={openCreate}>
+                发布公告
+              </button>
+            ) : null}
+          </>
+        }
+        pagination={
+          <Pagination
+            disabled={loading}
+            limit={PAGE_SIZE}
+            offset={offset}
+            total={total}
+            onPageChange={setOffset}
+          />
+        }
+      >
+        <DataTable
+          ariaLabel="公告清单"
+          headers={
+            <>
+              <th>标题</th>
+              <th>色调</th>
+              <th>状态 / 生效区间</th>
+              <th>已读（触达率）</th>
+              <th>发布时间 / 人</th>
+              <th>操作</th>
+            </>
+          }
+        >
+          {items.map((item) => {
+            const status =
+              STATUS_DISPLAY[item.status ?? (item.live ? "live" : "ended")];
+            return (
+              <tr key={item.id}>
+                <td>
+                  {item.pinned ? (
+                    <StatusBadge tone="info">置顶</StatusBadge>
+                  ) : null}
+                  <strong>{item.title}</strong>
+                  <p className="admin-hint">{item.body.slice(0, 80)}</p>
+                </td>
+                <td>{item.tone_label}</td>
+                <td>
+                  <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+                  <small>
+                    {item.starts_at ? formatDateTime(item.starts_at) : "立即"}{" "}
+                    至 {item.ends_at ? formatDateTime(item.ends_at) : "不限"}
+                  </small>
+                </td>
+                <td>
+                  <strong>{item.read_count} 人</strong>
+                  {audience > 0 ? (
+                    <small>
+                      共 {audience} 名客户（
+                      {((item.read_count / audience) * 100).toFixed(1)}%）
+                    </small>
+                  ) : null}
+                </td>
+                <td>
+                  {formatDateTime(item.created_at)} · {item.created_by}
+                </td>
+                <td>
+                  {readOnly ? null : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={() => openEdit(item)}
+                      >
+                        编辑
+                      </button>{" "}
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={() =>
+                          void togglePin(
+                            item,
+                            item.pinned ? "取消置顶" : "置顶公告",
+                          )
+                        }
+                      >
+                        {item.pinned ? "取消置顶" : "置顶"}
+                      </button>{" "}
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={() => setPendingDelete(item)}
+                      >
+                        下线
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </DataTable>
+      </ListPage>
       {editing !== null ? (
         <ConfirmDialog
           open
@@ -331,102 +430,6 @@ export function AnnouncementsPage({
           </section>
         </ConfirmDialog>
       ) : null}
-      {loading ? (
-        <p role="status">正在读取公告…</p>
-      ) : items.length === 0 ? (
-        <PageBanner tone="notice">
-          还没有公告；点「发布公告」发出第一条。
-        </PageBanner>
-      ) : (
-        <DataTable
-          ariaLabel="公告清单"
-          headers={
-            <>
-              <th>标题</th>
-              <th>色调</th>
-              <th>状态 / 生效区间</th>
-              <th>已读（触达率）</th>
-              <th>发布时间 / 人</th>
-              <th>操作</th>
-            </>
-          }
-        >
-          {items.map((item) => {
-            const status =
-              STATUS_DISPLAY[item.status ?? (item.live ? "live" : "ended")];
-            return (
-              <tr key={item.id}>
-                <td>
-                  {item.pinned ? (
-                    <StatusBadge tone="info">置顶</StatusBadge>
-                  ) : null}
-                  <strong>{item.title}</strong>
-                  <p className="admin-hint">{item.body.slice(0, 80)}</p>
-                </td>
-                <td>{item.tone_label}</td>
-                <td>
-                  <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                  <small>
-                    {item.starts_at ? formatDateTime(item.starts_at) : "立即"}{" "}
-                    至 {item.ends_at ? formatDateTime(item.ends_at) : "不限"}
-                  </small>
-                </td>
-                <td>
-                  <strong>{item.read_count} 人</strong>
-                  {audience > 0 ? (
-                    <small>
-                      共 {audience} 名客户（
-                      {((item.read_count / audience) * 100).toFixed(1)}%）
-                    </small>
-                  ) : null}
-                </td>
-                <td>
-                  {formatDateTime(item.created_at)} · {item.created_by}
-                </td>
-                <td>
-                  {readOnly ? null : (
-                    <>
-                      <button
-                        type="button"
-                        disabled={saving}
-                        onClick={() => openEdit(item)}
-                      >
-                        编辑
-                      </button>{" "}
-                      <button
-                        type="button"
-                        disabled={saving}
-                        onClick={() =>
-                          void togglePin(
-                            item,
-                            item.pinned ? "取消置顶" : "置顶公告",
-                          )
-                        }
-                      >
-                        {item.pinned ? "取消置顶" : "置顶"}
-                      </button>{" "}
-                      <button
-                        type="button"
-                        disabled={saving}
-                        onClick={() => setPendingDelete(item)}
-                      >
-                        下线
-                      </button>
-                    </>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </DataTable>
-      )}
-      <Pagination
-        disabled={loading}
-        limit={PAGE_SIZE}
-        offset={offset}
-        total={total}
-        onPageChange={setOffset}
-      />
       <ConfirmDialog
         open={pendingDelete !== null}
         title="下线公告"
@@ -442,6 +445,6 @@ export function AnnouncementsPage({
         onClose={() => !saving && setPendingDelete(null)}
         onConfirm={(reason) => void confirmDelete(reason)}
       />
-    </section>
+    </>
   );
 }
