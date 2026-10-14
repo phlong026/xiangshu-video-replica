@@ -8,7 +8,7 @@ import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, SettingsWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.billing_catalog import SERVICES, Tariff, read_tariff, retail_snapshot
 from app.customer_fence import customer_read_transaction
@@ -82,7 +82,7 @@ def admin_prices(_actor: AdminReader, response: Response) -> PricingResponse:
 
 @router.put("/api/control/settings/customer-pricing", response_model=PricingResponse)
 def update_prices(
-    payload: PricingUpdate, request: Request, response: Response, actor: AdminWriter
+    payload: PricingUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("billing:tariffs",))

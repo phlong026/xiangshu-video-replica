@@ -29,7 +29,7 @@ import psycopg
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, SettingsWriter
 from app.admin_dates import utc_timestamp_sql
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
@@ -717,7 +717,7 @@ def read_alert_settings(response: Response, _actor: AdminReader) -> AlertSetting
 
 @router.put("/settings/alerts", response_model=AlertSettingsSnapshot)
 def update_alert_settings(
-    body: AlertSettingsUpdate, request: Request, response: Response, actor: AdminWriter
+    body: AlertSettingsUpdate, request: Request, response: Response, actor: SettingsWriter
 ) -> dict[str, object]:
     """全量更新告警设置；接收人必须是启用中的管理员（admin / auditor）。"""
 

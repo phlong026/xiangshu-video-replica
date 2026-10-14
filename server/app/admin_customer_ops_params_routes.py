@@ -14,7 +14,7 @@ import psycopg
 from fastapi import APIRouter, Request, Response
 from pydantic import Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, SettingsWriter
 from app.admin_customer_routes import _write_with_idempotency
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
@@ -59,7 +59,7 @@ def update_customer_ops_params(
     body: CustomerOpsParamsRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: SettingsWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         before = read_customer_ops_params(conn)

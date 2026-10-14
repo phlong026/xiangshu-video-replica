@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261014T1100_customer_ops_params"
+      "20261014T1200_admin_role_templates"
     ],
     "parents": {
       "001_core": null,
@@ -900,6 +900,10 @@
     "20261014T1100_customer_ops_params": {
       "file": "versions/20261014T1100_customer_ops_params.py",
       "sha256": "750f2206e91b953be92523522c2aa5daa977357dba3f6e0547ea5c80e3533102"
+    },
+    "20261014T1200_admin_role_templates": {
+      "file": "versions/20261014T1200_admin_role_templates.py",
+      "sha256": "47cfcf6ad622257cf158bed247bd38762d220f4f7fc721ab769dd76975621080"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

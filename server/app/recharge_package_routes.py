@@ -21,7 +21,7 @@ import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, StrictInt
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, SettingsWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.customer_fence import customer_read_transaction
 from app.db_pg import pg_transaction
@@ -198,7 +198,7 @@ def create_recharge_package(
     payload: RechargePackageWrite,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: SettingsWriter,
 ) -> dict[str, object]:
     """新建套餐（写契约 + 幂等快照 + advisory lock + 审计）."""
 
@@ -252,7 +252,7 @@ def update_recharge_package(
     payload: RechargePackageUpdate,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: SettingsWriter,
 ) -> dict[str, object]:
     """更新套餐（乐观锁：``expected_version`` 不符 → 409，重读重试）."""
 

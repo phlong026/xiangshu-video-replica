@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 import string
+from collections.abc import Callable
 from typing import Annotated, cast
 
 from fastapi import Depends, Header, HTTPException, Request
@@ -198,8 +199,18 @@ def get_control_exporter(
         return get_control_user(conn, proxy_token)
 
     from app.admin_auth_routes import get_admin_actor
+    from app.admin_permissions import EXPORT, POINT_LABELS
 
     admin_actor = get_admin_actor(request)
+    if not admin_actor.can(EXPORT):
+        # 整改 T41：导出是独立权限点，由角色模板授予。
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PERMISSION_DENIED",
+                "message": f"当前角色没有「{POINT_LABELS[EXPORT]}」权限。",
+            },
+        )
     return CurrentUser(
         id=admin_actor.user_id,
         username=admin_actor.username,
@@ -208,5 +219,39 @@ def get_control_exporter(
     )
 
 
+def _control_point_writer(point: str) -> Callable[..., CurrentUser]:
+    """控制面写接口按权限点把关（整改 T41）：客户生产线先过写级角色，再看模板是否有该点。
+
+    内部 P0 线沿用代理令牌身份（它本来只认 admin，没有「模板」的概念）。
+    """
+
+    def dependency(
+        request: Request,
+        conn: Database,
+        proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+    ) -> CurrentUser:
+        actor = get_control_writer(request, conn, proxy_token)
+        if not _is_customer_production():
+            return actor
+        from app.admin_auth_routes import get_admin_actor
+        from app.admin_permissions import POINT_LABELS
+
+        if not get_admin_actor(request).can(point):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "PERMISSION_DENIED",
+                    "message": (
+                        f"当前角色没有「{POINT_LABELS[point]}」权限，请联系超级管理员调整角色。"
+                    ),
+                },
+            )
+        return actor
+
+    return dependency
+
+
+ControlFundsWriter = Annotated[CurrentUser, Depends(_control_point_writer("funds.write"))]
+ControlSettingsWriter = Annotated[CurrentUser, Depends(_control_point_writer("settings.write"))]
 ControlWriter = Annotated[CurrentUser, Depends(get_control_writer)]
 ControlExporter = Annotated[CurrentUser, Depends(get_control_exporter)]

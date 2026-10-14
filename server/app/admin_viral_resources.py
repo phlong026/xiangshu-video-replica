@@ -10,7 +10,7 @@ import psycopg
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, ContentWriter
 from app.admin_write_contract import (
     AdminWriteContract,
     http_error,
@@ -63,7 +63,7 @@ def verify_resource_cost(
     payload: ResourceCostVerification,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
     if len(payload.bill_reference.strip()) < 3:

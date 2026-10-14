@@ -17,7 +17,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter, SuperAdminReader, SuperAdminWriter
+from app.admin_auth_routes import (
+    AdminReader,
+    SettingsWriter,
+    SuperAdminReader,
+    SuperAdminWriter,
+)
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.provider_gateway import ProviderGateway
@@ -238,7 +243,7 @@ def get_billing_settings(_actor: AdminReader) -> dict[str, Any]:
 @router.post("/billing-settings")
 def update_billing_settings(
     settings: BillingSettingsUpdate,
-    _actor: AdminWriter,
+    _actor: SettingsWriter,
 ) -> dict[str, Any]:
     """Update billing settings."""
     with pg_transaction() as raw:

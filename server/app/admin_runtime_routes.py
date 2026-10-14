@@ -31,7 +31,12 @@ import psycopg
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.admin_auth_routes import AdminReader, AdminWriter, SuperAdminReader, SuperAdminWriter
+from app.admin_auth_routes import (
+    AdminReader,
+    ContentWriter,
+    SuperAdminReader,
+    SuperAdminWriter,
+)
 from app.admin_dates import SHANGHAI, utc_timestamp_sql
 from app.admin_viral_collection_records import (
     fail_admin_search_record,
@@ -330,7 +335,7 @@ def add_viral_keyword(
     payload: ViralKeywordAddRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         rows = _read_keyword_rows(conn)
@@ -389,7 +394,7 @@ def delete_viral_keyword(
     payload: ViralKeywordDeleteRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         rows = _read_keyword_rows(conn)
@@ -460,7 +465,7 @@ def update_viral_runtime(
     payload: ViralRuntimeUpdateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         before = _viral_settings_audit_snapshot(conn)
@@ -675,7 +680,7 @@ def update_viral_video_availability(
     payload: ViralAvailabilityUpdateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
@@ -758,7 +763,7 @@ def collect_viral_now(
     payload: ViralCollectRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     """立即入队一次关键词采集，保留下一次定时执行计划.
 
@@ -1402,7 +1407,7 @@ def search_viral_videos_for_admin(
     payload: ViralAdminSearchRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     """管理端实时搜索：外呼上游 → 结果并入内容池，返回视频库同构行.
 
@@ -1705,7 +1710,7 @@ def archive_collected_viral_video(
     payload: ViralOperationWriteRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         require_cost_snapshot(conn, payload.expected_cost_snapshot)
@@ -1778,7 +1783,7 @@ def refresh_collected_wechat_statistics(
     payload: ViralOperationWriteRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     from app.viral_statistics import refresh_viral_statistics
     from app.viral_store import STATISTICS_CHECKED_AT_KEY, STATISTICS_RETRY_AT_KEY
@@ -2078,7 +2083,7 @@ def curate_collected_viral_video(
     payload: ViralCurationRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
     from app.viral_store import LINK_IMPORT_CATEGORY
@@ -2327,7 +2332,7 @@ def curate_collected_viral_videos_batch(
     payload: ViralBatchCurationRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
     from app.viral_store import LINK_IMPORT_CATEGORY
@@ -2791,7 +2796,7 @@ def read_viral_homepage(
 
 @router.put("/viral/homepage/order")
 def reorder_viral_homepage(
-    payload: ViralHomepageOrderRequest, request: Request, response: Response, actor: AdminWriter
+    payload: ViralHomepageOrderRequest, request: Request, response: Response, actor: ContentWriter
 ) -> dict[str, object]:
     require_write_contract(request, payload)
 
@@ -2854,7 +2859,7 @@ def schedule_viral_homepage(
     payload: ViralHomepageScheduleRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
 
@@ -3163,7 +3168,7 @@ def restore_viral_video(
     payload: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
 
@@ -3256,7 +3261,7 @@ def move_viral_homepage(
     payload: ViralHomepageMoveRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
 

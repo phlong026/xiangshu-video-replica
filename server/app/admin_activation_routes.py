@@ -64,7 +64,7 @@ from app.activation_code_service import (
     highest_export_aead_key_version,
     iter_code_digests,
 )
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, CustomerWriter
 from app.admin_write_contract import (
     REPLAY_HEADER,
     REQUEST_ID_HEADER,
@@ -188,7 +188,7 @@ def create_activation_code_batch(
     body: BatchCreateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Create an OPEN batch with frozen commercial snapshots."""
     _assert_batch_creation_allowed()
@@ -307,7 +307,7 @@ def generate_activation_codes(
     body: GenerateRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Mint codes for an OPEN batch and seal them into one export package.
 
@@ -431,7 +431,7 @@ def download_activation_code_export(
     body: DownloadRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """The single plaintext delivery path for an export package.
 
@@ -541,7 +541,7 @@ def deliver_activation_code(
     body: DeliverRequest,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Record a channel delivery and flip the code from GENERATED to ISSUED."""
 
@@ -653,7 +653,7 @@ def suspend_activation_code(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Suspend a delivered code (operator side state, frozen matrix)."""
 
@@ -712,7 +712,7 @@ def resume_activation_code(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Resume a suspended, activated code (the matrix has no back-to-ISSUED edge)."""
 
@@ -764,7 +764,7 @@ def revoke_activation_code(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Revoke a code permanently (terminal state, binding kept for audit)."""
 
@@ -820,7 +820,7 @@ def archive_activation_code(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Hide a revoked code from daily operations without deleting its history."""
 
@@ -918,7 +918,7 @@ def reveal_activation_code(
     body: AdminWriteContract,
     request: Request,
     response: Response,
-    actor: AdminWriter,
+    actor: CustomerWriter,
 ) -> dict[str, object]:
     """Reveal one retained code for an explicit, audited administrator copy.
 
