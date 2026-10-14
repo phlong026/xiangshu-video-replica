@@ -5,6 +5,8 @@ import clapperboardIcon from "../assets/icons/clapperboard.svg";
 import gaugeIcon from "../assets/icons/gauge.svg";
 import usersIcon from "../assets/icons/users-round.svg";
 import walletIcon from "../assets/icons/wallet.svg";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { CustomerPicker, type PickedCustomer } from "./ui/CustomerPicker";
 import { PageBanner } from "./ui/PageBanner";
 import { useAutoRefresh } from "./ui/useAutoRefresh";
 import { formatDateTime } from "./ui/vocabulary";
@@ -87,12 +89,28 @@ export function OverviewPage({
   onNavigate,
 }: {
   readOnly?: boolean;
-  onNavigate?: (tab: string) => void;
+  /** target 用于带上下文跳转（如快捷操作选定的客户 userId）。 */
+  onNavigate?: (tab: string, target?: Record<string, string>) => void;
 }) {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState("");
+  // 快捷操作先选客户（T13）：选定后直达该客户详情里的对应表单，
+  // 不再落到客户列表让运营再搜一次。
+  const [quickAction, setQuickAction] = useState<{
+    destination: string;
+    label: string;
+  } | null>(null);
+  const [quickCustomer, setQuickCustomer] = useState<PickedCustomer | null>(
+    null,
+  );
+  const [quickError, setQuickError] = useState("");
+  function startQuickAction(destination: string, label: string) {
+    setQuickCustomer(null);
+    setQuickError("");
+    setQuickAction({ destination, label });
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -499,19 +517,23 @@ export function OverviewPage({
               {/* 收款开通计入收入、赠送不计收入，入口分开（方案 P0-1）。 */}
               <button
                 type="button"
-                onClick={() => onNavigate?.("customerPackage")}
+                onClick={() =>
+                  startQuickAction("customerPackage", "开通套餐（已收款）")
+                }
               >
                 开通套餐（已收款）
               </button>
               <button
                 type="button"
-                onClick={() => onNavigate?.("customerAdjustments")}
+                onClick={() =>
+                  startQuickAction("customerAdjustments", "赠送积分")
+                }
               >
                 赠送积分
               </button>
               <button
                 type="button"
-                onClick={() => onNavigate?.("customerRefund")}
+                onClick={() => startQuickAction("customerRefund", "退款扣减")}
               >
                 退款扣减
               </button>
@@ -522,6 +544,34 @@ export function OverviewPage({
           </section>
         ) : null}
       </div>
+      <ConfirmDialog
+        open={quickAction !== null}
+        title={quickAction ? `${quickAction.label}：选择客户` : ""}
+        description="选定客户后直接打开该客户详情里的对应表单。"
+        confirmLabel="前往表单"
+        level="standard"
+        error={quickError}
+        onClose={() => setQuickAction(null)}
+        onConfirm={() => {
+          if (!quickAction) return;
+          if (!quickCustomer) {
+            setQuickError("请先选择客户。");
+            return;
+          }
+          onNavigate?.(quickAction.destination, {
+            userId: quickCustomer.user_id,
+          });
+          setQuickAction(null);
+        }}
+      >
+        <CustomerPicker
+          value={quickCustomer}
+          onChange={(customer) => {
+            setQuickCustomer(customer);
+            setQuickError("");
+          }}
+        />
+      </ConfirmDialog>
     </div>
   );
 }

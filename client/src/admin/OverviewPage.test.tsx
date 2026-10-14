@@ -54,6 +54,18 @@ function installFetch(payload: unknown = summaryPayload) {
         json: async () => payload,
       });
     }
+    if (url.includes("/api/control/customers?")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          items: [
+            { user_id: "u-1", username: "hongya", display_name: "洪雅店" },
+          ],
+          total: 1,
+        }),
+      });
+    }
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -110,12 +122,31 @@ describe("OverviewPage", () => {
     expect(
       screen.queryByRole("button", { name: "后台加款" }),
     ).not.toBeInTheDocument();
+    // T13：快捷操作先选客户，选定后带 userId 直达该客户的对应表单。
     fireEvent.click(screen.getByRole("button", { name: "开通套餐（已收款）" }));
-    expect(onNavigate).toHaveBeenCalledWith("customerPackage");
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "前往表单" }));
+    expect(within(dialog).getByText("请先选择客户。")).toBeInTheDocument();
+    expect(onNavigate).not.toHaveBeenCalledWith(
+      "customerPackage",
+      expect.anything(),
+    );
+    fireEvent.change(within(dialog).getByRole("searchbox"), {
+      target: { value: "洪雅" },
+    });
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "洪雅店（hongya）" }),
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "前往表单" }));
+    expect(onNavigate).toHaveBeenCalledWith("customerPackage", {
+      userId: "u-1",
+    });
     fireEvent.click(screen.getByRole("button", { name: "赠送积分" }));
-    expect(onNavigate).toHaveBeenCalledWith("customerAdjustments");
+    expect(screen.getByRole("dialog")).toHaveTextContent("赠送积分：选择客户");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     fireEvent.click(screen.getByRole("button", { name: "退款扣减" }));
-    expect(onNavigate).toHaveBeenCalledWith("customerRefund");
+    expect(screen.getByRole("dialog")).toHaveTextContent("退款扣减：选择客户");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     fireEvent.click(screen.getByRole("button", { name: "成本核对" }));
     expect(onNavigate).toHaveBeenCalledWith("costDetails");
 
