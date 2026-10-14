@@ -66,7 +66,7 @@ from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import Response as HttpResponse
 from pydantic import BaseModel, ConfigDict, StrictInt
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminExporter, AdminReader, AdminWriter
 from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE
 from app.admin_customer_metrics import (
     CUSTOMER_FACTS_CTE,
@@ -994,7 +994,7 @@ CUSTOMER_ACCOUNT_FROM = (
 
 @router.get("/adjustments.csv")
 def export_adjustments_csv(
-    actor: AdminWriter,
+    actor: AdminExporter,
     actor_username: str = "",
     target_username: str = "",
     source_document_type: str = "",
@@ -1636,7 +1636,7 @@ def customer_overview(user_id: str, actor: AdminReader) -> dict[str, object]:
 
 @router.get("/customers.csv")
 def export_customers_csv(
-    actor: AdminWriter,
+    actor: AdminExporter,
     status: str | None = None,
     username: str = "",
     created_from: str = "",

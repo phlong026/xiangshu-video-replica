@@ -79,7 +79,7 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
   ];
 
   async function download(item: (typeof items)[number]) {
-    if (readOnly || busy) return;
+    if (busy) return;
     setBusy(item.key);
     setError("");
     try {
@@ -125,7 +125,7 @@ export function ReportsPage({ readOnly = false }: { readOnly?: boolean }) {
             <dd>
               <button
                 type="button"
-                disabled={readOnly || busy !== "" || !month}
+                disabled={busy !== "" || !month}
                 onClick={() => void download(item)}
               >
                 {busy === item.key ? "正在导出…" : "导出 CSV"}

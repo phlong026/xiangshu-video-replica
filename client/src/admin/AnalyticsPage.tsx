@@ -104,7 +104,7 @@ export function AnalyticsPage({
               });
             }}
           />
-          {!readOnly && <SummaryReportExport kind="business" range={range} />}
+          <SummaryReportExport kind="business" range={range} />
         </>
       )}
     </div>

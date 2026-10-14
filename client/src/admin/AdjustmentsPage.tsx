@@ -193,12 +193,10 @@ export function AdjustmentsPage({
             />
           </label>
           <button type="submit">查询</button>
-          {/* 整表导出是写级动作（服务端 AdminWriter）：只读角色不渲染入口。 */}
-          {readOnly ? null : (
-            <button type="button" onClick={() => void exportCsv()}>
-              导出 CSV
-            </button>
-          )}
+          {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
+          <button type="button" onClick={() => void exportCsv()}>
+            导出 CSV
+          </button>
         </form>
       ) : null}
 

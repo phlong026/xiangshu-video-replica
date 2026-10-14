@@ -1427,38 +1427,39 @@ def test_customer_production_control_routes_keep_auditors_read_only(
     assert blocked.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
 
 
-# B3 (2026-09-22 review): the two fund-ledger CSV exports were the only control
-# exports still riding the read-level ``ControlUser`` adapter, so on the
-# customer-production lane an auditor could pull the entire ledger in bulk
-# while ``customers.csv`` (AdminWriter) answered 403. Bulk export is a
-# data-egress action, not a view: all three now require write-level authority.
+# B3 (2026-09-22) 曾要求整表导出写级权限；整改 T19（决策 D2）改为审计员也可导出，
+# 前提是每次导出都经 _guard_ledger_export 留 control.export 审计并限流。
 LEDGER_EXPORT_PATHS = ("/api/control/recharge-orders.csv", "/api/control/wallet-transactions.csv")
 
 
 @pytestmark_pg
 @pytest.mark.parametrize("path", LEDGER_EXPORT_PATHS)
-def test_customer_production_ledger_csv_exports_deny_auditors(
+def test_customer_production_ledger_csv_exports_allow_auditors_with_audit(
     customer_production_control_client: TestClient,
     path: str,
+    clean_sessions: str,
 ) -> None:
     client = customer_production_control_client
     exchange = password_admin_session(client, "auditor_u")
     assert exchange.status_code == 201, exchange.text
 
-    denied = client.get(path)
-    assert denied.status_code == 403, denied.text
-    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
-
-    # Positive control: the same route answers the admin role, so the 403 above
-    # is the role gate and not a blanket refusal of the export.
-    client.cookies.clear()
-    admin = password_admin_session(client, "admin_u")
-    assert admin.status_code == 201, admin.text
     allowed = client.get(path)
     assert allowed.status_code == 200, allowed.text
     assert allowed.headers["content-type"].startswith("text/csv")
-    # The response shape is unchanged by the B3 gate: same headers as before.
     assert "X-Export-Total" in allowed.headers
+    # 放权必留痕：导出记在审计员名下。
+    with psycopg.connect(clean_sessions) as conn:
+        audited = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action = 'control.export' "
+            "AND actor_user_id = 'auditor_u'"
+        ).fetchone()
+    assert audited == (1,)
+
+    # 管理员同样可导出。
+    client.cookies.clear()
+    admin = password_admin_session(client, "admin_u")
+    assert admin.status_code == 201, admin.text
+    assert client.get(path).status_code == 200
 
     # No fallback lane: with the session cookie gone the export must not accept
     # the retired proxy token (customer production ignores it entirely).

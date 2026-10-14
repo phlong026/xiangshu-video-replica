@@ -1037,19 +1037,30 @@ def test_audit_csv_export_streams_rows(client: TestClient, route_state: str):
 
 
 @pytest.mark.pg
-def test_auditor_cannot_export_the_audit_table(client: TestClient, route_state: str):
-    """回归：整表导出是数据出境动作，读级角色（auditor）不放行——与 customers.csv 一致。"""
+def test_auditor_can_export_the_audit_table_and_leaves_an_audit_row(
+    client: TestClient, route_state: str
+):
+    """整改 T19（决策 D2）：审计员可导出审计日志，但导出本身必须留 control.export 审计。
+
+    此前（B3 约定）整表导出要求写级权限、审计员 403；审计员恰恰是审计日志的
+    主要使用者，现放行，换来的约束是「放权必留痕」。
+    """
     _admin_session(client, "auditor_u")
 
-    denied = client.get(AUDIT_PATH + ".csv")
-    assert denied.status_code == 403, denied.text
-    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+    exported = client.get(AUDIT_PATH + ".csv")
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"].startswith("text/csv")
 
-    # 被拒的导出不能留下 control.export 审计（否则审计里会出现一次并未发生的导出）。
+    # 导出动作被记在审计员名下。
     with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
         assert conn.execute(
-            "SELECT count(*) FROM audit_logs WHERE action = 'control.export'"
-        ).fetchone() == (0,)
+            "SELECT count(*) FROM audit_logs WHERE action = 'control.export' "
+            "AND actor_user_id = 'auditor_u'"
+        ).fetchone() == (1,)
 
-    # 列表仍然对 auditor 开放（只读）。
+    # 列表照常可读。
     assert client.get(AUDIT_PATH).status_code == 200
+
+    # 未登录仍然不行（放行的只是审计员角色，不是匿名）。
+    client.cookies.clear()
+    assert client.get(AUDIT_PATH + ".csv").status_code == 401

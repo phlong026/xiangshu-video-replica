@@ -183,7 +183,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         direction: "asc",
       }),
     );
-    expect(screen.queryByRole("button", { name: "导出列表 CSV" })).toBeNull();
+    // 决策 D2：只读角色也可导出客户列表（服务端留审计并限流）。
+    expect(
+      screen.getByRole("button", { name: "导出列表 CSV" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /余额不足.*7/ }));
     await waitFor(() =>
       expect(adminApi.listCustomers).toHaveBeenLastCalledWith(

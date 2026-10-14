@@ -109,16 +109,14 @@ export function AccountsPage({
   return (
     <section aria-label="积分流水" className="admin-panel">
       <div className="admin-actions">
-        {/* 整表导出是写级动作（服务端 ControlWriter）：只读角色不渲染入口。 */}
-        {readOnly ? null : (
-          <button
-            type="button"
-            disabled={exporting || loading}
-            onClick={() => void exportTransactions()}
-          >
-            导出账务流水 CSV
-          </button>
-        )}
+        {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
+        <button
+          type="button"
+          disabled={exporting || loading}
+          onClick={() => void exportTransactions()}
+        >
+          导出账务流水 CSV
+        </button>
         <button
           aria-pressed={autoRefresh}
           type="button"

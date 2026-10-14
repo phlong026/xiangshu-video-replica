@@ -384,11 +384,9 @@ export function CustomerList({
           <button className="admin-toolbar__secondary" type="submit">
             筛选
           </button>
-          {!readOnly && (
-            <button type="button" onClick={exportList}>
-              导出列表 CSV
-            </button>
-          )}
+          <button type="button" onClick={exportList}>
+            导出列表 CSV
+          </button>
         </div>
       </form>
 

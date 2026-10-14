@@ -831,7 +831,20 @@ def get_super_admin_writer(
     return _require_super_admin(actor)
 
 
+def get_admin_exporter(actor: Annotated[AdminActor, Depends(get_admin_actor)]) -> AdminActor:
+    """整表导出的权限门（整改 T19，决策 D2）。
+
+    此前导出一律挂写级（B3 约定：数据出境不是查看），审计员连报表和审计日志
+    都导不出来，而审计员恰恰是最需要对账底稿的角色。现决定放行审计员，前提
+    是**每一次导出都必须留审计并过限流**（见 ``admin_export_guard``）。导出依赖
+    单独命名而不是直接用 ``AdminReader``：以后想再收紧，只改这一处。
+    激活码导出等含密文的下载不走这里，仍是写级。
+    """
+    return actor
+
+
 AdminReader = Annotated[AdminActor, Depends(get_admin_actor)]
+AdminExporter = Annotated[AdminActor, Depends(get_admin_exporter)]
 AdminWriter = Annotated[AdminActor, Depends(get_admin_writer)]
 SuperAdminReader = Annotated[AdminActor, Depends(get_super_admin_actor)]
 SuperAdminWriter = Annotated[AdminActor, Depends(get_super_admin_writer)]

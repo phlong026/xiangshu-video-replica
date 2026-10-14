@@ -2061,12 +2061,16 @@ def test_customers_csv_export_is_audited_and_filtered(client: TestClient) -> Non
     )
     assert audit is not None and int(audit[0]) == 1
 
-    # 审计员不可导出（AdminWriter 门）。B3（2026-09-22 评审）：批量导出是数据
-    # 外带动作而非查看，资金两个 CSV 导出已收敛到同一口径，三处导出此处对齐。
+    # 整改 T19（决策 D2）：审计员可导出（曾为 AdminWriter 门，B3 约定），
+    # 前提是导出记在审计员名下。
     auditor = _admin_session(client, actor="auditor_u")
-    denied = client.get("/api/control/customers.csv", headers=auditor)
-    assert denied.status_code == 403
-    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+    allowed = client.get("/api/control/customers.csv", headers=auditor)
+    assert allowed.status_code == 200
+    audit = _fetch_one(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'control.export' "
+        "AND entity_id = 'customers' AND actor_user_id = 'auditor_u'"
+    )
+    assert audit is not None and int(audit[0]) == 1
 
 
 def test_customers_csv_export_normalizes_status_casing(client: TestClient) -> None:
