@@ -199,6 +199,51 @@ def test_announcement_crud_customer_feed_and_idempotent_reads(client: TestClient
     assert after["items"] == []
 
 
+def test_announcement_schedule_status_edit_and_reach(client: TestClient) -> None:
+    """T12：定时公告显示「待生效」；可编辑标题正文与区间、可清空失效时间；分页与触达分母。"""
+    headers = _admin_session(client)
+    future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    later = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    merged = {**headers, IDEMPOTENCY_KEY_HEADER: f"key-{uuid.uuid4()}"}
+    created = client.post(
+        "/api/control/announcements",
+        json={
+            "confirm": True,
+            "reason": "预告活动",
+            "title": "明日活动预告",
+            "body": "明天开启充值满赠。",
+            "tone": "promo",
+            "starts_at": future,
+            "ends_at": later,
+        },
+        headers=merged,
+    )
+    assert created.status_code == 200, created.text
+    announcement_id = created.json()["id"]
+    listed = client.get("/api/control/announcements", params={"limit": 1}, headers=headers).json()
+    assert listed["total"] == 1 and listed["limit"] == 1
+    assert listed["audience_total"] == 1  # 夹具里有一名在役客户
+    assert listed["items"][0]["status"] == "scheduled"
+    assert listed["items"][0]["live"] is False
+
+    edited = client.patch(
+        f"/api/control/announcements/{announcement_id}",
+        json={
+            "confirm": True,
+            "reason": "改为立即生效",
+            "title": "充值满赠活动",
+            "starts_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+            "clear_ends_at": True,
+        },
+        headers={**headers, IDEMPOTENCY_KEY_HEADER: f"key-{uuid.uuid4()}"},
+    )
+    assert edited.status_code == 200, edited.text
+    item = client.get("/api/control/announcements", headers=headers).json()["items"][0]
+    assert item["title"] == "充值满赠活动"
+    assert item["status"] == "live"
+    assert item["ends_at"] == ""
+
+
 def test_lifecycle_sql_runs_and_classifies(client: TestClient) -> None:
     headers = _admin_session(client)
     # 夹具已有一名当天注册客户（customer_u）：SQL 必须可执行且分层落在 new。
