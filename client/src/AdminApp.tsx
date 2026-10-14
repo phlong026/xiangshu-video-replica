@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { AdminAlertsSection } from "./admin/AdminAlertsSection";
 import { AnalyticsPage } from "./admin/AnalyticsPage";
 import { AnnouncementsPage } from "./admin/AnnouncementsPage";
 import { AuditEventsPage } from "./admin/AuditEventsPage";
@@ -21,6 +22,7 @@ import { PublishStatsPage } from "./admin/PublishStatsPage";
 import { ReportsPage } from "./admin/ReportsPage";
 import { SupportTicketsPage } from "./admin/SupportTicketsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
+import { TeamManagementSection } from "./admin/TeamManagementSection";
 import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralCollectionPage } from "./admin/ViralCollectionPage";
 import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
@@ -43,10 +45,12 @@ import {
   exchangeAdminSession,
   fetchAdminSession,
   loginAdminWithPassword,
+  readPublishStatsEnabled,
   recoverAdminPassword,
 } from "./api.admin";
 import zhongshuBrandLogo from "./assets/brand/zhongshu-logo-mark.svg";
 import activityIcon from "./assets/icons/activity.svg";
+import bellIcon from "./assets/icons/bell.svg";
 import chartIcon from "./assets/icons/chart-no-axes-combined.svg";
 import chartPieIcon from "./assets/icons/chart-pie.svg";
 import clapperboardIcon from "./assets/icons/clapperboard.svg";
@@ -63,6 +67,7 @@ import searchCheckIcon from "./assets/icons/search-check.svg";
 import serverCogIcon from "./assets/icons/server-cog.svg";
 import settingsIcon from "./assets/icons/settings.svg";
 import collectionSettingsIcon from "./assets/icons/settings-2.svg";
+import shieldUserIcon from "./assets/icons/shield-user.svg";
 import smartphoneIcon from "./assets/icons/smartphone.svg";
 import alertIcon from "./assets/icons/triangle-alert.svg";
 import userCogIcon from "./assets/icons/user-cog.svg";
@@ -111,6 +116,8 @@ export type AdminTab =
   | "viralVideos"
   | "viralDiscoveries"
   | "auditCenter"
+  | "alerts"
+  | "team"
   | "systemSettings";
 
 const tabGroups: Array<{
@@ -118,33 +125,25 @@ const tabGroups: Array<{
   label: string;
   tabs: Array<{ id: AdminTab; label: string; helper: string }>;
 }> = [
-  {
-    id: "workbench",
-    label: "工作台",
-    tabs: [{ id: "overview", label: "总览", helper: "核心指标与运营待办" }],
-  },
+  // 每组至少两项（T27）：总览与资金中心并入「经营」，审计、团队、设置并入
+  // 「系统」。资金中心按拍板 D3 保持单入口，内部分页签走 URL。
   {
     id: "business",
     label: "经营",
     tabs: [
+      { id: "overview", label: "总览", helper: "核心指标与运营待办" },
       { id: "analytics", label: "经营看板", helper: "收入、成本与经营趋势" },
       {
         id: "costReview",
         label: "成本核对",
         helper: "待结算、成本待核对与业务全景",
       },
+      { id: "funds", label: "资金中心", helper: "收款、积分、人工调整与对账" },
       {
         id: "reports",
         label: "报表中心",
         helper: "经营月报、资金月报与账务明细",
       },
-    ],
-  },
-  {
-    id: "funds",
-    label: "资金中心",
-    tabs: [
-      { id: "funds", label: "资金中心", helper: "收款、积分、人工调整与对账" },
     ],
   },
   {
@@ -169,7 +168,7 @@ const tabGroups: Array<{
       {
         id: "publishStats",
         label: "发布成效",
-        helper: "客户发布内容的互动回流（默认关）",
+        helper: "客户发布内容的互动回流（需在系统设置开启）",
       },
       {
         id: "supportTickets",
@@ -185,7 +184,7 @@ const tabGroups: Array<{
   },
   {
     id: "generation",
-    label: "生成",
+    label: "生成运维",
     tabs: [
       {
         id: "generationRecords",
@@ -201,6 +200,11 @@ const tabGroups: Array<{
         id: "workerObservations",
         label: "队列观测",
         helper: "任务积压、高龄任务与隔离区",
+      },
+      {
+        id: "alerts",
+        label: "告警总览",
+        helper: "近 1 小时失败率与通知渠道",
       },
       {
         id: "externalCalls",
@@ -237,24 +241,23 @@ const tabGroups: Array<{
     ],
   },
   {
-    id: "audit",
-    label: "审计",
+    id: "system",
+    label: "系统",
     tabs: [
       {
         id: "auditCenter",
         label: "管理操作日志",
         helper: "管理员操作、高敏事件与变更摘要",
       },
-    ],
-  },
-  {
-    id: "settings",
-    label: "设置",
-    tabs: [
+      {
+        id: "team",
+        label: "团队与权限",
+        helper: "管理员账号、超管标记与密码重置",
+      },
       {
         id: "systemSettings",
         label: "系统设置",
-        helper: "价格、收款、团队、通知与技术配置",
+        helper: "价格、收款、功能开关与技术配置",
       },
     ],
   },
@@ -281,6 +284,8 @@ const tabPageTitles: Record<AdminTab, string> = {
   viralVideos: "视频库",
   viralDiscoveries: "客户需求洞察",
   auditCenter: "管理操作日志",
+  alerts: "告警总览",
+  team: "团队与权限",
   systemSettings: "系统设置",
 };
 
@@ -309,6 +314,8 @@ const navigationIcons: Record<AdminTab, string> = {
   viralVideos: listVideoIcon,
   viralDiscoveries: searchCheckIcon,
   auditCenter: scrollIcon,
+  alerts: bellIcon,
+  team: shieldUserIcon,
   systemSettings: settingsIcon,
 };
 
@@ -335,14 +342,23 @@ export function adminRouteFromHash(hash: string): {
 } {
   const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
   const requested = path.replace(/^admin\//, "") as AdminTab;
+  // 告警、团队原是系统设置的页签（?sub=alerts|team），现为独立入口；
+  // 旧书签与外部链接在此重定向，不丢落点。
+  const legacySub = new URLSearchParams(query).get("sub");
+  const legacySettingsTab =
+    requested === "systemSettings" &&
+    (legacySub === "alerts" || legacySub === "team")
+      ? legacySub
+      : null;
   return {
     tab:
-      requested === "analytics" &&
+      legacySettingsTab ??
+      (requested === "analytics" &&
       new URLSearchParams(query).get("analyticsTab") === "cost"
         ? "costReview"
         : adminTabs.has(requested)
           ? requested
-          : "overview",
+          : "overview"),
     intent: (() => {
       const intent = new URLSearchParams(query).get("intent") ?? "";
       return adminIntents.has(intent) ? intent : "";
@@ -377,6 +393,8 @@ export function AdminApp() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  // 「发布成效」默认关：开关打开前不进菜单（T28）。读取失败按关闭处理。
+  const [publishStatsEnabled, setPublishStatsEnabled] = useState(false);
   const [isCompactNavigation, setIsCompactNavigation] = useState(() =>
     typeof window !== "undefined"
       ? window.innerWidth < compactNavigationBreakpoint
@@ -455,6 +473,9 @@ export function AdminApp() {
         ].includes(key)
       )
         allowed.delete(key);
+    // 重定向到独立入口后，旧的 sub 参数不再有意义。
+    if (current.tab === "alerts" || current.tab === "team")
+      allowed.delete("sub");
     if (current.intent) allowed.set("intent", current.intent);
     else allowed.delete("intent");
     const normalized = `#admin/${current.tab}${allowed.size ? `?${allowed}` : ""}`;
@@ -475,6 +496,23 @@ export function AdminApp() {
       window.removeEventListener("popstate", restore);
     };
   }, []);
+
+  // 恢复 / 设密阶段不加载任何业务数据，只有进入工作台才读开关。
+  const signedIn = actor !== null && authPhase === "ready";
+  useEffect(() => {
+    if (!signedIn) return;
+    let active = true;
+    void readPublishStatsEnabled()
+      .then((result) => {
+        if (active) setPublishStatsEnabled(result.enabled);
+      })
+      .catch(() => {
+        if (active) setPublishStatsEnabled(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [signedIn]);
 
   const handleSessionExpired = useCallback(
     (message = "会话已失效，请重新登录。") => {
@@ -939,11 +977,14 @@ export function AdminApp() {
                   <h3>{group.label}</h3>
                   <div className="admin-nav-group__items">
                     {group.tabs
-                      .filter(
-                        (tab) =>
-                          tab.id !== "externalCalls" ||
-                          (actor.role === "admin" && actor.is_super_admin),
-                      )
+                      .filter((tab) => {
+                        if (tab.id === "externalCalls")
+                          return actor.role === "admin" && actor.is_super_admin;
+                        if (tab.id === "team") return actor.is_super_admin;
+                        if (tab.id === "publishStats")
+                          return publishStatsEnabled || activeTab === tab.id;
+                        return true;
+                      })
                       .map((tab) => (
                         // 真链接（整改 T09）：中键、Ctrl/⌘ 点击或右键「在新标签页
                         // 打开」交给浏览器；普通左键仍走站内导航，保留上下文。
@@ -1087,10 +1128,7 @@ export function AdminApp() {
                       tab: "viralVideos",
                       target: { listQuery: "libraryStatus=failed" },
                     },
-                    activeAlerts: {
-                      tab: "systemSettings",
-                      target: { sub: "alerts" },
-                    },
+                    activeAlerts: { tab: "alerts", target: {} },
                   };
                   const direct = filtered[destination];
                   if (direct) {
@@ -1321,12 +1359,24 @@ export function AdminApp() {
               }}
             />
           ) : null}
+          {activeTab === "alerts" ? (
+            <AdminAlertsSection readOnly={readOnly} />
+          ) : null}
+          {activeTab === "team" ? (
+            actor.is_super_admin === true ? (
+              <TeamManagementSection currentUserId={actor.user_id} />
+            ) : (
+              <PageBanner tone="notice">
+                仅超级管理员可管理团队与权限。
+              </PageBanner>
+            )
+          ) : null}
           {activeTab === "systemSettings" ? (
             <SystemSettingsPage
-              currentUserId={actor.user_id}
               isSuperAdmin={actor.is_super_admin === true}
               readOnly={readOnly}
               initialTab={navigationIntent === "rates" ? "rates" : undefined}
+              onPublishStatsChanged={setPublishStatsEnabled}
             />
           ) : null}
         </div>

@@ -4,7 +4,7 @@ import { expect, test, vi } from "vitest";
 
 import { SystemSettingsPage } from "./SystemSettingsPage";
 
-// 系统设置是「v4 导航合并」后的容器页：四个页签、服务配置下还套一层子页签，
+// 系统设置是「v4 导航合并」后的容器页：四个页签（价格与套餐、收款设置、功能开关、技术配置）、服务配置下还套一层子页签，
 // 并把只读态与**控制面设置后端**注入给共用组件 SettingsPanel（CW-019：客户
 // 构建制品的依赖图不可达，控制面 API 只出现在管理制品里）。
 // 各区块各自已有独立测试，这里只钉这层接线 —— 它此前完全无覆盖。
@@ -47,14 +47,9 @@ vi.mock("./QueueModeSection", () => ({
 vi.mock("./ViralRuntimeSection", () => ({
   ViralRuntimeSection: () => <div data-testid="viral-runtime">爆款运行时</div>,
 }));
-vi.mock("./AdminAlertsSection", () => ({
-  AdminAlertsSection: ({ readOnly }: { readOnly?: boolean }) => (
-    <div data-testid="admin-alerts">{`失败率告警 ro=${String(readOnly)}`}</div>
-  ),
-}));
-vi.mock("./TeamManagementSection", () => ({
-  TeamManagementSection: ({ currentUserId }: { currentUserId: string }) => (
-    <div data-testid="team-management">{`团队 me=${currentUserId}`}</div>
+vi.mock("./FeatureSwitchesSection", () => ({
+  FeatureSwitchesSection: ({ readOnly }: { readOnly?: boolean }) => (
+    <div data-testid="feature-switches">{`功能开关 ro=${String(readOnly)}`}</div>
   ),
 }));
 vi.mock("../SettingsPanel", () => ({
@@ -101,10 +96,10 @@ test("honours the initialTab prop", () => {
   expect(screen.getByTestId("customer-pricing")).toBeInTheDocument();
 });
 
-test("mounts the alerts tab only when selected", () => {
-  render(<SystemSettingsPage initialTab="alerts" />);
+test("mounts the feature switches tab only when selected", () => {
+  render(<SystemSettingsPage initialTab="features" />);
 
-  expect(screen.getByTestId("admin-alerts")).toBeInTheDocument();
+  expect(screen.getByTestId("feature-switches")).toBeInTheDocument();
   expect(screen.queryByTestId("customer-pricing")).toBeNull();
   expect(screen.queryByTestId("settings-panel")).toBeNull();
 });
@@ -162,32 +157,15 @@ test("keeps the service sub-tab selection inside the services tab", () => {
   );
 });
 
-test("forwards readOnly into the alerts tab so auditors get the read-only settings", () => {
-  render(<SystemSettingsPage initialTab="alerts" readOnly />);
+test("forwards readOnly into the feature switches tab", () => {
+  render(<SystemSettingsPage initialTab="features" readOnly />);
 
-  expect(screen.getByTestId("admin-alerts")).toHaveTextContent("ro=true");
+  expect(screen.getByTestId("feature-switches")).toHaveTextContent("ro=true");
 });
 
-test("hides the team tab from everyone but super admins", () => {
-  render(<SystemSettingsPage />);
+test("no longer hosts alerts or team: they are standalone menu entries", () => {
+  render(<SystemSettingsPage isSuperAdmin />);
 
+  expect(screen.queryByRole("tab", { name: "通知与告警" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "团队与权限" })).toBeNull();
-});
-
-test("shows the team tab to super admins and passes the signed-in user down", () => {
-  render(<SystemSettingsPage currentUserId="u-root" isSuperAdmin />);
-
-  // 未选中时不提前挂载（团队页挂载即发请求）。
-  expect(screen.queryByTestId("team-management")).toBeNull();
-  fireEvent.click(screen.getByRole("tab", { name: "团队与权限" }));
-
-  expect(screen.getByTestId("team-management")).toHaveTextContent("me=u-root");
-});
-
-test("never mounts the team page for a non-super admin, even via initialTab", () => {
-  render(<SystemSettingsPage initialTab="team" />);
-
-  expect(screen.queryByTestId("team-management")).toBeNull();
-  // 回落到默认页签，而不是留一个空白页。
-  expect(screen.getByTestId("customer-pricing")).toBeInTheDocument();
 });

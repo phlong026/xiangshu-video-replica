@@ -7,31 +7,30 @@ import {
 } from "../api";
 import { paidTestControlProvider } from "../api.admin";
 import { type SettingsBackend, SettingsPanel } from "../SettingsPanel";
-import { AdminAlertsSection } from "./AdminAlertsSection";
 import { AdminEnvironmentSwitch } from "./AdminEnvironmentSwitch";
 import { BillingQuoteCalculator } from "./BillingQuoteCalculator";
 import { BillingRatesManager } from "./BillingRatesManager";
 import { CustomerPricingManager } from "./CustomerPricingManager";
+import { FeatureSwitchesSection } from "./FeatureSwitchesSection";
 import { H3AccountsManager } from "./H3AccountsManager";
 import { PaymentSettingsSection } from "./PaymentSettingsSection";
 import { QueueModeSection } from "./QueueModeSection";
 import { RechargePackageManager } from "./RechargePackageManager";
 import { RegistrationBonusSection } from "./RegistrationBonusSection";
-import { TeamManagementSection } from "./TeamManagementSection";
 import { TabBar } from "./ui/TabBar";
 import { useHashParam } from "./ui/useHashParam";
 
 // 方案 P1「价格与套餐一页化」：兑换比例 / 业务单价 / 充值套餐 / 试算器收拢
 // 到一个页签，讲清任一客户的扣费规则；收款设置单独一页（商户配置是另一类
 // 受众）；技术配置（API 服务、账号并发、运行参数）仅超级管理员可见——
-// 与团队页同一拦截策略：页签不出现，而不是点进去看 403。
+// 页签不出现，而不是点进去看 403。「告警总览」与「团队与权限」已提升为侧边栏
+// 独立入口（T27），旧的 ?sub=alerts / ?sub=team 由外壳重定向。
 const baseTabs = [
   { id: "pricing", label: "价格与套餐" },
   { id: "collection", label: "收款设置" },
-  { id: "alerts", label: "通知与告警" },
+  { id: "features", label: "功能开关" },
 ];
 const technicalTab = { id: "services", label: "技术配置" };
-const teamTab = { id: "team", label: "团队与权限" };
 
 /**
  * 控制面设置后端：走 `/api/control/settings`（内部通道，由反代注入
@@ -59,7 +58,7 @@ export function SystemSettingsPage({
   readOnly = false,
   initialTab,
   isSuperAdmin = false,
-  currentUserId = "",
+  onPublishStatsChanged,
 }: {
   readOnly?: boolean;
   /** 旧页签 id（payment/rates）在挂载时归并到 pricing，外部 intent 不用改。 */
@@ -67,25 +66,21 @@ export function SystemSettingsPage({
     | "pricing"
     | "collection"
     | "services"
-    | "alerts"
-    | "team"
+    | "features"
     | "payment"
     | "rates";
   isSuperAdmin?: boolean;
-  /** 团队页据此隐藏「自己」那一行的停用 / 超管 / 重置密码按钮。 */
-  currentUserId?: string;
+  /** 功能开关切换后通知外壳刷新菜单显隐。 */
+  onPublishStatsChanged?: (enabled: boolean) => void;
 }) {
   // 收拢归并：payment / rates 都落「价格与套餐」；非超管看不到技术配置页签，
   // 带着该意图进来也落回价格页而不是看一页 404。
   const normalizeTab = (value: string) => {
     if (value === "payment" || value === "rates") return "pricing";
     if (value === "services" && !isSuperAdmin) return "pricing";
-    if (value === "team" && !isSuperAdmin) return "pricing";
     return value;
   };
-  const visibleTabs = isSuperAdmin
-    ? [baseTabs[0], baseTabs[1], teamTab, baseTabs[2], technicalTab]
-    : baseTabs;
+  const visibleTabs = isSuperAdmin ? [...baseTabs, technicalTab] : baseTabs;
   // 设置页签与技术配置分组都写入 URL（?sub= / ?section=），刷新不丢。
   const [tab, setTab] = useHashParam<string>(
     "sub",
@@ -164,9 +159,11 @@ export function SystemSettingsPage({
           )}
         </div>
       ) : null}
-      {tab === "alerts" ? <AdminAlertsSection readOnly={readOnly} /> : null}
-      {tab === "team" && isSuperAdmin ? (
-        <TeamManagementSection currentUserId={currentUserId} />
+      {tab === "features" ? (
+        <FeatureSwitchesSection
+          readOnly={readOnly}
+          onChanged={onPublishStatsChanged}
+        />
       ) : null}
     </div>
   );

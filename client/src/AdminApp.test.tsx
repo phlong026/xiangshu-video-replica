@@ -179,6 +179,8 @@ function installFetch(options?: {
   /** 以只读的 auditor 角色登录；默认是超级管理员。 */
   role?: "admin" | "auditor";
   isSuperAdmin?: boolean;
+  /** 发布成效开关；默认关闭，菜单不出现该入口。 */
+  publishStatsEnabled?: boolean;
 }) {
   const sessionState = options?.session ?? "missing";
   const activeSession =
@@ -229,6 +231,9 @@ function installFetch(options?: {
       requestInit?.method === "DELETE"
     ) {
       return jsonResponse(undefined, 204);
+    }
+    if (url.endsWith("/api/control/publish-stats/enabled")) {
+      return jsonResponse({ enabled: options?.publishStatsEnabled ?? false });
     }
     if (url.includes("/api/control/accounts?")) {
       return jsonResponse(accountsPage);
@@ -1035,7 +1040,7 @@ describe("AdminApp", () => {
     expect(screen.queryByRole("tablist", { name: "生成记录页签" })).toBeNull();
   });
 
-  it("renders the original eight navigation groups with scoped pages", async () => {
+  it("renders the five navigation groups with scoped pages", async () => {
     installFetch({ session: "valid" });
 
     render(<AdminApp />);
@@ -1045,16 +1050,7 @@ describe("AdminApp", () => {
       within(screen.getByRole("navigation", { name: "管理端导航" }))
         .getAllByRole("heading", { level: 3 })
         .map((heading) => heading.textContent),
-    ).toEqual([
-      "工作台",
-      "经营",
-      "资金中心",
-      "客户",
-      "生成",
-      "内容",
-      "审计",
-      "设置",
-    ]);
+    ).toEqual(["经营", "客户", "生成运维", "内容", "系统"]);
 
     for (const name of [
       "总览",
@@ -1489,6 +1485,67 @@ describe("AdminApp", () => {
     },
   );
 
+  it("发布成效默认不进菜单，开关打开后才出现", async () => {
+    installFetch({ session: "valid" });
+    const { unmount } = render(<AdminApp />);
+    await screen.findByRole("link", { name: "客户列表" });
+    expect(screen.queryByRole("link", { name: "发布成效" })).toBeNull();
+    unmount();
+
+    installFetch({ session: "valid", publishStatsEnabled: true });
+    render(<AdminApp />);
+    expect(
+      await screen.findByRole("link", { name: "发布成效" }),
+    ).toBeInTheDocument();
+  });
+
+  it("告警总览在生成运维组，团队与权限仅超管可见", async () => {
+    installFetch({ session: "valid" });
+    const { unmount } = render(<AdminApp />);
+    const nav = await screen.findByRole("navigation", { name: "管理端导航" });
+    expect(within(nav).getByRole("link", { name: "告警总览" })).toHaveAttribute(
+      "href",
+      "#admin/alerts",
+    );
+    expect(
+      within(nav).getByRole("link", { name: "团队与权限" }),
+    ).toBeInTheDocument();
+    unmount();
+
+    installFetch({ session: "valid", isSuperAdmin: false });
+    render(<AdminApp />);
+    const plain = await screen.findByRole("navigation", {
+      name: "管理端导航",
+    });
+    expect(
+      within(plain).queryByRole("link", { name: "团队与权限" }),
+    ).toBeNull();
+  });
+
+  it("每个导航分组至少两项", async () => {
+    installFetch({ session: "valid", isSuperAdmin: false });
+    render(<AdminApp />);
+    const nav = await screen.findByRole("navigation", { name: "管理端导航" });
+    for (const group of nav.querySelectorAll(".admin-nav-group")) {
+      expect(
+        group.querySelectorAll("a.admin-tab").length,
+        group.querySelector("h3")?.textContent ?? "",
+      ).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it("旧的系统设置告警 / 团队地址重定向到独立入口", () => {
+    expect(adminRouteFromHash("#admin/systemSettings?sub=alerts").tab).toBe(
+      "alerts",
+    );
+    expect(adminRouteFromHash("#admin/systemSettings?sub=team").tab).toBe(
+      "team",
+    );
+    expect(adminRouteFromHash("#admin/systemSettings?sub=pricing").tab).toBe(
+      "systemSettings",
+    );
+  });
+
   it("顶栏提供修改密码入口，打开后是改密对话框", async () => {
     installFetch({ session: "valid" });
     render(<AdminApp />);
@@ -1530,9 +1587,9 @@ describe("AdminApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "展开导航" }));
 
-    expect(screen.getAllByText("工作台").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("经营").length).toBeGreaterThan(0);
     expect(screen.getAllByText("客户").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("设置").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("系统").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "客户列表" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭导航" })).toHaveAttribute(
       "aria-expanded",
