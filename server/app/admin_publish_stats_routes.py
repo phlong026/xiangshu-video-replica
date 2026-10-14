@@ -50,6 +50,17 @@ def _flag(conn: psycopg.Connection) -> bool:
     return bool(row and int(row[0]) == 1)
 
 
+@router.get("/publish-stats/enabled")
+def get_publish_stats_enabled(actor: AdminReader) -> dict[str, bool]:
+    """菜单显隐只需要开关状态：单独一个轻接口，避免为此拉一整页列表。"""
+    del actor
+    try:
+        with pg_transaction() as conn:
+            return {"enabled": _flag(conn)}
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
+
+
 @router.get("/publish-stats")
 def list_publish_stats(
     actor: AdminReader,

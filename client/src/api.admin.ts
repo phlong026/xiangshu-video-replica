@@ -1755,6 +1755,16 @@ export async function listPublishStats(
   );
 }
 
+/** 菜单显隐用：开关关闭时「发布成效」不出现在侧边栏。 */
+export async function readPublishStatsEnabled(): Promise<{
+  enabled: boolean;
+}> {
+  return adminRead(
+    "/api/control/publish-stats/enabled",
+    "读取发布成效开关失败",
+  );
+}
+
 export async function setPublishStatsEnabled(input: {
   enabled: boolean;
   reason: string;

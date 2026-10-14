@@ -232,3 +232,17 @@
   gap: 4px;
   margin-top: 6px;
 }
+
+/* 功能开关行：说明在左，状态与操作在右，窄屏换行。 */
+.admin-feature-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--admin-border, #e5e7eb);
+}
+
+.admin-feature-switch > div {
+  flex: 1 1 320px;
+}

@@ -430,6 +430,10 @@ def test_support_ticket_lifecycle_and_publish_stats_guard(client: TestClient) ->
     stats_list = client.get("/api/control/publish-stats", headers=headers)
     assert stats_list.status_code == 200
     assert stats_list.json()["enabled"] is False
+    # 菜单显隐用的轻接口与清单口径一致。
+    flag = client.get("/api/control/publish-stats/enabled", headers=headers)
+    assert flag.status_code == 200
+    assert flag.json() == {"enabled": False}
     guarded = client.post(
         "/api/control/publish-stats/any-id/sync",
         json={"confirm": True, "reason": "尝试同步"},
