@@ -104,7 +104,10 @@ def list_support_tickets(
     bounded_offset = max(0, int(offset))
     clauses: list[str] = []
     params: list[object] = []
-    if status.strip():
+    if status.strip() == "unresolved":
+        # 「未结案」= 待处理 + 处理中，与总览「工单未结案」待办同口径。
+        clauses.append("st.status IN ('open', 'processing')")
+    elif status.strip():
         clauses.append("st.status = %s")
         params.append(status.strip())
     if category.strip():

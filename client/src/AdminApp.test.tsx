@@ -173,6 +173,8 @@ function installFetch(options?: {
   session?: "valid" | "missing";
   failedTasks?: number;
   reconciliationProblems?: number;
+  pendingOrders?: number;
+  openTickets?: number;
   generationTotal?: number;
   /** 以只读的 auditor 角色登录；默认是超级管理员。 */
   role?: "admin" | "auditor";
@@ -246,6 +248,8 @@ function installFetch(options?: {
           pending_pairings: 0,
           failed_tasks_7d: options?.failedTasks ?? 0,
           reconciliation_problems: options?.reconciliationProblems ?? 0,
+          pending_orders: options?.pendingOrders ?? 0,
+          open_tickets: options?.openTickets ?? 0,
           expiring_codes_7d: 0,
         },
         device_slots: { bound: 0, total: 0 },
@@ -470,6 +474,52 @@ describe("AdminApp", () => {
     expect(
       await screen.findByRole("tab", { name: "人工调整", selected: true }),
     ).toBeInTheDocument();
+  });
+
+  it("全局待办落到带筛选的清单：待支付订单、未结案工单", async () => {
+    installFetch({ session: "valid", pendingOrders: 2, openTickets: 3 });
+    render(<AdminApp />);
+    const todos = await screen.findByRole("region", { name: "待办事项" });
+    const orders = within(todos).getByText("待支付充值订单").closest("li");
+    fireEvent.click(
+      within(orders as HTMLElement).getByRole("button", { name: "去处理" }),
+    );
+    expect(window.location.hash).toBe("#admin/funds?sub=orders&status=PENDING");
+    expect(
+      await screen.findByRole("tab", { name: "收款订单", selected: true }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.some(([url]) => {
+          const parsed = new URL(String(url));
+          return (
+            parsed.pathname.endsWith("/recharge-orders") &&
+            parsed.searchParams.get("status") === "PENDING"
+          );
+        }),
+      ).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "总览" }));
+    const again = await screen.findByRole("region", { name: "待办事项" });
+    const tickets = within(again).getByText("工单未结案").closest("li");
+    fireEvent.click(
+      within(tickets as HTMLElement).getByRole("button", { name: "去处理" }),
+    );
+    expect(window.location.hash).toBe(
+      "#admin/supportTickets?status=unresolved",
+    );
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.some(([url]) => {
+          const parsed = new URL(String(url));
+          return (
+            parsed.pathname.endsWith("/support-tickets") &&
+            parsed.searchParams.get("status") === "unresolved"
+          );
+        }),
+      ).toBe(true),
+    );
   });
 
   it("刷新资金对账地址保留异常清单意图", () => {

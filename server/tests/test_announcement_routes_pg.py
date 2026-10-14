@@ -306,6 +306,11 @@ def test_support_ticket_lifecycle_and_publish_stats_guard(client: TestClient) ->
         headers={**headers, IDEMPOTENCY_KEY_HEADER: f"tk-{uuid.uuid4()}"},
     )
     assert started.status_code == 200, started.text
+    # 「未结案」伪状态 = open + processing，与总览「工单未结案」待办同口径。
+    unresolved = client.get(
+        "/api/control/support-tickets", params={"status": "unresolved"}, headers=headers
+    ).json()
+    assert unresolved["total"] == 1
     resolved = client.patch(
         f"/api/control/support-tickets/{ticket_id}",
         json={
@@ -326,6 +331,12 @@ def test_support_ticket_lifecycle_and_publish_stats_guard(client: TestClient) ->
     listed = client.get("/api/control/support-tickets", headers=headers).json()
     assert listed["total"] == 1 and listed["items"][0]["status"] == "resolved"
     assert listed["items"][0]["handler_username"] == "admin_u"
+    assert (
+        client.get(
+            "/api/control/support-tickets", params={"status": "unresolved"}, headers=headers
+        ).json()["total"]
+        == 0
+    )
 
     # 发布效果回流：默认关 → 同步被 409 挡下；清单可见开关状态。
     stats_list = client.get("/api/control/publish-stats", headers=headers)

@@ -49,8 +49,10 @@ export function FundsPage({
   initialMonth,
   onMonthChange,
   initialAnomaly = "paid_without_charge",
+  initialOrderStatus = "",
   onCustomer,
 }: {
+  initialOrderStatus?: string;
   readOnly?: boolean;
   initialTab?: FundsTab;
   userId?: string;
@@ -104,6 +106,7 @@ export function FundsPage({
           readOnly={readOnly}
           userId={userId}
           orderNo={orderNo}
+          initialStatus={initialOrderStatus}
           onOpenReconciliation={(next) => {
             setAnomaly(next);
             setTab("reconciliation");

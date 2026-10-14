@@ -48,18 +48,21 @@ export function OrdersPage({
   orderNo = "",
   onOpenReconciliation,
   onCustomer,
+  initialStatus = "",
 }: {
   readOnly?: boolean;
   userId?: string;
   orderNo?: string;
+  /** 总览「待支付订单」等入口带入的状态筛选。 */
+  initialStatus?: string;
   onOpenReconciliation?: (anomaly: ReconciliationAnomaly) => void;
   onCustomer?: (id: string) => void;
 }) {
   const [orders, setOrders] = useState<AdminRechargeOrder[]>([]);
   const [orderTotal, setOrderTotal] = useState(0);
   const [orderOffset, setOrderOffset] = useState(0);
-  const [statusDraft, setStatusDraft] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+  const [statusDraft, setStatusDraft] = useState(initialStatus);
+  const [statusFilter, setStatusFilter] = useState(initialStatus);
   const [usernameFilter, setUsernameFilter] = useState("");
   const [channelFilter, setChannelFilter] = useState("");
   const [createdFrom, setCreatedFrom] = useState("");

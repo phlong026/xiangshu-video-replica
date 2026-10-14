@@ -51,7 +51,8 @@ function TodoRow({
   openLabel = "去处理",
 }: {
   label: string;
-  count: number;
+  /** null = 数据源暂不可用：显示「—」而不是用 0 冒充「没有待办」。 */
+  count: number | null;
   tone: "warn" | "danger" | "info";
   hint?: string;
   onOpen?: () => void;
@@ -60,7 +61,9 @@ function TodoRow({
   return (
     <li>
       <span>{label}</span>
-      <span className={`status-badge status-badge--${tone}`}>{count}</span>
+      <span className={`status-badge status-badge--${tone}`}>
+        {count ?? "—"}
+      </span>
       {hint ? <small>{hint}</small> : null}
       {onOpen ? (
         <button type="button" onClick={onOpen}>
@@ -70,6 +73,10 @@ function TodoRow({
     </li>
   );
 }
+
+// 待办按业务域分组，运营一眼看出哪条线上有事。
+const TODO_GROUPS = ["资金", "生成", "客户", "内容", "系统"] as const;
+type TodoGroup = (typeof TODO_GROUPS)[number];
 
 /**
  * W15 — 总览仪表盘：KPI、近 7 日生成趋势、待办事项与快捷操作。
@@ -176,14 +183,16 @@ export function OverviewPage({
     undefined;
   const todoItems: Array<{
     key: string;
+    group: TodoGroup;
     label: string;
-    count: number;
+    count: number | null;
     tone: "warn" | "danger" | "info";
     tab: string;
     hint?: string;
   }> = [
     {
       key: "failed",
+      group: "生成",
       label: "失败任务待处理",
       count: todos.failed_tasks_7d,
       tone: "danger",
@@ -193,6 +202,7 @@ export function OverviewPage({
       // 拆解是付费上游调用：2026-09-20 那种「拆解全挂、总览全绿」不能再出现，
       // 单列一行并把最集中的上游原因直接摆出来。
       key: "analysis",
+      group: "生成",
       label: "拆解失败待排查",
       count: todos.analysis_failures_7d ?? 0,
       tone: "danger",
@@ -201,6 +211,7 @@ export function OverviewPage({
     },
     {
       key: "recon",
+      group: "资金",
       label: "对账不一致",
       count: todos.reconciliation_problems,
       tone: "warn",
@@ -209,6 +220,7 @@ export function OverviewPage({
     },
     {
       key: "rates",
+      group: "系统",
       label: "成本待配置",
       count: todos.unconfigured_rates ?? 0,
       tone: "danger",
@@ -220,6 +232,7 @@ export function OverviewPage({
       // pending_count 是仍处 PENDING 的计费操作数（billing_reports.py:174），
       // unknown_revenue_count 是收入无法确定的操作数（同文件 :322）。
       key: "pendingOps",
+      group: "资金",
       label: "今日操作待结算",
       count: today.pending_operations ?? 0,
       tone: "info",
@@ -233,6 +246,7 @@ export function OverviewPage({
       // 服务端 billing_reports.py 承诺「成本待核对」清单与计数同口径
       // （attention=unknown_cost），这里补上发出方。
       key: "unknownCost",
+      group: "资金",
       label: "今日成本待核对",
       count: todos.unknown_cost_records ?? 0,
       tone: "warn",
@@ -241,11 +255,56 @@ export function OverviewPage({
     },
     {
       key: "unknownRevenue",
+      group: "资金",
       label: "今日收入未确定",
       count: today.unknown_revenue_operations ?? 0,
       tone: "warn",
       tab: "unknownRevenue",
       hint: "毛利可能偏低",
+    },
+    // 全局待办（整改 T11）：每项计数与跳转后清单同口径，点进去条数一致。
+    {
+      key: "pendingOrders",
+      group: "资金",
+      label: "待支付充值订单",
+      count: todos.pending_orders ?? 0,
+      tone: "info",
+      tab: "pendingOrders",
+      hint: "含客户放弃支付的订单；久未到账可查单补单",
+    },
+    {
+      key: "queueAttention",
+      group: "生成",
+      label: "队列需人工处理",
+      count: todos.queue_attention ?? 0,
+      tone: "danger",
+      tab: "queueAttention",
+      hint: "隔离区冻结了客户预扣积分",
+    },
+    {
+      key: "openTickets",
+      group: "客户",
+      label: "工单未结案",
+      count: todos.open_tickets ?? 0,
+      tone: "warn",
+      tab: "openTickets",
+    },
+    {
+      key: "contentFailed",
+      group: "内容",
+      label: "内容准备失败",
+      count: todos.content_prepare_failed ?? 0,
+      tone: "warn",
+      tab: "contentFailed",
+    },
+    {
+      key: "activeAlerts",
+      group: "系统",
+      label: "告警命中",
+      count: todos.active_alerts === undefined ? 0 : todos.active_alerts,
+      tone: "danger",
+      tab: "activeAlerts",
+      hint: todos.active_alerts === null ? "告警聚合暂不可用" : undefined,
     },
   ];
 
@@ -403,23 +462,32 @@ export function OverviewPage({
 
         <section className="admin-panel" aria-label="待办事项">
           <h2>待办事项</h2>
-          <ul className="dashboard-todos">
-            {todoItems.map((item) => (
-              <TodoRow
-                key={item.key}
-                count={item.count}
-                hint={item.hint}
-                label={item.label}
-                tone={item.tone}
-                // 审计员同样需要落到清单去核对，只是按钮说「去查看」；
-                // 写操作由目标页自身按 readOnly 收敛。
-                onOpen={
-                  item.count > 0 ? () => onNavigate?.(item.tab) : undefined
-                }
-                openLabel={readOnly ? "去查看" : "去处理"}
-              />
-            ))}
-          </ul>
+          {TODO_GROUPS.map((group) => (
+            <section key={group} aria-label={`${group}待办`}>
+              <h3 className="dashboard-todo-group">{group}</h3>
+              <ul className="dashboard-todos">
+                {todoItems
+                  .filter((item) => item.group === group)
+                  .map((item) => (
+                    <TodoRow
+                      key={item.key}
+                      count={item.count}
+                      hint={item.hint}
+                      label={item.label}
+                      tone={item.tone}
+                      // 审计员同样需要落到清单去核对，只是按钮说「去查看」；
+                      // 写操作由目标页自身按 readOnly 收敛。
+                      onOpen={
+                        (item.count ?? 0) > 0
+                          ? () => onNavigate?.(item.tab)
+                          : undefined
+                      }
+                      openLabel={readOnly ? "去查看" : "去处理"}
+                    />
+                  ))}
+              </ul>
+            </section>
+          ))}
         </section>
       </div>
 

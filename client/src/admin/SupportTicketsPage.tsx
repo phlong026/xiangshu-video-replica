@@ -32,6 +32,8 @@ const CATEGORY_OPTIONS: Array<{ value: string; label: string }> = [
 
 const STATUS_OPTIONS = [
   { value: "", label: "全部状态" },
+  // 未结案 = 待处理 + 处理中，与总览「工单未结案」待办同口径。
+  { value: "unresolved", label: "未结案" },
   { value: "open", label: "待处理" },
   { value: "processing", label: "处理中" },
   { value: "resolved", label: "已解决" },
@@ -40,14 +42,16 @@ const STATUS_OPTIONS = [
 export function SupportTicketsPage({
   readOnly = false,
   onCustomer,
+  initialStatus = "",
 }: {
   readOnly?: boolean;
   onCustomer?: (id: string) => void;
+  initialStatus?: string;
 }) {
   const [items, setItems] = useState<SupportTicket[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState(initialStatus);
   const [category, setCategory] = useState("");
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(true);

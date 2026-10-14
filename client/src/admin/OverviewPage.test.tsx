@@ -217,6 +217,34 @@ describe("OverviewPage", () => {
     ).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("待办按业务域分组；告警不可用时显示「—」而不是 0", async () => {
+    installFetch({
+      ...summaryPayload,
+      todos: {
+        ...summaryPayload.todos,
+        open_tickets: 4,
+        queue_attention: 1,
+        content_prepare_failed: 0,
+        pending_orders: 0,
+        active_alerts: null,
+      },
+    });
+    const onNavigate = vi.fn();
+    render(<OverviewPage onNavigate={onNavigate} />);
+    const customer = await screen.findByRole("region", { name: "客户待办" });
+    expect(within(customer).getByText("工单未结案")).toBeInTheDocument();
+    fireEvent.click(within(customer).getByRole("button", { name: "去处理" }));
+    expect(onNavigate).toHaveBeenCalledWith("openTickets");
+    const system = screen.getByRole("region", { name: "系统待办" });
+    expect(within(system).getByText("告警聚合暂不可用")).toBeInTheDocument();
+    expect(within(system).getByText("—")).toBeInTheDocument();
+    for (const group of ["资金", "生成", "内容"]) {
+      expect(
+        screen.getByRole("region", { name: `${group}待办` }),
+      ).toBeInTheDocument();
+    }
+  });
+
   it("keeps unsettled and legacy costs unknown in cards and chart", async () => {
     const onNavigate = vi.fn();
     installFetch({

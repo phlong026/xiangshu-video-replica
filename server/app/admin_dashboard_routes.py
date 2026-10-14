@@ -12,10 +12,12 @@ from fastapi import APIRouter, HTTPException
 from app.admin_auth_routes import AdminReader
 from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE, NONCASH_ADJUSTMENT, OFFLINE_CASH_EVIDENCE
 from app.admin_customer_metrics import utc_text_timestamp
+from app.admin_worker_observation_routes import queue_attention_count
 from app.billing_catalog import SERVICES
 from app.billing_reports import UNMETERED_DELIVERED_CHARGE, date_bounds, statistics
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
+from app.viral_content_state import content_state_sql
 
 router = APIRouter(prefix="/api/control", tags=["admin-dashboard"])
 
@@ -207,6 +209,29 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
         unconfigured_rates = sum(
             item.customer_charge_allowed and key not in configured for key, item in SERVICES.items()
         )
+        # 全局待办（整改 T11）：每项计数与跳转后清单同口径，点进去条数一致。
+        open_tickets = int(
+            _one(
+                conn,
+                "SELECT count(*) FROM support_tickets WHERE status IN ('open', 'processing')",
+            )
+        )
+        pending_orders = int(
+            _one(conn, "SELECT count(*) FROM recharge_orders WHERE status = 'PENDING'")
+        )
+        queue_attention = queue_attention_count(conn)
+        content_prepare_failed = int(
+            _one(
+                conn,
+                f"""
+                SELECT count(*) FROM viral_videos v
+                WHERE v.deleted_at IS NULL
+                  AND v.platform IN ('douyin', 'wechat_channels')
+                  AND ({content_state_sql("v")}) = 'prepare_failed'
+                """,
+            )
+        )
+    active_alerts = _active_alert_count()
 
     trend = [
         {
@@ -251,8 +276,28 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
             "reconciliation_problems": reconciliation_problems,
             "unconfigured_rates": unconfigured_rates,
             "unknown_cost_records": today_financial.get("unknown_cost_count", 0),
+            "open_tickets": open_tickets,
+            "pending_orders": pending_orders,
+            "queue_attention": queue_attention,
+            "content_prepare_failed": content_prepare_failed,
+            "active_alerts": active_alerts,
         },
     }
+
+
+def _active_alert_count() -> int | None:
+    """告警总览当前命中的条数；与「通知与告警」页的告警总览同源。
+
+    告警聚合跨多张表、依赖告警设置行：任何一处不可用都只让这一项显示未知
+    （None），不能拖垮整个总览——总览恰恰是排障时第一个打开的页面。
+    """
+    from app.failure_rate_alerts import build_alerts_overview
+
+    try:
+        with pg_transaction() as raw:
+            return len(build_alerts_overview(BusinessConnection.postgres(raw)).items)
+    except Exception:  # noqa: BLE001 — 告警不可用只降级本项，见 docstring。
+        return None
 
 
 # ---------------------------------------------------------------------------

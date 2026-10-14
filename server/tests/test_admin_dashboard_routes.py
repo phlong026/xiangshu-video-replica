@@ -233,6 +233,47 @@ def test_dashboard_summary_counts(admin_headers: dict[str, str], client: TestCli
     assert today_trend[0]["cost_fen"] == 0
 
 
+def test_global_todos_match_their_target_lists(
+    admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
+) -> None:
+    """T11 全局待办：工单、待支付订单、队列、内容、告警；条数与目标清单同口径。"""
+    payload = client.get("/api/control/dashboard/summary", headers=admin_headers).json()
+    todos = payload["todos"]
+    assert todos["open_tickets"] == 0
+    assert todos["pending_orders"] == 0
+    assert todos["queue_attention"] == 0
+    assert todos["content_prepare_failed"] == 0
+    # 告警聚合不可用时只降级为 None，不拖垮总览。
+    assert todos["active_alerts"] is None or isinstance(todos["active_alerts"], int)
+
+    with psycopg.connect(dashboard_pg_dsn, autocommit=True) as conn:
+        for ticket_id, status in (
+            ("t-open", "open"),
+            ("t-doing", "processing"),
+            ("t-done", "resolved"),
+        ):
+            conn.execute(
+                "INSERT INTO support_tickets (id, category, summary, status, "
+                "created_by_user_id) VALUES (%s, 'other', '测试工单', %s, 'admin_u')",
+                (ticket_id, status),
+            )
+        conn.execute(
+            """
+            INSERT INTO recharge_orders (id, user_id, provider, amount_fen, credits,
+                status, merchant_order_no, base_unit_price_fen_snapshot,
+                charged_unit_price_fen_snapshot, min_recharge_fen_snapshot,
+                recharge_step_fen_snapshot, created_at)
+            VALUES ('order_pending', 'cust_1', 'zpay', 10000, 10, 'PENDING',
+                    'W15-ORDER-PENDING', 1000, 1000, 10000, 1000,
+                    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+            """
+        )
+    todos = client.get("/api/control/dashboard/summary", headers=admin_headers).json()["todos"]
+    # 已解决工单不计入「未结案」。
+    assert todos["open_tickets"] == 2
+    assert todos["pending_orders"] == 1
+
+
 def test_failed_todo_counts_oral_failures_when_no_video_failed(
     admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
 ) -> None:
