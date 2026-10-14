@@ -430,7 +430,7 @@ export type StudioContextValue = {
   confirmFinalDraft: () => void;
   /** 上传来源视频 → 提取文案（script-from-audio）→ 回填草稿并跳文案工坊。
    * 爆款来源额外带 `copyClaim`（视频的平台与原生 ID）：转写完成后凭它回获取接口
-   * 取正文（交付免费，2026-10-04 拍板）；转写费落在 ASR 科目。 */
+   * 取正文（计费以服务端 claim 回执为准）；转写费落在 ASR 科目。 */
   extractScriptFromUpload: (
     projectId?: string,
     assetId?: string,

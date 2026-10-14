@@ -1647,7 +1647,7 @@ export function StudioWorkspace({
           const deliveryKey = JSON.stringify([saveAccountRef.current, task.id]);
           if (deliveredExtractionTasksRef.current.has(deliveryKey)) return;
           // 普通任务正文随任务接口下发；爆款任务正文为 null，凭任务里带的视频身份
-          // 回「获取文案」取一次（交付免费，2026-10-04 拍板）。
+          // 回「获取文案」取一次（计费以服务端回执为准：转写者本人免费，非转写者首次扣一次）。
           const text = task.result?.text ?? "";
           const viralSource = task.copyClaimRequired
             ? task.viralSource
@@ -2307,7 +2307,7 @@ export function StudioWorkspace({
       },
     });
     navigate("copy", { returnTo: "workbench" });
-    // 「获取文案」收费（2026-10-06 拍板）：命中缓存秒回同样按 viral_copy 扣费
+    // 「获取文案」计费（2026-10-08 口径）：命中缓存秒回同样按 viral_copy 扣费
     // （同账号同视频只扣一次）；回执 charged>0 时刷新钱包余额展示。
     if (billing.charged > 0) {
       setWalletRevision((value) => value + 1);

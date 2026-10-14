@@ -8644,7 +8644,7 @@ export type ViralCopyStatus = {
   /** 共享缓存里有没有这条视频的文案：true = 现在获取即可秒回。 */
   available: boolean;
   updatedAt: string | null;
-  /** 历史口径字段：交付已免费（2026-10-04），仅反映该账号过去是否付过获取费。 */
+  /** 反映该付费账号是否已为这条详情付过费（查看详情已于 2026-10-13 起免费，仅历史购买会置位）。 */
   purchased: boolean;
 };
 
@@ -8668,7 +8668,8 @@ export function fetchViralCopy(
 }
 
 /**
- * 获取共享文案：命中缓存即返回正文并按 viral_copy 科目扣费（2026-10-06 拍板）.
+ * 获取共享文案：命中缓存即返回正文。计费口径（2026-10-08）：转写者本人取自己的产出免费、
+ * 已购复看免费，非转写者首次获取按 viral_copy 科目扣一次（服务端 charge_viral_copy 为准）.
  *
  * 同一账号同一条视频只扣一次：复看时 charged=0 且 deduped=true。未命中返回
  * `text=null` 且分文不扣，调用方再走本地抽音轨转写（那一步按秒计 ASR 费）。

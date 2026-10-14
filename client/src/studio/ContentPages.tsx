@@ -2255,7 +2255,7 @@ export function ViralDetailPage() {
       sourceAssetId: task.sourceAssetId,
     });
     // Web 降级链路（本地无缓存，素材由服务端导入）：同样带上视频身份，转写完成后
-    // 走一次「获取文案」取正文（交付免费，2026-10-04 拍板）。
+    // 走一次「获取文案」取正文（计费以服务端 claim 回执为准）。
     // 没有平台标识就没法关联文案，只能按普通转写处理（这类条目本就进不了爆款列表）。
     const copyClaim =
       video.platformKey && video.nativeId
