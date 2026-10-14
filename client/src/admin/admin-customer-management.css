@@ -333,3 +333,48 @@
     outline-color: transparent;
   }
 }
+
+/* 顶栏全局搜索：输入框 + 结果下拉，挂在顶栏会话区左侧。 */
+.admin-global-search {
+  position: relative;
+  display: block;
+}
+
+.admin-global-search__form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-global-search input {
+  width: 240px;
+  max-width: 40vw;
+}
+
+.admin-global-search__message {
+  font-size: 12px;
+  color: var(--admin-muted, #6b7280);
+}
+
+.admin-global-search__results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 280px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--admin-surface, #fff);
+  border: 1px solid var(--admin-border, #e5e7eb);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.admin-global-search__results button {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  align-items: flex-start;
+  text-align: left;
+}

@@ -17,6 +17,7 @@ import { DeviceManagement } from "./admin/DeviceManagement";
 import { ExternalCallsPage } from "./admin/ExternalCallsPage";
 import { FundsPage } from "./admin/FundsPage";
 import { GenerationRecordsPage } from "./admin/GenerationRecordsPage";
+import { GlobalSearch } from "./admin/GlobalSearch";
 import { OverviewPage } from "./admin/OverviewPage";
 import { PublishStatsPage } from "./admin/PublishStatsPage";
 import { ReportsPage } from "./admin/ReportsPage";
@@ -933,6 +934,18 @@ export function AdminApp() {
           </span>
         </div>
         <div className="admin-session">
+          <GlobalSearch
+            onPick={(item) => {
+              // 命中后一步到详情：客户 → 客户详情；订单 → 资金中心订单；任务 → 生成记录。
+              if (item.type === "customer")
+                navigateAdmin("customersMgmt", "customer", { userId: item.id });
+              else if (item.type === "order")
+                navigateAdmin("funds", "order", { orderNo: item.id });
+              else navigateAdmin("generationRecords", "", { taskId: item.id });
+              setError("");
+              setNotice("");
+            }}
+          />
           <time dateTime={shanghaiDate()}>{shanghaiDate()}</time>
           <button type="button" onClick={() => setChangePasswordOpen(true)}>
             修改密码

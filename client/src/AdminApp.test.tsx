@@ -232,6 +232,22 @@ function installFetch(options?: {
     ) {
       return jsonResponse(undefined, 204);
     }
+    if (url.includes("/api/control/search?")) {
+      const q = new URL(url).searchParams.get("q");
+      return jsonResponse({
+        items:
+          q === "TASK-9"
+            ? [
+                {
+                  type: "task",
+                  id: "TASK-9",
+                  label: "视频任务 TASK-9",
+                  detail: "生成记录",
+                },
+              ]
+            : [],
+      });
+    }
     if (url.endsWith("/api/control/publish-stats/enabled")) {
       return jsonResponse({ enabled: options?.publishStatsEnabled ?? false });
     }
@@ -1541,6 +1557,27 @@ describe("AdminApp", () => {
       expect(listCall?.searchParams.get("status")).toBe(
         "UNKNOWN,SUBMISSION_UNCERTAIN",
       );
+    });
+  });
+
+  it("顶栏全局搜索：粘贴任务号一步到对应生成记录", async () => {
+    const fetchMock = installFetch({ session: "valid" });
+    render(<AdminApp />);
+    fireEvent.change(await screen.findByLabelText("全局搜索"), {
+      target: { value: "TASK-9" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() =>
+      expect(window.location.hash).toContain("#admin/generationRecords"),
+    );
+    expect(window.location.hash).toContain("taskId=TASK-9");
+    await waitFor(() => {
+      const listCall = fetchMock.mock.calls
+        .map(([url]) => new URL(String(url)))
+        .find((url) =>
+          url.pathname.endsWith("/api/control/generation-records"),
+        );
+      expect(listCall?.searchParams.get("task_ref")).toBe("TASK-9");
     });
   });
 

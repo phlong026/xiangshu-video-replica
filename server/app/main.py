@@ -29,6 +29,7 @@ from app.admin_generation_routes import router as admin_generation_router
 from app.admin_publish_stats_routes import router as publish_stats_router
 from app.admin_refund_routes import router as admin_refund_router
 from app.admin_runtime_routes import router as admin_runtime_router
+from app.admin_search_routes import router as admin_search_router
 from app.admin_session_routes import router as admin_session_router
 from app.admin_support_ticket_routes import router as support_ticket_router
 from app.admin_team_routes import router as admin_team_router
@@ -398,6 +399,7 @@ app.include_router(payment_router)
 app.include_router(control_router)
 app.include_router(admin_auth_router)
 app.include_router(admin_dashboard_router)
+app.include_router(admin_search_router)
 app.include_router(admin_customer_router)
 app.include_router(customer_ops_params_router)
 app.include_router(customer_lifecycle_router)
