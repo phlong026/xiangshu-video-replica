@@ -13,7 +13,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   setAdminCsrfToken("");
 });
-it("探测先读最新费用，取消不调用供应商，确认带价格快照和写契约", async () => {
+it("探测先读最新费用，取消不调用上游服务，确认带价格快照和写契约", async () => {
   let price = 1;
   const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url.includes("/operations/estimate"))

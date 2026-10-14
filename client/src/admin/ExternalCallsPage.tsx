@@ -193,7 +193,7 @@ export function ExternalCallsPage() {
           />
         </label>
         <label>
-          任务编号、8 位错误编号或第三方任务号；重号用服务商:凭证
+          任务编号、8 位错误编号或第三方任务号；重号用上游服务:凭证
           <input
             value={draft.task_ref}
             placeholder="我方完整或8位编号、第三方任务号或请求编号"

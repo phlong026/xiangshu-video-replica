@@ -216,3 +216,19 @@
   align-items: flex-end;
   gap: 8px;
 }
+
+/* 口径说明折叠块：默认只占一行，展开后沿用 admin-hint 的字号与配色。 */
+.admin-rule-note {
+  margin: 4px 0;
+}
+.admin-rule-note > summary {
+  width: fit-content;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--font-caption);
+  cursor: pointer;
+}
+.admin-rule-note__body {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}

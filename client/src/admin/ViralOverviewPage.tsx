@@ -7,6 +7,7 @@ import {
   viralLibraryOverview,
 } from "../api.admin";
 import { PageBanner } from "./ui/PageBanner";
+import { RuleNote } from "./ui/RuleNote";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 import { ViralResourceCosts } from "./ViralResourceCosts";
 
@@ -120,7 +121,6 @@ export function ViralOverviewPage({
           <h3>
             采集转化（仅起计以来） · {business.from} 至 {business.to}
           </h3>
-          <p className="admin-hint">{business.cohortRule}</p>
           <dl className="admin-content-funnel">
             {business.funnel.map((step) => (
               <div key={step.name}>
@@ -158,12 +158,15 @@ export function ViralOverviewPage({
                 .join(" · ")}
             </p>
           )}
-          <p className="admin-hint">
-            {business.historyNote} 起计：
-            {formatDateTime(business.measurementStartedAt)}
-            。直接获取文案但未记录详情读取：{business.directCopyWithoutDetail}{" "}
-            条。
-          </p>
+          <RuleNote>
+            <p className="admin-hint">{business.cohortRule}</p>
+            <p className="admin-hint">
+              {business.historyNote} 起计：
+              {formatDateTime(business.measurementStartedAt)}
+              。直接获取文案但未记录详情读取：{business.directCopyWithoutDetail}{" "}
+              条。
+            </p>
+          </RuleNote>
           <h3>爆款业务收支 · 同一区间全部平台</h3>
           <dl className="admin-viral-tiles">
             {[

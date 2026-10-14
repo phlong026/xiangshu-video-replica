@@ -12,6 +12,7 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
+import { RuleNote } from "./ui/RuleNote";
 import { StatusBadge } from "./ui/StatusBadge";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 
@@ -183,8 +184,10 @@ export function CustomerLifecyclePage({
               </button>
             ))}
           </section>
-          <p className="admin-hint">{data.lifecycleRule}</p>
-          <p className="admin-hint">{data.healthRule}</p>
+          <RuleNote>
+            <p className="admin-hint">{data.lifecycleRule}</p>
+            <p className="admin-hint">{data.healthRule}</p>
+          </RuleNote>
         </>
       ) : null}
       <form

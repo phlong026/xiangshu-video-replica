@@ -720,7 +720,7 @@ function pendingCopy(action: PendingAction, count: number) {
     return {
       title: batch ? `推送 ${count} 条视频到前端` : "推送到前端",
       description:
-        "素材就绪的视频立即对客户可见；未就绪的自动按默认分辨率转存素材（视频号在服务端解密），就绪后自动上架。推送上架不受发布时间 7 天窗口限制。供应商成本记平台账，不扣客户积分。",
+        "素材就绪的视频立即对客户可见；未就绪的自动按默认分辨率转存素材（视频号在服务端解密），就绪后自动上架。推送上架不受发布时间 7 天窗口限制。上游服务成本记平台账，不扣客户积分。",
     };
   if (action === "prepare")
     return {
@@ -732,13 +732,13 @@ function pendingCopy(action: PendingAction, count: number) {
     return {
       title: "立即采集爆款视频",
       description:
-        "将按已配置的关键词触发一轮采集，采到的视频进入内容池，准备后才能展示到首页。供应商成本记平台账，不扣客户积分。",
+        "将按已配置的关键词触发一轮采集，采到的视频进入内容池，准备后才能展示到首页。上游服务成本记平台账，不扣客户积分。",
     };
   if (action === "archive")
     return {
       title: "准备单条视频素材",
       description:
-        "后台将获取此视频并准备到已配置的云存储，可能产生供应商调用费用。已完成的视频文件会复用；不会重新搜索整个列表或修改首页展示。请填写操作原因。",
+        "后台将获取此视频并准备到已配置的云存储，可能产生上游服务调用费用。已完成的视频文件会复用；不会重新搜索整个列表或修改首页展示。请填写操作原因。",
     };
   if (action === "delete")
     return batch
@@ -1697,7 +1697,7 @@ export function ViralVideosPage({
         <section aria-label="实时搜索上游" className="admin-viral-upstream">
           <h3>实时搜索入库</h3>
           <p className="admin-hint">
-            数据接口按关键词检索，结果保存到视频库；供应商成本记平台账，不扣客户积分。搜索后可准备素材再展示到首页。
+            数据接口按关键词检索，结果保存到视频库；上游服务成本记平台账，不扣客户积分。搜索后可准备素材再展示到首页。
           </p>
           <form
             className="admin-toolbar admin-viral-toolbar"

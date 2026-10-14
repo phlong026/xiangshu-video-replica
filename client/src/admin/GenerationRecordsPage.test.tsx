@@ -75,7 +75,7 @@ function videoFailureRecord(
     project_name: "演示项目",
     status: "FAILED",
     retry_path: "PRE_PROVIDER",
-    handling_advice: "尚未触达服务商，按原规则重新入队。",
+    handling_advice: "尚未触达上游服务，按原规则重新入队。",
     provider: null,
     model: null,
     provider_cost: null,
@@ -625,11 +625,11 @@ describe("GenerationRecordsPage", () => {
 
     render(<GenerationRecordsPage initialStatus="FAILED" />);
 
-    expect(await screen.findByText("服务商故障 · 1 次")).toBeInTheDocument();
+    expect(await screen.findByText("上游服务故障 · 1 次")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("查看详情"));
     expect(screen.getByText("原因分类")).toBeInTheDocument();
-    expect(screen.getByText("服务商故障")).toBeInTheDocument();
+    expect(screen.getByText("上游服务故障")).toBeInTheDocument();
     expect(screen.getByText("处理人")).toBeInTheDocument();
     expect(screen.getByText("运营重试")).toBeInTheDocument();
   });
@@ -916,7 +916,7 @@ describe("GenerationRecordsPage", () => {
       ),
     );
     expect(
-      await screen.findByText(/已对账：任务 ff-stuck 供应商侧已受理/),
+      await screen.findByText(/已对账：任务 ff-stuck 上游服务侧已受理/),
     ).toBeInTheDocument();
     // 对账后重新拉取列表：状态已被服务端改写，旧行不该留在页面上。
     await waitFor(() =>

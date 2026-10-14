@@ -999,7 +999,7 @@ describe("ViralVideosPage", () => {
   });
 });
 
-it("可精确打开列表页外的任务视频，查询编码ID且不发起准备或供应商请求", async () => {
+it("可精确打开列表页外的任务视频，查询编码ID且不发起准备或上游服务请求", async () => {
   const video = row({ video_id: "off-page/opaque=id", title: "列表页外目标" });
   const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url.includes("/details"))
