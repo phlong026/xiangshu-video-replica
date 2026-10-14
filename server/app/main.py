@@ -20,6 +20,7 @@ from app.admin_auth_routes import router as admin_auth_router
 from app.admin_customer_annotation_routes import router as admin_customer_annotation_router
 from app.admin_customer_benefit_routes import router as admin_customer_benefit_router
 from app.admin_customer_lifecycle_routes import router as customer_lifecycle_router
+from app.admin_customer_ops_params_routes import router as customer_ops_params_router
 from app.admin_customer_routes import router as admin_customer_router
 from app.admin_dashboard_routes import router as admin_dashboard_router
 from app.admin_device_routes import router as admin_device_router
@@ -398,6 +399,7 @@ app.include_router(control_router)
 app.include_router(admin_auth_router)
 app.include_router(admin_dashboard_router)
 app.include_router(admin_customer_router)
+app.include_router(customer_ops_params_router)
 app.include_router(customer_lifecycle_router)
 app.include_router(admin_customer_benefit_router)
 app.include_router(admin_customer_annotation_router)

@@ -102,6 +102,8 @@ export function CustomerList({
   const [attention, setAttention] = useState<CustomerListOptions["attention"]>(
     (initial.get("attention") as CustomerListOptions["attention"]) || "",
   );
+  // 服务端回传的生效阈值：输入框为空时就是系统设置里的运营参数。
+  const [defaultThreshold, setDefaultThreshold] = useState<number | null>(null);
   const [attentionCounts, setAttentionCounts] =
     useState<CustomerListResponse["attention_counts"]>();
   const [expandedUserId, setExpandedUserId] = useState<string | null>(
@@ -159,6 +161,7 @@ export function CustomerList({
       setCustomers(response.items);
       setTotal(response.total);
       setAttentionCounts(response.attention_counts);
+      setDefaultThreshold(response.low_balance_threshold ?? null);
     } catch (err) {
       if (sequence !== requestId.current) return;
       setError(
@@ -394,7 +397,9 @@ export function CustomerList({
             min="0"
             max="2147483647"
             step="1"
-            placeholder="未配置"
+            placeholder={
+              defaultThreshold !== null ? `默认 ${defaultThreshold}` : "默认"
+            }
             value={threshold}
             onChange={(event) => setThreshold(event.target.value)}
           />
@@ -440,8 +445,10 @@ export function CustomerList({
       <p className="admin-hint">
         全量当前筛选客户，不受分页影响。
         {filters.threshold !== ""
-          ? `低余额：严格小于 ${filters.threshold} 积分。`
-          : "低余额阈值未配置，输入阈值并筛选后启用。"}
+          ? `低余额：严格小于 ${filters.threshold} 积分（本次临时阈值）。`
+          : defaultThreshold !== null
+            ? `低余额：严格小于 ${defaultThreshold} 积分（系统设置 → 运营参数）。`
+            : ""}
         生成成功率按近30天创建任务计算；30天未活跃使用登录、心跳、生成和账本活动。
         {attention && (
           <button

@@ -279,7 +279,9 @@ export function CustomerLifecyclePage({
               <td>
                 <strong
                   className={
-                    item.health_score < 40 ? "is-danger-text" : undefined
+                    item.health_score < (data?.healthAlertScore ?? 40)
+                      ? "is-danger-text"
+                      : undefined
                   }
                 >
                   {item.health_score}

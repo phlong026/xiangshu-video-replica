@@ -3071,12 +3071,16 @@ def test_customer_attention_is_global_sorted_and_matches_export(client: TestClie
         headers=headers,
     ).json()["items"][0]
     assert target["success_rate_30d"] is None and target["low_balance"] is False
-    assert (
-        client.get(
-            "/api/control/customers", params={"attention": "low_balance"}, headers=headers
-        ).status_code
-        == 400
+    # 未显式传阈值时取持久化的运营参数（T29，默认 100），不再 400：
+    # 余额 49/50 的这批客户都低于默认线，卡片开箱可用。
+    default_threshold = client.get(
+        "/api/control/customers",
+        params={"username": "scope-", "attention": "low_balance"},
+        headers=headers,
     )
+    assert default_threshold.status_code == 200, default_threshold.text
+    assert default_threshold.json()["low_balance_threshold"] == 100
+    assert default_threshold.json()["total"] == 25
     exported = client.get(
         "/api/control/customers.csv", params={**params, "attention": "low_balance"}, headers=headers
     )

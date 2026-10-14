@@ -4,13 +4,13 @@
 
 - **生命周期**：new = 注册 14 天内；active = 30 天内有任务或消费；dormant =
   30–90 天无活动；churned = 超过 90 天无活动。停用账号不参与分层。
-- **健康分**（0–100，越高越健康）：近 30 天有成功任务 +40；余额 >100 积分
-  +30（够一次最低消耗）；近 7 天无失败 +20；近 30 天有充值 +10。
-  低分（<40）= 需要运营介入的信号组合。
+- **健康分**（0–100，越高越健康）：近 30 天有成功任务 +40；余额高于低余额阈值
+  （默认 100 积分，够一次最低消耗）+30；近 7 天无失败 +20；近 30 天有充值 +10。
+  低于预警线（默认 40）= 需要运营介入的信号组合。
 
-数据全部来自既有 CUSTOMER_FACTS_CTE / CUSTOMER_METRICS_JOINS 聚合，本模块
-零新表零迁移。批量赠送走既有逐户调账端点（前端按幂等键串行），不在服务端
-复制钱包写入逻辑。
+数据全部来自既有 CUSTOMER_FACTS_CTE / CUSTOMER_METRICS_JOINS 聚合；两条阈值来自
+runtime_settings 的运营参数（T29），与客户列表「余额不足」共用，本模块不新增表。
+批量赠送走既有逐户调账端点（前端按幂等键串行），不在服务端复制钱包写入逻辑。
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from app.admin_customer_metrics import (
 )
 from app.admin_customer_routes import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from app.admin_write_contract import http_error as _http
+from app.customer_ops_params import CustomerOpsParams, read_customer_ops_params
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.sql_pagination import page_bounds
 
@@ -35,10 +36,18 @@ LIFECYCLE_RULE = (
     "new = 注册 14 天内；active = 30 天内有任务或消费；"
     "dormant = 30–90 天无活动；churned = 超过 90 天无活动。停用账号不参与分层。"
 )
-HEALTH_RULE = (
-    "健康分（0–100）：近 30 天成功任务 +40；余额 >100 积分 +30；"
-    "近 7 天无失败 +20；近 30 天有充值 +10。低于 40 视为需运营介入。"
-)
+
+
+def health_rule(params: CustomerOpsParams) -> str:
+    """口径文案随运营参数下发：阈值改了，页面说明同步变。"""
+    return (
+        "健康分（0–100）：近 30 天成功任务 +40；"
+        f"余额高于 {params['low_balance_threshold']} 积分 +30；"
+        "近 7 天无失败 +20；近 30 天有充值 +10。"
+        f"低于 {params['health_alert_score']} 视为需运营介入。"
+        "阈值在系统设置「运营参数」里调整，与客户列表「余额不足」共用。"
+    )
+
 
 _STAGE_SQL = f"""
 CASE
@@ -53,7 +62,7 @@ END
 
 _HEALTH_SQL = """
 (CASE WHEN COALESCE(recent.succeeded_30d, 0) > 0 THEN 40 ELSE 0 END
- + CASE WHEN COALESCE(w.available_credits, 0) > 100 THEN 30 ELSE 0 END
+ + CASE WHEN COALESCE(w.available_credits, 0) > %s THEN 30 ELSE 0 END
  + CASE WHEN COALESCE(recent.failed_7d, 0) = 0 THEN 20 ELSE 0 END
  + CASE WHEN COALESCE(recharge.total_fen, 0) > 0
           AND recharge.last_at >= now()-interval '30 days' THEN 10 ELSE 0 END)
@@ -80,6 +89,8 @@ def list_customer_lifecycle(
         row_params.append(stage.strip())
     try:
         with pg_transaction(isolation="REPEATABLE READ") as conn:
+            ops_params = read_customer_ops_params(conn)
+            balance_floor = ops_params["low_balance_threshold"]
             rows = conn.execute(
                 CUSTOMER_FACTS_CTE
                 + f"""
@@ -109,7 +120,7 @@ def list_customer_lifecycle(
                 ORDER BY health_score ASC, created_at DESC
                 LIMIT %s OFFSET %s
                 """,
-                (*row_params, bounded_limit, bounded_offset),
+                (balance_floor, *row_params, bounded_limit, bounded_offset),
             ).fetchall()
             distribution = conn.execute(
                 CUSTOMER_FACTS_CTE
@@ -128,7 +139,8 @@ def list_customer_lifecycle(
                   {CUSTOMER_METRICS_JOINS}
                   WHERE u.role = 'customer' AND u.is_active = 1
                 ) grouped GROUP BY stage ORDER BY stage
-                """
+                """,
+                (balance_floor,),
             ).fetchall()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(
@@ -144,7 +156,9 @@ def list_customer_lifecycle(
             for r in distribution
         ],
         "lifecycleRule": LIFECYCLE_RULE,
-        "healthRule": HEALTH_RULE,
+        "healthRule": health_rule(ops_params),
+        "healthAlertScore": ops_params["health_alert_score"],
+        "lowBalanceThreshold": ops_params["low_balance_threshold"],
         "limit": bounded_limit,
         "offset": bounded_offset,
     }

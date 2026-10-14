@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261014T1000_support_ticket_priority"
+      "20261014T1100_customer_ops_params"
     ],
     "parents": {
       "001_core": null,
@@ -183,9 +183,10 @@
       "20261008T1400_publish_stats_flag": "20261008T1300_viral_homepage_capacity",
       "20261008T1500_recharge_package_window": "20261008T1400_publish_stats_flag",
       "20261008T1600_support_tickets": "20261008T1500_recharge_package_window",
-      "20261014T1000_support_ticket_priority": "20261008T1600_support_tickets"
+      "20261014T1000_support_ticket_priority": "20261008T1600_support_tickets",
+      "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority"
     },
-    "revision_count": 164
+    "revision_count": 165
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -855,6 +856,10 @@
     "20261014T1000_support_ticket_priority": {
       "file": "versions/20261014T1000_support_ticket_priority.py",
       "sha256": "e3b71ebac5b802dc4599613b82efdb8bd9c2aa265a99ddb568f3363a1cd8b311"
+    },
+    "20261014T1100_customer_ops_params": {
+      "file": "versions/20261014T1100_customer_ops_params.py",
+      "sha256": "750f2206e91b953be92523522c2aa5daa977357dba3f6e0547ea5c80e3533102"
     }
   },
   "task": "MIGRATION-GUARD-20260912"
