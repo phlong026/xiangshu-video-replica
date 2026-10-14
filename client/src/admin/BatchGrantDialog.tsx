@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { createCustomerAdjustment } from "../api.admin";
+import { runAdjustmentBatch } from "./batchAdjustments";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 
 export interface BatchTarget {
@@ -36,7 +36,8 @@ export function BatchGrantDialog({
   const [error, setError] = useState("");
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({});
   const keysRef = useRef<{
-    fingerprint: string;
+    amount: number;
+    reason: string;
     ref: string;
     keys: Map<string, string>;
   } | null>(null);
@@ -44,6 +45,7 @@ export function BatchGrantDialog({
   const failed = targets.filter((item) => outcomes[item.user_id]?.ok === false);
   const succeeded = targets.filter((item) => outcomes[item.user_id]?.ok);
   const isRetry = failed.length > 0;
+  const locked = keysRef.current !== null;
 
   function close() {
     if (saving) return;
@@ -56,62 +58,46 @@ export function BatchGrantDialog({
   }
 
   async function run(reason: string) {
-    const amount = Number.parseInt(credits, 10);
-    if (
-      !Number.isInteger(amount) ||
-      amount <= 0 ||
-      String(amount) !== credits
-    ) {
-      setError("赠送积分必须是正整数。");
-      return;
-    }
-    // 金额 / 单号 / 原因任一变化都视为新的一批，换一组幂等键。
-    const fingerprint = `${amount}|${ref.trim()}|${reason}`;
-    const fresh = keysRef.current?.fingerprint !== fingerprint;
-    if (fresh) {
+    // 首次提交后锁定金额 / 单号 / 原因：重试沿用同一批幂等键，而幂等键与请求内容绑定，
+    // 中途改动会让已到达服务端的客户撞 409，或被当成新请求重复发放。
+    if (keysRef.current === null) {
+      const amount = Number.parseInt(credits, 10);
+      if (
+        !Number.isInteger(amount) ||
+        amount <= 0 ||
+        String(amount) !== credits
+      ) {
+        setError("赠送积分必须是正整数。");
+        return;
+      }
       keysRef.current = {
-        fingerprint,
+        amount,
+        reason,
         ref: ref.trim() || `batch-${Date.now()}`,
         keys: new Map(),
       };
-      setOutcomes({});
     }
-    const batch = keysRef.current as NonNullable<typeof keysRef.current>;
-    const base: Record<string, Outcome> = fresh ? {} : outcomes;
-    const pending = targets.filter((item) => base[item.user_id]?.ok !== true);
+    const batch = keysRef.current;
+    const base: Record<string, Outcome> = outcomes;
     setSaving(true);
     setError("");
-    const next: Record<string, Outcome> = { ...base };
+    let next: Record<string, Outcome> = base;
     try {
-      let index = 0;
-      for (const item of pending) {
-        index += 1;
-        setProgress(`正在发放（${index}/${pending.length}）：${item.username}`);
-        let key = batch.keys.get(item.user_id);
-        if (!key) {
-          key = crypto.randomUUID();
-          batch.keys.set(item.user_id, key);
-        }
-        try {
-          await createCustomerAdjustment(
-            item.user_id,
-            {
-              sourceDocumentType: "FREE_GRANT",
-              sourceDocumentRef: batch.ref,
-              credits: amount,
-            },
-            reason,
-            key,
-          );
-          next[item.user_id] = { ok: true, message: "" };
-        } catch (cause) {
-          next[item.user_id] = {
-            ok: false,
-            message: cause instanceof Error ? cause.message : "发放失败",
-          };
-        }
-        setOutcomes({ ...next });
-      }
+      next = await runAdjustmentBatch({
+        jobs: targets.map((item) => ({
+          id: item.user_id,
+          userId: item.user_id,
+          label: item.username,
+          credits: batch.amount,
+          sourceDocumentType: "FREE_GRANT",
+          sourceDocumentRef: batch.ref,
+        })),
+        base,
+        keys: batch.keys,
+        reason: batch.reason,
+        onProgress: setProgress,
+        onOutcomes: setOutcomes,
+      });
     } finally {
       setSaving(false);
       setProgress("");
@@ -144,6 +130,7 @@ export function BatchGrantDialog({
         <input
           type="number"
           min={1}
+          disabled={locked}
           value={credits}
           onChange={(event) => setCredits(event.target.value)}
         />
@@ -152,6 +139,7 @@ export function BatchGrantDialog({
         发放单号（可追溯）
         <input
           value={ref}
+          disabled={locked}
           onChange={(event) => setRef(event.target.value)}
           placeholder="如：十月激活活动"
         />

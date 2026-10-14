@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-
+import { downloadGenerationRecordsCsv } from "../api";
 import {
   type AdminGenerationRecord,
   type AdminGenerationRecordSummaryCards,
@@ -10,6 +10,7 @@ import {
   reconcileFirstFrameTask,
   retryGenerationRecord,
 } from "../api.admin";
+import { BatchCompensateDialog } from "./BatchCompensateDialog";
 import { CopyDiagnosticReference } from "./CopyDiagnosticReference";
 import { FailureDiagnostics } from "./FailureDiagnostics";
 import { RecordCallsPanel } from "./RecordCallsPanel";
@@ -137,6 +138,11 @@ export function GenerationRecordsPage({
     setView(next);
   }
   const [notice, setNotice] = useState("");
+  // 详情抽屉（T33）：详情不再在表格行内展开，行高不随展开变化。
+  const [drawerKey, setDrawerKey] = useState<string | null>(null);
+  // 批量补偿：只勾选当前页的失败记录，换页 / 重新加载即清空。
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [batchOpen, setBatchOpen] = useState(false);
   // 首帧对账：确认框里只放"待处理的那一行"，避免把行对象散进多个状态。
   const [pendingReconcile, setPendingReconcile] =
     useState<AdminGenerationRecord | null>(null);
@@ -186,6 +192,7 @@ export function GenerationRecordsPage({
       setLoading(true);
       setError("");
       setItems([]);
+      setSelectedKeys(new Set());
       const query = {
         userId: initialUserId || undefined,
         username: filters.username || undefined,
@@ -360,6 +367,265 @@ export function GenerationRecordsPage({
     }
   }
 
+  /** 记录详情主体：结论（分类、处理人、建议）在上，排查用的编号与凭证收在折叠区。 */
+  const failedItems = items.filter((item) => FAILURE_STATUSES.has(item.status));
+  const selectedRecords = items.filter((item) =>
+    selectedKeys.has(recordKey(item)),
+  );
+  const drawerItem =
+    drawerKey === null
+      ? null
+      : (items.find((item) => recordKey(item) === drawerKey) ?? null);
+
+  function renderRecordDetail(item: AdminGenerationRecord) {
+    return (
+      <>
+        {/* 方案 P1：详情分「概要 / 技术详情」——运营先看结论
+                          （分类、谁来处理、积分是否退回），编号、凭证、状态码
+                          这类排查字段收进折叠区。 */}
+        <dl>
+          {item.failure_category && item.failure_owner ? (
+            <>
+              <dt>原因分类</dt>
+              <dd>
+                {labelFrom(FAILURE_CATEGORY_LABELS, item.failure_category)}
+              </dd>
+              <dt>处理人</dt>
+              <dd>{labelFrom(FAILURE_OWNER_LABELS, item.failure_owner)}</dd>
+            </>
+          ) : null}
+          {item.failure_phase ? (
+            <>
+              <dt>失败阶段</dt>
+              <dd>{labelFrom(FAILURE_PHASE_LABELS, item.failure_phase)}</dd>
+            </>
+          ) : null}
+          {item.advice ? (
+            <>
+              <dt>修复建议</dt>
+              <dd>{item.advice}</dd>
+            </>
+          ) : null}
+          {FAILURE_STATUSES.has(item.status) ? (
+            <>
+              <dt>本轮积分退回</dt>
+              <dd>
+                {item.credits_refunded == null
+                  ? "无法核验"
+                  : item.credits_refunded
+                    ? "已退回"
+                    : "未退回"}
+              </dd>
+            </>
+          ) : null}
+        </dl>
+        <details className="admin-generation-records__technical">
+          {/* biome-ignore lint/a11y/noStaticElementInteractions: summary 是 details 的固有开关（原生可聚焦、可键盘切换），这里只借用它的点击做懒加载登记。 */}
+          <summary
+            onClick={(event) => {
+              // 懒加载只在「即将打开」时触发：关闭动作不清空已加载内容。
+              const container = event.currentTarget.closest("details");
+              if (container instanceof HTMLDetailsElement && container.open) {
+                return;
+              }
+              const key = recordKey(item);
+              setOpenedDetails((prev) => {
+                if (prev.has(key)) return prev;
+                const next = new Set(prev);
+                next.add(key);
+                return next;
+              });
+            }}
+          >
+            技术详情
+          </summary>
+          <dl>
+            <dt>服务 / 模型</dt>
+            <dd>{formatProvider(item)}</dd>
+            <dt>原始状态</dt>
+            <dd>
+              {labelFrom(GENERATION_STATUS_LABELS, item.status)}（{item.status}
+              ）
+            </dd>
+            {!readOnly && item.error_message ? (
+              <>
+                <dt>错误说明</dt>
+                <dd>{item.error_message}</dd>
+              </>
+            ) : null}
+            <dt>记录编号</dt>
+            <dd>
+              <CopyDiagnosticReference
+                value={item.record_id}
+                label="任务编号"
+              />
+            </dd>
+            {item.short_ref ? (
+              <>
+                <dt>错误编号</dt>
+                <dd>
+                  <CopyDiagnosticReference
+                    value={item.short_ref}
+                    label="错误编号"
+                  />
+                </dd>
+              </>
+            ) : null}
+            {item.root_task_id ? (
+              <>
+                <dt>主记录</dt>
+                <dd>
+                  <CopyDiagnosticReference
+                    value={item.root_task_id}
+                    label="主记录编号"
+                  />
+                </dd>
+              </>
+            ) : null}
+            <dt>结果引用</dt>
+            <dd>{item.result_reference ?? "—"}</dd>
+            <dt>上游服务任务凭证</dt>
+            <dd>
+              {item.provider_reference ? (
+                <CopyDiagnosticReference
+                  value={item.provider_reference}
+                  label="上游服务任务凭证"
+                />
+              ) : (
+                "—"
+              )}
+            </dd>
+            <dt>错误码</dt>
+            <dd>{item.error_code ?? "—"}</dd>
+            {item.provider_error_code ? (
+              <>
+                <dt>上游服务错误码</dt>
+                <dd>{item.provider_error_code}</dd>
+              </>
+            ) : null}
+            {!readOnly && item.provider_message ? (
+              <>
+                <dt>上游服务原话</dt>
+                <dd>{item.provider_message}</dd>
+              </>
+            ) : null}
+            {item.status === "FAILED" && item.retryable != null ? (
+              <>
+                <dt>可否重试</dt>
+                <dd>{item.retryable ? "可重试" : "不可重试"}</dd>
+              </>
+            ) : null}
+            {item.upstream_status != null ? (
+              <>
+                <dt>上游状态码</dt>
+                <dd>{item.upstream_status}</dd>
+              </>
+            ) : null}
+            {!readOnly && item.upstream_reason ? (
+              <>
+                <dt>上游说明</dt>
+                <dd>{item.upstream_reason}</dd>
+              </>
+            ) : null}
+            <dt>记录数据</dt>
+            <dd>
+              {item.record_data_status === "CORRUPTED"
+                ? "记录数据损坏"
+                : "正常"}
+            </dd>
+          </dl>
+          <RecordCallsPanel
+            active={openedDetails.has(recordKey(item))}
+            readOnly={readOnly}
+            recordId={item.record_id}
+            recordType={item.record_type}
+          />
+        </details>
+
+        {item.status === "FAILED" ||
+        item.status === "ARCHIVE_FAILED" ||
+        item.status === "SUBMISSION_UNCERTAIN" ||
+        item.status === "UNKNOWN" ? (
+          <button
+            className="admin-diagnostics__jump"
+            type="button"
+            onClick={() => switchView("diagnostics", item.record_id)}
+          >
+            查看诊断
+          </button>
+        ) : null}
+        {!readOnly &&
+        item.record_type === FIRST_FRAME_RECORD_TYPE &&
+        item.status === SUBMISSION_UNCERTAIN ? (
+          <button
+            aria-label={`重新对账首帧任务 ${item.record_id}`}
+            className="admin-generation-records__reconcile"
+            type="button"
+            onClick={() => {
+              setPendingReconcile(item);
+              setReconcileError("");
+            }}
+          >
+            重新对账
+          </button>
+        ) : null}
+        {item.handling_advice ? <p>{item.handling_advice}</p> : null}
+        {!readOnly &&
+        item.record_type === VIDEO_RECORD_TYPE &&
+        item.retry_path ? (
+          <button
+            aria-label={`重试任务 ${item.record_id}`}
+            type="button"
+            onClick={() => {
+              setPendingRetry(item);
+              setRetryError("");
+            }}
+          >
+            {item.retry_path === "ARCHIVE_ONLY"
+              ? "恢复归档（不重新扣费）"
+              : "重试任务"}
+          </button>
+        ) : null}
+        {!readOnly &&
+        item.retry_path === "ARCHIVE_ONLY" &&
+        !FAILURE_STATUSES.has(item.status) ? (
+          <button
+            aria-label={`复制客户说明 ${item.record_id}`}
+            type="button"
+            onClick={() => void copyCustomerNote(item)}
+          >
+            复制客户说明
+          </button>
+        ) : null}
+        {!readOnly && FAILURE_STATUSES.has(item.status) ? (
+          <div className="admin-generation-records__actions">
+            <button
+              aria-label={`补偿积分 ${item.record_id}`}
+              type="button"
+              onClick={() => {
+                setPendingCompensation(item);
+                setCompensationError("");
+                setCompensationCredits(
+                  String(Math.max(0, item.charged_credits)),
+                );
+                compensationRetryRef.current = null;
+              }}
+            >
+              补偿积分
+            </button>
+            <button
+              aria-label={`复制客户说明 ${item.record_id}`}
+              type="button"
+              onClick={() => void copyCustomerNote(item)}
+            >
+              复制客户说明
+            </button>
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
   async function copyCustomerNote(item: AdminGenerationRecord) {
     setNotice("");
     try {
@@ -444,6 +710,26 @@ export function GenerationRecordsPage({
           <div className="admin-actions">
             <button type="button" onClick={() => void loadRecords()}>
               {loading ? "刷新中…" : "刷新记录"}
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                void downloadGenerationRecordsCsv({
+                  userId: initialUserId || undefined,
+                  username: filters.username || undefined,
+                  projectName: filters.projectName || undefined,
+                  status: filters.status || undefined,
+                  recordType: filters.recordType || undefined,
+                  failurePhase: filters.failurePhase || undefined,
+                  taskRef: filters.taskRef || undefined,
+                  createdFrom: filters.createdFrom || undefined,
+                  createdTo: filters.createdTo || undefined,
+                }).catch((cause: unknown) =>
+                  setError(cause instanceof Error ? cause.message : "导出失败"),
+                )
+              }
+            >
+              导出当前筛选 CSV
             </button>
             <span>共 {total} 条</span>
           </div>
@@ -671,6 +957,22 @@ export function GenerationRecordsPage({
           {error ? <PageBanner tone="error">{error}</PageBanner> : null}
           {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
+          {!readOnly && selectedRecords.length > 0 ? (
+            <div
+              className="admin-generation-records__batch"
+              role="toolbar"
+              aria-label="批量处理"
+            >
+              <strong>已选 {selectedRecords.length} 条失败记录</strong>
+              <button type="button" onClick={() => setBatchOpen(true)}>
+                批量补偿积分
+              </button>
+              <button type="button" onClick={() => setSelectedKeys(new Set())}>
+                取消选择
+              </button>
+            </div>
+          ) : null}
+
           {!loading && items.length === 0 ? (
             <PageBanner tone="notice">暂无生成记录。</PageBanner>
           ) : (
@@ -678,6 +980,26 @@ export function GenerationRecordsPage({
               ariaLabel="用户生成记录列表"
               headers={
                 <>
+                  {readOnly ? null : (
+                    <th>
+                      <input
+                        aria-label="选择本页全部失败记录"
+                        type="checkbox"
+                        checked={
+                          failedItems.length > 0 &&
+                          selectedKeys.size === failedItems.length
+                        }
+                        disabled={failedItems.length === 0}
+                        onChange={(event) =>
+                          setSelectedKeys(
+                            event.target.checked
+                              ? new Set(failedItems.map(recordKey))
+                              : new Set(),
+                          )
+                        }
+                      />
+                    </th>
+                  )}
                   <th>缩略图</th>
                   <th>时间</th>
                   {compact ? null : <th>客户</th>}
@@ -696,6 +1018,26 @@ export function GenerationRecordsPage({
             >
               {items.map((item) => (
                 <tr key={`${item.record_type}-${item.record_id}`}>
+                  {readOnly ? null : (
+                    <td>
+                      {FAILURE_STATUSES.has(item.status) ? (
+                        <input
+                          aria-label={`选择记录 ${item.record_id}`}
+                          type="checkbox"
+                          checked={selectedKeys.has(recordKey(item))}
+                          onChange={() =>
+                            setSelectedKeys((previous) => {
+                              const next = new Set(previous);
+                              const key = recordKey(item);
+                              if (next.has(key)) next.delete(key);
+                              else next.add(key);
+                              return next;
+                            })
+                          }
+                        />
+                      ) : null}
+                    </td>
+                  )}
                   <td>
                     <RecordThumbnail
                       active={!readOnly && item.has_preview}
@@ -755,275 +1097,12 @@ export function GenerationRecordsPage({
                         )}
                       </div>
                     ) : null}
-                    <details>
-                      <summary>
-                        <span>查看详情</span>
-                      </summary>
-                      {/* 方案 P1：详情分「概要 / 技术详情」——运营先看结论
-                          （分类、谁来处理、积分是否退回），编号、凭证、状态码
-                          这类排查字段收进折叠区。 */}
-                      <dl>
-                        {item.failure_category && item.failure_owner ? (
-                          <>
-                            <dt>原因分类</dt>
-                            <dd>
-                              {labelFrom(
-                                FAILURE_CATEGORY_LABELS,
-                                item.failure_category,
-                              )}
-                            </dd>
-                            <dt>处理人</dt>
-                            <dd>
-                              {labelFrom(
-                                FAILURE_OWNER_LABELS,
-                                item.failure_owner,
-                              )}
-                            </dd>
-                          </>
-                        ) : null}
-                        {item.failure_phase ? (
-                          <>
-                            <dt>失败阶段</dt>
-                            <dd>
-                              {labelFrom(
-                                FAILURE_PHASE_LABELS,
-                                item.failure_phase,
-                              )}
-                            </dd>
-                          </>
-                        ) : null}
-                        {item.advice ? (
-                          <>
-                            <dt>修复建议</dt>
-                            <dd>{item.advice}</dd>
-                          </>
-                        ) : null}
-                        {FAILURE_STATUSES.has(item.status) ? (
-                          <>
-                            <dt>本轮积分退回</dt>
-                            <dd>
-                              {item.credits_refunded == null
-                                ? "无法核验"
-                                : item.credits_refunded
-                                  ? "已退回"
-                                  : "未退回"}
-                            </dd>
-                          </>
-                        ) : null}
-                      </dl>
-                      <details className="admin-generation-records__technical">
-                        {/* biome-ignore lint/a11y/noStaticElementInteractions: summary 是 details 的固有开关（原生可聚焦、可键盘切换），这里只借用它的点击做懒加载登记。 */}
-                        <summary
-                          onClick={(event) => {
-                            // 懒加载只在「即将打开」时触发：关闭动作不清空已加载内容。
-                            const container =
-                              event.currentTarget.closest("details");
-                            if (
-                              container instanceof HTMLDetailsElement &&
-                              container.open
-                            ) {
-                              return;
-                            }
-                            const key = recordKey(item);
-                            setOpenedDetails((prev) => {
-                              if (prev.has(key)) return prev;
-                              const next = new Set(prev);
-                              next.add(key);
-                              return next;
-                            });
-                          }}
-                        >
-                          技术详情
-                        </summary>
-                        <dl>
-                          <dt>服务 / 模型</dt>
-                          <dd>{formatProvider(item)}</dd>
-                          <dt>原始状态</dt>
-                          <dd>
-                            {labelFrom(GENERATION_STATUS_LABELS, item.status)}（
-                            {item.status}）
-                          </dd>
-                          {!readOnly && item.error_message ? (
-                            <>
-                              <dt>错误说明</dt>
-                              <dd>{item.error_message}</dd>
-                            </>
-                          ) : null}
-                          <dt>记录编号</dt>
-                          <dd>
-                            <CopyDiagnosticReference
-                              value={item.record_id}
-                              label="任务编号"
-                            />
-                          </dd>
-                          {item.short_ref ? (
-                            <>
-                              <dt>错误编号</dt>
-                              <dd>
-                                <CopyDiagnosticReference
-                                  value={item.short_ref}
-                                  label="错误编号"
-                                />
-                              </dd>
-                            </>
-                          ) : null}
-                          {item.root_task_id ? (
-                            <>
-                              <dt>主记录</dt>
-                              <dd>
-                                <CopyDiagnosticReference
-                                  value={item.root_task_id}
-                                  label="主记录编号"
-                                />
-                              </dd>
-                            </>
-                          ) : null}
-                          <dt>结果引用</dt>
-                          <dd>{item.result_reference ?? "—"}</dd>
-                          <dt>上游服务任务凭证</dt>
-                          <dd>
-                            {item.provider_reference ? (
-                              <CopyDiagnosticReference
-                                value={item.provider_reference}
-                                label="上游服务任务凭证"
-                              />
-                            ) : (
-                              "—"
-                            )}
-                          </dd>
-                          <dt>错误码</dt>
-                          <dd>{item.error_code ?? "—"}</dd>
-                          {item.provider_error_code ? (
-                            <>
-                              <dt>上游服务错误码</dt>
-                              <dd>{item.provider_error_code}</dd>
-                            </>
-                          ) : null}
-                          {!readOnly && item.provider_message ? (
-                            <>
-                              <dt>上游服务原话</dt>
-                              <dd>{item.provider_message}</dd>
-                            </>
-                          ) : null}
-                          {item.status === "FAILED" &&
-                          item.retryable != null ? (
-                            <>
-                              <dt>可否重试</dt>
-                              <dd>{item.retryable ? "可重试" : "不可重试"}</dd>
-                            </>
-                          ) : null}
-                          {item.upstream_status != null ? (
-                            <>
-                              <dt>上游状态码</dt>
-                              <dd>{item.upstream_status}</dd>
-                            </>
-                          ) : null}
-                          {!readOnly && item.upstream_reason ? (
-                            <>
-                              <dt>上游说明</dt>
-                              <dd>{item.upstream_reason}</dd>
-                            </>
-                          ) : null}
-                          <dt>记录数据</dt>
-                          <dd>
-                            {item.record_data_status === "CORRUPTED"
-                              ? "记录数据损坏"
-                              : "正常"}
-                          </dd>
-                        </dl>
-                        <RecordCallsPanel
-                          active={openedDetails.has(recordKey(item))}
-                          readOnly={readOnly}
-                          recordId={item.record_id}
-                          recordType={item.record_type}
-                        />
-                      </details>
-
-                      {item.status === "FAILED" ||
-                      item.status === "ARCHIVE_FAILED" ||
-                      item.status === "SUBMISSION_UNCERTAIN" ||
-                      item.status === "UNKNOWN" ? (
-                        <button
-                          className="admin-diagnostics__jump"
-                          type="button"
-                          onClick={() =>
-                            switchView("diagnostics", item.record_id)
-                          }
-                        >
-                          查看诊断
-                        </button>
-                      ) : null}
-                      {!readOnly &&
-                      item.record_type === FIRST_FRAME_RECORD_TYPE &&
-                      item.status === SUBMISSION_UNCERTAIN ? (
-                        <button
-                          aria-label={`重新对账首帧任务 ${item.record_id}`}
-                          className="admin-generation-records__reconcile"
-                          type="button"
-                          onClick={() => {
-                            setPendingReconcile(item);
-                            setReconcileError("");
-                          }}
-                        >
-                          重新对账
-                        </button>
-                      ) : null}
-                      {item.handling_advice ? (
-                        <p>{item.handling_advice}</p>
-                      ) : null}
-                      {!readOnly &&
-                      item.record_type === VIDEO_RECORD_TYPE &&
-                      item.retry_path ? (
-                        <button
-                          aria-label={`重试任务 ${item.record_id}`}
-                          type="button"
-                          onClick={() => {
-                            setPendingRetry(item);
-                            setRetryError("");
-                          }}
-                        >
-                          {item.retry_path === "ARCHIVE_ONLY"
-                            ? "恢复归档（不重新扣费）"
-                            : "重试任务"}
-                        </button>
-                      ) : null}
-                      {!readOnly &&
-                      item.retry_path === "ARCHIVE_ONLY" &&
-                      !FAILURE_STATUSES.has(item.status) ? (
-                        <button
-                          aria-label={`复制客户说明 ${item.record_id}`}
-                          type="button"
-                          onClick={() => void copyCustomerNote(item)}
-                        >
-                          复制客户说明
-                        </button>
-                      ) : null}
-                      {!readOnly && FAILURE_STATUSES.has(item.status) ? (
-                        <div className="admin-generation-records__actions">
-                          <button
-                            aria-label={`补偿积分 ${item.record_id}`}
-                            type="button"
-                            onClick={() => {
-                              setPendingCompensation(item);
-                              setCompensationError("");
-                              setCompensationCredits(
-                                String(Math.max(0, item.charged_credits)),
-                              );
-                              compensationRetryRef.current = null;
-                            }}
-                          >
-                            补偿积分
-                          </button>
-                          <button
-                            aria-label={`复制客户说明 ${item.record_id}`}
-                            type="button"
-                            onClick={() => void copyCustomerNote(item)}
-                          >
-                            复制客户说明
-                          </button>
-                        </div>
-                      ) : null}
-                    </details>
+                    <button
+                      type="button"
+                      onClick={() => setDrawerKey(recordKey(item))}
+                    >
+                      查看详情
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -1037,8 +1116,38 @@ export function GenerationRecordsPage({
             total={total}
             onPageChange={setOffset}
           />
+
+          {/* 详情抽屉（T33）：从右侧滑出，结论在上、技术字段折叠；表格行高不再随展开变化。 */}
+          {drawerItem ? (
+            <aside aria-label="记录详情" className="admin-record-drawer">
+              <header>
+                <h3>
+                  {labelFrom(
+                    GENERATION_RECORD_TYPE_LABELS,
+                    drawerItem.record_type,
+                  )}
+                  {" · "}
+                  {drawerItem.project_name ?? drawerItem.record_id}
+                </h3>
+                <button type="button" onClick={() => setDrawerKey(null)}>
+                  关闭
+                </button>
+              </header>
+              {renderRecordDetail(drawerItem)}
+            </aside>
+          ) : null}
         </>
       )}
+
+      <BatchCompensateDialog
+        open={batchOpen && !readOnly}
+        records={selectedRecords}
+        onClose={() => setBatchOpen(false)}
+        onFinished={() => {
+          setSelectedKeys(new Set());
+          void loadRecords();
+        }}
+      />
 
       {/* 首帧对账：standard 级。该端点不接受也不消费 reason（服务端按供应商
           真实回执自行裁决并写审计），让运营手填一个被丢弃的原因只会制造

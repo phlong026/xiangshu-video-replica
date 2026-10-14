@@ -246,3 +246,33 @@
 .admin-feature-switch > div {
   flex: 1 1 320px;
 }
+
+/* 生成记录详情抽屉：固定在视口右侧，内容独立滚动，不撑高表格行。 */
+.admin-record-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  width: min(520px, 100vw);
+  padding: 20px;
+  overflow-y: auto;
+  background: var(--admin-surface, #fff);
+  border-left: 1px solid var(--admin-border, #e5e7eb);
+  box-shadow: -8px 0 24px rgba(15, 23, 42, 0.12);
+}
+
+.admin-record-drawer > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-generation-records__batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 0;
+}

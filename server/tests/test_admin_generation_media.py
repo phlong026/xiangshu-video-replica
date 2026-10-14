@@ -31,7 +31,7 @@ from pg_test_kit import (
 from app.admin_auth_routes import AdminActor, get_admin_actor
 from app.admin_generation_routes import router as admin_generation_router
 from app.auth import CurrentUser
-from app.control_auth import get_control_route_user
+from app.control_auth import get_control_exporter, get_control_route_user
 from app.control_routes import router as control_router
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 from app.storage import STORAGE_ROOT_ENV
@@ -207,6 +207,7 @@ def _client(seeded: str, monkeypatch: pytest.MonkeyPatch, role: str) -> TestClie
     app.include_router(control_router)
     app.dependency_overrides[get_admin_actor] = lambda: _actor(role)
     app.dependency_overrides[get_control_route_user] = lambda: _current_user(role)
+    app.dependency_overrides[get_control_exporter] = lambda: _current_user(role)
     return TestClient(app)
 
 
@@ -364,6 +365,27 @@ def test_auditor_cannot_read_media_or_error_text_but_sees_cost(
     assert item["provider_cost"] == 1.25 and item["provider_cost_status"] == "ESTIMATED"
     assert item["provider_message"] is None and item["error_message"] is None
     assert _audit_count(seeded, "t-direct") == 0
+
+
+def test_generation_records_csv_export_is_audited_and_hides_upstream_names(
+    api_auditor, seeded
+) -> None:
+    """T33：导出走与列表同一条查询；审计员可导出且必留审计，不含上游服务信息。"""
+    _seed_direct_result(seeded)
+    with psycopg.connect(seeded, autocommit=True) as conn:
+        conn.execute("UPDATE generation_tasks SET actual_cost = 1.25 WHERE id = 't-direct'")
+    exported = api_auditor.get("/api/control/generation-records.csv?record_type=VIDEO")
+    assert exported.status_code == 200, exported.text
+    header, *lines = exported.text.lstrip("\ufeff").splitlines()
+    assert "provider" not in header and "provider_reference" not in header
+    assert any("t-direct" in line and "1.25" in line for line in lines)
+    assert exported.headers["X-Export-Total"] == str(len(lines))
+    with psycopg.connect(seeded) as conn:
+        audited = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action='control.export' "
+            "AND entity_id='generation_records'"
+        ).fetchone()
+    assert audited is not None and audited[0] == 1
 
 
 def test_missing_record_and_missing_result_return_404(api: TestClient, seeded: str) -> None:
