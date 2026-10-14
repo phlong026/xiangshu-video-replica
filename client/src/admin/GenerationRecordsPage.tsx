@@ -66,6 +66,7 @@ export function GenerationRecordsPage({
   initialUserId = "",
   initialTaskRef = "",
   initialView = "records",
+  onViewChange,
   readOnly = false,
 }: {
   initialStatus?: string;
@@ -76,6 +77,11 @@ export function GenerationRecordsPage({
   initialTaskRef?: string;
   /** 左侧「失败诊断」入口进来时直接落在诊断视图，而不是失败状态的记录列表。 */
   initialView?: "records" | "diagnostics";
+  /**
+   * 外壳菜单已有「生成记录 / 失败诊断」两项时由外壳接管视图切换（页内不再
+   * 渲染同名页签）；客户详情等嵌入场景不传，保留页内页签。
+   */
+  onViewChange?: (view: "records" | "diagnostics", taskId?: string) => void;
   readOnly?: boolean;
 }) {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
@@ -113,7 +119,17 @@ export function GenerationRecordsPage({
   });
   // 合并页签：诊断是同一页面的第二视图，跳转时把任务编号一起带过去。
   const [view, setView] = useState<"records" | "diagnostics">(initialView);
-  const [diagnosticTaskId, setDiagnosticTaskId] = useState("");
+  const [diagnosticTaskId, setDiagnosticTaskId] = useState(
+    initialView === "diagnostics" ? initialTaskRef : "",
+  );
+  function switchView(next: "records" | "diagnostics", taskId = "") {
+    if (onViewChange) {
+      onViewChange(next, taskId);
+      return;
+    }
+    setDiagnosticTaskId(taskId);
+    setView(next);
+  }
   const [notice, setNotice] = useState("");
   // 首帧对账：确认框里只放"待处理的那一行"，避免把行对象散进多个状态。
   const [pendingReconcile, setPendingReconcile] =
@@ -395,17 +411,19 @@ export function GenerationRecordsPage({
       aria-label="生成记录"
       className="admin-panel admin-generation-records"
     >
-      <TabBar
-        active={view}
-        ariaLabel="生成记录页签"
-        items={[
-          { id: "records", label: "生成记录" },
-          { id: "diagnostics", label: "失败诊断" },
-        ]}
-        onChange={(id) =>
-          setView(id === "diagnostics" ? "diagnostics" : "records")
-        }
-      />
+      {onViewChange ? null : (
+        <TabBar
+          active={view}
+          ariaLabel="生成记录页签"
+          items={[
+            { id: "records", label: "生成记录" },
+            { id: "diagnostics", label: "失败诊断" },
+          ]}
+          onChange={(id) =>
+            switchView(id === "diagnostics" ? "diagnostics" : "records")
+          }
+        />
+      )}
       {view === "diagnostics" ? (
         <>
           {/* 方案 P1：页签默认先给近 7 天失败清单；交接了具体任务编号时让位。 */}
@@ -898,10 +916,9 @@ export function GenerationRecordsPage({
                         <button
                           className="admin-diagnostics__jump"
                           type="button"
-                          onClick={() => {
-                            setDiagnosticTaskId(item.record_id);
-                            setView("diagnostics");
-                          }}
+                          onClick={() =>
+                            switchView("diagnostics", item.record_id)
+                          }
                         >
                           查看诊断
                         </button>

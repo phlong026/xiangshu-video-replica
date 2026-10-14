@@ -1019,14 +1019,10 @@ export function AdminApp() {
             )
           ) : null}
 
+          {/* 一个层级只导航一次（整改 T08）：总览不再放与左侧菜单重复的快捷栏，
+              经营分析、生成记录也不再渲染与菜单同名的页内页签。 */}
           {activeTab === "overview" ? (
             <>
-              <TabBar
-                ariaLabel="运营概览快捷导航"
-                items={[...tabGroups[0].tabs, ...tabGroups[1].tabs]}
-                active={activeTab}
-                onChange={(tab) => navigateAdmin(tab as AdminTab)}
-              />
               <OverviewPage
                 readOnly={readOnly}
                 onNavigate={(destination) => {
@@ -1057,6 +1053,7 @@ export function AdminApp() {
             <AnalyticsPage
               key={`${activeTab}:${navigationIntent}:${businessTarget.get("billingQuery") ?? ""}`}
               readOnly={readOnly}
+              showViewTabs={false}
               onCustomer={(userId) =>
                 navigateAdmin("customersMgmt", "customer", { userId })
               }
@@ -1195,6 +1192,15 @@ export function AdminApp() {
               }
               initialView={
                 activeTab === "generationFailures" ? "diagnostics" : "records"
+              }
+              onViewChange={(view, taskId) =>
+                navigateAdmin(
+                  view === "diagnostics"
+                    ? "generationFailures"
+                    : "generationRecords",
+                  "",
+                  taskId ? { taskId } : {},
+                )
               }
               readOnly={readOnly}
             />
