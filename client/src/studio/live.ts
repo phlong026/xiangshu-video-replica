@@ -1010,6 +1010,65 @@ export async function reloadTasks(
   ];
 }
 
+const POLLED_ACTIVE_STATUSES = new Set<StudioTask["status"]>([
+  "running",
+  "queued",
+  "uncertain",
+]);
+/** 每轮最多补刷几条翻页加载出来的进行中任务，避免历史很多时一次打出一串请求。 */
+const STALE_TASK_REFRESH_LIMIT = 10;
+
+/** 轮询只取第一页；「加载更多」出来的旧任务若仍在进行中，按 ID 逐条补刷（FIX-07），
+ * 否则它们会永远停在旧状态。单条失败静默跳过，下一轮再试。 */
+export async function refreshStaleTasks(
+  previous: StudioTask[],
+  refreshed: StudioTask[],
+): Promise<StudioTask[]> {
+  const refreshedIds = new Set(refreshed.map((task) => task.id));
+  const stale = previous
+    .filter(
+      (task) =>
+        !refreshedIds.has(task.id) &&
+        task.backendKind !== undefined &&
+        POLLED_ACTIVE_STATUSES.has(task.status),
+    )
+    .slice(0, STALE_TASK_REFRESH_LIMIT);
+  const results = await Promise.allSettled(
+    stale.map((task) =>
+      loadStudioTaskDetail(
+        task.backendKind as "generation_batch" | "oral_task",
+        task.backendId || task.batchId || task.id,
+      ),
+    ),
+  );
+  return results.flatMap((result, index) => {
+    const old = stale[index];
+    if (result.status !== "fulfilled" || !old) return [];
+    // 详情接口不带列表口径的提交时间与提交者，沿用列表里的值，避免无谓抖动。
+    return [
+      {
+        ...old,
+        ...result.value,
+        submitted: old.submitted,
+        createdByUserId: old.createdByUserId,
+      },
+    ];
+  });
+}
+
+/** 合并轮询结果：已知任务原位更新、保持既有排序，新出现的任务放到最前。 */
+export function mergePolledTasks(
+  previous: StudioTask[],
+  refreshed: StudioTask[],
+): StudioTask[] {
+  const byId = new Map(refreshed.map((task) => [task.id, task]));
+  const known = new Set(previous.map((task) => task.id));
+  return [
+    ...refreshed.filter((task) => !known.has(task.id)),
+    ...previous.map((task) => byId.get(task.id) ?? task),
+  ];
+}
+
 /** Workbench quick upload: create a project, PUT the raw video to cloud
  * storage through the presigned intent, and hand back the source identity so
  * 后续复刻/文案提取都拿这个来源继续，而不是把大视频当解析输入。 */
