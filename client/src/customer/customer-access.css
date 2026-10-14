@@ -1390,8 +1390,15 @@ button.table-action-button--danger {
   margin-left: auto;
 }
 
-.customer-announcement p {
+.customer-announcement__body {
+  display: block;
+  width: 100%;
   margin: 6px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--text-muted, #a49e95);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }

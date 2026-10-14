@@ -70,7 +70,7 @@ export function CustomerAnnouncementCenter({ token }: { token: string }) {
   const visible = items.filter((item) => !dismissed.has(item.id));
   if (visible.length === 0) return null;
   return (
-    <div className="customer-announcements" aria-label="平台公告">
+    <section className="customer-announcements" aria-label="平台公告">
       {visible.slice(0, 3).map((item) => (
         <div
           key={item.id}
@@ -88,23 +88,21 @@ export function CustomerAnnouncementCenter({ token }: { token: string }) {
               知道了
             </button>
           </div>
-          <p
-            role="button"
-            tabIndex={0}
+          {/* 原生 button 自带键盘与读屏语义，不再用 p + role="button" 模拟。 */}
+          <button
+            type="button"
+            className="customer-announcement__body"
+            aria-expanded={expanded === item.id}
             onClick={() => setExpanded(expanded === item.id ? null : item.id)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter")
-                setExpanded(expanded === item.id ? null : item.id);
-            }}
           >
             {expanded === item.id
               ? item.body
               : item.body.length > 60
                 ? `${item.body.slice(0, 60)}…（点击展开）`
                 : item.body}
-          </p>
+          </button>
         </div>
       ))}
-    </div>
+    </section>
   );
 }

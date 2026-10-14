@@ -2112,6 +2112,7 @@ export function ViralDetailPage() {
   const beginReplicateRef = useRef<() => void>(() => {});
   // ADM-17 卡片「去复刻」直达：意图即焚；handler 经 ref 晚绑定，保持 hook
   // 顺序稳定（beginReplicate 的定义在组件 early return 之后）。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只应在意图或视频变化时触发；notify/patchState 每次渲染新建，列入依赖会让意图被重复消费判断。
   useEffect(() => {
     if (!state.viralReplicateIntent || !video) return;
     patchState({ viralReplicateIntent: false });
