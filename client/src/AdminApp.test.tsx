@@ -537,7 +537,7 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
 
     // 从侧栏点回「客户管理」= 不带 intent，引导必须跟着 intent 一起消失。
-    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
+    fireEvent.click(screen.getByRole("link", { name: "客户列表" }));
     expect(window.location.hash).toMatch(/^#admin\/customersMgmt(?:\?|$)/);
     expect(window.location.hash).not.toContain("intent=");
     await waitFor(() =>
@@ -608,7 +608,7 @@ describe("AdminApp", () => {
       ).toBe(true),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "生成记录" }));
+    fireEvent.click(screen.getByRole("link", { name: "生成记录" }));
     expect(window.location.hash).toBe("#admin/generationRecords");
     expect(screen.getByLabelText("生成账号")).toHaveValue("");
     expect(screen.getByLabelText("生成状态")).toHaveValue("");
@@ -655,7 +655,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await signInWithPassword();
 
-    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("link", { name: "资金中心" }));
     fireEvent.click(screen.getByRole("tab", { name: "收款订单" }));
 
     expect(
@@ -730,7 +730,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await signInWithPassword();
 
-    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("link", { name: "资金中心" }));
     fireEvent.click(screen.getByRole("tab", { name: "收款订单" }));
     expect(
       await screen.findByText(
@@ -755,7 +755,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await signInWithPassword();
 
-    fireEvent.click(screen.getByRole("button", { name: "系统设置" }));
+    fireEvent.click(screen.getByRole("link", { name: "系统设置" }));
     // ZPay 商户配置在「收款设置」页签（方案 P1：价格与收款分开）。
     fireEvent.click(screen.getByRole("tab", { name: "收款设置" }));
     expect(await screen.findByDisplayValue("merchant-1")).toBeInTheDocument();
@@ -818,7 +818,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await signInWithPassword();
 
-    fireEvent.click(screen.getByRole("button", { name: "系统设置" }));
+    fireEvent.click(screen.getByRole("link", { name: "系统设置" }));
     fireEvent.click(screen.getByRole("tab", { name: "技术配置" }));
     expect(
       await screen.findByRole("heading", { name: "视频生成 · 多账号" }),
@@ -873,7 +873,7 @@ describe("AdminApp", () => {
 
     render(<AdminApp />);
     await signInWithPassword();
-    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
+    fireEvent.click(screen.getByRole("link", { name: "客户列表" }));
     expect(
       screen.queryByRole("tab", { name: "激活码" }),
     ).not.toBeInTheDocument();
@@ -886,7 +886,7 @@ describe("AdminApp", () => {
     installFetch({ session: "valid" });
 
     render(<AdminApp />);
-    fireEvent.click(await screen.findByRole("button", { name: "生成记录" }));
+    fireEvent.click(await screen.findByRole("link", { name: "生成记录" }));
 
     expect(
       await screen.findByRole("heading", { level: 1, name: "生成记录" }),
@@ -974,13 +974,13 @@ describe("AdminApp", () => {
     expect(
       screen.queryByRole("tablist", { name: "运营概览快捷导航" }),
     ).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
-    expect(screen.getByRole("button", { name: "经营看板" })).toHaveAttribute(
+    fireEvent.click(screen.getByRole("link", { name: "经营看板" }));
+    expect(screen.getByRole("link", { name: "经营看板" })).toHaveAttribute(
       "aria-current",
       "page",
     );
     expect(screen.queryByRole("tablist", { name: "经营分析页签" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "生成记录" }));
+    fireEvent.click(screen.getByRole("link", { name: "生成记录" }));
     expect(screen.queryByRole("tablist", { name: "生成记录页签" })).toBeNull();
   });
 
@@ -1015,19 +1015,17 @@ describe("AdminApp", () => {
       "管理操作日志",
       "系统设置",
     ]) {
-      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name })).toBeInTheDocument();
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("link", { name: "资金中心" }));
     expect(screen.getByRole("tab", { name: "收款订单" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "积分流水" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
-    expect(
-      screen.getByRole("button", { name: "成本核对" }),
-    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "经营看板" }));
+    expect(screen.getByRole("link", { name: "成本核对" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
+    fireEvent.click(screen.getByRole("link", { name: "客户列表" }));
     expect(
       screen.queryByRole("tab", { name: "在线会话" }),
     ).not.toBeInTheDocument();
@@ -1039,18 +1037,18 @@ describe("AdminApp", () => {
       screen.queryByRole("tab", { name: "设备与会话" }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "管理操作日志" }));
+    fireEvent.click(screen.getByRole("link", { name: "管理操作日志" }));
     // 调账记录已迁入资金中心·人工调整（方案 P1），审计中心只剩审计日志单页。
     expect(
       screen.getByRole("region", { name: "审计事件" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "调账记录" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("link", { name: "资金中心" }));
     expect(screen.getByRole("tab", { name: "人工调整" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "对账异常" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "系统设置" }));
+    fireEvent.click(screen.getByRole("link", { name: "系统设置" }));
     expect(screen.getByRole("tab", { name: "价格与套餐" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "收款设置" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "技术配置" })).toBeInTheDocument();
@@ -1063,7 +1061,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await screen.findByRole("navigation", { name: "管理端导航" });
 
-    fireEvent.click(screen.getByRole("button", { name: "登录与设备" }));
+    fireEvent.click(screen.getByRole("link", { name: "登录与设备" }));
 
     expect(await screen.findByLabelText("公司名或用户名")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "搜索" })).toBeInTheDocument();
@@ -1361,7 +1359,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await signInWithPassword();
     fireEvent.click(screen.getByRole("button", { name: "展开导航" }));
-    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("link", { name: "资金中心" }));
     fireEvent.click(screen.getByRole("tab", { name: "收款订单" }));
 
     expect(
@@ -1395,7 +1393,7 @@ describe("AdminApp", () => {
         heading.compareDocumentPosition(banner) &
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
-      expect(screen.queryByRole("button", { name: "接口调用日志" })).toBeNull();
+      expect(screen.queryByRole("link", { name: "接口调用日志" })).toBeNull();
       expect(
         vi
           .mocked(fetch)
@@ -1419,6 +1417,22 @@ describe("AdminApp", () => {
     expect(new Set(icons).size).toBe(icons.length);
   });
 
+  it("菜单项是真链接：带地址，修饰键点击交给浏览器新开标签页", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1280,
+    });
+    installFetch({ session: "valid" });
+    render(<AdminApp />);
+    const funds = await screen.findByRole("link", { name: "资金中心" });
+    expect(funds).toHaveAttribute("href", "#admin/funds");
+    fireEvent.click(funds, { ctrlKey: true });
+    expect(funds).not.toHaveAttribute("aria-current");
+    fireEvent.click(funds);
+    expect(funds).toHaveAttribute("aria-current", "page");
+    expect(window.location.hash).toBe("#admin/funds");
+  });
+
   it("groups admin navigation and lets compact layouts collapse and reopen it", async () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -1431,22 +1445,20 @@ describe("AdminApp", () => {
     expect(
       await screen.findByRole("button", { name: "展开导航" }),
     ).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("button", { name: "客户列表" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "客户列表" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "展开导航" }));
 
     expect(screen.getAllByText("工作台").length).toBeGreaterThan(0);
     expect(screen.getAllByText("客户").length).toBeGreaterThan(0);
     expect(screen.getAllByText("设置").length).toBeGreaterThan(0);
-    expect(
-      screen.getByRole("button", { name: "客户列表" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "客户列表" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭导航" })).toHaveAttribute(
       "aria-expanded",
       "true",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
+    fireEvent.click(screen.getByRole("link", { name: "客户列表" }));
 
     expect(
       await screen.findByRole("heading", { name: "客户列表" }),
@@ -1464,13 +1476,13 @@ describe("AdminApp", () => {
     installFetch({ session: "valid" });
     render(<AdminApp />);
     await screen.findByRole("navigation", { name: "管理端导航" });
-    fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
-    fireEvent.click(screen.getByRole("button", { name: "成本核对" }));
+    fireEvent.click(screen.getByRole("link", { name: "经营看板" }));
+    fireEvent.click(screen.getByRole("link", { name: "成本核对" }));
     expect(
       await screen.findByRole("region", { name: "成本明细" }),
     ).toBeInTheDocument();
     expect(window.location.hash).toContain("#admin/costReview");
-    fireEvent.click(screen.getByRole("button", { name: "生成记录" }));
+    fireEvent.click(screen.getByRole("link", { name: "生成记录" }));
     await waitFor(() =>
       expect(
         vi
@@ -1481,7 +1493,7 @@ describe("AdminApp", () => {
       ).toBe(true),
     );
     vi.mocked(fetch).mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "失败诊断" }));
+    fireEvent.click(screen.getByRole("link", { name: "失败诊断" }));
     // 菜单「失败诊断」必须落在诊断视图（诊断队列读取），而不是失败状态的记录列表。
     await waitFor(() =>
       expect(
@@ -1513,7 +1525,7 @@ describe("AdminApp", () => {
     installFetch({ session: "valid" });
     render(<AdminApp />);
     await screen.findByRole("navigation", { name: "管理端导航" });
-    expect(screen.getByRole("button", { name: "成本核对" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "成本核对" })).toHaveAttribute(
       "aria-current",
       "page",
     );

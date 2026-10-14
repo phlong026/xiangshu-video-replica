@@ -2964,8 +2964,10 @@ button.activation-generator__submit {
   gap: 2px;
 }
 
-.admin-shell--control button.admin-tab {
+.admin-shell--control a.admin-tab {
   display: flex;
+  box-sizing: border-box;
+  text-decoration: none;
   width: 100%;
   min-height: clamp(32px, 6.5dvh, 52px);
   align-items: center;
@@ -2980,7 +2982,7 @@ button.activation-generator__submit {
   text-align: left;
 }
 
-.admin-shell--control button.admin-tab small {
+.admin-shell--control a.admin-tab small {
   display: none;
   color: var(--admin-muted);
   font-size: var(--font-caption);
@@ -3000,13 +3002,13 @@ button.activation-generator__submit {
   filter: invert(72%) sepia(16%) saturate(560%) hue-rotate(2deg) brightness(94%);
 }
 
-.admin-shell--control button.admin-tab:not(:disabled):hover {
+.admin-shell--control a.admin-tab:hover {
   border-color: #2c2a27;
   color: #d3cec4;
   background: #171716;
 }
 
-.admin-shell--control button.admin-tab.is-active {
+.admin-shell--control a.admin-tab.is-active {
   border-color: rgba(198, 164, 95, 0.4);
   color: #ead7ad;
   background: var(--admin-gold-wash);
