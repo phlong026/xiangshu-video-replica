@@ -1510,14 +1510,31 @@ export interface AnnouncementItem {
   created_at: string;
   read_count: number;
   live: boolean;
+  /** 管理端清单：scheduled 待生效 / live 生效中 / ended 已结束。 */
+  status?: "scheduled" | "live" | "ended";
   read?: boolean;
 }
 
+export interface AnnouncementPage {
+  items: AnnouncementItem[];
+  total: number;
+  /** 触达率分母：当前启用的客户数。 */
+  audience_total: number;
+  limit: number;
+  offset: number;
+}
+
 export async function listAnnouncements(
-  includeOffline = true,
-): Promise<{ items: AnnouncementItem[] }> {
+  options: { includeOffline?: boolean; limit?: number; offset?: number } = {},
+): Promise<AnnouncementPage> {
+  const params = new URLSearchParams();
+  if (options.includeOffline === false) params.set("include_offline", "false");
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
+  const query = params.toString();
   return adminRead(
-    `/api/control/announcements${includeOffline ? "" : "?include_offline=false"}`,
+    `/api/control/announcements${query ? `?${query}` : ""}`,
     "读取公告失败",
   );
 }
@@ -1554,6 +1571,10 @@ export async function updateAnnouncement(input: {
   title?: string;
   body?: string;
   tone?: string;
+  startsAt?: string;
+  endsAt?: string;
+  /** 把失效时间改回「不限」；endsAt 留空只表示不修改。 */
+  clearEndsAt?: boolean;
   reason: string;
   idempotencyKey?: string;
 }): Promise<{ id: string }> {
@@ -1564,6 +1585,9 @@ export async function updateAnnouncement(input: {
       body: input.body ?? "",
       tone: input.tone ?? "",
       pinned: input.pinned ?? null,
+      starts_at: input.startsAt ?? "",
+      ends_at: input.endsAt ?? "",
+      clear_ends_at: input.clearEndsAt ?? false,
     },
     input.reason,
     "修改公告失败",

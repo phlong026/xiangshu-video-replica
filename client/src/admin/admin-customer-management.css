@@ -165,3 +165,23 @@
     padding: 10px 5px;
   }
 }
+
+/* 公告客户端预览：与工作台横幅同样只露出标题与正文前 60 字。 */
+.admin-announcement-preview {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--admin-line, #38362e);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--admin-panel-raised, #1b1a18);
+}
+.admin-announcement-preview p {
+  margin: 6px 0 0;
+  color: var(--admin-muted, #a49e95);
+}
+.admin-announcement-preview--maintenance {
+  border-left-color: #d08a3c;
+}
+.admin-announcement-preview--promo {
+  border-left-color: var(--admin-gold, #c6a45f);
+}
