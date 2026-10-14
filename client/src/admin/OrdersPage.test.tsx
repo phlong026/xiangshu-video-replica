@@ -134,9 +134,9 @@ describe("OrdersPage", () => {
       target: { value: "PAID" },
     });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "筛选" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "查询" })).toBeEnabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     const button = screen.getByRole("button", { name: "导出充值订单 CSV" });
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
@@ -184,7 +184,7 @@ describe("OrdersPage", () => {
     fireEvent.change(screen.getByLabelText("订单状态"), {
       target: { value: "PAID" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
 
     await waitFor(() =>
       expect(
@@ -193,6 +193,49 @@ describe("OrdersPage", () => {
         ),
       ).toBe(true),
     );
+  });
+
+  it("输入不触发请求，点查询才应用；重置清空筛选并重新查询", async () => {
+    const fetchMock = installFetch();
+    render(<OrdersPage />);
+    await screen.findByText("¥100.50");
+    const listCalls = () =>
+      fetchMock.mock.calls.filter(([url]) =>
+        new URL(String(url)).pathname.endsWith("/recharge-orders"),
+      ).length;
+    const before = listCalls();
+
+    fireEvent.change(screen.getByLabelText("订单客户"), {
+      target: { value: "operator" },
+    });
+    // 逐键输入不再逐键请求。
+    expect(listCalls()).toBe(before);
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("username=operator"),
+        ),
+      ).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+    expect(screen.getByLabelText("订单客户")).toHaveValue("");
+    await waitFor(() => {
+      const last = fetchMock.mock.calls
+        .map(([url]) => String(url))
+        .filter((url) => new URL(url).pathname.endsWith("/recharge-orders"))
+        .at(-1);
+      expect(last).not.toContain("username=");
+    });
+    // 按钮顺序固定：查询 · 重置 · 导出 · 自动刷新。
+    const names = screen
+      .getAllByRole("button")
+      .map((b) => b.textContent)
+      .filter((t) =>
+        ["查询", "重置", "导出充值订单 CSV", "自动刷新：关"].includes(t ?? ""),
+      );
+    expect(names).toEqual(["查询", "重置", "导出充值订单 CSV", "自动刷新：关"]);
   });
 
   it("confirms the ZPay order sync with a reason before firing it", async () => {

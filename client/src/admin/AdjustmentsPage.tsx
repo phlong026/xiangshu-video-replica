@@ -7,6 +7,7 @@ import {
 } from "../api.admin";
 import { CustomerLink } from "./CustomerLink";
 import { DataTable } from "./ui/DataTable";
+import { FilterBar } from "./ui/FilterBar";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -123,13 +124,23 @@ export function AdjustmentsPage({
         {userId ? <p className="user-info">用户 ID: {userId}</p> : null}
       </header>
       {!userId ? (
-        <form
-          className="admin-toolbar"
-          onSubmit={(event) => {
-            event.preventDefault();
+        <FilterBar
+          ariaLabel="调账筛选"
+          onReset={() => {
+            setOffset(0);
+            setDraft(emptyFilters);
+            setFilters(emptyFilters);
+          }}
+          onSubmit={() => {
             setOffset(0);
             setFilters(draft);
           }}
+          actions={
+            /* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */
+            <button type="button" onClick={() => void exportCsv()}>
+              导出 CSV
+            </button>
+          }
         >
           <label>
             操作人
@@ -192,12 +203,7 @@ export function AdjustmentsPage({
               }
             />
           </label>
-          <button type="submit">查询</button>
-          {/* 导出对审计员开放（T19）：服务端每次导出留审计并限流。 */}
-          <button type="button" onClick={() => void exportCsv()}>
-            导出 CSV
-          </button>
-        </form>
+        </FilterBar>
       ) : null}
 
       {loading && <div className="loading">加载中...</div>}

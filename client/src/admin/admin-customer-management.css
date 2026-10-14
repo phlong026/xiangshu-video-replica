@@ -208,3 +208,11 @@
   width: 100%;
   text-align: left;
 }
+
+/* FilterBar：查询 / 重置 / 其它动作固定排成一行，换行时整组一起换。 */
+.admin-filter-bar__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}

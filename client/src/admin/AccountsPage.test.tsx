@@ -202,6 +202,8 @@ describe("AccountsPage", () => {
     fireEvent.change(screen.getByLabelText("流水截止时间"), {
       target: { value: "2026-09-12" },
     });
+    // 导出沿用已提交的筛选：先点「查询」应用，再导出。
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
     const button = screen.getByRole("button", { name: "导出账务流水 CSV" });
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
