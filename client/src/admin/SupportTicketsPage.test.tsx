@@ -132,3 +132,31 @@ it("指派负责人并调整优先级", async () => {
     priority: "P2",
   });
 });
+
+it("客户详情内嵌：按客户编号精确取、不显示客户筛选，登记时关联客户固定", async () => {
+  const fetchMock = installFetch();
+  render(
+    <SupportTicketsPage
+      customer={{ user_id: "u-1", username: "hongya", display_name: "洪雅店" }}
+    />,
+  );
+  expect(await screen.findByText("充值后积分未到账")).toBeInTheDocument();
+  const listCall = fetchMock.mock.calls
+    .map(([url]) => new URL(String(url)))
+    .find((url) => url.pathname.endsWith("/support-tickets"));
+  expect(listCall?.searchParams.get("user_id")).toBe("u-1");
+  expect(screen.queryByLabelText("客户")).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "登记工单" }));
+  expect(await screen.findByText("关联客户：hongya")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/问题描述/), {
+    target: { value: "积分没到账" },
+  });
+  fireEvent.change(screen.getByLabelText("操作原因"), {
+    target: { value: "客户反馈" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认登记" }));
+  await waitFor(() =>
+    expect(lastWrite(fetchMock, "POST").target_user_id).toBe("u-1"),
+  );
+});

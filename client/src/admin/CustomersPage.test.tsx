@@ -420,25 +420,20 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     render(<CustomersPage readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
     fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "查看全部人工调整" }),
-    );
-    expect(await screen.findByText("150 → 50 积分")).toBeInTheDocument();
-    expect(screen.getByText("operator")).toBeInTheDocument();
-    const history = screen.getByRole("table", { name: "调账历史列表" })
-      .parentElement?.parentElement;
-    expect(history).not.toBeNull();
-    fireEvent.click(
-      within(history as HTMLElement).getByRole("button", { name: "下一页" }),
-    );
-    await waitFor(() =>
-      expect(adminApi.listAdminAdjustments).toHaveBeenLastCalledWith("user-1", {
-        limit: 20,
-        offset: 20,
-      }),
+    // 完整记录回资金中心（T32）：详情页不再内嵌全量表，只给带客户编号的真链接。
+    const link = await screen.findByRole("link", { name: "查看全部人工调整" });
+    expect(link).toHaveAttribute(
+      "href",
+      "#admin/funds?sub=adjustments&userId=user-1",
     );
     expect(
-      screen.queryByRole("button", { name: "导出 CSV" }),
+      screen.getByRole("link", { name: "查看全部充值订单" }),
+    ).toHaveAttribute("href", "#admin/funds?sub=orders&userId=user-1");
+    expect(
+      screen.getByRole("link", { name: "查看全部积分流水" }),
+    ).toHaveAttribute("href", "#admin/funds?sub=transactions&userId=user-1");
+    expect(
+      screen.queryByRole("table", { name: "调账历史列表" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1264,7 +1259,12 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(
       screen.getByRole("region", { name: "客户核心指标" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("累计消耗")).toBeInTheDocument();
+    // 首屏核心指标只留 4 张，且不与头部重复（T32）。
+    const kpis = within(screen.getByRole("region", { name: "客户核心指标" }));
+    for (const label of ["可用积分", "累计充值", "本月消耗", "近30天成功率"])
+      expect(kpis.getByText(label)).toBeInTheDocument();
+    expect(kpis.queryByText("累计消耗")).not.toBeInTheDocument();
+    expect(kpis.queryByText("当前权益")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", {
         name: "调账历史",

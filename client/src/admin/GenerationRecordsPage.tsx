@@ -69,6 +69,7 @@ export function GenerationRecordsPage({
   initialView = "records",
   onViewChange,
   readOnly = false,
+  compact = false,
 }: {
   initialStatus?: string;
   initialRecordType?: string;
@@ -84,6 +85,11 @@ export function GenerationRecordsPage({
    */
   onViewChange?: (view: "records" | "diagnostics", taskId?: string) => void;
   readOnly?: boolean;
+  /**
+   * 精简版（客户详情「生成记录」页签）：已经限定为一位客户，所以不再显示账号筛选、
+   * 客户列与顶部聚合卡片——这些在全局生成记录页才有意义。
+   */
+  compact?: boolean;
 }) {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
   const [total, setTotal] = useState(0);
@@ -485,14 +491,16 @@ export function GenerationRecordsPage({
               });
             }}
           >
-            <label>
-              公司名 / 账号
-              <input
-                aria-label="生成账号"
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-              />
-            </label>
+            {compact ? null : (
+              <label>
+                公司名 / 账号
+                <input
+                  aria-label="生成账号"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                />
+              </label>
+            )}
             <label>
               项目
               <input
@@ -589,13 +597,13 @@ export function GenerationRecordsPage({
             </label>
           </FilterBar>
 
-          {!loading && summary === null ? (
+          {!compact && !loading && summary === null ? (
             <PageBanner tone="notice">
               记录聚合暂不可用；列表数据不受影响。
             </PageBanner>
           ) : null}
 
-          {summary && summary.total > 0 ? (
+          {!compact && summary && summary.total > 0 ? (
             <section className="admin-panel" aria-label="记录聚合">
               {/* 方案 P1：顶部聚合 4 张卡——先结论后明细。 */}
               <div className="economics-kpis economics-kpis--four">
@@ -672,7 +680,7 @@ export function GenerationRecordsPage({
                 <>
                   <th>缩略图</th>
                   <th>时间</th>
-                  <th>客户</th>
+                  {compact ? null : <th>客户</th>}
                   <th>项目</th>
                   <th>生成类型</th>
                   <th>状态</th>
@@ -697,10 +705,12 @@ export function GenerationRecordsPage({
                     />
                   </td>
                   <td>{formatDateTime(item.created_at)}</td>
-                  <td>
-                    <strong>{item.display_name || item.username}</strong>
-                    <small>{item.username}</small>
-                  </td>
+                  {compact ? null : (
+                    <td>
+                      <strong>{item.display_name || item.username}</strong>
+                      <small>{item.username}</small>
+                    </td>
+                  )}
                   <td>{item.project_name ?? "—"}</td>
                   <td>
                     {labelFrom(GENERATION_RECORD_TYPE_LABELS, item.record_type)}

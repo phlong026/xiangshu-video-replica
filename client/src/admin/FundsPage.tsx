@@ -7,6 +7,7 @@ import { FundsOverview } from "./FundsOverview";
 import { OrdersPage } from "./OrdersPage";
 import { ReconciliationPage } from "./ReconciliationPage";
 import { RefundsPage } from "./RefundsPage";
+import { PageBanner } from "./ui/PageBanner";
 import { TabBar } from "./ui/TabBar";
 import { useHashParam } from "./ui/useHashParam";
 
@@ -83,6 +84,12 @@ export function FundsPage({
   );
   return (
     <div>
+      {userId && ["orders", "transactions", "adjustments"].includes(tab) ? (
+        <PageBanner tone="notice">
+          当前只看一位客户的记录（编号 {userId}）。
+          <a href={`#admin/funds?sub=${tab}`}>查看全部客户</a>
+        </PageBanner>
+      ) : null}
       <TabBar
         active={tab}
         ariaLabel="资金中心页签"
@@ -117,7 +124,11 @@ export function FundsPage({
         <AccountsPage readOnly={readOnly} userId={userId} />
       )}
       {tab === "adjustments" && (
-        <AdjustmentsPage readOnly={readOnly} onCustomer={onCustomer} />
+        <AdjustmentsPage
+          readOnly={readOnly}
+          onCustomer={onCustomer}
+          userId={userId || undefined}
+        />
       )}
       {tab === "refunds" && (
         <RefundsPage readOnly={readOnly} onCustomer={onCustomer} />

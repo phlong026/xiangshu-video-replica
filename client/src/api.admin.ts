@@ -1942,6 +1942,8 @@ export async function listSupportTickets(
     status?: string;
     category?: string;
     username?: string;
+    /** 客户编号，精确匹配（客户详情「工单」页签用）。 */
+    userId?: string;
     limit?: number;
     offset?: number;
   } = {},
@@ -1955,6 +1957,7 @@ export async function listSupportTickets(
   if (options.status) params.set("status", options.status);
   if (options.category) params.set("category", options.category);
   if (options.username) params.set("username", options.username);
+  if (options.userId) params.set("user_id", options.userId);
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));

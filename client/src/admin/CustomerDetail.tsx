@@ -7,6 +7,7 @@ import { CustomerBenefitsSection } from "./CustomerBenefitsSection";
 import { CustomerDeviceSection } from "./CustomerDeviceSection";
 import { CustomerRefundSection } from "./CustomerRefundSection";
 import { GenerationRecordsPage } from "./GenerationRecordsPage";
+import { SupportTicketsPage } from "./SupportTicketsPage";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
 import { CustomerStatusBadge } from "./ui/StatusBadge";
@@ -27,6 +28,7 @@ const CUSTOMER_DETAIL_TABS = [
   { id: "overview", label: "概览" },
   { id: "funds", label: "充值与积分" },
   { id: "records", label: "生成记录" },
+  { id: "tickets", label: "工单" },
   { id: "devices", label: "登录与设备" },
   { id: "benefits", label: "价格与权益" },
   { id: "activity", label: "操作记录" },
@@ -165,21 +167,13 @@ export function CustomerDetail({
         </div>
       </section>
 
+      {/* 核心指标只留 4 张（T32）：累计消耗、累计生成在资金/记录页签里有完整口径，
+          当前权益已在头部身份区出现一次，不在首屏重复。 */}
       <section aria-label="客户核心指标" className="customer-detail-kpis">
         <article>
           <span>可用积分</span>
           <strong>{customer.available_credits ?? 0}</strong>
           <small>积分</small>
-        </article>
-        <article>
-          <span>累计消耗</span>
-          <strong>{customer.credits_spent ?? 0}</strong>
-          <small>积分</small>
-        </article>
-        <article>
-          <span>累计生成</span>
-          <strong>{customer.generation_total ?? 0}</strong>
-          <small>条</small>
         </article>
         <article>
           <span>累计充值</span>
@@ -190,10 +184,6 @@ export function CustomerDetail({
           <span>本月消耗</span>
           <strong>{customer.month_consumed_credits ?? 0}</strong>
           <small>积分</small>
-        </article>
-        <article>
-          <span>当前权益</span>
-          <strong>{customer.current_benefit || "原价"}</strong>
         </article>
         <article>
           <span>近30天成功率</span>
@@ -269,8 +259,21 @@ export function CustomerDetail({
 
       {tab === "records" ? (
         <GenerationRecordsPage
+          compact
           key={`records:${customer.user_id}`}
           initialUserId={customer.user_id}
+          readOnly={readOnly}
+        />
+      ) : null}
+
+      {tab === "tickets" ? (
+        <SupportTicketsPage
+          key={`tickets:${customer.user_id}`}
+          customer={{
+            user_id: customer.user_id,
+            username: customer.username,
+            display_name: customer.display_name ?? "",
+          }}
           readOnly={readOnly}
         />
       ) : null}
