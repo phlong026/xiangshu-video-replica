@@ -8709,6 +8709,32 @@ export function fetchViralCopy(
  * 同一账号同一条视频只扣一次：复看时 charged=0 且 deduped=true。未命中返回
  * `text=null` 且分文不扣，调用方再走本地抽音轨转写（那一步按秒计 ASR 费）。
  */
+/** 提取记录条目：文案工坊「提取记录」页签的数据行（新→旧，最多 50 条）。 */
+export type ViralCopyExtractionRecord = {
+  platform: string;
+  videoId: string;
+  title: string;
+  lastExtractedAt: string;
+  times: number;
+  text: string | null;
+  updatedAt: string | null;
+};
+
+/**
+ * 我的文案提取记录：每次成功领取正文都会留痕（viral_content_usage_events 的
+ * copy 交付事件），正文实时回源共享缓存；缓存归档后 text 为 null（时间与次数保留）。
+ */
+export function fetchViralCopyExtractions(): Promise<{
+  items: ViralCopyExtractionRecord[];
+}> {
+  return requestApiJson(
+    "/api/viral/videos/copy/extractions",
+    "读取提取记录失败",
+    {},
+    VIRAL_LIST_TIMEOUT_MS,
+  );
+}
+
 export function claimViralCopy(
   platform: ViralPlatform,
   videoId: string,

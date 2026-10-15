@@ -556,6 +556,53 @@ def test_copy_claim_charges_once_then_replays_free(detail_client, route_state) -
         assert _copy_operations(raw, f"viral-copy:{uid}:douyin:v-copy-first") == [("SUCCEEDED", 2)]
 
 
+def test_copy_extractions_lists_own_claim_history(detail_client, route_state) -> None:
+    """提取记录：按用户回放领取历史（新→旧），正文回源共享缓存；只看自己的."""
+    headers, uid = account(detail_client, "copy_history")
+    with psycopg.connect(route_state) as raw:
+        _seed_copy_video(raw, uid, video_id="v-copy-hist-a")
+        _seed_copy_video(raw, uid, video_id="v-copy-hist-b")
+    first = _claim_copy(detail_client, headers, video_id="v-copy-hist-a")
+    assert first.status_code == 200, first.text
+    second = _claim_copy(detail_client, headers, video_id="v-copy-hist-b")
+    assert second.status_code == 200, second.text
+
+    listing = detail_client.get(
+        "/api/viral/videos/copy/extractions", headers=headers
+    )
+    assert listing.status_code == 200, listing.text
+    items = listing.json()["items"]
+    assert [item["videoId"] for item in items][:2] == [
+        "v-copy-hist-b",
+        "v-copy-hist-a",
+    ]
+    assert items[0]["platform"] == "douyin"
+    assert items[0]["times"] == 1
+    assert items[0]["text"] == _COPY_TEXT
+    assert items[0]["title"] == "T"
+    assert items[0]["lastExtractedAt"]
+
+    # 未领取过的账号记录为空；重复领取不产生重复条目（只加次数）。
+    other_headers, _other_uid = account(detail_client, "copy_history_other")
+    other = detail_client.get(
+        "/api/viral/videos/copy/extractions", headers=other_headers
+    )
+    assert other.status_code == 200, other.text
+    assert other.json()["items"] == []
+    replay = _claim_copy(detail_client, headers, video_id="v-copy-hist-a")
+    assert replay.status_code == 200, replay.text
+    again = detail_client.get(
+        "/api/viral/videos/copy/extractions", headers=headers
+    )
+    rows = again.json()["items"]
+    assert len(rows) == 2
+    # 重领把 hist-a 的最近交付时间推到最新，排序随之置顶，次数 +1。
+    assert rows[0]["videoId"] == "v-copy-hist-a"
+    assert rows[0]["times"] == 2
+    assert rows[1]["videoId"] == "v-copy-hist-b"
+    assert rows[1]["times"] == 1
+
+
 def test_copy_claim_miss_delivers_nothing_and_costs_nothing(detail_client, route_state) -> None:
     """未命中共享缓存：如实回 null 且分文不扣——没有交付就没有收费."""
     headers, uid = account(detail_client, "copy_miss")

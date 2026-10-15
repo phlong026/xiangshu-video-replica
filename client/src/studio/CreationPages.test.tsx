@@ -29,6 +29,7 @@ const replicaApi = vi.hoisted(() => ({
   getLatestProjectAnalysis: vi.fn(async () => ({ id: "av-x", payload: {} })),
   getLatestGenerationPrompt: vi.fn(),
   getLatestScriptVersion: vi.fn(),
+  fetchViralCopyExtractions: vi.fn(),
   getLatestScriptRewriteTask: vi.fn<
     (...args: [string, string?, string?]) => Promise<unknown>
   >(async () => null),
@@ -1029,6 +1030,56 @@ describe("V1.4 创作页面", () => {
     expect(oralButton).toBeEnabled();
     fireEvent.click(oralButton);
     expect(value.navigate).toHaveBeenCalledWith("oral", { returnTo: "copy" });
+  });
+
+  it("提取记录页签列出个人提取历史并可复用到工坊", async () => {
+    replicaApi.fetchViralCopyExtractions.mockResolvedValueOnce({
+      items: [
+        {
+          platform: "douyin",
+          videoId: "v-1",
+          title: "家乡变化",
+          lastExtractedAt: "2026-10-15T06:09:53+00:00",
+          times: 2,
+          text: "不出三年，家乡大变样……",
+          updatedAt: "2026-10-15T06:09:53+00:00",
+        },
+        {
+          platform: "douyin",
+          videoId: "v-2",
+          title: "",
+          lastExtractedAt: "2026-10-14T06:09:53+00:00",
+          times: 1,
+          text: null,
+          updatedAt: null,
+        },
+      ],
+    });
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "提取记录" }));
+    await screen.findByText("家乡变化");
+    expect(screen.getByText(/提取 2 次/)).toBeInTheDocument();
+    expect(screen.getByText("正文已过期，可重新提取。")).toBeInTheDocument();
+
+    const reuseButtons = screen.getAllByRole("button", {
+      name: "复用到工坊",
+    });
+    expect(reuseButtons).toHaveLength(2);
+    expect(reuseButtons[0]).toBeEnabled();
+    expect(reuseButtons[1]).toBeDisabled();
+    fireEvent.click(reuseButtons[0]);
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scriptEdited: true,
+        script: expect.objectContaining({
+          text: "不出三年，家乡大变样……",
+          confirmed: false,
+        }),
+      }),
+    );
   });
 
   it("审计员可查看创作内容但文案、视频与口播提交控件只读", () => {

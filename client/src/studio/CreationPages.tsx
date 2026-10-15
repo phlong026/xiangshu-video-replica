@@ -14,6 +14,7 @@ import {
   capturePromptSession,
   customerVisibleErrorMessage,
   DIRECT_RESULT_RETENTION_HINT,
+  fetchViralCopyExtractions,
   type GenerationRatio,
   type GenerationVersionState,
   getAnalysisTask,
@@ -42,6 +43,7 @@ import {
   saveShotCards,
   selectCharacterReferences,
   startVideoAnalysis,
+  type ViralCopyExtractionRecord,
   waitForAnalysisTask,
   waitForScriptRewriteTask,
 } from "../api";
@@ -441,7 +443,12 @@ export function CopyPage() {
       ? ""
       : copyProfile(data.people.find((item) => item.id === state.draft.ipId));
   const [rewriteError, setRewriteError] = useState("");
-  const [tab, setTab] = useState<"rewrite" | "saved">("rewrite");
+  const [tab, setTab] = useState<"rewrite" | "saved" | "history">("rewrite");
+  const [extractions, setExtractions] = useState<
+    ViralCopyExtractionRecord[] | null
+  >(null);
+  const [extractionsLoading, setExtractionsLoading] = useState(false);
+  const [extractionsError, setExtractionsError] = useState("");
   const [rewriting, setRewriting] = useState(false);
   const [candidate, setCandidate] = useState(state.draft.rewriteCandidate);
   const [savedLoading, setSavedLoading] = useState(false);
@@ -713,6 +720,38 @@ export function CopyPage() {
       savedOperation.current += 1;
     };
   }, [tab, review, refreshSaved]);
+  const refreshExtractions = useCallback(() => {
+    if (review) return;
+    setExtractionsLoading(true);
+    setExtractionsError("");
+    fetchViralCopyExtractions()
+      .then((page) => setExtractions(page.items))
+      .catch((cause: unknown) =>
+        setExtractionsError(
+          customerVisibleErrorMessage(cause, "读取提取记录失败，请稍后重试。"),
+        ),
+      )
+      .finally(() => setExtractionsLoading(false));
+  }, [review]);
+  useEffect(() => {
+    // 每次进入页签都拉一次：提取记录是行为流水，不是可长期缓存的清单。
+    if (tab === "history" && !review) refreshExtractions();
+  }, [tab, review, refreshExtractions]);
+  const reuseExtraction = (record: ViralCopyExtractionRecord) => {
+    if (readOnly || !record.text) return;
+    const currentScript = state.draft.script;
+    patchDraft({
+      scriptEdited: true,
+      script: {
+        ...currentScript,
+        text: record.text,
+        resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
+        confirmed: false,
+      },
+    });
+    notify("已复用提取文案，请核对后确认终稿。");
+    setTab("rewrite");
+  };
 
   const customWordCountInvalid =
     state.draft.rewriteLength === "custom" &&
@@ -911,12 +950,70 @@ export function CopyPage() {
         items={[
           { id: "rewrite", label: "文案改写" },
           { id: "saved", label: "我的文案" },
+          { id: "history", label: "提取记录" },
         ]}
         value={tab}
-        onChange={(value) => setTab(value as "rewrite" | "saved")}
+        onChange={(value) => setTab(value as "rewrite" | "saved" | "history")}
       />
 
-      {tab === "saved" ? (
+      {tab === "history" ? (
+        <Panel className="creation-extraction-list">
+          {!review ? (
+            <Button
+              variant="outline"
+              disabled={extractionsLoading}
+              onClick={() => refreshExtractions()}
+            >
+              刷新记录
+            </Button>
+          ) : null}
+          {extractionsLoading ? <Hint>正在读取提取记录…</Hint> : null}
+          {extractionsError ? (
+            <Empty
+              title={extractionsError}
+              action={
+                <Button onClick={() => refreshExtractions()}>重试读取</Button>
+              }
+            />
+          ) : extractions && extractions.length ? (
+            extractions.map((record) => (
+              <div
+                className="creation-extraction-row"
+                key={`${record.platform}:${record.videoId}`}
+              >
+                <div className="creation-extraction-row-head">
+                  <strong>
+                    {record.title || `${record.platform} · ${record.videoId}`}
+                  </strong>
+                  <small>
+                    {record.lastExtractedAt.slice(0, 16).replace("T", " ")}
+                    {record.times > 1 ? ` · 提取 ${record.times} 次` : ""}
+                  </small>
+                </div>
+                <p>
+                  {record.text
+                    ? record.text.length > 120
+                      ? `${record.text.slice(0, 120)}…`
+                      : record.text
+                    : "正文已过期，可重新提取。"}
+                </p>
+                <Button
+                  variant="outline"
+                  disabled={readOnly || !record.text}
+                  onClick={() => reuseExtraction(record)}
+                >
+                  复用到工坊
+                </Button>
+              </div>
+            ))
+          ) : !extractionsLoading ? (
+            <Empty
+              title="还没有提取记录"
+              description="从爆款链接或爆款视频提取文案后，记录会集中显示在这里，可一键复用。"
+            />
+          ) : null}
+        </Panel>
+      ) : tab === "saved" ? (
         <Panel className="creation-saved-list">
           {!review ? (
             <Button
