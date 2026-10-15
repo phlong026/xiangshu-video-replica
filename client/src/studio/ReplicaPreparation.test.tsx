@@ -31,7 +31,14 @@ vi.mock("../api", async (original) => ({
 
 import { ReplicaNarration } from "./ReplicaPreparation";
 
-function Harness({ initial }: { initial?: Partial<StudioDraft> } = {}) {
+function Harness({
+  initial,
+  referenceAssetId = "a1",
+}: {
+  initial?: Partial<StudioDraft>;
+  /** 项目当前的复刻参考视频；null 表示这是提取文案项目（只有音轨来源）。 */
+  referenceAssetId?: string | null;
+} = {}) {
   const [draft, setDraft] = useState({
     ...createDraft(),
     projectId: "p1",
@@ -42,6 +49,15 @@ function Harness({ initial }: { initial?: Partial<StudioDraft> } = {}) {
   });
   mocks.useStudio.mockReturnValue({
     state: { draft },
+    data: {
+      projects: [
+        {
+          id: draft.projectId,
+          name: "复刻项目",
+          reference_asset_id: referenceAssetId,
+        },
+      ],
+    },
     user: { id: "u1", role: "customer" },
     review: false,
     patchDraft: (patch: Partial<StudioDraft>) =>
@@ -319,6 +335,30 @@ it("重进后重新提交复用未完成任务的幂等键", async () => {
     undefined,
     "a1",
     "reused-key",
+  );
+});
+// 提取文案项目只有音轨来源（reference_audio），服务端只接受复刻参考视频：拿音轨当
+// 来源提交会被判成「来源素材不存在」，恢复查询也会 404 而静默失效。这类项目就按
+// 纯文本改写提交。
+it("音轨来源项目不带来源 ID 提交，恢复查询也不拿音轨当来源", async () => {
+  render(
+    <Harness
+      referenceAssetId={null}
+      initial={{ sourceId: "audio-asset-1", sourceAssetId: "audio-asset-1" }}
+    />,
+  );
+  await waitFor(() =>
+    expect(mocks.latest).toHaveBeenCalledWith("p1", null, null),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "AI 改写" }));
+  await waitFor(() =>
+    expect(mocks.rewrite).toHaveBeenCalledWith(
+      "p1",
+      "当前口播",
+      undefined,
+      undefined,
+      expect.any(String),
+    ),
   );
 });
 it("可重试的失败保留幂等键供重试", async () => {

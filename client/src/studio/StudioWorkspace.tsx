@@ -10,6 +10,7 @@ import {
   claimViralCopy,
   createIndependentVideoTask,
   createOralTask,
+  createProject,
   customerGetWallet,
   customerVisibleErrorMessage,
   defaultBatchProvider,
@@ -2276,27 +2277,57 @@ export function StudioWorkspace({
    * 命中共享文案缓存后的统一回填（桌面 / Web 两条 claim-first 链路共用）：
    * 命中时既没有导入项目也没有转写任务，只把文案填进草稿、不动来源归属。
    */
-  const applyClaimedViralCopy = (
+  const applyClaimedViralCopy = async (
     text: string,
     billing: ViralCopyBilling,
     guard: { permissionGeneration: number; account: string; scope: string },
+    videoTitle?: string,
   ) => {
-    const currentDraft = latestDraftRef.current;
-    if (
-      currentUserRoleRef.current === "auditor" ||
-      permissionGenerationRef.current !== guard.permissionGeneration ||
-      saveAccountRef.current !== guard.account ||
+    const scopeStillCurrent = () =>
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === guard.permissionGeneration &&
+      saveAccountRef.current === guard.account &&
       JSON.stringify([
-        currentDraft.id,
-        currentDraft.projectId,
-        currentDraft.sourceId,
-        currentDraft.sourceAssetId,
-      ]) !== guard.scope
-    )
-      return;
-    // 命中共享缓存：没有项目也没有任务，只把文案填进草稿，不动来源归属。
+        latestDraftRef.current.id,
+        latestDraftRef.current.projectId,
+        latestDraftRef.current.sourceId,
+        latestDraftRef.current.sourceAssetId,
+      ]) === guard.scope;
+    if (!scopeStillCurrent()) return;
+    // 命中共享缓存时既没有导入任务也没有项目，而文案工坊的改写与版本保存都以项目为
+    // 归属：缺项目就地补一个（与上传/导入链路同口径），否则正文已经到手也二创不了，
+    // 只会停在「当前文案缺少来源项目」。
+    let projectId = latestDraftRef.current.projectId;
+    if (!projectId) {
+      try {
+        const project = await createProject(
+          (videoTitle?.trim() || "爆款视频文案提取").slice(0, 120),
+        );
+        projectId = project.id;
+        setData((current) => ({
+          ...current,
+          projects: [
+            project,
+            ...current.projects.filter((item) => item.id !== project.id),
+          ],
+        }));
+      } catch (cause) {
+        // 建项目失败不能吞掉已经付费的正文：照常填入，用户至少能先核对原文。
+        if (scopeStillCurrent())
+          notify(
+            customerVisibleErrorMessage(
+              cause,
+              "创建文案项目失败，可稍后重试。",
+            ),
+          );
+      }
+    }
+    if (!scopeStillCurrent()) return;
+    // 建项目与填写正文必须同一次 patch：patchStudioDraft 换项目时会用空草稿覆盖
+    // script，分两步写会把刚拿到的原文擦掉。
+    const currentDraft = latestDraftRef.current;
     const currentScript = currentDraft.script;
-    patchDraft({
+    const patch: Partial<StudioDraft> = {
       scriptEdited: true,
       script: {
         ...currentScript,
@@ -2305,7 +2336,9 @@ export function StudioWorkspace({
         resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
         confirmed: false,
       },
-    });
+    };
+    if (projectId) patch.projectId = projectId;
+    patchDraft(patch);
     navigate("copy", { returnTo: "workbench" });
     // 「获取文案」计费（2026-10-08 口径）：命中缓存秒回同样按 viral_copy 扣费
     // （同账号同视频只扣一次）；回执 charged>0 时刷新钱包余额展示。
@@ -2326,6 +2359,7 @@ export function StudioWorkspace({
    */
   const extractViralCopy = (
     video: {
+      title?: string;
       platformKey?: string;
       nativeId?: string;
       playUrl?: string | null;
@@ -2399,11 +2433,16 @@ export function StudioWorkspace({
             onCacheMiss();
             return;
           }
-          applyClaimedViralCopy(claimed.text, claimed.billing, {
-            permissionGeneration,
-            account: extractionAccount,
-            scope: extractionScope,
-          });
+          applyClaimedViralCopy(
+            claimed.text,
+            claimed.billing,
+            {
+              permissionGeneration,
+              account: extractionAccount,
+              scope: extractionScope,
+            },
+            video.title,
+          );
         })
         .catch((cause: unknown) => {
           extractingRef.current = false;
@@ -2453,11 +2492,16 @@ export function StudioWorkspace({
         }
         extractingRef.current = false;
         endCopyExtractionProgress();
-        applyClaimedViralCopy(receipt.text, receipt.billing, {
-          permissionGeneration,
-          account: extractionAccount,
-          scope: extractionScope,
-        });
+        applyClaimedViralCopy(
+          receipt.text,
+          receipt.billing,
+          {
+            permissionGeneration,
+            account: extractionAccount,
+            scope: extractionScope,
+          },
+          video.title,
+        );
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;

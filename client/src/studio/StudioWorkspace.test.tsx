@@ -150,6 +150,13 @@ const api = vi.hoisted(() => ({
   // Web 端 claim-first 的交付计费点：默认「未命中」，具体用例再覆盖。
   claimViralCopy: vi.fn(),
   createViralImportTask: vi.fn(),
+  // 命中共享缓存且草稿没有项目时客户端就地补建项目；默认给一条可用回执。
+  createProject: vi.fn(async (name: string) => ({
+    id: "project-claimed-copy",
+    owner_user_id: "review-user",
+    name,
+    status: "ACTIVE",
+  })),
   completeMaterialUpload: vi.fn(),
   createMaterialUploadIntent: vi.fn(),
   customerGetWallet: vi.fn(),
@@ -2796,6 +2803,50 @@ describe("V1.4 workspace integration", () => {
         expect(live.startViralCopyExtraction).toHaveBeenCalledTimes(1);
       },
     );
+
+    // 命中共享缓存既没有导入任务也没有项目，而文案工坊的改写/保存版本都以项目为归属：
+    // 不补项目，用户拿得到原文却二创不了，只会停在「当前文案缺少来源项目」。
+    it("命中共享缓存且草稿没有项目时就地补建项目并落回正文", async () => {
+      extractionProbe.desktop = true;
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      live.startViralCopyExtraction.mockResolvedValue({
+        kind: "cache",
+        text: "缓存命中的原文",
+        billing: { charged: 0 },
+      });
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          initialState={createState("workbench")}
+        />,
+      );
+      await waitFor(() => expect(extractionProbe.current).not.toBeNull());
+      await act(async () => {
+        currentExtractionContext().patchDraft({ sourceId: "viral-claimed" });
+        currentExtractionContext().extractViralCopy({
+          title: "乡墅案例",
+          platformKey: "douyin",
+          nativeId: "claimed",
+        });
+      });
+
+      await waitFor(() =>
+        expect(api.createProject).toHaveBeenCalledWith("乡墅案例"),
+      );
+      await waitFor(() =>
+        expect(currentExtractionContext().state.draft.projectId).toBe(
+          "project-claimed-copy",
+        ),
+      );
+      expect(currentExtractionContext().state.draft.script.original).toBe(
+        "缓存命中的原文",
+      );
+      expect(await screen.findByLabelText("来源原文")).toHaveValue(
+        "缓存命中的原文",
+      );
+      expect(screen.queryByText(/缺少来源项目/)).toBeNull();
+    });
 
     it.each(["cache", "task", "error"])(
       "快速换源后忽略旧桌面%s响应",
