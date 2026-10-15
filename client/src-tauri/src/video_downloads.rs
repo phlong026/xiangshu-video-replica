@@ -235,10 +235,23 @@ pub async fn choose_video_download(
     {
         let owner = window.hwnd().map_err(|_| "无法打开保存窗口")?.0 as usize;
         let suggested = safe_filename(&filename);
-        let path =
-            tauri::async_runtime::spawn_blocking(move || windows_dialog::choose(owner, &suggested))
-                .await
-                .map_err(|_| "保存窗口异常退出")??;
+        // 模态保存对话框必须回主线程显示。主线程是 WebView2 建立的 STA 套间；
+        // spawn_blocking 的线程池线程是 MTA（或未初始化 COM），而
+        // GetSaveFileNameW 带 OFN_EXPLORER 时会走 shell COM：在那个线程上创建
+        // 对话框会失败，且失败与「用户取消」在 Win32 层同样是返回 0 且
+        // CommDlgExtendedError()==0 —— 于是命令返回 Ok(None)，前端按「已取消」
+        // 静默收场：Windows 生产端点了下载什么都不弹、也没有任何报错。
+        // 这里把对话框排到主线程执行，结论经通道回传给异步命令。
+        let (sender, receiver) = std::sync::mpsc::channel();
+        window
+            .run_on_main_thread(move || {
+                let _ = sender.send(windows_dialog::choose(owner, &suggested));
+            })
+            .map_err(|_| "无法打开保存窗口".to_string())?;
+        let path = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|_| "保存窗口异常退出".to_string())?
+            .map_err(|_| "保存窗口未返回结果".to_string())??;
         // Navigation while the modal was open must not grant a remote page a destination.
         local_origin(window.as_ref())?;
         path.map(|path| {
