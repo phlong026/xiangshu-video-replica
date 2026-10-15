@@ -9,7 +9,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU2RTY3QzAzRDQzQjBBODYKUldTR0NqdlVBM3ptVm9PZzcvU2M0OG03b1ZtdkFaSGIxQlpZdFBnNytQWWVYbjdRSHR5T0phWW0K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQxNjA2RUNEQjZCNzY3OTEKUldTUlo3ZTJ6VzVnUWJocHBmYUtUeWZ1N2gwWVh2blQvcW9MWGR2U3cyMHUrclYveC9ucFVBWjUK",
       "endpoints": [
         "https://staging.example.invalid/downloads/customer-cloud/stable.json"
       ]
