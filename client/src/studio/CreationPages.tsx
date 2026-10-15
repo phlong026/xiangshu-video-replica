@@ -5427,6 +5427,7 @@ export function OralPage() {
     openPicker,
     saveDraft,
     requestGeneration,
+    confirmFinalDraft,
     user,
   } = useStudio();
   const readOnly = user.role === "auditor";
@@ -5612,16 +5613,18 @@ export function OralPage() {
             <>
               <div className="oral-panel-heading">
                 <h2>口播文案</h2>
-                <span className="oral-source-label">
-                  {scriptReady ? "已确认终稿" : "待确认终稿"}
-                </span>
+                {/* 文案从文案工坊带入后允许就地确认终稿，不再强迫用户跳回工坊。 */}
+                {!scriptReady && state.draft.script.text.trim() ? (
+                  <Button
+                    variant="outline"
+                    disabled={readOnly}
+                    onClick={() => confirmFinalDraft()}
+                  >
+                    确认终稿
+                  </Button>
+                ) : null}
               </div>
               <div className="creation-readonly-script">
-                <div>
-                  <span>来源：文案工坊</span>
-                  <strong>V{state.draft.script.version}</strong>
-                </div>
-                <h3>{state.draft.script.title || "未命名作品"}</h3>
                 <p>
                   {state.draft.script.text || "去文案工坊填写并确认口播文案。"}
                 </p>
@@ -5631,10 +5634,6 @@ export function OralPage() {
                 >
                   去文案工坊修改
                 </button>
-              </div>
-              <div className="oral-script-meta">
-                <span>{state.draft.script.text.trim().length} 字</span>
-                <span>成片时长随口播内容确定</span>
               </div>
               <div className="creation-style-controls">
                 <span>标准口播</span>

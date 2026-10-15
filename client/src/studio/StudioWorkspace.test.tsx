@@ -1072,7 +1072,9 @@ describe("V1.4 workspace integration", () => {
       within(screen.getByRole("dialog")).getByRole("button", { name: /李总/ }),
     );
     expect(screen.queryByText("张工本人音色 V1")).not.toBeInTheDocument();
-    expect(screen.getByText("待确认终稿")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "确认终稿" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
   });
   it("cancelling a picker leaves the original draft intact", () => {
