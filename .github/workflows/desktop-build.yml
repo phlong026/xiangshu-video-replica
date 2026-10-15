@@ -8,6 +8,20 @@ on:
         type: string
         required: true
         default: https://video.zszhj.cn
+      platforms:
+        # 计费口径：私有仓库按分钟计费，macOS 跑一分钟算 10 分钟、Windows 算 2 分钟，
+        # 一次三端全量 ≈ 300 分钟额度。日常排查只需要一端时选它，别每次全量。
+        # 标签发版必须三端齐全（release 作业逐平台校验 provenance），而 push/tag 事件
+        # 不带输入，所以缺省值取 all。
+        description: Platforms to build（all = 三端内部预览）
+        type: choice
+        options:
+          - all
+          - windows-x86_64
+          - macos-arm64
+          - macos-x86_64
+        default: all
+        required: false
   push:
     # The task branch makes the first build reviewable before merging to main.
     branches: [main, feat/desktop-actions-20260917]
@@ -51,6 +65,9 @@ jobs:
   build:
     needs: ffmpeg-windows-binaries
     name: Build ${{ matrix.platform }}
+    # 只跑选中的平台（未选中的矩阵腿显示 skipped，不消耗额度）；push/tag 事件没有
+    # inputs，按 all 处理，保证标签发版仍是三端齐全。
+    if: ${{ (inputs.platforms || 'all') == 'all' || (inputs.platforms || 'all') == matrix.platform }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
