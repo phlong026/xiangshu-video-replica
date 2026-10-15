@@ -11,16 +11,19 @@ import {
   createIndependentVideoTask,
   createOralTask,
   createProject,
+  createPromptOptimization,
   customerGetWallet,
   customerVisibleErrorMessage,
   defaultBatchProvider,
   type GenerationBatch,
   type GenerationPriceQuote,
+  type GenerationRatio,
   getAssetDownloadUrl,
   getGenerationBatch,
   getGenerationPriceQuote,
   getIndependentCapabilities,
   getOralPrice,
+  getPromptOptimization,
   getWallet,
   type IndependentCapabilities,
   listMaterials,
@@ -1174,6 +1177,36 @@ export function StudioWorkspace({
     setWalletRevision((value) => value + 1);
   }, []);
 
+  // 一句话需求 → 标准六段式：复用服务端提示词优化（按次计费），提交被结构
+  // 门禁拦下时由 submitVideoTask 自动调用一次。
+  const autoOptimizeReferencePrompt = async (
+    draft: StudioDraft,
+  ): Promise<string | null> => {
+    let result = await createPromptOptimization({
+      route: "reference",
+      duration_seconds: normalizeCustomerDuration(draft.duration),
+      ratio: draft.ratio as GenerationRatio,
+      resolution: draft.resolution === "2K" ? "2K" : "768P",
+      project_id: draft.projectId ?? null,
+      references: draft.referenceIds.map((assetId) => ({
+        asset_id: assetId,
+        purpose: draft.referencePurposes?.[assetId] || "unspecified",
+      })),
+      prompt_text: draft.referencePrompt ?? "",
+      idempotency_key: crypto.randomUUID(),
+      editor_revision: 1,
+    });
+    const deadline = Date.now() + 12 * 60 * 1000;
+    while (result.status === "PENDING" || result.status === "RUNNING") {
+      if (Date.now() > deadline)
+        throw new Error("优化任务超时，请稍后手动重试。");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      result = await getPromptOptimization(result.task_id);
+    }
+    if (result.status !== "SUCCEEDED") return null;
+    return result.result?.prompt_text ?? null;
+  };
+
   const referenceDraftError = (draft: StudioDraft): string | undefined => {
     if (referenceAssetsPending) return "草稿参考图仍在恢复，请稍后重试。";
     if (referenceAssetsError) return "草稿参考图读取失败，请先重试。";
@@ -1195,7 +1228,7 @@ export function StudioWorkspace({
     return undefined;
   };
 
-  const submitVideoTask = async () => {
+  const submitVideoTask = async (autoOptimizeRetried = false) => {
     if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
@@ -1301,6 +1334,50 @@ export function StudioWorkspace({
       }
     } catch (cause: unknown) {
       if (isCurrent()) {
+        // 参考生视频「一句话需求直接生成」：结构门禁（422）拦下后自动按参考
+        // 素材生成标准六段式提示词（含 1 次优化计费，已 notify），然后重提一次；
+        // 仍不成立才交回常规错误处理，避免用户手动来回点。
+        const retryMode = resolveVideoMode(
+          page,
+          Boolean(draft.firstFrameId),
+          Boolean(draft.tailFrameId),
+        );
+        const errorCode = (cause as { code?: string }).code;
+        const errorStatus = (cause as { status?: number }).status;
+        if (
+          !autoOptimizeRetried &&
+          retryMode === "r2v" &&
+          errorStatus === 422 &&
+          (errorCode === "H3_STRUCTURE_INVALID" ||
+            errorCode === "SHOT_SEQUENCE_INVALID")
+        ) {
+          notify(
+            "提示词还不是标准六段式：正在按参考素材自动生成标准提示词（含 1 次提示词优化计费），完成后自动提交。",
+          );
+          // 释放提交锁：重提发生在本次尝试的 catch 里，锁还握在本次手上，
+          // 不先放掉会在 submitVideoTask 的并发守卫处静默返回。
+          videoSubmittingRef.current = false;
+          setVideoSubmitting(false);
+          try {
+            const optimized = await autoOptimizeReferencePrompt(draft);
+            if (!isCurrent()) return;
+            if (optimized) {
+              patchDraft({ referencePrompt: optimized });
+              void submitVideoTask(true);
+              return;
+            }
+            notify(
+              "自动优化未能生成标准提示词，请手动点击「生成标准提示词」后重试。",
+            );
+          } catch (optimizeCause: unknown) {
+            notify(
+              customerVisibleErrorMessage(
+                optimizeCause,
+                "自动优化失败，请手动生成标准提示词后再提交。",
+              ),
+            );
+          }
+        }
         const message = customerVisibleErrorMessage(
           cause,
           "视频生成任务提交失败，请稍后重试。",

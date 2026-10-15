@@ -184,6 +184,8 @@ const api = vi.hoisted(() => ({
       max_quantity: 4,
     }),
   ),
+  createPromptOptimization: vi.fn(),
+  getPromptOptimization: vi.fn(),
   getGenerationPriceQuote: vi.fn(
     async (): Promise<{
       resolution: string;
@@ -4259,6 +4261,127 @@ describe("视频生成（C2 独立创作）", () => {
       expect(api.getIndependentCapabilities).toHaveBeenCalledTimes(2),
     );
     expect(screen.getByRole("button", { name: "生成视频" })).toBeEnabled();
+  });
+
+  it("参考生视频自由文本被结构门禁拦下后自动优化并重提", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_reference_videos: 3,
+      max_reference_audios: 3,
+      max_quantity: 4,
+    });
+    api.getGenerationPriceQuote.mockResolvedValue({
+      resolution: "768P",
+      duration_seconds: 8,
+      quantity: 1,
+      unit_price_fen_per_second: 120,
+      estimated_seconds: 8,
+      estimated_price_fen: 960,
+      unit_credits: 960,
+      estimated_credits: 960,
+      quote_token: "quote-auto-1",
+      quote_expires_at: Math.floor(Date.now() / 1000) + 600,
+      max_credits: 960,
+    });
+    api.createIndependentVideoTask
+      .mockRejectedValueOnce(
+        Object.assign(new Error("提示词缺少当前模式的必要段落。"), {
+          status: 422,
+          code: "H3_STRUCTURE_INVALID",
+        }),
+      )
+      .mockResolvedValueOnce({
+        id: "batch-video-auto",
+        project_id: null,
+        creation_kind: "independent",
+        stale: false,
+        progress: { total_count: 1, terminal_count: 0, progress_percent: 0 },
+        tasks: [],
+      });
+    api.createPromptOptimization.mockResolvedValue({
+      task_id: "opt-auto-1",
+      status: "RUNNING",
+      mode: "Ref2VA",
+      editor_revision: 1,
+      context_hash: "hash",
+      formatter_version: "v1",
+      error_message: null,
+      result: null,
+    });
+    api.getPromptOptimization.mockResolvedValue({
+      task_id: "opt-auto-1",
+      status: "SUCCEEDED",
+      mode: "Ref2VA",
+      editor_revision: 1,
+      context_hash: "hash",
+      formatter_version: "v1",
+      error_message: null,
+      result: {
+        prompt_text: [
+          "subject_definitions: <Subject 1> 目标人物。",
+          "summary: reference generation。",
+          "retention_analysis: fully_preserved。",
+          "detailed_description: [Shot 1] 00:00-00:08 替换人物。",
+          "overall_soundscape: 自然环境音。",
+          "non_diegetic_music: 无。",
+        ].join("\n"),
+        warnings: [],
+        validation_status: "ok",
+      },
+    });
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      assets: [
+        {
+          id: "image-a",
+          name: "外立面 A.jpg",
+          kind: "image",
+          group: "参考素材",
+          source: "素材库",
+          saved: true,
+        },
+        {
+          id: "video-a",
+          name: "运镜 B.mp4",
+          kind: "video",
+          group: "参考素材",
+          source: "素材库",
+          saved: true,
+        },
+      ],
+    });
+    const initial = createState("reference");
+    initial.draft.referencePrompt =
+      "将视频1中的人物更换成图2中的人物，保持其他内容不变";
+    initial.draft.referenceIds = ["video-a", "image-a"];
+    initial.draft.videoName = "人物替换自动优化";
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "生成视频" }));
+    fireEvent.click(await findEnabledButton("确认费用并提交"));
+
+    await waitFor(() =>
+      expect(api.createPromptOptimization).toHaveBeenCalledOnce(),
+    );
+    expect(api.createPromptOptimization.mock.calls[0][0]).toMatchObject({
+      route: "reference",
+      prompt_text: "将视频1中的人物更换成图2中的人物，保持其他内容不变",
+    });
+    await waitFor(
+      () => expect(api.createIndependentVideoTask).toHaveBeenCalledTimes(2),
+      { timeout: 8000 },
+    );
+    const retryInput = api.createIndependentVideoTask.mock.calls[1][0] as {
+      prompt_text: string;
+      quote_token: string;
+    };
+    expect(retryInput.prompt_text).toContain("subject_definitions:");
+    expect(retryInput.quote_token).toBe("quote-auto-1");
   });
 
   it("确认弹窗打开后参考图失效也不能绕过最终提交校验", async () => {
