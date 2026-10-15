@@ -657,6 +657,97 @@ describe("V1.4 创作页面", () => {
     );
   });
 
+  // 提取文案（爆款链接、只上传音轨）的项目没有参考视频：二创按纯文本提交、不带
+  // 来源 ID，但草稿里的展示来源是音轨资产或爆款视频 ID。结果校验必须对齐「本次
+  // 请求发出去的来源」，否则服务端已是 SUCCEEDED 的正文会被丢弃，并报出「改写未
+  // 返回完整正文，请重试。」——用户无论点多少次、刷新多少次都拿不到稿子。
+  it.each<
+    [string, string, string | undefined, string | null, string | undefined]
+  >([
+    // 名称、草稿 sourceId、草稿 sourceAssetId、项目参考视频、提交时带的来源
+    ["音轨资产只在 sourceId", "audio-asset-1", undefined, null, undefined],
+    [
+      "音轨资产同时写入 sourceAssetId",
+      "audio-asset-1",
+      "audio-asset-1",
+      null,
+      undefined,
+    ],
+    ["爆款视频 ID 只在 sourceId", "douyin-7231", undefined, null, undefined],
+    [
+      "复刻参考视频项目（来源本来就一致）",
+      "source-1",
+      undefined,
+      "source-1",
+      "source-1",
+    ],
+  ])(
+    "二创结果按提交口径校验来源：%s",
+    async (_name, sourceId, sourceAssetId, referenceAssetId, submittedSourceAssetId) => {
+      const value = studio({ review: false });
+      value.state.draft = {
+        ...value.state.draft,
+        ipId: undefined,
+        rewriteMethod: "custom",
+        rewriteInstructions: "调整开头；更口语化",
+        sourceId,
+        sourceAssetId,
+      };
+      value.data = {
+        ...value.data,
+        projects: [
+          {
+            id: "project-1",
+            owner_user_id: "user-1",
+            name: "提取文案项目",
+            status: "READY" as const,
+            reference_asset_id: referenceAssetId,
+            script_source_asset_id: "audio-asset-1",
+            reference_upload_status: "NOT_STARTED" as const,
+            analysis_status: "NOT_READY" as const,
+          },
+        ],
+      };
+      replicaApi.rewriteProjectScript.mockResolvedValue({
+        id: "text-only-source-1",
+        project_id: "project-1",
+        identity_id: null,
+        // 服务端回显的就是请求里带的来源，不会是别的值。
+        source_asset_id: submittedSourceAssetId ?? null,
+        source_text: "原始文案",
+        instructions: "调整开头；更口语化",
+        status: "SUCCEEDED",
+        result: { rewritten_text: "提取文案项目的二创正文" },
+      });
+      useStudio.mockReturnValue(value);
+      render(<CopyPage />);
+      fireEvent.click(screen.getByRole("button", { name: "生成二创文案" }));
+      await waitFor(() =>
+        expect(replicaApi.rewriteProjectScript).toHaveBeenCalledWith(
+          "project-1",
+          "原始文案",
+          undefined,
+          submittedSourceAssetId,
+          expect.any(String),
+          "调整开头；更口语化",
+        ),
+      );
+      await waitFor(() =>
+        expect(value.patchDraft).toHaveBeenCalledWith(
+          expect.objectContaining({
+            script: expect.objectContaining({
+              text: "提取文案项目的二创正文",
+              resultKind: "rewritten",
+            }),
+          }),
+        ),
+      );
+      expect(value.notify).not.toHaveBeenCalledWith(
+        "改写未返回完整正文，请重试。",
+      );
+    },
+  );
+
   it.each([450, 5000])(
     "文案字数可选自定义，%s 字随改写要求提交",
     async (wordCount) => {
@@ -1219,6 +1310,12 @@ describe("V1.4 创作页面", () => {
     value.state = {
       ...value.state,
       draft: { ...value.state.draft, scriptEdited: false },
+    };
+    // 提交与校验都按项目记录取来源，项目列表必须真的带上参考视频，否则请求发的是
+    // undefined 而 mock 回的是 source-1，校验口径会被这条不一致的夹具体现不出来。
+    value.data = {
+      ...value.data,
+      projects: [projectWithReferenceVideo],
     };
     replicaApi.rewriteProjectScript
       .mockRejectedValueOnce(new Error("临时失败"))

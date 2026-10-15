@@ -445,6 +445,8 @@ export type StudioContextValue = {
    */
   extractViralCopy: (
     video: {
+      /** 命中共享缓存时要补建文案项目，用它作项目名（缺省回落到固定名）。 */
+      title?: string;
       platformKey?: string;
       nativeId?: string;
       playUrl?: string | null;

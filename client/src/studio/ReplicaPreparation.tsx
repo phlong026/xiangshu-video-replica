@@ -74,25 +74,32 @@ function replicaRewriteTaskMatches(
   task: ScriptRewriteTask,
   draft: StudioDraft,
   expectedText: string,
+  referenceAssetId: string | undefined,
 ): boolean {
   return (
     task.project_id === draft.projectId &&
     (task.identity_id ?? "") === (draft.ipId ?? "") &&
-    (task.source_asset_id ?? "") === (draft.sourceAssetId ?? "") &&
+    (task.source_asset_id ?? undefined) === referenceAssetId &&
     task.source_text === expectedText &&
     (task.instructions ?? "") === ""
   );
 }
 
 export function ReplicaNarration() {
-  const { state, user, review, patchDraft } = useStudio();
+  const { state, user, review, patchDraft, data } = useStudio();
   const draft = state.draft;
   const readOnly = user.role === "auditor";
+  // 改写来源只认项目当前的复刻参考视频：服务端只接受 reference_video，草稿里的来源
+  // 可能是提取文案用的音轨或爆款视频 ID，带上它会被判成「来源素材不存在」而直接拒绝。
+  // 项目记录尚未刷新时取不到视频，就按纯文本改写提交（服务端同样接受）。
+  const referenceAssetId =
+    data.projects.find((project) => project.id === draft.projectId)
+      ?.reference_asset_id ?? undefined;
   const key = JSON.stringify([
     user.id,
     draft.id,
     draft.projectId,
-    draft.sourceAssetId,
+    referenceAssetId,
     draft.ipId,
   ]);
   const latest = useRef({
@@ -154,7 +161,7 @@ export function ReplicaNarration() {
     const checkKey = JSON.stringify([
       user.id,
       draft.projectId,
-      draft.sourceAssetId ?? "",
+      referenceAssetId ?? "",
       draft.ipId ?? "",
     ]);
     if (recoveryCheckedRef.current.has(checkKey)) return;
@@ -179,7 +186,7 @@ export function ReplicaNarration() {
           : await getLatestScriptRewriteTask(
               projectId,
               draft.ipId ?? null,
-              draft.sourceAssetId ?? null,
+              referenceAssetId ?? null,
             );
       } catch (cause) {
         if (current())
@@ -191,8 +198,16 @@ export function ReplicaNarration() {
           );
         return;
       }
-      if (!current() || !task) return;
-      if (!replicaRewriteTaskMatches(task, latest.current.draft, expectedText))
+      if (
+        !current() ||
+        !task ||
+        !replicaRewriteTaskMatches(
+          task,
+          latest.current.draft,
+          expectedText,
+          referenceAssetId,
+        )
+      )
         return;
       // 结果已经回填过（任务标记或正文任一命中）就不再处理，避免重复提示与撤销。
       if (
@@ -205,7 +220,7 @@ export function ReplicaNarration() {
       const scope: ScriptRewriteScope = {
         accountId: user.id,
         projectId,
-        sourceAssetId: latest.current.draft.sourceAssetId ?? "",
+        sourceAssetId: referenceAssetId ?? "",
         identityId: latest.current.draft.ipId ?? "",
         scriptId: latest.current.draft.script.id,
         scriptVersion: latest.current.draft.script.version,
@@ -286,7 +301,7 @@ export function ReplicaNarration() {
     draft.projectId,
     draft.script.id,
     draft.script.text,
-    draft.sourceAssetId,
+    referenceAssetId,
     key,
     readOnly,
     review,
@@ -311,7 +326,7 @@ export function ReplicaNarration() {
     const scope = {
       accountId: user.id,
       projectId: draft.projectId,
-      sourceAssetId: draft.sourceAssetId ?? "",
+      sourceAssetId: referenceAssetId ?? "",
       identityId: draft.ipId ?? "",
       scriptId: draft.script.id,
       scriptVersion: draft.script.version,
@@ -338,7 +353,7 @@ export function ReplicaNarration() {
         draft.projectId,
         draft.script.text,
         draft.ipId,
-        draft.sourceAssetId,
+        referenceAssetId,
         requestKey,
       );
       storeReplicaRewritePending(user.id, {

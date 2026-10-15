@@ -496,16 +496,19 @@ export function CopyPage() {
           return;
         const current = currentRef.current.state.draft;
         const rewritten = completed.result?.rewritten_text?.trim();
-        const currentSourceAssetId = current.sourceAssetId ?? current.sourceId;
+        // 结果归属只认本次请求发出去的那份参数：提取文案（爆款链接、只上传音轨）
+        // 的项目没有参考视频，提交时本就不带来源 ID，而草稿里的展示来源是音轨
+        // 资产或爆款视频 ID。拿草稿来源比对会把成功结果误判成「未返回完整正文」。
         if (
           completed.status !== "SUCCEEDED" ||
-          completed.project_id !== current.projectId ||
-          completed.identity_id !==
-            (current.rewriteMethod === "custom" ? null : current.ipId) ||
+          completed.project_id !== requestScope.projectId ||
+          completed.identity_id !== (requestScope.identityId || null) ||
           // 后端对纯文本二创回 null，与前端 undefined 语义对齐后再比对。
-          (completed.source_asset_id ?? undefined) !== currentSourceAssetId ||
-          completed.source_text !== copySource(current) ||
-          (completed.instructions ?? "") !== copyInstructions(current) ||
+          (completed.source_asset_id ?? undefined) !==
+            requestScope.sourceAssetId ||
+          completed.source_text !== requestScope.text ||
+          (completed.instructions ?? "") !==
+            (requestScope.instructions ?? "") ||
           !taskProfileMatches(
             completed,
             requestScope.profileFingerprint ?? "",
