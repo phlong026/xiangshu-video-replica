@@ -15,7 +15,7 @@ async function openCustomerCenter(page, displayName) {
         }
         if (command === "customer_save_credentials") return;
         if (command === "customer_device_instance_id") return "layout-fixture";
-        if (command === "plugin:app|version") return "2.6.3";
+        if (command === "plugin:app|version") return "2.6.4";
         if (command === "list_local_publish_accounts") return [];
         throw new Error(`布局夹具不支持桌面操作：${command}`);
       },

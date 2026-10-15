@@ -1,6 +1,6 @@
 {
   "name": "video-replica-desktop",
-  "version": "2.6.3",
+  "version": "2.6.4",
   "private": true,
   "workspaces": [
     "client"
