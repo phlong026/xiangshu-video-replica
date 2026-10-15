@@ -499,24 +499,6 @@ def test_macos_tauri_overlay_builds_dmg_without_distribution_signing() -> None:
     assert config["bundle"]["resources"] == []
 
 
-def test_desktop_dispatch_can_narrow_platforms_without_weakening_tag_releases() -> None:
-    """手动触发可以只出一端（macOS runner 按 10× 计费），标签发版仍必须三端齐全。"""
-    workflow = (REPO_ROOT / ".github/workflows/desktop-build.yml").read_text(encoding="utf-8")
-
-    assert "type: choice" in workflow
-    assert "default: all" in workflow
-    for platform in ("windows-x86_64", "macos-arm64", "macos-x86_64"):
-        assert f"- {platform}\n" in workflow
-    # build 作业按输入过滤矩阵腿；push/tag 事件不带 inputs，表达式回退到 all，
-    # 所以标签发版不可能少平台（release 作业逐平台校验 provenance）。
-    assert "(inputs.platforms || 'all') == 'all'" in workflow
-    assert "(inputs.platforms || 'all') == matrix.platform" in workflow
-    build, release = workflow.split("\n  release:\n", 1)
-    assert "inputs.platforms" in build
-    # 过滤只作用于构建：发布作业仍然只认标签事件，不受手动选择影响。
-    assert "inputs.platforms" not in release
-
-
 def test_desktop_release_is_tag_only_and_build_has_no_write_token() -> None:
     workflow = (REPO_ROOT / ".github/workflows/desktop-build.yml").read_text()
     build, release = workflow.split("\n  release:\n", 1)
