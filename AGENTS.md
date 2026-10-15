@@ -51,6 +51,10 @@ npm run check:sharded    # 四分片并行 pytest，每片独立 PG 容器
 - `npm run check:full`（`scripts/ci/run-full-gate.sh`）逐段等价复刻 CI 的 Linux
   质量门：sharded 门禁 + 分片清单覆盖断言 + 浏览器 E2E + `cargo test` +
   双前端构建 + `npm audit`。Windows NSIS 打包保留在 CI 手动触发。
+- 改动 `client/src-tauri/**` 里 `#[cfg(windows)]` 的代码后，除 `npm run check:tauri`
+  外还要跑 `scripts/verify_windows_target.sh`：宿主目标的 `cargo check` 不编译 Windows
+  专用代码，而 NSIS 打包在 CI 手动触发——漏编译、类型错误与只在 Windows 运行期发作
+  的问题，本地门禁都看不见（2026-10-15「下载不弹保存对话框」即属此类）。
 
 ## 本地集成与推送纪律（2026-10-08 起）
 
