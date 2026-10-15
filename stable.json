@@ -1,0 +1,11 @@
+{
+ "version": "2.6.3",
+ "notes": "本次更新：文案改写来源口径修复（提取类项目不再误报）；文案工坊新增「提取记录」，个人提取历史可一键复用；管理后台与计费整改。",
+ "pub_date": "2026-10-15T12:05:11Z",
+ "platforms": {
+  "windows-x86_64": {
+   "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTUlo3ZTJ6VzVnUVdHVEM3c2ZRR2NCU0tMUVlMV2s3K1RMbGt1cER0cWZNbk0yQmVZemVTUXE4Rm0zSjMwMTJaVW0rKzJGUFg5SnRXODFCWmdmcG8rV1NWSVVNZ21SY0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDY1ODM2CWZpbGU65LyX5aKF5LmL5a62IEFJIOeIhuasvuinhumikeW3peWFt18yLjYuM194NjQtc2V0dXAuZXhlCk9YVXJQaU1SRHlJaGNoWGxMV1ZLUzdqYkVxV3h5UWY0UVBzTmJENmFVeVhyZGIveW51OHZkWVR1ZThINTFQR24wTmtHc2wrbE9VaFh5RE03WTBLYUF3PT0K",
+   "url": "https://video.zszhj.cn/downloads/customer-cloud/2.6.3/众墅之家 AI 爆款视频工具_2.6.3_x64-setup.exe"
+  }
+ }
+}
