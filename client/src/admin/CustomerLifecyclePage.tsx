@@ -1,16 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   type CustomerLifecycleItem,
   type CustomerLifecycleResponse,
   type CustomerRetentionResponse,
-  createCustomerAdjustment,
-  createIdempotencyKey,
   listCustomerLifecycle,
   readCustomerRetention,
 } from "../api.admin";
-import { apiBaseUrl } from "../apiBase";
+import { BatchGrantDialog } from "./BatchGrantDialog";
+import { type GrantBatch, readGrantBatch } from "./batchAdjustments";
 import { CustomerLink } from "./CustomerLink";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
@@ -23,103 +21,11 @@ import { formatDateTime, formatFen } from "./ui/vocabulary";
  * M3 客户运营 v2（ADM-10）：生命周期分层 + 健康分 + 批量赠送。
  *
  * 目标读者是运营：先看分布（谁在沉睡），再按分层下钻，勾选目标客户批量
- * 赠送激活积分。批量赠送逐户调用既有调账端点（幂等键逐户独立），失败
- * 中断并列出已成功名单，方便续发。
+ * 赠送激活积分。批量赠送统一走 BatchGrantDialog（与客户列表页同一实现）：
+ * 逐户调用既有调账端点、逐户独立幂等键与操作号，失败不阻断其余客户并可只重试
+ * 失败部分；整批进度落盘，刷新或崩溃后按原标识继续，不会重复发放。
  */
 const PAGE_SIZE = 20;
-const MAX_GRANT_CREDITS = 2_147_483_647;
-
-type GrantTarget = {
-  userId: string;
-  username: string;
-  operationId: string;
-  idempotencyKey: string;
-  done: boolean;
-};
-
-type GrantBatch = {
-  version: 1;
-  id: string;
-  apiBase: string;
-  sourceDocumentRef: string;
-  credits: number;
-  reason: string;
-  targets: GrantTarget[];
-};
-
-function batchStorageKey(base = apiBaseUrl()) {
-  // 同一浏览器切换服务端时不能把旧环境的发放请求带到新环境。
-  return `admin:customer-grant-batch:v1:${base}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isNonBlank(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function readBatch(): GrantBatch | null {
-  const stored = localStorage.getItem(batchStorageKey());
-  if (stored === null) return null;
-  const value: unknown = JSON.parse(stored);
-  if (
-    !isRecord(value) ||
-    value.version !== 1 ||
-    !isNonBlank(value.id) ||
-    value.apiBase !== apiBaseUrl() ||
-    !isNonBlank(value.sourceDocumentRef) ||
-    !isNonBlank(value.reason) ||
-    typeof value.credits !== "number" ||
-    !Number.isSafeInteger(value.credits) ||
-    value.credits <= 0 ||
-    value.credits > MAX_GRANT_CREDITS ||
-    !Array.isArray(value.targets) ||
-    value.targets.length === 0 ||
-    value.targets.length > PAGE_SIZE ||
-    !value.targets.every(
-      (target: unknown) =>
-        isRecord(target) &&
-        isNonBlank(target.userId) &&
-        isNonBlank(target.username) &&
-        isNonBlank(target.operationId) &&
-        target.operationId.length <= 128 &&
-        isNonBlank(target.idempotencyKey) &&
-        typeof target.done === "boolean",
-    )
-  ) {
-    throw new Error("批次恢复记录格式无效");
-  }
-  const batch = value as GrantBatch;
-  for (const field of ["userId", "operationId", "idempotencyKey"] as const) {
-    if (
-      new Set(batch.targets.map((target) => target[field])).size !==
-      batch.targets.length
-    ) {
-      throw new Error("批次恢复记录包含重复目标或标识");
-    }
-  }
-  return batch;
-}
-
-function persistBatch(batch: GrantBatch) {
-  if (batch.apiBase !== apiBaseUrl()) {
-    throw new Error("服务端地址已更改，已暂停原批次。请切回原服务端后继续。");
-  }
-  try {
-    const key = batchStorageKey(batch.apiBase);
-    const serialized = JSON.stringify(batch);
-    localStorage.setItem(key, serialized);
-    if (localStorage.getItem(key) !== serialized) throw new Error();
-  } catch {
-    // 首次发送前保存完整请求；收到成功响应后再保存进度。任何失败都停止后续发放。
-    throw new Error(
-      "无法保存批次恢复记录，已暂停发放。请恢复浏览器存储后继续原批次。",
-    );
-  }
-}
-
 const STAGE_LABELS: Record<string, string> = {
   new: "新客",
   active: "活跃",
@@ -147,24 +53,21 @@ export function CustomerLifecyclePage({
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [grantOpen, setGrantOpen] = useState(false);
-  const [grantCredits, setGrantCredits] = useState("100");
-  const [grantRef, setGrantRef] = useState("");
-  const [restored] = useState(() => {
+  // 只在发放对话框开关时读一次恢复记录：有未完成批次就给出「继续」入口；
+  // 记录损坏时不在这里重复报错，留给对话框给出可处置的提示。
+  const [pendingBatch, setPendingBatch] = useState<GrantBatch | null>(null);
+  // 只读取共享恢复记录用于「继续未完成批次」入口；记录损坏时交给对话框给可处置的
+  // 报错，这里不重复报一次。挂载与每次关闭对话框后各读一次。
+  const refreshPendingBatch = useCallback(() => {
     try {
-      return { batch: readBatch(), error: "" };
+      setPendingBatch(readGrantBatch());
     } catch {
-      return {
-        batch: null,
-        error:
-          "无法读取批次恢复记录，已暂停赠送。请先核对发放流水并恢复浏览器存储，勿直接清除记录后重发。",
-      };
+      setPendingBatch(null);
     }
-  });
-  const [batch, setBatch] = useState<GrantBatch | null>(restored.batch);
-  const batchRef = useRef(batch);
-  const savingRef = useRef(false);
-  const [saving, setSaving] = useState(false);
-  const [progress, setProgress] = useState("");
+  }, []);
+  useEffect(() => {
+    refreshPendingBatch();
+  }, [refreshPendingBatch]);
   const [retention, setRetention] = useState<CustomerRetentionResponse | null>(
     null,
   );
@@ -235,135 +138,24 @@ export function CustomerLifecyclePage({
     });
   }
 
-  async function confirmGrant(reason: string) {
-    if (readOnly || savingRef.current || restored.error) return;
-    let current = batchRef.current;
-    if (!current) {
-      const credits = Number(grantCredits);
-      if (
-        !Number.isSafeInteger(credits) ||
-        credits <= 0 ||
-        credits > MAX_GRANT_CREDITS
-      ) {
-        setError(`赠送积分必须是 1 至 ${MAX_GRANT_CREDITS} 的整数。`);
-        return;
-      }
-      const targets =
-        data?.items.filter((item) => selected.has(item.user_id)) ?? [];
-      if (targets.length === 0 || !reason.trim()) return;
-      try {
-        const existing = readBatch();
-        if (existing) {
-          batchRef.current = existing;
-          setBatch(existing);
-          setError("发现已有批次恢复记录，请核对原批次后继续发放。");
-          return;
-        }
-      } catch {
-        setError("无法读取批次恢复记录，已暂停赠送。请恢复浏览器存储后重试。");
-        return;
-      }
-      const id = createIdempotencyKey();
-      current = {
-        version: 1,
-        id,
-        apiBase: apiBaseUrl(),
-        sourceDocumentRef: grantRef.trim() || `batch-${id}`,
-        credits,
-        reason: reason.trim(),
-        targets: targets.map((item) => ({
-          userId: item.user_id,
-          username: item.username,
-          operationId: createIdempotencyKey(),
-          idempotencyKey: createIdempotencyKey(),
-          done: false,
-        })),
-      };
-      batchRef.current = current;
-      setBatch(current);
-    }
-    savingRef.current = true;
-    setSaving(true);
-    setError("");
-    setNotice("");
-    setProgress("");
-    try {
-      persistBatch(current);
-      for (const item of current.targets.filter((target) => !target.done)) {
-        const completed = current.targets.filter(
-          (target) => target.done,
-        ).length;
-        setProgress(
-          `正在发放（${completed + 1}/${current.targets.length}）：${item.username}`,
-        );
-        await createCustomerAdjustment(
-          item.userId,
-          {
-            sourceDocumentType: "FREE_GRANT",
-            sourceDocumentRef: current.sourceDocumentRef,
-            credits: current.credits,
-            operationId: item.operationId,
-          },
-          current.reason,
-          item.idempotencyKey,
-        );
-        current = {
-          ...current,
-          targets: current.targets.map((target) =>
-            target.userId === item.userId ? { ...target, done: true } : target,
-          ),
-        };
-        batchRef.current = current;
-        setBatch(current);
-        persistBatch(current);
-      }
-      localStorage.removeItem(batchStorageKey(current.apiBase));
-      batchRef.current = null;
-      setBatch(null);
-      setNotice(
-        `已向 ${current.targets.length} 名客户各赠送 ${current.credits} 积分。`,
-      );
-      setGrantOpen(false);
-      setGrantRef("");
-      await load();
-    } catch (cause) {
-      const done = current.targets.filter((target) => target.done);
-      setError(
-        `发放中断：${done.length}/${current.targets.length} 完成（${done.map((target) => target.username).join("、") || "无"}）。` +
-          (cause instanceof Error ? cause.message : ""),
-      );
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-      setProgress("");
-    }
-  }
-
   return (
     <section className="admin-panel admin-lifecycle-page" aria-label="客户运营">
       <header>
         <p className="admin-hint">
           生命周期分层与健康分定位需要激活的客户；勾选后可批量赠送积分
-          （逐户调账、逐户留痕，失败会中断并列出已成功名单）。
+          （逐户调账、逐户留痕；中断后可继续未完成部分）。
         </p>
       </header>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
-      {restored.error ? (
-        <PageBanner tone="error">{restored.error}</PageBanner>
-      ) : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
-      {batch ? (
+      {pendingBatch ? (
         <PageBanner tone="notice">
-          原批次 {batch.sourceDocumentRef}：已完成{" "}
-          {batch.targets.filter((target) => target.done).length}/
-          {batch.targets.length}，每户 {batch.credits} 积分。
-          目标客户、积分及原因已锁定，刷新后可继续；已成功客户不会重复发放。
+          有未完成的发放批次 {pendingBatch.sourceDocumentRef}：已完成{" "}
+          {pendingBatch.targets.filter((target) => target.done).length}/
+          {pendingBatch.targets.length}，每户 {pendingBatch.credits} 积分。
+          继续发放沿用原幂等键与操作号，已成功的客户不会重复发放。
           {!readOnly ? (
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => setGrantOpen(true)}
-            >
+            <button type="button" onClick={() => setGrantOpen(true)}>
               继续未完成批次
             </button>
           ) : null}
@@ -422,7 +214,7 @@ export function CustomerLifecyclePage({
             ))}
           </select>
         </label>
-        {canGrant && !batch && !restored.error && selected.size > 0 ? (
+        {canGrant && selected.size > 0 ? (
           <button type="button" onClick={() => setGrantOpen(true)}>
             批量赠送（已选 {selected.size}）
           </button>
@@ -563,53 +355,21 @@ export function CustomerLifecyclePage({
           <p className="admin-hint">{retention.rule}</p>
         </section>
       ) : null}
-      <ConfirmDialog
+      <BatchGrantDialog
         open={grantOpen && !readOnly}
-        title={batch ? "继续批量赠送积分" : "批量赠送积分"}
-        confirmLabel={batch ? "继续发放未完成客户" : "确认发放"}
-        description={
-          batch
-            ? `原批次共 ${batch.targets.length} 名客户，仅继续未完成客户：${
-                batch.targets
-                  .filter((target) => !target.done)
-                  .map((target) => target.username)
-                  .join("、") || "无（仅清理完成记录）"
-              }。沿用原操作原因及发放凭证。`
-            : `将向 ${selected.size} 名客户逐户赠送积分并逐户留痕；发放过程不可中途撤销。`
-        }
-        busy={saving}
-        error={progress || error}
-        level={batch ? "standard" : "reason"}
-        onClose={() => !saving && setGrantOpen(false)}
-        onConfirm={(reason) => void confirmGrant(reason)}
-      >
-        <label>
-          每户赠送积分（正整数）
-          <input
-            type="number"
-            min={1}
-            max={MAX_GRANT_CREDITS}
-            value={batch?.credits ?? grantCredits}
-            disabled={!!batch || saving}
-            onChange={(event) => setGrantCredits(event.target.value)}
-          />
-        </label>
-        <label>
-          发放单号（可追溯）
-          <input
-            value={batch?.sourceDocumentRef ?? grantRef}
-            disabled={!!batch || saving}
-            onChange={(event) => setGrantRef(event.target.value)}
-            placeholder="如：十月激活活动"
-          />
-        </label>
-        {batch ? (
-          <label>
-            原操作原因
-            <input value={batch.reason} readOnly />
-          </label>
-        ) : null}
-      </ConfirmDialog>
+        targets={(data?.items ?? [])
+          .filter((item) => selected.has(item.user_id))
+          .map((item) => ({ user_id: item.user_id, username: item.username }))}
+        onClose={() => {
+          setGrantOpen(false);
+          refreshPendingBatch();
+        }}
+        onFinished={(ids) => {
+          setSelected(new Set());
+          setNotice(`已向 ${ids.length} 名客户赠送积分，列表已刷新。`);
+          void load();
+        }}
+      />
     </section>
   );
 }
