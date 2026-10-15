@@ -29,7 +29,7 @@ from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
-from app.script_from_audio import cached_transcript, cached_transcripts
+from app.script_from_audio import _iso_updated_at, cached_transcript, cached_transcripts
 from app.settings import settings_encryption_key
 from app.storage import StorageBackendUnavailable, local_download_signature
 from app.usage_billing import accept_operation, finish_source, resolve_wallet_owner
@@ -210,6 +210,20 @@ class ViralCopyClaimResponse(BaseModel):
     text: str | None
     updatedAt: str | None
     billing: ViralCopyBilling
+
+
+class ViralCopyExtractionRecord(BaseModel):
+    platform: str
+    videoId: str
+    title: str
+    lastExtractedAt: str
+    times: int
+    text: str | None
+    updatedAt: str | None
+
+
+class ViralCopyExtractionsResponse(BaseModel):
+    items: list[ViralCopyExtractionRecord]
 
 
 class ViralStatisticsRequest(BaseModel):
@@ -1156,6 +1170,46 @@ def viral_copy_purchased(
     )
 
 
+@router.get("/videos/copy/extractions", response_model=ViralCopyExtractionsResponse)
+def list_viral_copy_extractions(
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> ViralCopyExtractionsResponse:
+    """文案工坊「提取记录」：当前账号成功领取过正文的视频清单（新→旧）.
+
+    数据源是 viral_content_usage_events 的 copy 交付事件——每次 claim 成功都落一行，
+    因此无需新表即可回放个人提取历史。正文实时回源共享缓存；缓存被归档清理后的
+    条目 text 回 null（时间与次数仍保留），客户端按「正文已过期」展示。
+    """
+    rows = conn.execute(
+        "SELECT e.platform, e.video_id, MAX(e.created_at) AS last_at, COUNT(*) AS times, "
+        "COALESCE(MAX(v.title), '') AS title "
+        "FROM viral_content_usage_events e "
+        "LEFT JOIN viral_videos v ON v.platform=e.platform AND v.video_id=e.video_id "
+        "AND v.deleted_at IS NULL "
+        "WHERE e.user_id=%s AND e.kind='copy' "
+        "GROUP BY e.platform, e.video_id ORDER BY 3 DESC LIMIT 50",
+        (actor.id,),
+    ).fetchall()
+    items: list[ViralCopyExtractionRecord] = []
+    for row in rows:
+        hit = cached_transcript(
+            conn, platform=str(row["platform"]), video_id=str(row["video_id"])
+        )
+        items.append(
+            ViralCopyExtractionRecord(
+                platform=str(row["platform"]),
+                videoId=str(row["video_id"]),
+                title=str(row["title"] or ""),
+                lastExtractedAt=_iso_updated_at(row["last_at"]),
+                times=int(row["times"]),
+                text=hit.result.text if hit else None,
+                updatedAt=hit.updated_at if hit else None,
+            )
+        )
+    return ViralCopyExtractionsResponse(items=items)
+
+
 @router.get("/videos/{platform}/{video_id:path}", response_model=ViralVideoItem)
 def get_viral_video_detail(
     conn: Database,
@@ -1368,3 +1422,5 @@ def claim_viral_video_copy(
             billable=billable,
         ),
     )
+
+
