@@ -1557,7 +1557,9 @@ describe("TaskRecordsPanel", () => {
     );
     await openBatchQuote();
     expect(await screen.findByText(/最多预留 24 积分/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    // 报价文案与「取消」按钮不在同一次渲染里出现：高负载下同步 getByRole 会偶发
+    // 找不到按钮（门禁曾因此红过一次），这里等它出现再点。
+    fireEvent.click(await screen.findByRole("button", { name: "取消" }));
     expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
   });
 
