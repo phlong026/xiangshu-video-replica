@@ -1,0 +1,14 @@
+{
+ "channel": "updater-release-authenticode-pending",
+ "version": "2.6.4",
+ "platform": "windows-x86_64",
+ "artifact": "众墅之家 AI 爆款视频工具_2.6.4_x64-setup.exe",
+ "sha256": "7EA7825D1803C6A1E97C2BCFC9547D6C59094B2823FDF1BAA1785E44845136B4",
+ "updater": {
+  "endpoint": "https://video.zszhj.cn/downloads/customer-cloud/stable.json",
+  "signatureArtifact": "众墅之家 AI 爆款视频工具_2.6.4_x64-setup.exe.sig",
+  "signatureSha256": "8331601F311BDB16DBFF2B8B3E8363E0E3624CC798173D4A81BCE758AE7A0F60",
+  "manifestArtifact": "stable.json"
+ },
+ "generatedAt": "2026-10-15T14:32:20Z"
+}

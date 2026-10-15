@@ -1,0 +1,11 @@
+{
+ "version": "2.6.4",
+ "notes": "本次更新：参考生视频提示词优化结果改为中文呈现；一句话需求直接生成——自由文本提交时自动生成标准提示词后出片（含 1 次优化计费）；文案工坊新增「提取记录」。",
+ "pub_date": "2026-10-15T14:32:20Z",
+ "platforms": {
+  "windows-x86_64": {
+   "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTUlo3ZTJ6VzVnUVV0eWcrbkhXRFBYbTJCU0hLMUgvcmRGbkppTzEwYmUzdmxNQUIyVml2TW96QWlCTTVrcUt6K29qbUVPRHhoamlmZmU5SFNFc2FLZEVYckpOd3FXTndZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDc0Njk5CWZpbGU65LyX5aKF5LmL5a62IEFJIOeIhuasvuinhumikeW3peWFt18yLjYuNF94NjQtc2V0dXAuZXhlCmVmcFBrQW05TjJiVlcwQnN0RXZRbEFZcDJIeldKRVMwems2UnhDODU0aVpMOUNkYzlhcG1wWGN1UFBNWWE2cGxaOW5Sdk1vQXNTSDhweWFEWXdqREFnPT0K",
+   "url": "https://video.zszhj.cn/downloads/customer-cloud/2.6.4/众墅之家 AI 爆款视频工具_2.6.4_x64-setup.exe"
+  }
+ }
+}
