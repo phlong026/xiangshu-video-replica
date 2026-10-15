@@ -1,0 +1,11 @@
+{
+ "version": "2.6.2",
+ "notes": "本次更新：管理后台改版与计费/发布整改；口播文案就地点确认；修复图生视频报价校验所需的客户端报价流程（自动更新通道自本版本起生效）。",
+ "pub_date": "2026-10-15T05:50:07Z",
+ "platforms": {
+  "windows-x86_64": {
+   "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTUlo3ZTJ6VzVnUVdIcTkzdnZhdTUyU1lBT2YwTkk3R1FCNWhMM3hUM0J4SXF2bG1RaVdyMTdiNXA4eE5XNk5aNlEyUXdwZVpjWkFSRTlKbmdVa0d4OUE1WjFMeWFBSmdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDQzMjg4CWZpbGU65LyX5aKF5LmL5a62IEFJIOeIhuasvuinhumikeW3peWFt18yLjYuMl94NjQtc2V0dXAuZXhlCkg3cGVicWZOSVlQOFlGTnUxeWs3WlJiV1RlZXJFdURNQ1c4L1lMdHJ1K1lZVzdTTXAwcDhITy9JVFBRcjBmb1lMdk4vajBmYnAxUE1sYmxqS3dSbUJBPT0K",
+   "url": "https://video.zszhj.cn/downloads/customer-cloud/2.6.2/众墅之家 AI 爆款视频工具_2.6.2_x64-setup.exe"
+  }
+ }
+}
