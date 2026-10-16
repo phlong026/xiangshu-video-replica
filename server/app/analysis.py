@@ -35,6 +35,9 @@ from app.external_calls import (
 
 ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
+# 长视频复刻提示词：独立任务族与结果 kind（4–180 秒源片 → 一段完整复刻提示词）。
+REPLICA_PROMPT_KIND = "replica_prompt"
+REPLICA_PROMPT_SCHEMA_VERSION = "replica-prompt.v1"
 SCHEMA_VERSION = "b3.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 # 图像语义检查（人物识别源图、首帧复核）2026-09-26 起与视频拆解统一用
@@ -540,6 +543,50 @@ class ApilioGemini:
         )
         return ProviderResponse(text=text, raw=raw)
 
+    def analyze_replica_prompt(
+        self,
+        *,
+        video_uri: str,
+        duration_seconds: float,
+        media_info: dict[str, Any] | None = None,
+    ) -> ProviderResponse:
+        """长视频复刻提示词：看完整源片，产出一段完整提示词 + 口播 + 摘要."""
+        if not is_https_video_url(video_uri):
+            logger.warning(
+                "%s Replica-prompt analysis refused: the reference video URL is not HTTPS",
+                analysis_log_ref(),
+            )
+            raise AnalysisProviderFailed(
+                "参考视频没有可用的 HTTPS 签名地址，无法送去拆解；请重新上传参考视频后再试。",
+                failure_phase=REQUEST_FAILURE_PHASE,
+            )
+        from app.h3_prompts import RULES
+
+        instruction = (RULES / "replica_prompt.txt").read_text(encoding="utf-8")
+        # 与拆解同一纪律：目标生成时长不进提示词，媒体事实以服务端探测为准。
+        info = dict(media_info or {})
+        info.setdefault("duration_seconds", duration_seconds)
+        instruction = instruction.replace("{MEDIA_INFO_JSON}", json.dumps(info, ensure_ascii=False))
+        text, raw = self._complete(
+            {
+                "model": self.model,
+                "temperature": 0,
+                "max_tokens": 16000,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": instruction},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "以下视频仅用于分析；不生成最终视频。"},
+                            {"type": "image_url", "image_url": {"url": video_uri}},
+                        ],
+                    },
+                ],
+            }
+        )
+        return ProviderResponse(text=text, raw=raw)
+
     def _complete(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """按「主模型 → 备选模型」顺序尝试，把限流/下线从任务失败降级为换道。
 
@@ -681,6 +728,81 @@ def parse_analysis_fallback_models(raw: str | None) -> tuple[str, ...]:
     return tuple(models)
 
 
+_REPLICA_PROMPT_SUMMARY_FIELDS = (
+    "theme",
+    "visual_style",
+    "pace",
+    "camera_language",
+    "color_tone",
+)
+
+
+def default_replica_prompt_payload(duration_seconds: float) -> dict[str, Any]:
+    """FakeGemini 的默认出参：结构与真实链路一致，供本地/测试全链路走通."""
+    return {
+        "schema_version": REPLICA_PROMPT_SCHEMA_VERSION,
+        "summary": {field: "测试摘要" for field in _REPLICA_PROMPT_SUMMARY_FIELDS},
+        "spoken_script": [
+            {"start_time": 0.0, "end_time": min(4.0, duration_seconds), "text": "测试口播一句。"}
+        ],
+        "replica_prompt": (
+            "测试用复刻提示词：室内场景，一位讲解者面向镜头缓步介绍，"
+            f"镜头跟随，整体时长约 {round(duration_seconds)} 秒。"
+        ),
+    }
+
+
+def parse_replica_prompt_payload(text: str) -> dict[str, Any]:
+    """宽松校验长视频拆解出参：键与类型正确即可，多余的键不拒绝.
+
+    与分镜链路的严格 ProviderShotCard 校验刻意不同：本链路没有逐段时间轴
+    合同，唯一必须可靠的是「一段完整提示词」本身；摘要与口播缺字段时按
+    空值落库，不因次要字段失败丢掉整次付费调用。
+    """
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise AnalysisProviderFailed(
+            "长视频拆解结果格式无效，请重新拆解。",
+            retryable=False,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AnalysisProviderFailed("长视频拆解结果格式无效，请重新拆解。", retryable=False)
+    prompt_text = payload.get("replica_prompt")
+    if not isinstance(prompt_text, str) or not prompt_text.strip():
+        raise AnalysisProviderFailed(
+            "长视频拆解没有产出复刻提示词，请重新拆解。",
+            retryable=False,
+        )
+    summary_raw = payload.get("summary")
+    summary = {
+        field: (summary_raw.get(field, "") if isinstance(summary_raw, dict) else "")
+        for field in _REPLICA_PROMPT_SUMMARY_FIELDS
+    }
+    spoken_raw = payload.get("spoken_script")
+    spoken_script: list[dict[str, Any]] = []
+    if isinstance(spoken_raw, list):
+        for item in spoken_raw:
+            if not isinstance(item, dict):
+                continue
+            line = item.get("text")
+            if not isinstance(line, str) or not line.strip():
+                continue
+            spoken_script.append(
+                {
+                    "start_time": item.get("start_time"),
+                    "end_time": item.get("end_time"),
+                    "text": line,
+                }
+            )
+    return {
+        "schema_version": REPLICA_PROMPT_SCHEMA_VERSION,
+        "summary": summary,
+        "spoken_script": spoken_script,
+        "replica_prompt": prompt_text,
+    }
+
+
 @dataclass(init=False)
 class FakeGemini:
     analysis_json: str | None = None
@@ -692,6 +814,21 @@ class FakeGemini:
     def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
         text = self.analysis_json or json.dumps(
             _default_analysis_payload(duration_seconds), ensure_ascii=True, sort_keys=True
+        )
+        return ProviderResponse(
+            text=text,
+            raw={"provider": "fake_gemini", "text": text},
+        )
+
+    def analyze_replica_prompt(
+        self,
+        *,
+        video_uri: str,
+        duration_seconds: float,
+        media_info: dict[str, Any] | None = None,
+    ) -> ProviderResponse:
+        text = self.analysis_json or json.dumps(
+            default_replica_prompt_payload(duration_seconds), ensure_ascii=True, sort_keys=True
         )
         return ProviderResponse(
             text=text,

@@ -105,6 +105,13 @@ from app.oral_worker import (
     perform_oral_work,
     prepare_oral_work,
 )
+from app.replica_prompt import (
+    acquire_replica_prompt_task,
+    complete_replica_prompt_task,
+    fail_replica_prompt_task,
+    perform_replica_prompt_task,
+    prepare_replica_prompt_task,
+)
 from app.script_from_audio import (
     ScriptFromAudioTaskLease,
     acquire_script_from_audio_task,
@@ -637,6 +644,28 @@ def run_worker_once(
                 complete_analysis_task(conn, work=analysis_work, result=analysis_result)
             except Exception as exc:
                 fail_analysis_task(conn, lease=analysis_lease, cause=exc)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        prompt_lease = acquire_replica_prompt_task(conn, worker_id=worker_id)
+        if prompt_lease is not None:
+            try:
+                prompt_work = prepare_replica_prompt_task(
+                    conn,
+                    lease=prompt_lease,
+                    storage=storage,
+                )
+                with (
+                    billing_context(prompt_lease.id),
+                    external_call_context(
+                        "REPLICA_PROMPT", prompt_lease.id, attempt=prompt_lease.attempt
+                    ),
+                ):
+                    prompt_payload = perform_replica_prompt_task(prompt_work)
+                complete_replica_prompt_task(conn, work=prompt_work, payload=prompt_payload)
+            except Exception as exc:
+                fail_replica_prompt_task(conn, lease=prompt_lease, cause=exc)
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
@@ -1505,6 +1534,75 @@ def run_pg_worker_once(
                         conn, record_id=analysis_cost_id, usage_amount=analysis_cost_usage
                     )
                     fail_analysis_task(conn, lease=analysis_lease, cause=exc)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        with pg_transaction() as raw_conn:
+            conn = BusinessConnection.postgres(raw_conn)
+            prompt_lease = acquire_replica_prompt_task(conn, worker_id=worker_id)
+        if prompt_lease is not None:
+            prompt_cost_id = ""
+            prompt_cost_usage: float | None = None
+
+            def record_prompt_response() -> None:
+                nonlocal prompt_cost_usage
+                prompt_cost_usage = 1
+                with pg_transaction() as raw_conn:
+                    complete_operation_cost(
+                        BusinessConnection.postgres(raw_conn),
+                        record_id=prompt_cost_id,
+                        usage_amount=1,
+                    )
+
+            try:
+                # 与拆解同一纪律：prepare 只读配置/素材状态并生成签名 URL，
+                # 付费 provider 调用发生在该事务提交之后。
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    prompt_work = prepare_replica_prompt_task(
+                        conn,
+                        lease=prompt_lease,
+                        storage=storage,
+                    )
+                    prompt_cost_id = begin_operation_cost(
+                        conn,
+                        source_type="replica_prompt_task",
+                        source_id=f"{prompt_lease.id}:{prompt_lease.attempt}",
+                        subject="video_analysis_768p",
+                        user_id=prompt_lease.created_by_user_id,
+                        resolution="768P",
+                        metadata={"resolution_basis": "default_generation_tier"},
+                    )
+                with (
+                    billing_context(prompt_lease.id),
+                    external_call_context(
+                        "REPLICA_PROMPT", prompt_lease.id, attempt=prompt_lease.attempt
+                    ),
+                ):
+                    prompt_payload = perform_replica_prompt_task(
+                        prompt_work, on_provider_result=record_prompt_response
+                    )
+                prompt_cost_usage = 1
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    complete_operation_cost(
+                        conn,
+                        record_id=prompt_cost_id,
+                        usage_amount=1,
+                    )
+                    complete_replica_prompt_task(
+                        conn,
+                        work=prompt_work,
+                        payload=prompt_payload,
+                    )
+            except Exception as exc:
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    complete_operation_cost(
+                        conn, record_id=prompt_cost_id, usage_amount=prompt_cost_usage
+                    )
+                    fail_replica_prompt_task(conn, lease=prompt_lease, cause=exc)
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:

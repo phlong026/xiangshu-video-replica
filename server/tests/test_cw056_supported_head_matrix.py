@@ -103,9 +103,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上；
 # 20261014T1000_support_ticket_priority（管理端整改 T14/T15 工单优先级与关联对象）
 # 20261014T1100_customer_ops_params（整改 T29 客户运营参数）与
-# 20261014T1200_admin_role_templates（整改 T41 权限点与角色模板）依次追加其上，
-# 故链尾为该值。
-HEAD_REVISION = "20261014T1200_admin_role_templates"
+# 20261014T1200_admin_role_templates（整改 T41 权限点与角色模板）依次追加其上；
+# 20261016T1000_replica_prompt_tasks（长视频复刻提示词任务族）追加其上，故链尾为该值。
+HEAD_REVISION = "20261016T1000_replica_prompt_tasks"
 
 
 @pytest.mark.pg

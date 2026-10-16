@@ -67,6 +67,7 @@ import {
 } from "./copyExtractionProgress";
 import { clearCreationDraftResidue } from "./draftResidue";
 import { LiveWorkspacePanel } from "./LiveWorkspacePanel";
+import { LongReplicaPage } from "./LongReplicaPage";
 import {
   awaitScriptFromAudioTask,
   type CloudDraftRestore,
@@ -278,6 +279,7 @@ export const navGroups: {
       { id: "viral", title: "爆款视频", icon: "fire" },
       { id: "copy", title: "文案工坊", icon: "pen" },
       { id: "replica", title: "视频创作", icon: "video" },
+      { id: "long-replica", title: "长视频复刻", icon: "sparkles" },
     ],
   },
   {
@@ -3087,6 +3089,8 @@ function StudioPageContent({
       return <CopyPage />;
     case "replica":
       return <ReplicaPage />;
+    case "long-replica":
+      return <LongReplicaPage />;
     case "replacement":
       return <ReplacementPage />;
     case "video":

@@ -1069,6 +1069,20 @@ def store_verified_upload(
     return storage.put_object(key, content, content_type=content_type)
 
 
+def store_verified_upload_from_file(
+    storage: StorageAdapter,
+    *,
+    asset_id: str,
+    source_key: str,
+    source_path: Path,
+    sha256: str,
+    content_type: str,
+) -> StoredObject:
+    """大文件通道的 verified 副本：键推导与字节版完全一致，落盘走流式 put_file."""
+    key = verified_upload_object_key(asset_id=asset_id, digest=sha256, source_key=source_key)
+    return storage.put_file(key, source_path, content_type=content_type)
+
+
 def _stored_object(
     *,
     provider: str,

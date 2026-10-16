@@ -88,6 +88,7 @@ from app.rbac_routes import router as rbac_router
 from app.recharge_package_routes import router as recharge_package_router
 from app.recharge_routes import router as recharge_router
 from app.registration_bonus_routes import router as registration_bonus_router
+from app.replica_prompt_routes import router as replica_prompt_router
 from app.script_from_audio_routes import router as script_from_audio_router
 from app.settings import SettingsUnavailableError
 from app.settings_routes import router as settings_router
@@ -394,6 +395,7 @@ app.include_router(publish_browser_router)
 app.include_router(publish_record_router)
 app.include_router(material_router)
 app.include_router(script_from_audio_router)
+app.include_router(replica_prompt_router)
 app.include_router(oral_router)
 app.include_router(independent_router)
 app.include_router(rbac_router)

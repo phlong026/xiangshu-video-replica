@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261014T1200_admin_role_templates"
+      "20261016T1000_replica_prompt_tasks"
     ],
     "parents": {
       "001_core": null,
@@ -193,9 +193,10 @@
       "20261013T1020_publish_submission_safety": "20261013T1010_studio_draft_tombstones",
       "20261014T1000_support_ticket_priority": "20261013T1020_publish_submission_safety",
       "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority",
-      "20261014T1200_admin_role_templates": "20261014T1100_customer_ops_params"
+      "20261014T1200_admin_role_templates": "20261014T1100_customer_ops_params",
+      "20261016T1000_replica_prompt_tasks": "20261014T1200_admin_role_templates"
     },
-    "revision_count": 174
+    "revision_count": 175
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -905,6 +906,10 @@
     "20261014T1200_admin_role_templates": {
       "file": "versions/20261014T1200_admin_role_templates.py",
       "sha256": "47cfcf6ad622257cf158bed247bd38762d220f4f7fc721ab769dd76975621080"
+    },
+    "20261016T1000_replica_prompt_tasks": {
+      "file": "versions/20261016T1000_replica_prompt_tasks.py",
+      "sha256": "a8d50dd1b1dec215d2126c08ca0842151f318e81aece1bb1b8db77d5f6846f8f"
     }
   },
   "task": "MIGRATION-GUARD-20260912"
