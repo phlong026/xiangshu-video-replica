@@ -14,6 +14,7 @@ import {
   waitForReplicaPromptTask,
 } from "../api";
 import { isInsufficientCredits } from "../insufficientCredits";
+import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { readVideoDuration, uploadWorkbenchSourceVideo } from "./live";
 import { Button, Empty, Icon, Panel } from "./ui";
@@ -104,9 +105,7 @@ function CopyBlock({
         </div>
       </div>
       {hasText ? (
-        <div className="long-replica-block__body">
-          {children ?? text}
-        </div>
+        <div className="long-replica-block__body">{children ?? text}</div>
       ) : (
         <p className="long-replica-block__empty">{emptyHint ?? "暂无内容。"}</p>
       )}
@@ -203,39 +202,42 @@ export function LongReplicaPage() {
   }, []);
 
   // 等一个已知 taskId 的任务跑到终态并拉取结果（上传启动 / 重新拆解共用）。
-  const awaitTaskRun = useCallback((run: LastRun, session: number) => {
-    void (async () => {
-      try {
-        await waitForReplicaPromptTask(run.taskId, () => {
+  const awaitTaskRun = useCallback(
+    (run: LastRun, session: number) => {
+      void (async () => {
+        try {
+          await waitForReplicaPromptTask(run.taskId, () => {
+            if (session !== sessionRef.current) return;
+            setTick((value) => value + 1);
+          });
           if (session !== sessionRef.current) return;
-          setTick((value) => value + 1);
-        });
-        if (session !== sessionRef.current) return;
-        const version = await getLatestReplicaPromptResult(run.projectId);
-        if (session !== sessionRef.current) return;
-        if (!version) {
-          setStage("idle");
-          return;
+          const version = await getLatestReplicaPromptResult(run.projectId);
+          if (session !== sessionRef.current) return;
+          if (!version) {
+            setStage("idle");
+            return;
+          }
+          lastResult = version;
+          setResult(version);
+          setStage("ready");
+        } catch (cause: unknown) {
+          if (session !== sessionRef.current) return;
+          setStage("failed");
+          if (isInsufficientCredits(cause)) {
+            setError("积分余额不足，请先充值后重试。");
+            openLive("wallet");
+            return;
+          }
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "长视频拆解失败，请重新提交。",
+          );
         }
-        lastResult = version;
-        setResult(version);
-        setStage("ready");
-      } catch (cause: unknown) {
-        if (session !== sessionRef.current) return;
-        setStage("failed");
-        if (isInsufficientCredits(cause)) {
-          setError("积分余额不足，请先充值后重试。");
-          openLive("wallet");
-          return;
-        }
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "长视频拆解失败，请重新提交。",
-        );
-      }
-    })();
-  }, [openLive]);
+      })();
+    },
+    [openLive],
+  );
 
   // 挂载接回：会话内有过运行（含正在跑的）就恢复，不要求用户重新上传。
   useEffect(() => {
@@ -388,140 +390,143 @@ export function LongReplicaPage() {
     : null;
 
   return (
-    <div className="long-replica">
-      <input
-        ref={fileInputRef}
-        accept="video/mp4,video/quicktime,.mp4,.mov"
-        hidden
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          event.target.value = "";
-          if (file) void handleUpload(file);
-        }}
-        type="file"
-      />
-      <header className="long-replica-head">
-        <div>
-          <h2>长视频复刻提示词</h2>
-          <p className="status-note">
-            上传 4–180 秒的爆款视频，AI
-            看完整片后产出一段可直接使用的复刻提示词、
-            逐句口播文案与全片摘要。拆解预计 5–15
-            分钟，可以离开本页稍后回来查看。
-          </p>
-        </div>
-        {stage === "idle" || stage === "failed" ? (
-          <Button
-            variant="primary"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {stage === "failed" ? "重新上传视频" : "上传长视频"}
-          </Button>
-        ) : null}
-      </header>
-
-      {stage === "uploading" ? (
-        <Panel className="long-replica-progress">
-          <p>
-            正在上传视频…{" "}
-            {uploadPercent >= 0 ? `${Math.round(uploadPercent)}%` : ""}
-          </p>
-        </Panel>
-      ) : null}
-
-      {stage === "analyzing" ? (
-        <Panel className="long-replica-progress">
-          <p role="status">
-            <Icon name="clock" size={16} /> 正在看片拆解… 已进行{" "}
-            {formatSeconds(elapsed)}
-          </p>
-          <p className="status-note">
-            长视频拆解比 15 秒片段慢，预计 5–15
-            分钟；可以先去处理其他事情，稍后回到本页查看。
-          </p>
-          {lastRun?.taskId ? (
-            <Button variant="outline" onClick={() => void handleCancel()}>
-              取消拆解
-            </Button>
-          ) : null}
-        </Panel>
-      ) : null}
-
-      {stage === "failed" && error ? (
-        <Panel className="long-replica-progress">
-          <p role="alert" className="settings-error">
-            {error}
-          </p>
-          {lastRun ? (
-            <Button variant="primary" onClick={handleRetry}>
-              重新拆解
-            </Button>
-          ) : null}
-        </Panel>
-      ) : null}
-
-      {stage === "ready" && payload ? (
-        <div className="long-replica-results">
-          <CopyBlock
-            emptyHint="本次拆解没有产出复刻提示词。"
-            text={payload.replica_prompt}
-            title="复刻提示词"
-          />
-          <CopyBlock
-            emptyHint="这条视频没有可辨识的口播。"
-            title="逐句口播文案"
-            text={payload.spoken_script
-              .map(
-                (line) =>
-                  `${formatSeconds(line.start_time)}-${formatSeconds(line.end_time)} ${line.text}`,
-              )
-              .join("\n")}
-          >
-            {payload.spoken_script.length ? (
-              <ol className="long-replica-script">
-                {payload.spoken_script.map((line, index) => (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: 每次渲染由结果重新解析的纯展示列表，无重排/增删，顺序即内容。
-                  <li key={`${line.start_time ?? "na"}-${index}`}>
-                    <span className="long-replica-script__time">
-                      {formatSeconds(line.start_time)}-
-                      {formatSeconds(line.end_time)}
-                    </span>
-                    <span>{line.text}</span>
-                  </li>
-                ))}
-              </ol>
-            ) : null}
-          </CopyBlock>
-          <section className="long-replica-block">
-            <div className="long-replica-block__head">
-              <h3>全片摘要</h3>
-            </div>
-            <dl className="long-replica-summary">
-              {SUMMARY_FIELDS.map((field) => (
-                <div className="long-replica-summary__row" key={field.key}>
-                  <dt>{field.label}</dt>
-                  <dd>{payload.summary[field.key] || "—"}</dd>
-                </div>
-              ))}
-            </dl>
-          </section>
-        </div>
-      ) : null}
-
-      {stage === "idle" ? (
-        <Empty
-          action={
+    <section className="creation-page creation-long-replica">
+      <CreationNavigation />
+      <div className="long-replica">
+        <input
+          ref={fileInputRef}
+          accept="video/mp4,video/quicktime,.mp4,.mov"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) void handleUpload(file);
+          }}
+          type="file"
+        />
+        <header className="long-replica-head">
+          <div>
+            <h2>长视频拆解</h2>
+            <p className="status-note">
+              上传 4–180 秒的爆款视频，AI
+              看完整片后产出一段可直接使用的复刻提示词、
+              逐句口播文案与全片摘要。拆解预计 5–15
+              分钟，可以离开本页稍后回来查看。
+            </p>
+          </div>
+          {stage === "idle" || stage === "failed" ? (
             <Button
               variant="primary"
               onClick={() => fileInputRef.current?.click()}
             >
-              选择 MP4 / MOV 文件
+              {stage === "failed" ? "重新上传视频" : "上传长视频"}
             </Button>
-          }
-          description="支持 4–180 秒、600 MB 以内的 MP4 / MOV；提交后按次计费。"
-          title="还没有上传长视频"
-        />
-      ) : null}
-    </div>
+          ) : null}
+        </header>
+
+        {stage === "uploading" ? (
+          <Panel className="long-replica-progress">
+            <p>
+              正在上传视频…{" "}
+              {uploadPercent >= 0 ? `${Math.round(uploadPercent)}%` : ""}
+            </p>
+          </Panel>
+        ) : null}
+
+        {stage === "analyzing" ? (
+          <Panel className="long-replica-progress">
+            <p role="status">
+              <Icon name="clock" size={16} /> 正在看片拆解… 已进行{" "}
+              {formatSeconds(elapsed)}
+            </p>
+            <p className="status-note">
+              长视频拆解比 15 秒片段慢，预计 5–15
+              分钟；可以先去处理其他事情，稍后回到本页查看。
+            </p>
+            {lastRun?.taskId ? (
+              <Button variant="outline" onClick={() => void handleCancel()}>
+                取消拆解
+              </Button>
+            ) : null}
+          </Panel>
+        ) : null}
+
+        {stage === "failed" && error ? (
+          <Panel className="long-replica-progress">
+            <p role="alert" className="settings-error">
+              {error}
+            </p>
+            {lastRun ? (
+              <Button variant="primary" onClick={handleRetry}>
+                重新拆解
+              </Button>
+            ) : null}
+          </Panel>
+        ) : null}
+
+        {stage === "ready" && payload ? (
+          <div className="long-replica-results">
+            <CopyBlock
+              emptyHint="本次拆解没有产出复刻提示词。"
+              text={payload.replica_prompt}
+              title="复刻提示词"
+            />
+            <CopyBlock
+              emptyHint="这条视频没有可辨识的口播。"
+              title="逐句口播文案"
+              text={payload.spoken_script
+                .map(
+                  (line) =>
+                    `${formatSeconds(line.start_time)}-${formatSeconds(line.end_time)} ${line.text}`,
+                )
+                .join("\n")}
+            >
+              {payload.spoken_script.length ? (
+                <ol className="long-replica-script">
+                  {payload.spoken_script.map((line, index) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: 每次渲染由结果重新解析的纯展示列表，无重排/增删，顺序即内容。
+                    <li key={`${line.start_time ?? "na"}-${index}`}>
+                      <span className="long-replica-script__time">
+                        {formatSeconds(line.start_time)}-
+                        {formatSeconds(line.end_time)}
+                      </span>
+                      <span>{line.text}</span>
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+            </CopyBlock>
+            <section className="long-replica-block">
+              <div className="long-replica-block__head">
+                <h3>全片摘要</h3>
+              </div>
+              <dl className="long-replica-summary">
+                {SUMMARY_FIELDS.map((field) => (
+                  <div className="long-replica-summary__row" key={field.key}>
+                    <dt>{field.label}</dt>
+                    <dd>{payload.summary[field.key] || "—"}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          </div>
+        ) : null}
+
+        {stage === "idle" ? (
+          <Empty
+            action={
+              <Button
+                variant="primary"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                选择 MP4 / MOV 文件
+              </Button>
+            }
+            description="支持 4–180 秒、600 MB 以内的 MP4 / MOV；提交后按次计费。"
+            title="还没有上传长视频"
+          />
+        ) : null}
+      </div>
+    </section>
   );
 }

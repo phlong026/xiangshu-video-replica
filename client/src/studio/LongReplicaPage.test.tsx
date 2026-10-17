@@ -20,14 +20,15 @@ const {
 } = vi.hoisted(() => ({
   useStudio: vi.fn<() => StudioContextValue>(),
   readVideoDuration: vi.fn<(file: File) => Promise<number>>(),
-  uploadWorkbenchSourceVideo: vi.fn<
-    (
-      file: File,
-      onProgress: (percent: number) => void,
-      signal?: AbortSignal,
-      purpose?: "replica" | "script" | "replica_prompt",
-    ) => Promise<{ projectId: string; assetId: string }>
-  >(),
+  uploadWorkbenchSourceVideo:
+    vi.fn<
+      (
+        file: File,
+        onProgress: (percent: number) => void,
+        signal?: AbortSignal,
+        purpose?: "replica" | "script" | "replica_prompt",
+      ) => Promise<{ projectId: string; assetId: string }>
+    >(),
   startReplicaPromptTask: vi.fn(),
   getLatestReplicaPromptTask: vi.fn(),
   getLatestReplicaPromptResult: vi.fn(),
@@ -156,7 +157,9 @@ describe("LongReplicaPage 上传门禁", () => {
     render(<LongReplicaPage />);
     await pickFile(makeFile());
     await waitFor(() => {
-      expect(notify).toHaveBeenCalledWith("长视频时长不能超过 180 秒，请裁剪后再上传。");
+      expect(notify).toHaveBeenCalledWith(
+        "长视频时长不能超过 180 秒，请裁剪后再上传。",
+      );
     });
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
@@ -167,7 +170,9 @@ describe("LongReplicaPage 上传门禁", () => {
     render(<LongReplicaPage />);
     await pickFile(makeFile());
     await waitFor(() => {
-      expect(notify).toHaveBeenCalledWith("长视频时长不能少于 4 秒，请更换素材。");
+      expect(notify).toHaveBeenCalledWith(
+        "长视频时长不能少于 4 秒，请更换素材。",
+      );
     });
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
@@ -178,7 +183,9 @@ describe("LongReplicaPage 上传门禁", () => {
     render(<LongReplicaPage />);
     await pickFile(makeFile({ size: 601 * 1024 * 1024 }));
     await waitFor(() => {
-      expect(notify).toHaveBeenCalledWith("长视频不能超过 600 MB，请压缩后再上传。");
+      expect(notify).toHaveBeenCalledWith(
+        "长视频不能超过 600 MB，请压缩后再上传。",
+      );
     });
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
@@ -253,7 +260,9 @@ describe("LongReplicaPage 拆解链路", () => {
       assetId: "asset-1",
     });
     startReplicaPromptTask.mockRejectedValue(
-      Object.assign(new Error("积分余额不足"), { code: "INSUFFICIENT_CREDITS" }),
+      Object.assign(new Error("积分余额不足"), {
+        code: "INSUFFICIENT_CREDITS",
+      }),
     );
     render(<LongReplicaPage />);
     await pickFile(makeFile());
@@ -270,9 +279,7 @@ describe("LongReplicaPage 拆解链路", () => {
       projectId: "proj-1",
       assetId: "asset-1",
     });
-    startReplicaPromptTask.mockRejectedValue(
-      new Error("上游拒绝（HTTP 502）"),
-    );
+    startReplicaPromptTask.mockRejectedValue(new Error("上游拒绝（HTTP 502）"));
     render(<LongReplicaPage />);
     await pickFile(makeFile());
     await waitFor(() => {

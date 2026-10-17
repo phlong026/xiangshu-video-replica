@@ -257,6 +257,7 @@ function savedDraftScope(accountId: string, draft: StudioDraft) {
 }
 const creationPages = new Set<StudioPage>([
   "replica",
+  "long-replica",
   "replacement",
   "video",
   "reference",
@@ -278,8 +279,7 @@ export const navGroups: {
     pages: [
       { id: "viral", title: "爆款视频", icon: "fire" },
       { id: "copy", title: "文案工坊", icon: "pen" },
-      { id: "replica", title: "视频创作", icon: "video" },
-      { id: "long-replica", title: "长视频复刻", icon: "sparkles" },
+      { id: "replica", title: "视频拆解", icon: "video" },
     ],
   },
   {
@@ -2662,8 +2662,9 @@ export function StudioWorkspace({
       : navGroups;
 
   const creationWorkspace =
-    ["replica", "replacement", "video", "reference"].includes(state.page) &&
-    !livePanel;
+    ["replica", "long-replica", "replacement", "video", "reference"].includes(
+      state.page,
+    ) && !livePanel;
 
   return (
     <StudioContext.Provider value={context}>
