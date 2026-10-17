@@ -40,6 +40,23 @@ type LastRun = {
 // 跨重启不恢复——重新上传即重建项目，云端草稿里没有这个链路的合同。
 let lastRun: LastRun | null = null;
 let lastResult: ReplicaPromptVersion | null = null;
+// 工作台「开始复刻」对 >15s 来源的交接：整片已用 replica_prompt 用途上传，
+// 跳转到本页签后自动建任务开跑（不要求用户再传一遍）。
+let pendingAutoStart = false;
+
+/** 工作台上传整片后调用：登记来源并要求本页签挂载即自动开始拆解。 */
+export function handOffLongReplicaSource(source: {
+  projectId: string;
+  assetId: string;
+}): void {
+  lastRun = {
+    projectId: source.projectId,
+    assetId: source.assetId,
+    taskId: "",
+  };
+  lastResult = null;
+  pendingAutoStart = true;
+}
 
 const SUMMARY_FIELDS: {
   key: keyof ReplicaPromptResult["summary"];
@@ -151,6 +168,19 @@ export function LongReplicaPage() {
     setError("");
     void (async () => {
       try {
+        if (pendingAutoStart) {
+          // 工作台交接来的新来源：上传已完成，这里直接建任务开跑。
+          pendingAutoStart = false;
+          const started = await startReplicaPromptTask(
+            run.projectId,
+            run.assetId,
+          );
+          if (session !== sessionRef.current) return;
+          const startedRun: LastRun = { ...run, taskId: started.id };
+          lastRun = startedRun;
+          awaitTaskRun(startedRun, session);
+          return;
+        }
         const task = await getLatestReplicaPromptTask(run.projectId);
         if (session !== sessionRef.current) return;
         if (!task || task.asset_id !== run.assetId) {

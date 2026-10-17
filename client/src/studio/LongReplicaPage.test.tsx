@@ -52,7 +52,7 @@ vi.mock("../api", async (importOriginal) => ({
   waitForReplicaPromptTask,
 }));
 
-import { LongReplicaPage } from "./LongReplicaPage";
+import { handOffLongReplicaSource, LongReplicaPage } from "./LongReplicaPage";
 
 const RESULT_PAYLOAD = {
   schema_version: "replica-prompt.v1",
@@ -288,6 +288,29 @@ describe("LongReplicaPage 拆解链路", () => {
     expect(screen.getByText("重新拆解")).toBeTruthy();
   });
 
+  it("工作台交接：挂载即自动建任务开跑并展示结果", async () => {
+    handOffLongReplicaSource({ projectId: "proj-9", assetId: "asset-9" });
+    startReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      id: "task-9",
+      status: "PENDING",
+    });
+    waitForReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      id: "task-9",
+      status: "SUCCEEDED",
+    });
+    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    render(<LongReplicaPage />);
+
+    await waitFor(() =>
+      expect(startReplicaPromptTask).toHaveBeenCalledWith("proj-9", "asset-9"),
+    );
+    await waitFor(() => {
+      expect(screen.getByText("复刻提示词")).toBeTruthy();
+    });
+    expect(screen.getByText(/庭院施工讲解视频/)).toBeTruthy();
+  });
   it("挂载时接回在途任务并显示进行中状态", async () => {
     getLatestReplicaPromptTask.mockResolvedValue(runningTask());
     waitForReplicaPromptTask.mockReturnValue(new Promise(() => {}));

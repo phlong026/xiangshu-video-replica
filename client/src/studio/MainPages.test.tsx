@@ -1515,6 +1515,76 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
 
+  it(">15s 来源点开始复刻：补传整片（replica_prompt 用途）并跳长视频拆解页签", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    readVideoDuration.mockResolvedValue(60);
+    extractLocalVideoAudio.mockImplementation(
+      async () => new File(["audio"], "乡墅案例.m4a", { type: "audio/mp4" }),
+    );
+    uploadWorkbenchSourceVideo
+      .mockResolvedValueOnce({
+        projectId: "project-audio",
+        assetId: "asset-audio",
+      })
+      .mockResolvedValueOnce({
+        projectId: "project-long",
+        assetId: "asset-long",
+      });
+    render(<WorkbenchPage />);
+
+    changeFile("乡墅案例.mp4");
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "project-audio" }),
+      ),
+    );
+    uploadWorkbenchSourceVideo.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+
+    // 第二次上传的是原片整片（非抽出的音轨），用途为长视频拆解素材。
+    await waitFor(() =>
+      expect(uploadWorkbenchSourceVideo).toHaveBeenCalledOnce(),
+    );
+    expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[0]?.name).toBe(
+      "乡墅案例.mp4",
+    );
+    expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[3]).toBe(
+      "replica_prompt",
+    );
+    await waitFor(() =>
+      expect(value.navigate).toHaveBeenCalledWith("long-replica"),
+    );
+  });
+
+  it(">180s 来源点开始复刻：本地拦截并提示，不补传也不跳转", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    readVideoDuration.mockResolvedValue(200);
+    extractLocalVideoAudio.mockImplementation(
+      async () => new File(["audio"], "乡墅案例.m4a", { type: "audio/mp4" }),
+    );
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-audio",
+      assetId: "asset-audio",
+    });
+    render(<WorkbenchPage />);
+
+    changeFile("乡墅案例.mp4");
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "project-audio" }),
+      ),
+    );
+    uploadWorkbenchSourceVideo.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    expect(value.notify).toHaveBeenCalledWith(
+      "长视频拆解仅支持 4–180 秒的视频，请裁剪后再试。",
+    );
+    expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalledWith("long-replica");
+  });
+
   it("超过 15 秒的视频先本地抽音轨，再以音频文件提取文案", async () => {
     const value = workbench();
     useStudio.mockReturnValue(value);
