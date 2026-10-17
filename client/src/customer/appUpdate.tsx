@@ -13,14 +13,17 @@ import { isTauriRuntime } from "./useCustomerSession";
 /**
  * 桌面端自动更新（仅客户 lane；浏览器版没有自动更新能力）。
  *
- * 状态机：idle → checking → available（弹窗，用户确认）→ downloading →
- * installed（提示重启）→ 重启。检查/下载/安装全部走 Tauri 官方 updater
- * 插件：清单里的安装包带 minisign 签名，插件下载后会先验签再安装，前端
- * 不自己拼升级逻辑。
+ * 状态机：idle → checking → available → downloading → installed → 重启。
+ * 检查/下载/安装全部走 Tauri 官方 updater 插件：清单里的安装包带 minisign
+ * 签名，插件下载后会先验签再安装，前端不自己拼升级逻辑。
  *
- * 自动检查每天最多一次、延迟启动避开登录期的接口高峰，且**静默**——只有
- * 发现新版本才弹窗，已是最新或检查失败都不打扰；手动入口（用户中心）则
- * 全程有界面反馈。
+ * 两条路径：
+ * - 自动路径（autoInstall，默认会话壳开启）：启动后每天最多检查一次、延迟
+ *   避开登录期接口高峰；发现新版本**免确认**——自动下载、验签安装并重启，
+ *   全程不弹窗不打扰（2026-10-16 产品口径：打开软件即自动更新，用户不再去
+ *   个人中心手动升级）。下载/安装失败静默，清掉当日节流标记，下次启动重试。
+ * - 手动路径（用户中心「检查更新」）：弹 UpdateDialog，确认→下载→重启，
+ *   全程有界面反馈，作为自动路径失败时的兜底入口。
  */
 
 export type AppUpdatePhase =
@@ -82,10 +85,36 @@ function markAutoCheckDone(): void {
   }
 }
 
+/** 共享的下载+验签+安装流程：手动路径与自动路径唯一共用点，进度事件
+ * 归一成 {received,total} 回调，total 在 Started 帧确定后保持不变。 */
+function downloadPendingWithProgress(
+  pending: Update,
+  onProgress: (progress: { received: number; total: number | null }) => void,
+): Promise<void> {
+  let receivedBytes = 0;
+  let total: number | null = null;
+  return pending.downloadAndInstall((event) => {
+    switch (event.event) {
+      case "Started":
+        total = event.data.contentLength ?? null;
+        onProgress({ received: 0, total });
+        break;
+      case "Progress":
+        receivedBytes += event.data.chunkLength;
+        onProgress({ received: receivedBytes, total });
+        break;
+      default:
+        break;
+    }
+  });
+}
+
 export function useAppUpdate({
   autoCheck = false,
+  autoInstall = false,
 }: {
   autoCheck?: boolean;
+  autoInstall?: boolean;
 } = {}): AppUpdateController {
   const supported = isTauriRuntime();
   const [phase, setPhase] = useState<AppUpdatePhase>("idle");
@@ -139,20 +168,54 @@ export function useAppUpdate({
     }
   }, []);
 
+  // 自动路径的下载安装：不弹窗、装完自动重启；失败清当日节流，下次启动重试。
+  const downloadAndAutoRestart = useCallback((pending: Update) => {
+    setPhase("downloading");
+    setProgress({ received: 0, total: null });
+    setError("");
+    void downloadPendingWithProgress(pending, setProgress)
+      .then(() => {
+        if (!mountedRef.current) {
+          return;
+        }
+        setPhase("installed");
+        // 新包已装好；重启失败不弹窗，下次启动自然运行新版本。
+        void invoke("restart_app").catch(() => {});
+      })
+      .catch(() => {
+        if (!mountedRef.current) {
+          return;
+        }
+        setPhase("failed");
+        try {
+          window.localStorage.removeItem(AUTO_CHECK_DAY_KEY);
+        } catch {
+          // 记不住节流就算了，不影响其它功能。
+        }
+      });
+  }, []);
+
   useEffect(() => {
     if (!autoCheck || !supported || autoCheckAlreadyRanToday()) {
       return;
     }
     const timer = window.setTimeout(() => {
       void runCheck().then((outcome) => {
-        // 静默检查只有「发现新版本」才弹窗；已是最新/失败都不出声。
-        if (mountedRef.current && outcome === "available") {
-          setDialogOpen(true);
+        if (!mountedRef.current || outcome !== "available") {
+          // 已是最新/检查失败都不出声。
+          return;
         }
+        const pending = pendingRef.current;
+        if (autoInstall && pending) {
+          // 免确认自动升级：下载→验签安装→自动重启，全程无界面。
+          downloadAndAutoRestart(pending);
+          return;
+        }
+        setDialogOpen(true);
       });
     }, AUTO_CHECK_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [autoCheck, supported, runCheck]);
+  }, [autoCheck, autoInstall, supported, runCheck, downloadAndAutoRestart]);
 
   const openManualCheck = useCallback(() => {
     if (!supported) {
@@ -172,30 +235,7 @@ export function useAppUpdate({
     setPhase("downloading");
     setProgress({ received: 0, total: null });
     setError("");
-    let receivedBytes = 0;
-    void pending
-      .downloadAndInstall((event) => {
-        if (!mountedRef.current) {
-          return;
-        }
-        switch (event.event) {
-          case "Started":
-            setProgress({
-              received: 0,
-              total: event.data.contentLength ?? null,
-            });
-            break;
-          case "Progress":
-            receivedBytes += event.data.chunkLength;
-            setProgress((current) => ({
-              received: receivedBytes,
-              total: current?.total ?? null,
-            }));
-            break;
-          default:
-            break;
-        }
-      })
+    void downloadPendingWithProgress(pending, setProgress)
       .then(() => {
         // 走到这里安装包已验签并安装完成，重启后即运行新版本。
         if (mountedRef.current) {

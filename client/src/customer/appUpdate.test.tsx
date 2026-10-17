@@ -32,8 +32,14 @@ function fakeUpdate(overrides: Partial<Update> = {}): Update {
 }
 
 let controller: AppUpdateController | null = null;
-function Harness({ autoCheck = false }: { autoCheck?: boolean }) {
-  controller = useAppUpdate({ autoCheck });
+function Harness({
+  autoCheck = false,
+  autoInstall = false,
+}: {
+  autoCheck?: boolean;
+  autoInstall?: boolean;
+}) {
+  controller = useAppUpdate({ autoCheck, autoInstall });
   return (
     <>
       {controller.dialog}
@@ -162,6 +168,59 @@ test("启动自动检查发现新版本：延迟后弹窗展示更新日志", as
     });
     expect(screen.getByText("发现新版本 V2.5.0")).toBeVisible();
     expect(screen.getByText("更新日志内容")).toBeVisible();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("autoInstall 开启：发现新版本免确认自动下载安装并重启，全程无弹窗", async () => {
+  vi.useFakeTimers();
+  try {
+    const pending = fakeUpdate();
+    checkMock.mockResolvedValue(pending);
+    render(<Harness autoCheck autoInstall />);
+
+    await act(async () => {
+      vi.advanceTimersByTime(8000);
+      // runCheck / downloadAndInstall 的微任务链清完。
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // 免确认：不弹窗，直接开下并完成安装，随后自动重启。
+    expect(controller?.dialog).toBeNull();
+    expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(controller?.phase).toBe("installed");
+    expect(invokeMock).toHaveBeenCalledWith("restart_app");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("autoInstall 下载安装失败：静默并清当日节流，下次启动重试", async () => {
+  vi.useFakeTimers();
+  try {
+    const pending = fakeUpdate({
+      downloadAndInstall: vi.fn(() => Promise.reject(new Error("download"))),
+    });
+    checkMock.mockResolvedValue(pending);
+    const view = render(<Harness autoCheck autoInstall />);
+
+    await act(async () => {
+      vi.advanceTimersByTime(8000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(controller?.dialog).toBeNull();
+    expect(controller?.phase).toBe("failed");
+    // 当日节流被清掉：再次挂载（下次启动）会重新检查。
+    expect(window.localStorage.getItem(AUTO_CHECK_DAY_KEY)).toBeNull();
+    view.unmount();
+    checkMock.mockClear();
+    render(<Harness autoCheck autoInstall />);
+    await act(async () => {
+      vi.advanceTimersByTime(8000);
+    });
+    expect(checkMock).toHaveBeenCalledTimes(1);
   } finally {
     vi.useRealTimers();
   }
