@@ -4284,7 +4284,7 @@ describe("视频生成（C2 独立创作）", () => {
       estimated_price_fen: 960,
       unit_credits: 960,
       estimated_credits: 960,
-      quote_token: "quote-auto-1",
+      quote_token: "qa-1",
       quote_expires_at: Math.floor(Date.now() / 1000) + 600,
       max_credits: 960,
     });
@@ -4381,7 +4381,7 @@ describe("视频生成（C2 独立创作）", () => {
       quote_token: string;
     };
     expect(retryInput.prompt_text).toContain("subject_definitions:");
-    expect(retryInput.quote_token).toBe("quote-auto-1");
+    expect(retryInput.quote_token).toBe("qa-1");
   });
 
   it("确认弹窗打开后参考图失效也不能绕过最终提交校验", async () => {
