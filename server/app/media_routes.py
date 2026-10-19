@@ -134,7 +134,7 @@ class UploadIntentRequest(BaseModel):
     content_type: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    purpose: Literal["replica", "script"] = "replica"
+    purpose: Literal["replica", "script", "replica_prompt"] = "replica"
 
 
 class UploadIntentResponse(BaseModel):

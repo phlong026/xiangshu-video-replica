@@ -1094,7 +1094,7 @@ export async function uploadWorkbenchSourceVideo(
   file: File,
   onProgress: (percent: number) => void,
   signal?: AbortSignal,
-  purpose: "replica" | "script" = "replica",
+  purpose: "replica" | "script" | "replica_prompt" = "replica",
 ): Promise<{
   projectId: string;
   assetId: string;

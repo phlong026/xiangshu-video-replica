@@ -1,0 +1,130 @@
+/* 长视频复刻提示词页：结果三面板 + 进度态。令牌沿用全局 --studio-* 变量。 */
+
+.long-replica {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.long-replica-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.long-replica-head h2 {
+  margin: 0 0 6px;
+}
+
+.long-replica-head .status-note {
+  margin: 0;
+  max-width: 560px;
+}
+
+.long-replica-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.long-replica-progress p {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin: 0;
+}
+
+.long-replica-progress .settings-error {
+  margin: 0;
+}
+
+.long-replica-results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.long-replica-block {
+  background: var(--studio-panel-bg, var(--studio-bg, #fff));
+  border: 1px solid var(--studio-border, #e5e5e5);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+.long-replica-block__head {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.long-replica-block__head h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.long-replica-block__actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.long-replica-block__body {
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.long-replica-block__empty {
+  color: var(--studio-text-secondary, #888);
+  margin: 0;
+}
+
+.long-replica-script {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-inline-start: 18px;
+}
+
+.long-replica-script li {
+  display: flex;
+  gap: 10px;
+  line-height: 1.7;
+}
+
+.long-replica-script__time {
+  color: var(--studio-text-secondary, #888);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.long-replica-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+
+.long-replica-summary__row {
+  display: flex;
+  gap: 12px;
+}
+
+.long-replica-summary__row dt {
+  color: var(--studio-text-secondary, #888);
+  flex: none;
+  width: 64px;
+}
+
+.long-replica-summary__row dd {
+  line-height: 1.7;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

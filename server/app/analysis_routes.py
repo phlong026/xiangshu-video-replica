@@ -20,6 +20,7 @@ from app.analysis import (
     SHOT_CARD_KIND,
     AnalysisProviderFailed,
     AnalysisResult,
+    ApilioChatTransport,
     ApilioGemini,
     FakeGemini,
     VideoAnalysisProvider,
@@ -81,7 +82,16 @@ MAX_ANALYSIS_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERAN
 ANALYSIS_TASK_LEASE_MINUTES = 10
 
 
-def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
+def get_video_analysis_provider(
+    conn: Database,
+    *,
+    transport: ApilioChatTransport | None = None,
+) -> VideoAnalysisProvider:
+    """构建视频分析 provider。
+
+    ``transport`` 供长视频任务族注入更长的调用超时（180 秒源片单次调用可到
+    十分钟以上）；拆解链路不传，维持 240 秒默认。
+    """
     has_saved_apilio_config = (
         conn.execute(
             "SELECT 1 FROM provider_settings WHERE provider = %s",
@@ -131,16 +141,22 @@ def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
         # 主模型限流/下线时自动换道；出厂名单见
         # APILIO_ANALYSIS_FALLBACK_MODELS，设置项可整组覆盖。
         fallback_models=parse_analysis_fallback_models(config.get("analysis_model_fallbacks")),
+        transport=transport,
     )
 
 
-def signed_video_url_for_provider(storage: StorageAdapter, *, asset_uri: str) -> str:
+def signed_video_url_for_provider(
+    storage: StorageAdapter,
+    *,
+    asset_uri: str,
+    expires_in: timedelta = timedelta(minutes=15),
+) -> str:
     try:
         reference = storage_object_ref_from_uri(asset_uri)
         require_storage_match(storage, reference)
         intent = storage.create_download_intent(
             reference.key,
-            expires_in=timedelta(minutes=15),
+            expires_in=expires_in,
             can_read=True,
         )
     except (StorageBackendUnavailable, ValueError) as exc:

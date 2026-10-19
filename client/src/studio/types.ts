@@ -13,6 +13,7 @@ export type StudioPage =
   | "viral-detail"
   | "copy"
   | "replica"
+  | "long-replica"
   | "replacement"
   | "video"
   | "reference"

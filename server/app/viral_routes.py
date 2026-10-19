@@ -1193,9 +1193,7 @@ def list_viral_copy_extractions(
     ).fetchall()
     items: list[ViralCopyExtractionRecord] = []
     for row in rows:
-        hit = cached_transcript(
-            conn, platform=str(row["platform"]), video_id=str(row["video_id"])
-        )
+        hit = cached_transcript(conn, platform=str(row["platform"]), video_id=str(row["video_id"]))
         items.append(
             ViralCopyExtractionRecord(
                 platform=str(row["platform"]),
@@ -1422,5 +1420,3 @@ def claim_viral_video_copy(
             billable=billable,
         ),
     )
-
-

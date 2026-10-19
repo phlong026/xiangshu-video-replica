@@ -2845,7 +2845,7 @@ export async function renameProject(
 export async function createVideoUploadIntent(
   projectId: string,
   file: File,
-  purpose: "replica" | "script" = "replica",
+  purpose: "replica" | "script" | "replica_prompt" = "replica",
 ): Promise<UploadIntent> {
   const sha256 = await sha256ForUpload(file);
   return requestApiJson<UploadIntent>(
@@ -3521,6 +3521,190 @@ export async function getLatestProjectAnalysis(
     `/api/projects/${encodeURIComponent(projectId)}/analysis/latest`,
     "读取视频拆解失败",
   );
+}
+
+// ---------------------------------------------------------------------------
+// 长视频复刻提示词（replica_prompt）：4–180 秒源片 → 一段完整复刻提示词 +
+// 逐句口播 + 全片摘要。任务形状与拆解任务同构，但单次调用可达 5–15 分钟，
+// 轮询上限放宽到 30 分钟。
+// ---------------------------------------------------------------------------
+
+export type ReplicaPromptTask = {
+  id: string;
+  project_id: string;
+  asset_id: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  attempt: number;
+  result_version_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  failure_phase: string | null;
+  retryable: boolean;
+  request_id: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type ReplicaPromptSpokenLine = {
+  start_time: number | null;
+  end_time: number | null;
+  text: string;
+};
+
+export type ReplicaPromptResult = {
+  schema_version: string;
+  summary: {
+    theme: string;
+    visual_style: string;
+    pace: string;
+    camera_language: string;
+    color_tone: string;
+  };
+  spoken_script: ReplicaPromptSpokenLine[];
+  replica_prompt: string;
+};
+
+export type ReplicaPromptVersion = {
+  id: string;
+  project_id: string;
+  asset_id: string | null;
+  kind: string;
+  version_number: number;
+  payload: ReplicaPromptResult & Record<string, unknown>;
+  created_by_user_id: string | null;
+  created_at: string;
+};
+
+export async function startReplicaPromptTask(
+  projectId: string,
+  assetId: string,
+  forceNew = false,
+): Promise<ReplicaPromptTask> {
+  const errorPrefix = "启动长视频拆解失败";
+  try {
+    return await requestApiJson<ReplicaPromptTask>(
+      `/api/projects/${encodeURIComponent(projectId)}/replica-prompt-tasks`,
+      errorPrefix,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          asset_id: assetId,
+          reuse_existing: !forceNew,
+        }),
+      },
+    );
+  } catch (error) {
+    throw replicaPromptRequestError(error, errorPrefix);
+  }
+}
+
+export async function getReplicaPromptTask(
+  taskId: string,
+): Promise<ReplicaPromptTask> {
+  return requestApiJson<ReplicaPromptTask>(
+    `/api/replica-prompt-tasks/${encodeURIComponent(taskId)}`,
+    "读取长视频拆解任务失败",
+  );
+}
+
+export async function cancelReplicaPromptTask(
+  taskId: string,
+): Promise<ReplicaPromptTask> {
+  const errorPrefix = "取消长视频拆解任务失败";
+  try {
+    return await requestApiJson<ReplicaPromptTask>(
+      `/api/replica-prompt-tasks/${encodeURIComponent(taskId)}/cancel`,
+      errorPrefix,
+      { method: "POST" },
+    );
+  } catch (error) {
+    throw replicaPromptRequestError(error, errorPrefix);
+  }
+}
+
+export async function getLatestReplicaPromptTask(
+  projectId: string,
+): Promise<ReplicaPromptTask | null> {
+  return requestApiJson<ReplicaPromptTask | null>(
+    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt-tasks/latest`,
+    "读取长视频拆解任务失败",
+  );
+}
+
+export async function getLatestReplicaPromptResult(
+  projectId: string,
+): Promise<ReplicaPromptVersion | null> {
+  return requestApiJson<ReplicaPromptVersion | null>(
+    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/latest`,
+    "读取长视频拆解结果失败",
+  );
+}
+
+const replicaPromptTaskWaiters = new Map<string, Promise<ReplicaPromptTask>>();
+const replicaPromptTaskObservers = new Map<
+  string,
+  Set<(task: ReplicaPromptTask) => void>
+>();
+
+export async function waitForReplicaPromptTask(
+  taskId: string,
+  onUpdate?: (task: ReplicaPromptTask) => void,
+): Promise<ReplicaPromptTask> {
+  const observers = replicaPromptTaskObservers.get(taskId) ?? new Set();
+  replicaPromptTaskObservers.set(taskId, observers);
+  if (onUpdate) observers.add(onUpdate);
+  const existing = replicaPromptTaskWaiters.get(taskId);
+  if (existing) {
+    try {
+      return await existing;
+    } finally {
+      if (onUpdate) observers.delete(onUpdate);
+    }
+  }
+  const waiter = pollReplicaPromptTask(taskId);
+  replicaPromptTaskWaiters.set(taskId, waiter);
+  const clear = () => {
+    if (replicaPromptTaskWaiters.get(taskId) === waiter) {
+      replicaPromptTaskWaiters.delete(taskId);
+      replicaPromptTaskObservers.delete(taskId);
+    }
+  };
+  void waiter.then(clear, clear);
+  return waiter;
+}
+
+async function pollReplicaPromptTask(
+  taskId: string,
+): Promise<ReplicaPromptTask> {
+  // 长视频拆解实测可达 5–15 分钟：轮询上限 30 分钟，超时提示可离开再回来恢复。
+  const deadline = Date.now() + 30 * 60_000;
+  const nextDelay = createPollBackoff();
+  while (Date.now() < deadline) {
+    const task = await getReplicaPromptTask(taskId);
+    for (const observer of replicaPromptTaskObservers.get(taskId) ?? []) {
+      try {
+        observer(task);
+      } catch {
+        // A UI status callback must not interrupt polling shared by all callers.
+      }
+    }
+    if (task.status === "SUCCEEDED") {
+      return task;
+    }
+    if (task.status === "FAILED") {
+      const failure = new Error(
+        task.error_message || "长视频拆解失败，请重新提交。",
+      ) as RequestError;
+      if (task.error_code) failure.code = task.error_code;
+      failure.taskId = task.id;
+      if (task.request_id) failure.requestId = task.request_id;
+      throw failure;
+    }
+    await waitForPoll(nextDelay());
+  }
+  throw new Error("长视频拆解仍在后台进行，请稍后回到本页恢复查看。");
 }
 
 export async function getLatestProjectShotCards(
@@ -6209,6 +6393,26 @@ function analysisRequestError(error: unknown, errorPrefix: string): Error {
   }
   if (error instanceof TypeError) {
     return new Error(`${errorPrefix}：网络连接失败，请检查网络后重试`);
+  }
+  return error instanceof Error ? error : new Error(errorPrefix);
+}
+
+// 长视频拆解与拆解共用服务端错误信封；差别只在入口文案（时长上限是 4–180 秒）。
+function replicaPromptRequestError(error: unknown, errorPrefix: string): Error {
+  const { status, code } = error as RequestError;
+  if (error instanceof Error && error.message === "请求超时，请重试") {
+    return new Error(`${errorPrefix}：请求超时，请重试`);
+  }
+  if (error instanceof TypeError) {
+    return new Error(`${errorPrefix}：网络连接失败，请检查网络后重试`);
+  }
+  if (
+    code === undefined &&
+    error instanceof Error &&
+    status !== undefined &&
+    status >= 400
+  ) {
+    return new Error(`${errorPrefix}：请刷新后重试（${status}）`);
   }
   return error instanceof Error ? error : new Error(errorPrefix);
 }

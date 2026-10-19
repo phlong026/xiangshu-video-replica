@@ -23,7 +23,7 @@ from app.analysis import (
 )
 from app.auth import CurrentUser
 from app.db_portable import BusinessConnection
-from app.material_thumbs import store_video_thumbnail
+from app.material_thumbs import store_video_thumbnail, store_video_thumbnail_from_file
 from app.permissions import (
     require_asset_access,
     require_not_auditor,
@@ -35,6 +35,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
     store_verified_upload,
+    store_verified_upload_from_file,
 )
 
 # content_type 与后缀成对登记，防止「音频类型配视频后缀」这类混搭混过校验；
@@ -55,8 +56,12 @@ _ALLOWED_TYPE_SUFFIX_PAIRS: dict[str, set[str]] = {
 # 2026-10-11 应产品要求 50MB→200MB：飞影 API 对分身视频素材无大小限制，
 # 且 #112 后厂商经签名 URL 直拉 COS，上限不再受服务器出口带宽约束。
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+# 长视频复刻提示词通道（replica_prompt）：180 秒手机实拍 H.264 约 17Mbps≈380MB，
+# 200MB 装不下。超过通用预算的完成校验走临时文件流式路径，不整载内存。
+REPLICA_PROMPT_MAX_UPLOAD_BYTES = 600 * 1024 * 1024
 MIN_DURATION_SECONDS = 4.0
 MAX_DURATION_SECONDS = 15.0
+MAX_REPLICA_PROMPT_DURATION_SECONDS = 180.0
 DURATION_ROUNDING_TOLERANCE_SECONDS = 0.1
 UPLOAD_INTENT_EXPIRES_IN = timedelta(minutes=15)
 FFPROBE_TIMEOUT_SECONDS = 5
@@ -361,7 +366,7 @@ def reuse_owned_completed_upload(
     # 复用不能绕过本次用途的时长门禁：同一文件先以「提取文案」（放开 15 秒上限）
     # 上传、再拿去复刻时，必须按复刻的 4–15 秒重新校验，与正常 complete 同一错误码。
     if duration is not None:
-        validate_duration(duration, allow_long=purpose == "script")
+        validate_duration(duration, purpose=purpose)
     asset_id = source_asset_id
     if str(source["project_id"]) != project_id:
         asset_id = str(uuid4())
@@ -557,6 +562,16 @@ def probe_upload_completion(
         raise media_error(
             409, "UPLOAD_SIZE_MISMATCH", "Uploaded size differs from the upload intent."
         )
+    if stored.size > MAX_UPLOAD_BYTES:
+        # 超出通用字节预算的长视频（仅放宽预算的用途能通过 validate_upload_request）：
+        # 走临时文件流式校验，绝不把整个对象读进内存。
+        return _probe_oversized_upload_completion(
+            prepared,
+            storage=storage,
+            probe=probe,
+            stored=stored,
+            content_type=content_type,
+        )
     # Read once with a hard byte budget, then probe/hash/persist exactly those bytes.
     # HEAD metadata alone cannot protect against an overwrite between HEAD and GET.
     chunks = storage.iter_object(storage_key)
@@ -564,7 +579,7 @@ def probe_upload_completion(
     try:
         for chunk in chunks:
             if len(content_buffer) + len(chunk) > MAX_UPLOAD_BYTES:
-                raise media_error(413, "MEDIA_TOO_LARGE", "Video upload must be 50MB or smaller.")
+                raise media_error(413, "MEDIA_TOO_LARGE", media_too_large_message(prepared.purpose))
             if len(content_buffer) + len(chunk) > stored.size:
                 raise media_error(
                     409, "UPLOAD_SIZE_MISMATCH", "Object changed during verification."
@@ -582,11 +597,9 @@ def probe_upload_completion(
         raise media_error(409, "UPLOAD_HASH_MISMATCH", "Uploaded content differs from its digest.")
     metadata = probe_video(probe, content, filename=Path(storage_key).name)
     # 裁剪爆款（replica）仍是 4–15 秒硬约束；提取文案（script）只卡下限、放开 15 秒
-    # 上限——复刻侧的时长守护由分析入口（analysis_duration_for_asset）兜底。
-    validate_duration(
-        metadata.duration_seconds,
-        allow_long=prepared.purpose == "script",
-    )
+    # 上限；长视频提示词（replica_prompt）放宽到 4–180 秒——复刻侧的时长守护由
+    # 分析入口（analysis_duration_for_asset）兜底，长视频侧由 replica_prompt 任务入口兜底。
+    validate_duration(metadata.duration_seconds, purpose=prepared.purpose)
     # This key is never the subject of a client PUT grant. Concurrent completions
     # with different bytes produce different keys; the database picks one below.
     verified = (
@@ -846,8 +859,8 @@ def validate_upload_request(
             "UNSUPPORTED_MEDIA_TYPE",
             "Only MP4 and MOV videos are accepted.",
         )
-    if size_bytes > MAX_UPLOAD_BYTES:
-        raise media_error(413, "MEDIA_TOO_LARGE", "Video upload must be 50MB or smaller.")
+    if size_bytes > upload_byte_budget(purpose):
+        raise media_error(413, "MEDIA_TOO_LARGE", media_too_large_message(purpose))
     if size_bytes < 0:
         raise media_error(422, "INVALID_MEDIA_SIZE", "Video size must be non-negative.")
 
@@ -869,19 +882,144 @@ def probe_video(probe: VideoProbe, content: bytes, *, filename: str) -> VideoMet
         ) from exc
 
 
-def validate_duration(duration_seconds: float, *, allow_long: bool = False) -> None:
-    max_seconds = None if allow_long else MAX_DURATION_SECONDS
+def probe_video_file(probe: VideoProbe, path: Path, *, filename: str) -> VideoMetadata:
+    """按文件路径探测；大文件通道专用，避免把整个对象读进内存再探测."""
+    probe_file = getattr(probe, "probe_file", None)
+    if not callable(probe_file):
+        # 探测协议只保证字节入口（测试替身常见）：回退逐字节读取。
+        return probe_video(probe, path.read_bytes(), filename=filename)
+    try:
+        metadata: VideoMetadata = probe_file(path, filename=filename)
+        return metadata
+    except VideoProbeUnavailable as exc:
+        raise media_error(
+            503,
+            "VIDEO_PROBE_UNAVAILABLE",
+            "视频检测服务暂不可用，请稍后重试。",
+        ) from exc
+    except VideoProbeFailed as exc:
+        raise media_error(
+            422,
+            "VIDEO_PROBE_FAILED",
+            "Video metadata could not be read.",
+        ) from exc
+
+
+def _probe_oversized_upload_completion(
+    prepared: PreparedUploadCompletion,
+    *,
+    storage: StorageAdapter,
+    probe: VideoProbe,
+    stored: Any,
+    content_type: str,
+) -> ProbedUploadCompletion:
+    """>200MB 的长视频完成校验：流式落临时文件，哈希/探测/抽帧都不整载内存.
+
+    只有放宽字节预算的用途（当前仅 replica_prompt）能到达这里——
+    validate_upload_request 已按用途预算把其余用途挡在 413。
+    """
+    storage_key = prepared.storage_key
+    suffix = Path(storage_key).suffix.lower() or ".mp4"
+    chunks = storage.iter_object(storage_key)
+    digest = hashlib.sha256()
+    size_seen = 0
+    temp = tempfile.NamedTemporaryFile(prefix="media-verify-", suffix=suffix, delete=False)
+    temp_path = Path(temp.name)
+    try:
+        with temp:
+            for chunk in chunks:
+                size_seen += len(chunk)
+                if size_seen > upload_byte_budget(prepared.purpose):
+                    raise media_error(
+                        413, "MEDIA_TOO_LARGE", media_too_large_message(prepared.purpose)
+                    )
+                if size_seen > stored.size:
+                    raise media_error(
+                        409, "UPLOAD_SIZE_MISMATCH", "Object changed during verification."
+                    )
+                digest.update(chunk)
+                temp.write(chunk)
+    finally:
+        close = getattr(chunks, "close", None)
+        if close is not None:
+            close()
+    if size_seen != stored.size:
+        raise media_error(409, "UPLOAD_SIZE_MISMATCH", "Object changed during verification.")
+    content_sha256 = digest.hexdigest()
+    if prepared.expected_sha256 and content_sha256 != prepared.expected_sha256.lower():
+        raise media_error(409, "UPLOAD_HASH_MISMATCH", "Uploaded content differs from its digest.")
+    try:
+        metadata = probe_video_file(probe, temp_path, filename=Path(storage_key).name)
+        validate_duration(metadata.duration_seconds, purpose=prepared.purpose)
+        # 与字节路径同一 verified-uploads 键推导；copy 语义由 put_file 承载，
+        # COS/本地适配器都是流式落盘，不会把文件读回内存。
+        verified = (
+            stored
+            if prepared.already_verified
+            else store_verified_upload_from_file(
+                storage,
+                asset_id=prepared.asset_id,
+                source_key=storage_key,
+                source_path=temp_path,
+                sha256=content_sha256,
+                content_type=content_type,
+            )
+        )
+        # 抽帧放在探测期（写事务之外）；失败只损失缩略图。
+        thumbnail_key = store_video_thumbnail_from_file(storage, verified.key, temp_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return ProbedUploadCompletion(
+        prepared=prepared,
+        storage_uri=verified.uri,
+        sha256=content_sha256,
+        size_bytes=stored.size,
+        content_type=content_type,
+        metadata=metadata,
+        thumbnail_key=thumbnail_key,
+    )
+
+
+def duration_limit_for_purpose(purpose: str) -> float | None:
+    """用途 → 时长上限（None 为不限）：复刻 15 秒 / 长视频提示词 180 秒 / 提取文案不限."""
+    if purpose == "script":
+        return None
+    if purpose == "replica_prompt":
+        return MAX_REPLICA_PROMPT_DURATION_SECONDS
+    return MAX_DURATION_SECONDS
+
+
+def upload_byte_budget(purpose: str) -> int:
+    """用途 → 单文件字节预算：长视频提示词通道放宽，其余用途共用通用预算."""
+    return REPLICA_PROMPT_MAX_UPLOAD_BYTES if purpose == "replica_prompt" else MAX_UPLOAD_BYTES
+
+
+def media_too_large_message(purpose: str) -> str:
+    limit_mb = upload_byte_budget(purpose) // (1024 * 1024)
+    return f"视频上传需不超过 {limit_mb}MB。"
+
+
+def validate_duration(duration_seconds: float, *, purpose: str = "replica") -> None:
+    limit = duration_limit_for_purpose(purpose)
     if duration_seconds < MIN_DURATION_SECONDS - DURATION_ROUNDING_TOLERANCE_SECONDS or (
-        max_seconds is not None
-        and duration_seconds > max_seconds + DURATION_ROUNDING_TOLERANCE_SECONDS
+        limit is not None and duration_seconds > limit + DURATION_ROUNDING_TOLERANCE_SECONDS
     ):
-        if allow_long:
+        rounded_limit = None if limit is None else round(limit)
+        if limit is None:
             detail = (
                 f"检测到 {duration_seconds:.2f} 秒；"
                 f"用于提取文案的视频需不少于 {MIN_DURATION_SECONDS:.0f} 秒。"
             )
+        elif purpose == "replica_prompt":
+            detail = (
+                f"检测到 {duration_seconds:.2f} 秒；"
+                f"长视频需为 {MIN_DURATION_SECONDS:.0f}–{rounded_limit} 秒。"
+            )
         else:
-            detail = f"检测到 {duration_seconds:.2f} 秒；参考视频需为 4–15 秒。"
+            detail = (
+                f"检测到 {duration_seconds:.2f} 秒；"
+                f"参考视频需为 {MIN_DURATION_SECONDS:.0f}–{rounded_limit} 秒。"
+            )
         raise media_error(422, "VIDEO_DURATION_OUT_OF_RANGE", detail)
 
 

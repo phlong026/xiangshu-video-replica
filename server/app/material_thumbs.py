@@ -19,6 +19,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Iterator
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.media_tools import resolve_media_binary
@@ -47,6 +48,27 @@ def thumbnail_key_for(object_key: str) -> str:
     return f"{object_key}{THUMBNAIL_SUFFIX}"
 
 
+def _thumbnail_ffmpeg_command(source_arg: str, *, scale_filter: str) -> list[str]:
+    ffmpeg = resolve_media_binary("ffmpeg")
+    return [
+        ffmpeg,
+        "-v",
+        "error",
+        "-i",
+        source_arg,
+        "-frames:v",
+        "1",
+        "-vf",
+        # 滤镜表达式内的逗号必须转义（逗号是 ffmpeg 的滤镜分隔符）。
+        scale_filter,
+        "-q:v",
+        "4",
+        "-f",
+        "mjpeg",
+        "pipe:1",
+    ]
+
+
 def extract_thumbnail_jpeg(
     content: bytes,
     *,
@@ -67,26 +89,40 @@ def extract_thumbnail_jpeg(
         )
     )
     try:
-        ffmpeg = resolve_media_binary("ffmpeg")
         result = subprocess.run(
-            [
-                ffmpeg,
-                "-v",
-                "error",
-                "-i",
-                "pipe:0",
-                "-frames:v",
-                "1",
-                "-vf",
-                # 滤镜表达式内的逗号必须转义（逗号是 ffmpeg 的滤镜分隔符）。
-                scale_filter,
-                "-q:v",
-                "4",
-                "-f",
-                "mjpeg",
-                "pipe:1",
-            ],
+            _thumbnail_ffmpeg_command("pipe:0", scale_filter=scale_filter),
             input=content,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout.startswith(b"\xff\xd8"):
+        return None
+    return result.stdout
+
+
+def extract_thumbnail_jpeg_from_path(
+    source: Path,
+    *,
+    max_height: int = _THUMBNAIL_MAX_HEIGHT,
+    max_width: int | None = None,
+) -> bytes | None:
+    """按文件路径抽首帧：大文件通道专用，视频不必整载内存.
+
+    与字节版同一滤镜/输出约束；任何失败返回 None 不抛错。
+    """
+    scale_filter = (
+        f"scale=-2:min({max_height}\\,ih)"
+        if max_width is None
+        else (
+            f"scale=w=min({max_width}\\,iw):h=min({max_height}\\,ih)"
+            ":force_original_aspect_ratio=decrease"
+        )
+    )
+    try:
+        result = subprocess.run(
+            _thumbnail_ffmpeg_command(str(source), scale_filter=scale_filter),
             capture_output=True,
             timeout=60,
         )
@@ -115,6 +151,23 @@ def store_video_thumbnail(
     约束宽度上界）。
     """
     thumb = extract_image_thumbnail_jpeg(content) if is_image else extract_thumbnail_jpeg(content)
+    if thumb is None:
+        return None
+    key = thumbnail_key_for(object_key)
+    try:
+        storage.put_object(key, thumb, content_type="image/jpeg")
+    except Exception:
+        return None
+    return key
+
+
+def store_video_thumbnail_from_file(
+    storage: StorageAdapter,
+    object_key: str,
+    source_path: Path,
+) -> str | None:
+    """按文件路径抽帧并落存储（大文件通道）；失败返回 None 不抛错."""
+    thumb = extract_thumbnail_jpeg_from_path(source_path)
     if thumb is None:
         return None
     key = thumbnail_key_for(object_key)

@@ -213,6 +213,10 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 取消语义/计费释放/晚到结果拦截矩阵 (test_analysis_task_cancel.py),
         # migrated to alembic head and truncated per test.
         "analysis_cancel_test",
+        # REPLICA-PROMPT-20261016 长视频复刻提示词任务族：dedicated database for
+        # the 入队/租约/完成/失败/取消矩阵 (test_replica_prompt_tasks.py),
+        # migrated to alembic head and truncated per test.
+        "replica_prompt_test",
         # BILLING-OBSERVABILITY-20260922 拆解失败诊断落库：dedicated database for
         # the fail_analysis_task 终态诊断矩阵
         # (test_analysis_failure_diagnostics_pg.py), migrated to alembic head.

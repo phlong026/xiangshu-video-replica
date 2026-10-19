@@ -891,8 +891,11 @@ describe("V1.4 workspace integration", () => {
     );
     const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
     expect(nav.getAllByRole("button").map((node) => node.textContent)).toEqual(
-      expect.arrayContaining(["爆款视频", "文案工坊", "视频创作"]),
+      expect.arrayContaining(["爆款视频", "文案工坊", "视频拆解"]),
     );
+    // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
+    expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
+    expect(nav.queryByRole("button", { name: "长视频拆解" })).toBeNull();
     expect(screen.getByText("粘贴一条爆款乡墅视频链接，")).toBeInTheDocument();
     expect(screen.getByText("快速生成它的原创视频")).toBeInTheDocument();
     expect(
@@ -2533,7 +2536,7 @@ describe("V1.4 workspace integration", () => {
       expect(await screen.findByLabelText("来源原文")).toHaveValue(
         "需要保留的未保存转写原文",
       );
-      fireEvent.click(screen.getByRole("button", { name: /^视频创作$/ }));
+      fireEvent.click(screen.getByRole("button", { name: /^视频拆解$/ }));
       await waitFor(() =>
         expect(api.getLatestScriptVersion).toHaveBeenCalledWith("project-1"),
       );
@@ -3709,8 +3712,8 @@ describe("视频生成（C2 独立创作）", () => {
   };
 
   async function openVideoPage() {
-    // 侧边栏「视频创作」进入复刻页签组，再切到「视频生成」。
-    fireEvent.click(screen.getByRole("button", { name: "视频创作" }));
+    // 侧边栏「视频拆解」进入复刻页签组，再切到「视频生成」。
+    fireEvent.click(screen.getByRole("button", { name: "视频拆解" }));
     fireEvent.click(screen.getByRole("tab", { name: "AI 视频" }));
     await waitFor(() =>
       expect(screen.getByLabelText("提示词")).toBeInTheDocument(),

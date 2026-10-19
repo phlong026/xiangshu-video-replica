@@ -103,9 +103,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上；
 # 20261014T1000_support_ticket_priority（管理端整改 T14/T15 工单优先级与关联对象）
 # 20261014T1100_customer_ops_params（整改 T29 客户运营参数）与
-# 20261014T1200_admin_role_templates（整改 T41 权限点与角色模板）依次追加其上，
-# 故链尾为该值。
-HEAD_REVISION = "20261014T1200_admin_role_templates"
+# 20261014T1200_admin_role_templates（整改 T41 权限点与角色模板）依次追加其上；
+# 20261016T1000_replica_prompt_tasks（长视频复刻提示词任务族）追加其上，故链尾为该值。
+HEAD_REVISION = "20261016T1000_replica_prompt_tasks"
 
 
 @pytest.mark.pg
@@ -421,16 +421,21 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # columns +4、check_constraints +4，tables 不变；digest 由 --print-schema 在
 # 迁到新 head 的隔离 PG16 探针库重算（两迁移自 20261013T1020 线性接续，
 # 未改写已发布链指纹）。
+# 2026-10-16 长视频复刻提示词追加：replica_prompt_tasks（任务族表，含主键、
+# 4 外键、4 CHECK 与 1 个活跃任务 partial unique 索引），故 tables/primary_keys/
+# partial_indexes 各 +1、columns +19、check_constraints +4、foreign_keys +4；
+# 时间戳走 sa.Text()，timestamptz/jsonb/sequences/triggers 不变。digest 在
+# 迁到新 head 的隔离 PG16 探针库重算（与 CW-075/076 先例同法）。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 393,
-    "columns": 1496,
-    "foreign_keys": 217,
+    "check_constraints": 397,
+    "columns": 1515,
+    "foreign_keys": 221,
     "identity_columns": 0,
     "jsonb_columns": 13,
-    "partial_indexes": 44,
-    "primary_keys": 134,
+    "partial_indexes": 45,
+    "primary_keys": 135,
     "sequences": 8,
-    "tables": 134,
+    "tables": 135,
     "timestamptz_columns": 118,
     "triggers": 61,
     "unique_constraints": 43,
@@ -542,6 +547,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "publish_browser_accounts",
     "publish_browser_logins",
     "publish_records",
+    "replica_prompt_tasks",
     "recharge_orders",
     "recharge_packages",
     "refund_executions",
@@ -691,7 +697,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "5b5e642b7a6762ce6716f5c9424b0ea43fb664eb7a07ebefdc5d71cf419b48c3"
+HEAD_SCHEMA_DIGEST = "655de707901307e1f4daa9dd8d5ba1f0e274b8e961a33593a048ac237a92c7a8"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

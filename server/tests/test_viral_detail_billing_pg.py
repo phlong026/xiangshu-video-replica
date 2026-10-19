@@ -567,9 +567,7 @@ def test_copy_extractions_lists_own_claim_history(detail_client, route_state) ->
     second = _claim_copy(detail_client, headers, video_id="v-copy-hist-b")
     assert second.status_code == 200, second.text
 
-    listing = detail_client.get(
-        "/api/viral/videos/copy/extractions", headers=headers
-    )
+    listing = detail_client.get("/api/viral/videos/copy/extractions", headers=headers)
     assert listing.status_code == 200, listing.text
     items = listing.json()["items"]
     assert [item["videoId"] for item in items][:2] == [
@@ -584,16 +582,12 @@ def test_copy_extractions_lists_own_claim_history(detail_client, route_state) ->
 
     # 未领取过的账号记录为空；重复领取不产生重复条目（只加次数）。
     other_headers, _other_uid = account(detail_client, "copy_history_other")
-    other = detail_client.get(
-        "/api/viral/videos/copy/extractions", headers=other_headers
-    )
+    other = detail_client.get("/api/viral/videos/copy/extractions", headers=other_headers)
     assert other.status_code == 200, other.text
     assert other.json()["items"] == []
     replay = _claim_copy(detail_client, headers, video_id="v-copy-hist-a")
     assert replay.status_code == 200, replay.text
-    again = detail_client.get(
-        "/api/viral/videos/copy/extractions", headers=headers
-    )
+    again = detail_client.get("/api/viral/videos/copy/extractions", headers=headers)
     rows = again.json()["items"]
     assert len(rows) == 2
     # 重领把 hist-a 的最近交付时间推到最新，排序随之置顶，次数 +1。
