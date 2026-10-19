@@ -1,0 +1,11 @@
+{
+ "version": "2.6.5",
+ "notes": "本次更新：新增「长视频拆解」——支持 4–180 秒爆款视频，AI 看完整片产出可直接使用的复刻提示词、逐句口播文案与全片摘要；工作台上传大视频后点「开始复刻」自动进入长视频拆解；桌面端启动自动更新上线，此后无需手动到个人中心升级。",
+ "pub_date": "2026-10-19T06:38:43Z",
+ "platforms": {
+  "windows-x86_64": {
+   "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTUlo3ZTJ6VzVnUWY4NGRvRWFMSTJPZzl3SVczQmM5RkRpUkZRNUFpd0ZzejcybXVDTExPYjdhd0RpM01hR2x5M3VSWHFLajIzWGd2T0VEMHpSdWFLRWp1U3g3SzJ4encwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMzkxODkzCWZpbGU65LyX5aKF5LmL5a62IEFJIOeIhuasvuinhumikeW3peWFt18yLjYuNV94NjQtc2V0dXAuZXhlCkZmUWFpZTNPcFJUK2JoV2ptaXVpV0JodVl5aHdjWHlPUVZMTjlmazVhemNvSmpZL0NERTFuWDNOV0dsdkR3NVp5K3NsOTVXQmdUR0loclZGb3hRcUNnPT0K",
+   "url": "https://video.zszhj.cn/downloads/customer-cloud/2.6.5/众墅之家 AI 爆款视频工具_2.6.5_x64-setup.exe"
+  }
+ }
+}
