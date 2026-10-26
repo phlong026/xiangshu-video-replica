@@ -469,6 +469,25 @@ def test_first_frame_quality_has_separate_single_attempt_budget():
     assert original.max_attempts == 2
 
 
+def test_source_frame_quality_budget_covers_real_vision_latency():
+    """源帧语义质检走同一网关，视觉调用实测单张小图就要 7.7~9.1 秒，
+    预算必须与首帧质检通道同级（60s），否则上线以来 100% 超时。"""
+    from app.first_frames import (
+        SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS,
+        ApilioFirstFrameQualityInspector,
+        bounded_source_frame_quality_inspector,
+    )
+
+    original = ApilioFirstFrameQualityInspector(api_key="test-key")
+    bounded = bounded_source_frame_quality_inspector(original)
+    assert SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS == 60.0
+    assert bounded.transport.timeout_seconds == SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS
+    assert bounded.max_attempts == 1
+
+    assert original.transport.timeout_seconds == 240
+    assert original.max_attempts == 2
+
+
 @pytest.mark.parametrize("resuming", [False, True])
 @pytest.mark.parametrize("appearance_source", ["SCENE_LOOK", "VIDEO_ANALYSIS"])
 def test_scene_replacement_has_no_ai_review_or_automatic_regeneration(resuming, appearance_source):
