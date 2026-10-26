@@ -2507,7 +2507,7 @@ def test_voice_audio_media_commands_restrict_protocols_and_fail_on_decode_errors
     assert normalized == b"ID3-normalized"
     assert len(commands) == 1
     command = commands[0]
-    assert "-xerror" in command
+    assert "-xerror" not in command
     assert command[command.index("-protocol_whitelist") + 1] == "file,pipe"
     assert inspections == [
         {
@@ -2525,6 +2525,121 @@ def test_voice_audio_media_commands_restrict_protocols_and_fail_on_decode_errors
             "local_input_only": True,
         },
     ]
+
+
+def _corrupt_phone_recording(path: Any) -> None:
+    """生成一份"能探测、能播放但含损坏包"的 m4a，模拟手机实录音的边角情况。"""
+    command = [
+        resolve_media_binary("ffmpeg"),
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=16000",
+        "-t",
+        "12",
+        "-c:a",
+        "aac",
+        "-y",
+        str(path),
+    ]
+    subprocess.run(command, check=True, capture_output=True)
+    data = bytearray(path.read_bytes())
+    mdat = data.find(b"mdat")
+    assert mdat > 0
+    for offset in range(mdat + 8 + 2000, mdat + 8 + 2040, 4):
+        data[offset] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+
+def test_voice_clone_tolerates_minor_decode_errors_in_phone_recordings(
+    tmp_path: Any, fake_source_storage: FakeSourceStorage
+) -> None:
+    corrupt_path = tmp_path / "voice.m4a"
+    _corrupt_phone_recording(corrupt_path)
+    fake_source_storage.objects["voice.m4a"] = corrupt_path.read_bytes()
+    vendor, transport = make_vendor()
+    transport.on(
+        "POST",
+        "/api/v2/hifly/tool/create_upload_url",
+        envelope(
+            {
+                "upload_url": "https://up.example/normalized",
+                "content_type": "audio/mpeg",
+                "file_id": "normalized-file",
+            }
+        ),
+    )
+    transport.on("POST", "/api/v2/hifly/voice/create", envelope({"task_id": "voice-task"}))
+
+    result = perform_oral_work(
+        OralWorkLease(
+            kind="voice_submit",
+            record_id="voice-corrupt-tolerant",
+            worker_id="format-worker",
+            lease_token="format-lease",
+            attempt_count=1,
+            row={
+                "source_storage_uri": "fake://assets/voice.m4a",
+                "title": "张工声音",
+            },
+        ),
+        vendor=vendor,
+        storage=fake_source_storage,
+    )
+
+    assert result.outcome == "submitted"
+    assert len(transport.put_bodies) == 1
+
+
+def test_voice_clone_untranscodable_audio_reports_file_problem(
+    fake_source_storage: FakeSourceStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import media_tools
+    from app.media_tools import MediaToolFailed, MediaValidationFailed
+
+    def fail_transcode(*_args: Any, **_kwargs: Any) -> None:
+        raise MediaToolFailed("ffmpeg 返回非零退出码")
+
+    monkeypatch.setattr("app.media_tools.inspect_media_bytes", lambda *_a, **_k: object())
+    monkeypatch.setattr("app.media_tools._run", fail_transcode)
+    with pytest.raises(MediaValidationFailed):
+        media_tools.normalize_audio_to_mp3(
+            b"RIFF-source",
+            suffix=".wav",
+            min_duration_seconds=5,
+            max_duration_seconds=180,
+        )
+
+
+def test_voice_clone_file_problem_reaches_user_as_reupload_guidance(
+    fake_source_storage: FakeSourceStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.media_tools import MediaValidationFailed
+
+    vendor, transport = make_vendor()
+
+    def fail_normalization(*_args: Any, **_kwargs: Any) -> bytes:
+        raise MediaValidationFailed("音频无法转码，请重新录制或更换文件")
+
+    monkeypatch.setattr("app.oral_worker.normalize_audio_to_mp3", fail_normalization)
+    result = perform_oral_work(
+        OralWorkLease(
+            kind="voice_submit",
+            record_id="voice-file-problem",
+            worker_id="format-worker",
+            lease_token="format-lease",
+            attempt_count=1,
+            row={"source_storage_uri": "fake://assets/voice.mp3", "title": "张工声音"},
+        ),
+        vendor=vendor,
+        storage=fake_source_storage,
+    )
+
+    assert result.outcome == "failed"
+    assert result.message == "声音素材需为 5 至 180 秒的有效音频"
+    assert transport.calls == []
 
 
 def test_voice_clone_done_without_demo_stays_running(
