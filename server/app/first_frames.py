@@ -1126,7 +1126,7 @@ class ApilioFirstFrameQualityInspector:
                 payload = json.loads(raw_content)
                 if not isinstance(payload, dict):
                     raise TypeError("quality response must be an object")
-                return cast(dict[str, object], payload)
+                return _coerce_notes_lists(payload)
             except RetryableImageProviderFailed as exc:
                 last_error = exc
                 if attempt + 1 < self.max_attempts:
@@ -1142,6 +1142,25 @@ class ApilioFirstFrameQualityInspector:
                 last_error = exc
             break
         raise FirstFrameQualityInspectorFailed("first-frame quality request failed") from last_error
+
+
+def _coerce_notes_lists(payload: dict[str, object]) -> dict[str, object]:
+    """质检模型偶发把 notes 数组写成单个字符串（2026-10-26 生产实测），
+    递归做 str -> [str] 归一，其余结构原样保留。"""
+
+    def walk(node: object) -> object:
+        if isinstance(node, dict):
+            fixed = {k: walk(v) for k, v in node.items()}
+            notes = fixed.get("notes")
+            if isinstance(notes, str):
+                fixed["notes"] = [notes]
+            return fixed
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    coerced = walk(payload)
+    return coerced if isinstance(coerced, dict) else payload
 
 
 def bounded_first_frame_quality_inspector(
