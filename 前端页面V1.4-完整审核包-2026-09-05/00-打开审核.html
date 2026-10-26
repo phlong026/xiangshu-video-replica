@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>众墅之家｜AI 即创 · V1.4 完整效果图审核</title>
+  <link rel="stylesheet" href="review.css">
+  <script src="review.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">众</span><div><strong>众墅之家｜AI 即创</strong><small>V1.4 效果图审核</small></div></div>
+    <p class="directory-title">全部 21 张</p>
+    <nav id="page-directory" aria-label="效果图目录"></nav>
+  </aside>
+
+  <main>
+    <header>
+      <div class="eyebrow">前端页面 1.4 · 最终审核包</div>
+      <h1>完整效果图审核</h1>
+      <p class="intro">共 21 张：16 个业务页面，加 5 张同页模式或页签状态。图片中的人物、任务和数据均为界面示例。</p>
+      <div class="notice"><strong>静态审核说明</strong>：这里不是可操作的业务原型，按钮不连接 API，也不会执行生成、计费、上传或发布。</div>
+      <div class="stats"><span>21 张效果图</span><span>16 个业务页</span><span>5 个模式页签状态</span><span id="visible-count">当前 21 / 21 张</span></div>
+      <div class="toolbar" aria-label="审核筛选">
+        <label>模块<select id="module-filter"><option>全部</option><option>工作台</option><option>创作</option><option>任务</option><option>资产</option><option>分发</option><option>账户</option></select></label>
+        <label>页面类型<select id="kind-filter"><option>全部</option><option>业务页面</option><option>模式页签</option></select></label>
+        <label>审核结论<select id="state-filter"><option>全部</option><option>待审核</option><option>通过</option><option>需修改</option></select></label>
+        <label>重点业务链<select id="chain-filter"><option>全部</option><option>文案到口播</option><option>照片到人物置换</option><option>照片到口播分身</option><option>声音到口播</option><option>已有音频到口播</option></select></label>
+        <button id="previous-page" type="button">上一张</button>
+        <button id="next-page" type="button">下一张</button>
+        <button class="primary" id="export-review" type="button">导出审核意见 JSON</button>
+      </div>
+      <p class="save-message" id="save-message" role="status">审核结论与备注会按 V1.4 单独保存在当前浏览器；交付前请导出 JSON 留档。</p>
+    </header>
+
+    <section class="page-grid" id="page-grid" aria-live="polite"></section>
+    <footer>众墅之家｜AI 即创 · V1.4 静态界面审核材料</footer>
+  </main>
+
+  <dialog id="viewer">
+    <div class="viewer-bar">
+      <strong id="viewer-title"></strong>
+      <button id="viewer-previous" type="button">← 上一张</button>
+      <button id="viewer-next" type="button">下一张 →</button>
+      <a id="viewer-original" href="#" target="_blank" rel="noopener">新页查看原图</a>
+      <button id="viewer-close" type="button">关闭</button>
+    </div>
+    <img id="viewer-image" alt="">
+    <div class="viewer-missing" id="viewer-missing" hidden>图片未加载，请检查文件是否完整或刷新。</div>
+  </dialog>
+</body>
+</html>
