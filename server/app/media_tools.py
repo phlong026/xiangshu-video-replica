@@ -29,7 +29,37 @@ FFMPEG_TIMEOUT_SECONDS = 600
 IMAGE_DECODE_TIMEOUT_SECONDS = 15
 # 规范化比单纯解码多了缩放与 PNG 编码，1 亿像素上限的原图需要更宽的预算。
 IMAGE_NORMALIZE_TIMEOUT_SECONDS = 30
-GENERATED_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+GENERATED_VIDEO_MAX_MB_ENV = "VIDEO_REPLICA_GENERATED_VIDEO_MAX_MB"
+# 成片归档/规范化的大小上限（FIX-15）：与用户上传上限（media.MAX_UPLOAD_BYTES=200MB）
+# 分离。默认 50MB 是按 1080P 成片估的，2K 高码率成片可能超；线上核实实际大小后可用
+# 环境变量调高，不必等发版。
+DEFAULT_GENERATED_VIDEO_MAX_MB = 50
+
+
+def _generated_video_max_bytes() -> int:
+    """读成片上限，非法或非正值一律回退默认。
+
+    写成 0 或空串会让所有成片规范化直接失败（等于停服），因此这里 fail-safe
+    而不是 fail-closed。
+    """
+    fallback = DEFAULT_GENERATED_VIDEO_MAX_MB * 1024 * 1024
+    raw = os.environ.get(GENERATED_VIDEO_MAX_MB_ENV, "").strip()
+    if not raw:
+        return fallback
+    try:
+        megabytes = int(raw)
+    except ValueError:
+        return fallback
+    return megabytes * 1024 * 1024 if megabytes > 0 else fallback
+
+
+def _size_limit_label(num_bytes: int) -> str:
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes // (1024 * 1024)}MB"
+    return f"{num_bytes} 字节"
+
+
+GENERATED_VIDEO_MAX_BYTES = _generated_video_max_bytes()
 # This helper is used for customer uploads and generated results.  The byte
 # contract is still enforced by each caller; one minute is not a valid global
 # compatibility boundary (a perfectly normal source can be 61 seconds).
@@ -108,8 +138,17 @@ def normalize_generated_video(
         raise MediaValidationFailed("目标视频尺寸必须为有效的偶数尺寸")
     if max_bytes <= 0 or (max_duration_seconds is not None and max_duration_seconds <= 0):
         raise MediaValidationFailed("视频规范化资源限制无效")
-    if not content or len(content) > max_bytes or content[4:8] != b"ftyp":
-        raise MediaValidationFailed("成片必须为大小合规的非空 MP4 视频")
+    # 三种拒绝原因分开报：50MB 上限挡住 2K 成片时，运维要能从日志直接看出是大小问题
+    # （FIX-15），而不是笼统的「不规范」。
+    if not content:
+        raise MediaValidationFailed("成片内容为空")
+    if len(content) > max_bytes:
+        raise MediaValidationFailed(
+            f"成片超过大小上限 {_size_limit_label(max_bytes)}"
+            f"（可用 {GENERATED_VIDEO_MAX_MB_ENV} 调整归档上限）"
+        )
+    if content[4:8] != b"ftyp":
+        raise MediaValidationFailed("成片不是可识别的 MP4 容器")
     ffprobe = resolve_media_binary("ffprobe")
     ffmpeg = resolve_media_binary("ffmpeg")
     deadline = time.monotonic() + FFMPEG_TIMEOUT_SECONDS
