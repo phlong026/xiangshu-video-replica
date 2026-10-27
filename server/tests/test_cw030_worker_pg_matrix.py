@@ -727,6 +727,64 @@ def test_character_sheet_double_claim_and_expiry(pg_state: str) -> None:
     assert row["error_code"] == "IMAGE_TASK_LEASE_EXPIRED"
 
 
+def test_character_sheet_uncertain_expires_to_failed_after_window(pg_state: str) -> None:
+    """人物五视图上游是同步接口、无任务号可回查：UNCERTAIN 不可能自愈。
+
+    超过窗口后自动落 FAILED（额度在落 UNCERTAIN 时已解冻，这里不再动钱），
+    客户端走现成的「失败可重新生成」路径解锁创建入口；未到窗口的保持
+    UNCERTAIN，不被误杀。
+    """
+    _seed_base(pg_state)
+    _seed_image_task(
+        pg_state, table="character_sheet_tasks", task_id="cs-exp", status="SUBMISSION_UNCERTAIN"
+    )
+    _exec(
+        pg_state,
+        "UPDATE character_sheet_tasks"
+        " SET completed_at = now() - interval '6 minutes' WHERE id = 'cs-exp'",
+    )
+    _seed_image_task(
+        pg_state, table="character_sheet_tasks", task_id="cs-fresh", status="SUBMISSION_UNCERTAIN"
+    )
+    _exec(
+        pg_state,
+        "UPDATE character_sheet_tasks"
+        " SET completed_at = now() - interval '2 minutes' WHERE id = 'cs-fresh'",
+    )
+    with pg_transaction() as raw:
+        lease = acquire_character_sheet_task(BusinessConnection.postgres(raw), worker_id="worker-a")
+    assert lease is None
+    expired = _rows(
+        pg_state,
+        "SELECT status, error_code, error_message_redacted, retryable"
+        " FROM character_sheet_tasks WHERE id = 'cs-exp'",
+    )[0]
+    assert expired["status"] == "FAILED"
+    assert expired["error_code"] == "IMAGE_TASK_SUBMISSION_EXPIRED"
+    assert "额度已释放" in str(expired["error_message_redacted"])
+    assert int(expired["retryable"]) == 1
+    fresh = _rows(pg_state, "SELECT status FROM character_sheet_tasks WHERE id = 'cs-fresh'")[0]
+    assert fresh["status"] == "SUBMISSION_UNCERTAIN"
+
+
+def test_first_frame_uncertain_is_not_auto_expired(pg_state: str) -> None:
+    """首帧上游有任务号与回执续查通道：UNCERTAIN 保持人工核对，不自动转失败。"""
+    _seed_base(pg_state)
+    _seed_image_task(
+        pg_state, table="first_frame_tasks", task_id="ff-exp", status="SUBMISSION_UNCERTAIN"
+    )
+    _exec(
+        pg_state,
+        "UPDATE first_frame_tasks"
+        " SET completed_at = now() - interval '30 minutes' WHERE id = 'ff-exp'",
+    )
+    with pg_transaction() as raw:
+        lease = acquire_first_frame_task(BusinessConnection.postgres(raw), worker_id="worker-a")
+    assert lease is None
+    row = _rows(pg_state, "SELECT status FROM first_frame_tasks WHERE id = 'ff-exp'")[0]
+    assert row["status"] == "SUBMISSION_UNCERTAIN"
+
+
 # ---------------------------------------------------------------------------
 # D. 人物图 — character_generation_tasks (no SUBMISSION_UNCERTAIN semantics:
 # registered CW-002 limitation; failure closes through attempt exhaustion)

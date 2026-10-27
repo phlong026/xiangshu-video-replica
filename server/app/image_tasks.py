@@ -69,6 +69,10 @@ from app.storage import (
 # Keep a moderate crash-detection window and renew it between every long I/O
 # phase instead of relying on one fixed lease for the whole multi-round job.
 IMAGE_TASK_LEASE_MINUTES = 30
+# 人物五视图上游是同步接口、无任务号可回查：落 UNCERTAIN 后不可能自愈，
+# 只会把创建入口拖死在「待核对」。给一个短窗口（覆盖上游延迟返回的可能）
+# 后由领任务扫描自动转失败；额度在落 UNCERTAIN 时已解冻，转失败不动钱包。
+IMAGE_TASK_UNCERTAIN_EXPIRE_MINUTES = 5
 ACTIVE_IMAGE_TASK_STATUSES = ("PENDING", "RUNNING")
 # 429 限流错峰重试上限：与到期回收的 attempt>=3 终止线对齐，每次领取
 # attempt+1，最多 3 次供应商调用后落为忙碌失败，交用户自助重新生成。
@@ -734,6 +738,21 @@ def _acquire_image_task(
           AND locked_until::timestamptz <= now()
         """
     )
+    if table == "character_sheet_tasks":
+        # 首帧不适用：上游有任务号，回执续查/人工核对仍可能拯救已付费产出。
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET status = 'FAILED',
+                error_code = 'IMAGE_TASK_SUBMISSION_EXPIRED',
+                error_message_redacted = '生成结果未按时返回，额度已释放，请重新生成。',
+                retryable = 1, updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'SUBMISSION_UNCERTAIN'
+              AND completed_at IS NOT NULL
+              AND completed_at::timestamptz
+                  <= now() - interval '{IMAGE_TASK_UNCERTAIN_EXPIRE_MINUTES} minutes'
+            """
+        )
     row = conn.execute(
         f"""
         UPDATE {table}
