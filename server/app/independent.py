@@ -23,7 +23,7 @@ from uuid import uuid4
 import psycopg.errors as psycopg_errors
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.bootstrap import is_customer_production
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.generation import (
     H3_MODEL,
@@ -480,12 +480,13 @@ def create_independent_batch(
                 )
             return get_generation_batch(conn, batch_id=str(concurrent_existing["id"]), actor=actor)
 
+        from app.billing_catalog import generation_service_for
         from app.quote_contracts import validate_quote
 
         pricing_snapshot = validate_quote(
             conn,
             user_id=actor.id,
-            service="video_2k" if request.resolution == "2K" else "video_768p",
+            service=generation_service_for(request.resolution, request.output_duration_seconds),
             units=request.output_duration_seconds,
             quantity=request.quantity,
             quote_token=request.quote_token,

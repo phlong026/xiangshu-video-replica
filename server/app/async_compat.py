@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from app.bootstrap import is_customer_production
+from app.db_pg import is_customer_production
 
 
 def reject_legacy_sync_operation(*, replacement: str) -> None:

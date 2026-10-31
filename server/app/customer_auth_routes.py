@@ -41,8 +41,8 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api_errors import http_error as _http
-from app.bootstrap import customer_public_origin, is_customer_production
-from app.db_pg import get_pg_pool, pg_transaction
+from app.bootstrap import customer_public_origin
+from app.db_pg import get_pg_pool, is_customer_production, pg_transaction
 from app.password_hashing import PasswordPolicyError, hash_password, verify_password
 from app.registration_bonus_routes import grant_registration_bonus
 from app.sub_account_auth import password_login_account_ok

@@ -14,7 +14,6 @@ from fastapi import HTTPException
 
 from app import content_store
 from app.auth import CurrentUser
-from app.bootstrap import is_customer_production
 from app.character_asset_quality import inspect_character_asset
 from app.character_contracts import (
     CharacterAsset,
@@ -39,6 +38,7 @@ from app.character_identity import (
     require_character_admin,
     require_identity_active,
 )
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.external_calls import external_call_context
 from app.operation_costs import begin_operation_cost, complete_operation_cost

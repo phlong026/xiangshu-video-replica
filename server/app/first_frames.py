@@ -2796,7 +2796,7 @@ def read_asset_image(storage: StorageAdapter, asset: Mapping[str, object]) -> Im
     try:
         reference = storage_object_ref_from_uri(str(asset["storage_uri"]))
         if reference.provider == "local":
-            from app.bootstrap import is_customer_production
+            from app.db_pg import is_customer_production
 
             if is_customer_production():
                 raise StorageBackendUnavailable("Legacy local assets require migration to COS")

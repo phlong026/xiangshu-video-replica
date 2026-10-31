@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis import get_version, insert_version, next_version_number
 from app.auth import CurrentUser, Role
-from app.bootstrap import is_customer_production
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.external_calls import (
     endpoint_from_url,
@@ -948,6 +948,8 @@ class GenerationPriceQuote(BaseModel):
     resolution: Literal["768P", "2K"]
     duration_seconds: int
     quantity: int
+    # 计价档位：16-30 秒走独立档（单价为 15 秒及以内档的 2 倍）。
+    price_tier: Literal["4-15s", "16-30s"] = "4-15s"
     unit_price_fen_per_second: int
     estimated_seconds: int
     estimated_price_fen: int
@@ -2541,12 +2543,13 @@ def create_generation_batch(
                 "Generation must use the first frame that was used to compile the locked prompt.",
             )
 
+        from app.billing_catalog import generation_service_for
         from app.quote_contracts import validate_quote
 
         pricing_snapshot = validate_quote(
             conn,
             user_id=actor.id,
-            service="video_2k" if request.resolution == "2K" else "video_768p",
+            service=generation_service_for(request.resolution, request.output_duration_seconds),
             units=request.output_duration_seconds,
             quantity=request.quantity,
             quote_token=request.quote_token,
@@ -3213,12 +3216,15 @@ def _validate_regeneration_quote(
     request: PaidRegenerationRequest,
     parameters: dict[str, Any],
 ) -> dict[str, Any]:
+    from app.billing_catalog import generation_service_for
     from app.quote_contracts import validate_quote
 
     return validate_quote(
         conn,
         user_id=user_id,
-        service="video_2k" if parameters["resolution"] == "2K" else "video_768p",
+        service=generation_service_for(
+            str(parameters["resolution"]), int(parameters["duration_seconds"])
+        ),
         units=parameters["duration_seconds"],
         quantity=parameters["quantity"],
         specification=parameters["specification"],
@@ -3979,15 +3985,13 @@ def _pre_provider_retry_pricing_snapshot(
 ) -> dict[str, Any] | None:
     from decimal import InvalidOperation
 
-    from app.billing_catalog import amount, credits_from_snapshot
+    from app.billing_catalog import amount, credits_from_snapshot, generation_service_for
 
     try:
         payload = json.loads(prompt_snapshot)
         if not isinstance(payload, dict):
             raise ValueError("原任务冻结参数无效")
-        service = (
-            "video_2k" if str(payload.get("resolution", "768P")).upper() == "2K" else "video_768p"
-        )
+        service = generation_service_for(str(payload.get("resolution", "768P")), seconds)
         previous = conn.execute(
             "SELECT user_id, service, state, budget_units, reserved_credits, charged_credits, "
             "pricing_snapshot_json FROM billing_operations "
@@ -8200,10 +8204,10 @@ def generation_price_quote(
 ) -> GenerationPriceQuote:
     from decimal import ROUND_CEILING, Decimal
 
-    from app.billing_catalog import snapshot_discount_rate
+    from app.billing_catalog import generation_service_for, snapshot_discount_rate
     from app.quote_contracts import issue_quote
 
-    subject = "video_2k" if resolution == "2K" else "video_768p"
+    subject = generation_service_for(resolution, duration_seconds)
     contract = issue_quote(
         conn,
         user_id=user_id or "",
@@ -8233,6 +8237,7 @@ def generation_price_quote(
         resolution=resolution,
         duration_seconds=duration_seconds,
         quantity=quantity,
+        price_tier="16-30s" if duration_seconds > 15 else "4-15s",
         unit_price_fen_per_second=unit_price,
         estimated_seconds=estimated_seconds,
         estimated_price_fen=unit_price * estimated_seconds,

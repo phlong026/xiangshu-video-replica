@@ -38,8 +38,8 @@ from app.analysis import (
 )
 from app.async_compat import reject_legacy_sync_operation
 from app.auth import AuthenticatedUser, CurrentUser, Database, Role
-from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.h3_prompts import GenerationContext
 from app.media import (
@@ -723,8 +723,8 @@ def analysis_duration_for_asset(
             detail={
                 "code": "ANALYSIS_DURATION_EXCEEDED",
                 "message": (
-                    f"参考视频时长 {round(measured_duration)} 秒，超过 15 秒上限，"
-                    "无法拆解；请上传 15 秒以内的视频。"
+                    f"参考视频时长 {round(measured_duration)} 秒，超过 30 秒上限，"
+                    "无法拆解；请上传 30 秒以内的视频。"
                 ),
             },
         )

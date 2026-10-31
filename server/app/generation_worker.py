@@ -33,6 +33,7 @@ from app.db_pg import (
     DatabaseMode,
     check_pg_ready,
     close_pg_pool,
+    is_customer_production,
     pg_transaction,
     resolve_database_config,
     validate_customer_production,
@@ -2258,7 +2259,6 @@ def main() -> None:
     from app.bootstrap import (
         assert_customer_production_security,
         check_customer_production_runtime_dependencies,
-        is_customer_production,
     )
 
     assert_customer_production_security()
