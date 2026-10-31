@@ -97,6 +97,7 @@ from app.source_frame_routes import router as source_frame_router
 from app.studio_draft_routes import router as studio_draft_router
 from app.studio_routes import router as studio_router
 from app.task_diagnostic_routes import router as task_diagnostic_router
+from app.training_material_routes import router as training_material_router
 from app.viral_import_routes import router as viral_import_router
 from app.viral_routes import router as viral_router
 from app.viral_search_refresh_routes import router as viral_search_refresh_router
@@ -412,6 +413,7 @@ app.include_router(admin_customer_benefit_router)
 app.include_router(admin_customer_annotation_router)
 app.include_router(admin_refund_router)
 app.include_router(announcement_router)
+app.include_router(training_material_router)
 app.include_router(worker_observation_router)
 app.include_router(publish_stats_router)
 app.include_router(admin_publish_reconcile_router)
