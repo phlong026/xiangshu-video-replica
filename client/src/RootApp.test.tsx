@@ -231,7 +231,6 @@ describe("RootApp", () => {
     const preAuthAllowed = [
       "/api/customer/browser-session",
       "/api/customer/activate",
-      "/api/customer/devices/enroll",
       "/api/customer/sessions/login",
     ];
     expect(

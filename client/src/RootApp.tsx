@@ -73,7 +73,7 @@ export function RootApp({
  *
  * 任务书 B1：配对入口（原 `/customer/pairing` 的 CustomerPairingFlow）已摘除。
  * 新激活方案下不限设备台数、密码登录即用，不存在"添加已有账号设备"这一步。
- * 组件文件保留，实际删除归 B2。 */
+ * 组件与 enroll 客户端封装已于 2026-10-31 冗余清理删除（原 B2）。 */
 function CustomerShell() {
   // The credential store owns session state, so its identity must survive
   // memo cache invalidation (including Fast Refresh). Browser reloads restore
