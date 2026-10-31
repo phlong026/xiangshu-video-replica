@@ -2603,7 +2603,10 @@ describe("V1.4 任务中心列表", () => {
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "类型：全部类型" }));
-    fireEvent.pointerDown(screen.getByRole("heading", { name: "任务中心" }));
+    // 标题已让给数据看板页签外壳，外部点击改用页面内其他元素验证下拉收起。
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "历史任务与下载" }),
+    );
     expect(
       screen.queryByRole("listbox", { name: "类型" }),
     ).not.toBeInTheDocument();

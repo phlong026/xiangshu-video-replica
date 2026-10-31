@@ -660,15 +660,16 @@ describe("V1.4 workspace integration", () => {
     expect(main).toHaveClass("studio-route-workbench");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
 
+    // 2026-10-31：任务中心下沉为数据看板页签，导航项换成「数据看板」。
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
         "button",
-        { name: /任务中心/ },
+        { name: /数据看板/ },
       ),
     );
 
     expect(shell?.className).not.toContain("studio-route-");
-    expect(main).toHaveClass("studio-route-tasks");
+    expect(main).toHaveClass("studio-route-analytics");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
   });
 
@@ -1064,7 +1065,10 @@ describe("V1.4 workspace integration", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "查看视频" })[0]);
     expect(window.location.hash).toContain("returnTo=analytics");
-    fireEvent.click(screen.getByRole("button", { name: "任务中心" }));
+    // 任务中心下沉后：详情页经导航「数据看板」回到看板，再切「任务中心」页签。
+    fireEvent.click(screen.getByRole("button", { name: "数据看板" }));
+    expect(window.location.hash).toBe("#studio/analytics");
+    fireEvent.click(screen.getByRole("tab", { name: "任务中心" }));
     expect(window.location.hash).toBe("#studio/tasks");
     fireEvent.click(screen.getAllByRole("button", { name: "查看结果" })[1]);
     expect(window.location.hash).toBe(

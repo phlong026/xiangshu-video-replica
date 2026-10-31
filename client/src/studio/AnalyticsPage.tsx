@@ -12,7 +12,8 @@ import {
 } from "../api";
 import { useStudio } from "./context";
 import { CREATION_KIND_LABELS } from "./live";
-import { Button, Empty, formatTaskTime, Icon, Panel } from "./ui";
+import { TasksPage } from "./MainPages";
+import { Button, Empty, formatTaskTime, Icon, Panel, Tabs } from "./ui";
 import "./analytics.css";
 
 type Range = "7" | "30";
@@ -146,7 +147,34 @@ function TrendChart({
   );
 }
 
+/** 数据看板 = 「数据概览 / 任务中心」两个页签的外壳（2026-10-31 信息架构
+ * 精简：任务中心从一级导航下沉到这里）。页签直接映射路由 analytics / tasks，
+ * 深链与既有 navigate("tasks") 调用点无需改动。 */
 export function AnalyticsPage() {
+  const { state, navigate } = useStudio();
+  const tab: "overview" | "tasks" =
+    state.page === "tasks" ? "tasks" : "overview";
+  return (
+    <section className="analytics-page analytics-page--tabbed">
+      <header className="analytics-heading">
+        <h1>数据看板</h1>
+        <Tabs
+          value={tab}
+          onChange={(next) =>
+            navigate(next === "tasks" ? "tasks" : "analytics")
+          }
+          items={[
+            { id: "overview", label: "数据概览" },
+            { id: "tasks", label: "任务中心" },
+          ]}
+        />
+      </header>
+      {tab === "tasks" ? <TasksPage /> : <AnalyticsOverview />}
+    </section>
+  );
+}
+
+function AnalyticsOverview() {
   const { data, review, navigate, updateData, user } = useStudio();
   const [range, setRange] = useState<Range>("7");
   const [fresh, setFresh] = useState<Partial<Record<Range, StudioAnalytics>>>(
@@ -219,7 +247,7 @@ export function AnalyticsPage() {
 
   if (!review && !selectedAnalytics)
     return (
-      <section className="analytics-page analytics-empty-page">
+      <>
         <Empty
           title="统计数据尚未就绪"
           description="看板统计加载失败或还没有成片记录；完成创作后，这里会呈现真实的成片趋势与作品列表。"
@@ -227,7 +255,7 @@ export function AnalyticsPage() {
         <Button onClick={() => void refreshAnalytics()} disabled={refreshing}>
           {refreshing ? "刷新中…" : "重试刷新"}
         </Button>
-      </section>
+      </>
     );
 
   const analytics: StudioAnalytics = selectedAnalytics ?? EMPTY_ANALYTICS;
@@ -299,21 +327,7 @@ export function AnalyticsPage() {
   }
 
   return (
-    <section className="analytics-page">
-      <header className="analytics-heading">
-        <h1>数据看板</h1>
-        {!review ? (
-          <Button
-            variant="outline"
-            onClick={() => void refreshAnalytics()}
-            disabled={refreshing}
-          >
-            <Icon name="refresh" size={16} />
-            {refreshing ? "刷新中…" : "刷新报表"}
-          </Button>
-        ) : null}
-      </header>
-
+    <>
       <fieldset className="analytics-filters">
         <legend>数据筛选</legend>
         <label>
@@ -332,6 +346,17 @@ export function AnalyticsPage() {
             <i />
             示例数据
           </span>
+        ) : null}
+        {/* 标题让给页签外壳，刷新按钮并入筛选行保持一行紧凑。 */}
+        {!review ? (
+          <Button
+            variant="outline"
+            onClick={() => void refreshAnalytics()}
+            disabled={refreshing}
+          >
+            <Icon name="refresh" size={16} />
+            {refreshing ? "刷新中…" : "刷新报表"}
+          </Button>
         ) : null}
       </fieldset>
 
@@ -494,6 +519,6 @@ export function AnalyticsPage() {
           />
         )}
       </Panel>
-    </section>
+    </>
   );
 }

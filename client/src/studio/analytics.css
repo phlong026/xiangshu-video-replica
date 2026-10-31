@@ -469,3 +469,8 @@
   stroke: #d0654f;
   stroke-width: 2.5;
 }
+
+/* 页签行与标题同基线：标题自带 14px 下边距，页签对齐同一节奏。 */
+.analytics-page--tabbed .studio-tabs {
+  margin-bottom: 14px;
+}

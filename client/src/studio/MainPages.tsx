@@ -1494,7 +1494,7 @@ export function TasksPage() {
   };
   return (
     <section className="studio-tasks-page">
-      <h1>任务中心</h1>
+      {/* 页面标题由数据看板外壳（页签行）提供，这里不再重复 h1。 */}
       <div className="studio-page-actions">
         {!review && (
           <Button onClick={() => openLive("tasks")}>历史任务与下载</Button>
