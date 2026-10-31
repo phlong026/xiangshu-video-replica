@@ -1114,12 +1114,12 @@ function ViralCard({
           ))}
         </div>
         <div className="content-card-actions">
-          <Button variant="quiet" onClick={openDetail}>
-            查看详情
-          </Button>
+          {/* 2026-10-31：一键复刻升级为卡片主 CTA——复刻是这个页面的核心转化
+              动作，放首位并用 primary 样式；时长门槛与详情页共用 4–15s。 */}
           {canReplicateFromCard ? (
             <Button
-              variant="outline"
+              variant="primary"
+              aria-label={`一键复刻：${video.title}`}
               onClick={() => {
                 navigate("viral-detail", {
                   selectedVideoId: video.id,
@@ -1129,9 +1129,12 @@ function ViralCard({
                 persistViralDetailUrl(video);
               }}
             >
-              去复刻
+              一键复刻
             </Button>
           ) : null}
+          <Button variant="quiet" onClick={openDetail}>
+            查看详情
+          </Button>
           <Button
             variant="outline"
             aria-label={`下载视频 ${video.title}`}
@@ -2193,12 +2196,23 @@ export function ViralDetailPage() {
   useEffect(() => {
     if (!state.viralReplicateIntent || !video) return;
     patchState({ viralReplicateIntent: false });
-    if (
-      typeof video.durationMs !== "number" ||
-      video.durationMs < 4_000 ||
-      video.durationMs > 15_000
-    ) {
-      notify("该视频不在 4–15 秒复刻范围，请走「提取文案」方向");
+    // 卡片一键复刻对超限视频的降级提示：讲清替代方向而不是干巴巴的拒绝。
+    // >15s 平台视频暂不能自动走长视频拆解（服务端 canAnalyze 门禁 4–15s），
+    // 服务端放开后这里接 handOffLongReplicaSource 路由。
+    if (typeof video.durationMs !== "number") {
+      notify(
+        "该视频时长未知，暂不支持自动复刻；可在本页「提取文案」后由口播数字人翻拍。",
+      );
+      return;
+    }
+    if (video.durationMs > 15_000) {
+      notify(
+        "该视频超过 15 秒，暂不支持自动复刻；可用「提取文案」获取文案后由口播数字人翻拍。",
+      );
+      return;
+    }
+    if (video.durationMs < 4_000) {
+      notify("该视频不足 4 秒，请走「提取文案」方向");
       return;
     }
     beginReplicateRef.current();

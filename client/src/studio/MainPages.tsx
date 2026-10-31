@@ -1209,6 +1209,26 @@ export function WorkbenchPage() {
                       </span>
                     </div>
                     <div className="studio-home-viral-actions">
+                      {/* 与爆款视频页卡片同一套 4–15s 门槛的主 CTA：一键复刻
+                          直达详情页自动开跑；超限视频保留提取文案方向。 */}
+                      {typeof video.durationMs === "number" &&
+                        video.durationMs >= 4_000 &&
+                        video.durationMs <= 15_000 && (
+                          <Button
+                            variant="primary"
+                            aria-label={`一键复刻：${video.title}`}
+                            onClick={() => {
+                              navigate("viral-detail", {
+                                selectedVideoId: video.id,
+                                returnTo: "workbench",
+                                viralReplicateIntent: true,
+                              });
+                              persistWorkbenchViralDetailUrl(video);
+                            }}
+                          >
+                            一键复刻
+                          </Button>
+                        )}
                       <Button
                         variant="quiet"
                         aria-label={`查看详情：${video.title}`}
