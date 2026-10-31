@@ -399,11 +399,12 @@ def test_concurrent_grant_payment_and_token_consumption_conserve_account_ledger(
                     allowed_channels=("alipay",),
                 )
         else:
-            reserve(route_state, uid, key["id"], "concurrent-credit-task", 20)
+            # 15 秒内走标准档（>15 秒会落 16-30 秒长档科目，该用例只关心账本守恒）。
+            reserve(route_state, uid, key["id"], "concurrent-credit-task", 15)
             with psycopg.connect(route_state) as raw:
                 raw.execute(
                     "UPDATE generation_tasks SET status = 'SUCCEEDED', "
-                    "actual_output_seconds=20, archive_status = "
+                    "actual_output_seconds=15, archive_status = "
                     "'DIRECT', provider_result_url = 'https://example.com/test.mp4' "
                     "WHERE id = 'concurrent-credit-task'"
                 )
@@ -418,12 +419,12 @@ def test_concurrent_grant_payment_and_token_consumption_conserve_account_ledger(
     with psycopg.connect(route_state) as raw:
         assert raw.execute(
             "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s", (uid,)
-        ).fetchone() == (85, 0)
+        ).fetchone() == (100, 0)
         assert raw.execute(
             "SELECT SUM(available_delta), SUM(reserved_delta) FROM wallet_transactions "
             "WHERE user_id = %s",
             (uid,),
-        ).fetchone() == (85, 0)
+        ).fetchone() == (100, 0)
         assert (
             raw.execute(
                 "SELECT COUNT(*) FROM wallet_transactions WHERE user_id = %s AND type = 'CHARGE'",
@@ -432,7 +433,7 @@ def test_concurrent_grant_payment_and_token_consumption_conserve_account_ledger(
             == 3
         )
     listed = client.get("/api/customer/api-keys", headers=customer).json()["items"]
-    assert next(item for item in listed if item["id"] == key["id"])["total_consumed_credits"] == 60
+    assert next(item for item in listed if item["id"] == key["id"])["total_consumed_credits"] == 45
 
 
 def test_default_payment_saves_merchant_atomically_before_callback_is_ready(

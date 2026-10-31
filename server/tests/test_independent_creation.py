@@ -69,6 +69,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from threading import Barrier
+from typing import Literal, cast
 
 # Set the audit HMAC key before importing app modules (audit writers require it).
 os.environ.setdefault(
@@ -543,6 +544,145 @@ def test_i2v_batch_creation_reserves_seconds_and_marks_independent(scene: str) -
     assert {int(row["billed_seconds"]) for row in mode_rows} == {10}
     assert _wallet("employee_1") == (980, 20)
     assert _ledger_count("RESERVE") == 2
+
+
+def _enable_long_tier(unit_credits: int = 2) -> None:
+    with pg_transaction() as raw:
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES ('video_768p_long',true,%s) ON CONFLICT(service) DO UPDATE SET "
+            "enabled=true,unit_credits=excluded.unit_credits",
+            (unit_credits,),
+        )
+
+
+def test_long_duration_tier_disabled_rejects_quote_and_creation(scene: str) -> None:
+    """长档价目未启用（场景种子只有 768P/2K 标准档）时，16-30 秒 fail-closed：
+    报价与建单双双 422——没有启用的价目就没有可冻结的单价，绝不让长任务按
+    0 积分放行（LONG_DURATION_TIER_DISABLED）。"""
+    with pytest.raises(HTTPException) as quote_exc:
+        with pg_transaction() as raw:
+            generation_price_quote(
+                BusinessConnection.postgres(raw),
+                user_id=EMPLOYEE_1.id,
+                resolution="768P",
+                duration_seconds=30,
+                quantity=1,
+            )
+    assert quote_exc.value.status_code == 422
+    assert quote_exc.value.detail["code"] == "LONG_DURATION_TIER_DISABLED"
+
+    with pytest.raises(HTTPException) as create_exc:
+        _create(
+            IndependentVideoRequest(
+                mode="i2v",
+                prompt_text="三十秒乡墅全景长镜头",
+                first_frame_asset_id="frame-owned",
+                output_duration_seconds=30,
+                quantity=1,
+                idempotency_key="long-tier-disabled",
+            ),
+            EMPLOYEE_1,
+        )
+    assert create_exc.value.status_code == 422
+    assert create_exc.value.detail["code"] == "LONG_DURATION_TIER_DISABLED"
+    # 未建单也未预留。
+    assert _wallet("employee_1") == (1000, 0)
+
+    with pg_transaction() as raw:
+        caps = read_independent_capabilities(BusinessConnection.postgres(raw))
+    assert caps.max_output_duration_seconds == 15
+
+
+def test_long_duration_tier_creation_prices_and_reserves_long_subject(scene: str) -> None:
+    """启用长档后：30 秒建单落 video_768p_long 科目、按 30 秒预留；
+    capabilities 上限随之放开到 30。"""
+    _enable_long_tier(unit_credits=2)
+    with pg_transaction() as raw:
+        caps = read_independent_capabilities(BusinessConnection.postgres(raw))
+    assert caps.max_output_duration_seconds == 30
+
+    quote = _price_quote(resolution="768P", duration_seconds=30)
+    assert quote.price_tier == "16-30s"
+    assert quote.estimated_credits == 60  # 2 积分/秒 × 30 秒
+
+    batch = _create(
+        IndependentVideoRequest(
+            mode="i2v",
+            prompt_text="三十秒乡墅全景长镜头",
+            first_frame_asset_id="frame-owned",
+            output_duration_seconds=30,
+            quantity=1,
+            idempotency_key="long-tier-enabled",
+        ),
+        EMPLOYEE_1,
+    )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        task_row = conn.execute(
+            "SELECT billed_seconds FROM generation_tasks WHERE batch_id = %s", (batch.id,)
+        ).fetchone()
+        op_row = conn.execute(
+            "SELECT service, reserved_credits FROM billing_operations WHERE source_id = %s",
+            (batch.progress and _first_task_id(conn, batch.id),),
+        ).fetchone()
+    assert task_row is not None and int(task_row["billed_seconds"]) == 30
+    assert op_row is not None
+    assert str(op_row["service"]) == "video_768p_long"
+    assert int(op_row["reserved_credits"]) == 60
+    assert _wallet("employee_1") == (940, 60)
+
+
+def test_long_duration_2k_combination_is_rejected(scene: str) -> None:
+    """2K 不存在长档：超 15 秒的 2K 组合在报价与建单闸双双 422。"""
+    _enable_long_tier()
+    with pytest.raises(HTTPException) as quote_exc:
+        with pg_transaction() as raw:
+            generation_price_quote(
+                BusinessConnection.postgres(raw),
+                user_id=EMPLOYEE_1.id,
+                resolution="2K",
+                duration_seconds=30,
+                quantity=1,
+            )
+    assert quote_exc.value.status_code == 422
+    assert quote_exc.value.detail["code"] == "DURATION_RESOLUTION_UNSUPPORTED"
+
+    with pytest.raises(HTTPException) as create_exc:
+        _create(
+            IndependentVideoRequest(
+                mode="i2v",
+                prompt_text="2K 三十秒组合",
+                first_frame_asset_id="frame-owned",
+                output_duration_seconds=30,
+                resolution="2K",
+                quantity=1,
+                idempotency_key="long-tier-2k",
+            ),
+            EMPLOYEE_1,
+        )
+    assert create_exc.value.status_code == 422
+    assert create_exc.value.detail["code"] == "DURATION_RESOLUTION_UNSUPPORTED"
+
+
+def _price_quote(*, resolution: str, duration_seconds: int):
+    with pg_transaction() as raw:
+        return generation_price_quote(
+            BusinessConnection.postgres(raw),
+            user_id=EMPLOYEE_1.id,
+            resolution=cast(Literal["768P", "2K"], resolution),
+            duration_seconds=duration_seconds,
+            quantity=1,
+        )
+
+
+def _first_task_id(conn: BusinessConnection, batch_id: str) -> str:
+    row = conn.execute(
+        "SELECT id FROM generation_tasks WHERE batch_id = %s ORDER BY created_at, id LIMIT 1",
+        (batch_id,),
+    ).fetchone()
+    assert row is not None
+    return str(row["id"])
 
 
 def test_i2v_replay_returns_same_batch_and_conflicting_key_is_rejected(scene: str) -> None:

@@ -8220,6 +8220,17 @@ def generation_price_quote(
             422, "DURATION_RESOLUTION_UNSUPPORTED", "2K 分辨率目前最长支持 15 秒。"
         )
     subject = generation_service_for(resolution, duration_seconds)
+    if duration_seconds > 15:
+        # 长档未启用时不给报价：0 积分报价会误导客户以为免费，提交闸也会拒绝。
+        from app.billing_catalog import read_tariff
+
+        tariff = read_tariff(conn, subject)
+        if tariff is None or not tariff.enabled or not tariff.unit_credits:
+            raise generation_error(
+                422,
+                "LONG_DURATION_TIER_DISABLED",
+                "16-30 秒时长档暂未开放，请选择 15 秒及以内的时长。",
+            )
     contract = issue_quote(
         conn,
         user_id=user_id or "",

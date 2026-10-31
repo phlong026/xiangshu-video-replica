@@ -2570,6 +2570,66 @@ describe("V1.4 创作页面", () => {
 
   // 供应商 ratio 契约（2026-09-19 真实付费核对）：图生比例由首帧决定，
   // 文生不支持自动。
+  it("长档开放时时长下拉到 30 并常驻 2 倍价备注；切 2K 上限钳回 15", () => {
+    const value = studio({
+      state: {
+        ...studio().state,
+        page: "video",
+        draft: { ...studio().state.draft, duration: 30 },
+      },
+    });
+    value.videoCapabilitiesStatus = "ready";
+    value.videoCapabilities = {
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 8,
+      max_reference_videos: 3,
+      max_reference_audios: 3,
+      max_quantity: 4,
+      max_output_duration_seconds: 30,
+    };
+    useStudio.mockReturnValue(value);
+    const view = render(<VideoPage />);
+
+    const duration = screen.getByRole("combobox", {
+      name: "时长",
+    }) as HTMLSelectElement;
+    const options = Array.from(duration.options).map((option) =>
+      Number(option.value),
+    );
+    expect(options[0]).toBe(4);
+    expect(options.at(-1)).toBe(30);
+    expect(options.some((seconds) => seconds > 15)).toBe(true);
+    expect(screen.getByText(/长视频档/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/30\s*秒时总价即 15 秒成片的 2 倍/),
+    ).toBeInTheDocument();
+
+    // 切到 2K：上限回落 15，越界草稿被钳回，长档选项与备注一并消失。
+    fireEvent.change(screen.getByRole("combobox", { name: "分辨率" }), {
+      target: { value: "2K" },
+    });
+    // 工厂的 patchDraft 是 vi.fn，不落状态——手动落地分辨率后重渲染，
+    // 钳位 effect 才会看到 durationMax=15 vs draft.duration=30。
+    value.state = {
+      ...value.state,
+      draft: { ...value.state.draft, resolution: "2K" },
+    };
+    view.rerender(<VideoPage />);
+    expect(value.patchDraft).toHaveBeenCalledWith({ duration: 15 });
+    const twoKDuration = screen.getByRole("combobox", {
+      name: "时长",
+    }) as HTMLSelectElement;
+    const twoKOptions = Array.from(twoKDuration.options).map((option) =>
+      Number(option.value),
+    );
+    expect(twoKOptions.at(-1)).toBe(15);
+    expect(screen.queryByText(/长视频档/)).toBeNull();
+  });
+
   it("图生视频画面比例选择器禁用并提示由首帧决定", () => {
     const value = studio({
       state: { ...studio().state, page: "video" },
