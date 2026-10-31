@@ -216,6 +216,8 @@ export type GenerationPriceQuote = {
   resolution: "768P" | "2K";
   duration_seconds: number;
   quantity: number;
+  /** 计价档位："16-30s" 为长视频档（单价为 15 秒及以内档的 2 倍）。 */
+  price_tier?: "4-15s" | "16-30s";
   unit_price_fen_per_second: number;
   estimated_seconds: number;
   estimated_price_fen: number;
@@ -2158,6 +2160,10 @@ export type IndependentCapabilities = {
   max_reference_videos: number;
   max_reference_audios: number;
   max_quantity: number;
+  /** 768P 可选时长上限：16-30 秒长档（后台价目启用）开放时为 30，否则 15；
+   * 旧服务端/测试夹具缺省时前端按保守值 15 处理。2K 恒为 15（上游契约），
+   * 前端按分辨率分别取上限。 */
+  max_output_duration_seconds?: number;
 };
 
 export async function getIndependentCapabilities(): Promise<IndependentCapabilities> {
