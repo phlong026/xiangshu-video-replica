@@ -1656,6 +1656,151 @@ export async function deleteAnnouncement(input: {
   );
 }
 
+// --- IA 改版第 5 项：平台培训素材库-------------------------------------------
+
+export interface TrainingMaterialItem {
+  id: string;
+  title: string;
+  description: string;
+  kind: "video" | "training";
+  kind_label: string;
+  content_type: string;
+  file_suffix: string;
+  size_bytes: number;
+  sort_order: number;
+  visible: boolean;
+  download_count: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TrainingMaterialPage {
+  items: TrainingMaterialItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export async function listTrainingMaterials(
+  options: {
+    includeHidden?: boolean;
+    kind?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<TrainingMaterialPage> {
+  const params = new URLSearchParams();
+  if (options.includeHidden === false) params.set("include_hidden", "false");
+  if (options.kind) params.set("kind", options.kind);
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
+  const query = params.toString();
+  return adminRead(
+    `/api/control/training-materials${query ? `?${query}` : ""}`,
+    "读取培训素材失败",
+  );
+}
+
+export async function updateTrainingMaterial(input: {
+  id: string;
+  title?: string;
+  description?: string;
+  sortOrder?: number;
+  visible?: boolean;
+  reason: string;
+  idempotencyKey?: string;
+}): Promise<{ id: string }> {
+  return adminWrite(
+    `/api/control/training-materials/${encodeURIComponent(input.id)}`,
+    {
+      title: input.title ?? "",
+      description: input.description ?? "",
+      sort_order: input.sortOrder ?? null,
+      visible: input.visible ?? null,
+    },
+    input.reason,
+    "修改培训素材失败",
+    input.idempotencyKey,
+    "PATCH",
+  );
+}
+
+export async function deleteTrainingMaterial(input: {
+  id: string;
+  reason: string;
+  idempotencyKey?: string;
+}): Promise<{ id: string; deleted: boolean }> {
+  return adminWrite(
+    `/api/control/training-materials/${encodeURIComponent(input.id)}`,
+    {},
+    input.reason,
+    "删除培训素材失败",
+    input.idempotencyKey,
+    "DELETE",
+  );
+}
+
+/** 上传走 XHR（fetch 无上传进度）；大视频的进度条是运营的必要反馈。
+ * 写契约的 confirm/reason 与 Idempotency-Key 以 multipart 表单 + 头送达，
+ * 与后端 TrainingMaterialCreateContract 的服务端组包口径一致。 */
+export function uploadTrainingMaterial(input: {
+  file: File;
+  title: string;
+  description: string;
+  sortOrder: number;
+  visible: boolean;
+  reason: string;
+  idempotencyKey?: string;
+  onProgress?: (percent: number) => void;
+}): Promise<{ id: string }> {
+  return new Promise((resolve, reject) => {
+    const csrf = requireCsrfToken();
+    const form = new FormData();
+    form.set("file", input.file, input.file.name);
+    form.set("title", input.title);
+    form.set("description", input.description);
+    form.set("sort_order", String(input.sortOrder));
+    form.set("visible", input.visible ? "true" : "false");
+    form.set("confirm", "true");
+    form.set("reason", input.reason);
+    const request = new XMLHttpRequest();
+    request.open("POST", `${apiBaseUrl()}/api/control/training-materials`);
+    request.timeout = 10 * 60 * 1000; // 200MB 上限按慢链路给足
+    request.setRequestHeader(CSRF_HEADER, csrf);
+    request.setRequestHeader(
+      IDEMPOTENCY_KEY_HEADER,
+      input.idempotencyKey ?? newIdempotencyKey(),
+    );
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        input.onProgress?.(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        try {
+          resolve(JSON.parse(request.responseText) as { id: string });
+        } catch {
+          resolve({ id: "" });
+        }
+        return;
+      }
+      void parseActivationError(
+        new Response(request.responseText, {
+          status: request.status,
+          headers: { "content-type": "application/json" },
+        }),
+        "上传培训素材失败",
+      ).then(reject, () => reject(new Error("上传培训素材失败")));
+    };
+    request.onerror = () => reject(new Error("上传培训素材失败（网络中断）"));
+    request.ontimeout = () => reject(new Error("上传培训素材超时，请重试。"));
+    request.send(form);
+  });
+}
+
 // --- M3 客户运营 v2（ADM-10）--------------------------------------------------
 
 export interface CustomerLifecycleItem {

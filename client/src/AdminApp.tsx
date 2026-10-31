@@ -24,6 +24,7 @@ import { ReportsPage } from "./admin/ReportsPage";
 import { SupportTicketsPage } from "./admin/SupportTicketsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { TeamManagementSection } from "./admin/TeamManagementSection";
+import { TrainingMaterialsPage } from "./admin/TrainingMaterialsPage";
 import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralCollectionPage } from "./admin/ViralCollectionPage";
 import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
@@ -58,6 +59,7 @@ import chartPieIcon from "./assets/icons/chart-pie.svg";
 import clapperboardIcon from "./assets/icons/clapperboard.svg";
 import fileSpreadsheetIcon from "./assets/icons/file-spreadsheet.svg";
 import gaugeIcon from "./assets/icons/gauge.svg";
+import trainingIcon from "./assets/icons/graduation-cap.svg";
 import houseIcon from "./assets/icons/house.svg";
 import dashboardIcon from "./assets/icons/layout-dashboard.svg";
 import listVideoIcon from "./assets/icons/list-video.svg";
@@ -105,6 +107,7 @@ export type AdminTab =
   | "customersMgmt"
   | "customerLifecycle"
   | "announcements"
+  | "trainingMaterials"
   | "publishStats"
   | "supportTickets"
   | "sessions"
@@ -236,6 +239,11 @@ const tabGroups: Array<{
         helper: "搜索需求与内容补货",
       },
       {
+        id: "trainingMaterials",
+        label: "培训素材库",
+        helper: "后台统一上传，客户只读",
+      },
+      {
         id: "viralCollection",
         label: "采集设置",
         helper: "计划、关键词、质量与预算",
@@ -273,6 +281,7 @@ const tabPageTitles: Record<AdminTab, string> = {
   customersMgmt: "客户列表",
   customerLifecycle: "客户运营",
   announcements: "公告与消息",
+  trainingMaterials: "培训素材库",
   publishStats: "发布成效",
   supportTickets: "工单反馈",
   sessions: "登录与设备",
@@ -300,6 +309,7 @@ const tabReadPoints: Partial<Record<AdminTab, string>> = {
   customersMgmt: "customer.read",
   customerLifecycle: "customer.read",
   announcements: "customer.read",
+  trainingMaterials: "content.read",
   publishStats: "customer.read",
   supportTickets: "customer.read",
   sessions: "customer.read",
@@ -329,6 +339,7 @@ const navigationIcons: Record<AdminTab, string> = {
   customersMgmt: usersIcon,
   customerLifecycle: userCogIcon,
   announcements: megaphoneIcon,
+  trainingMaterials: trainingIcon,
   publishStats: radarIcon,
   supportTickets: ticketIcon,
   sessions: smartphoneIcon,
@@ -1319,6 +1330,9 @@ export function AdminApp() {
               readOnly 由会话页自身收敛（auditor 不渲染强制下线与调账入口）。 */}
             {viewTab === "customerLifecycle" ? (
               <CustomerLifecyclePage readOnly={readOnlyFor("customer.write")} />
+            ) : null}
+            {viewTab === "trainingMaterials" ? (
+              <TrainingMaterialsPage readOnly={readOnlyFor("content.write")} />
             ) : null}
             {viewTab === "announcements" ? (
               <AnnouncementsPage readOnly={readOnlyFor("customer.write")} />
