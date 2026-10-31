@@ -3,7 +3,8 @@
 /* 客户账户屏与共享基础样式（激活/登录/配对/设备/会话/个人中心/充值弹窗）。
  * 由 styles.css 拆出（前端分析报告 F-01/P0-1 修复）：客户构建制品不含 styles.css，
  * 本文件经 RootApp.tsx 引入，服务客户 lane；管理端样式仍在 styles.css（CW-019 两侧隔离）。
- * 再生成：node scripts/split_customer_styles.mjs（见脚本头注释）。
+ * 拆分是一次性的：styles.css 此后独立演进，重跑 split_customer_styles.mjs
+ * 无法复现本文件，日常修改直接编辑本文件（2026-10-31 核查确认）。
  */
 
 :root {

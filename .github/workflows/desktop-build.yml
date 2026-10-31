@@ -9,8 +9,9 @@ on:
         required: true
         default: https://video.zszhj.cn
   push:
-    # The task branch makes the first build reviewable before merging to main.
-    branches: [main, feat/desktop-actions-20260917]
+    # 首个可评审构建已由 2026-09 的任务分支完成并合入 main，过期分支监听
+    # 已清理（本地与远端均无该分支，2026-10-31 冗余清理核查确认）。
+    branches: [main]
     # v* 标签构建三平台内部未签名预览；全部成功后才允许挂到预发布 Release
     # （标签推送不适用 paths 过滤，保证发版不受改动路径影响）。
     tags: ['v*']

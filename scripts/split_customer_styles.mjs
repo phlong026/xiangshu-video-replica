@@ -12,7 +12,10 @@
 //   - 客户文件做选择器级清洗：剔除含 .admin- 的选择器；整条全 admin 则丢弃
 // 内置断言：admin/内部壳用到且原 styles.css 定义过的类，重写后必须仍被定义（零缺失才退出 0）。
 // 已知边界：不支持 @supports 与嵌套 @media（原版 styles.css 两者皆无；引入时需扩展本脚本）。
-// 用法：node scripts/split_customer_styles.mjs（从仓库根目录；会先要求 styles.css 无未提交改动）
+// 用法（历史工具）：node scripts/split_customer_styles.mjs（从仓库根目录）。
+// 注意：本脚本是 2026-09 一次性拆分工具，styles.css 拆分后已独立演进——
+// 重跑会按当前类使用面重分类并覆盖三份成型 CSS（2026-10-31 实测差异 -4700 行），
+// 除重新执行拆分专项外不得日常运行；日常改样式直接编辑对应 CSS 文件。
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,21 +25,25 @@ const SRC = resolve(ROOT, "client/src");
 const cssPath = resolve(SRC, "styles.css");
 const css = readFileSync(cssPath, "utf8");
 
-// 客户 lane 经 LiveWorkspacePanel 挂载的老组件（位于 client/src 根目录）
+// 客户 lane 经 LiveWorkspacePanel 挂载的老组件（位于 client/src 根目录）。
+// 2026-10-31 冗余清理：移除已删除的 AnalysisWorkspace / ProjectDetailFlow /
+// CharacterReferenceSelection / PromptMarkdown / GenerationComposer /
+// GenerationLauncher / ScriptEditor / WorkspaceTabs 八个死组件。
 const legacyFiles = [
-  "AnalysisWorkspace.tsx","ProjectDetailFlow.tsx","ProjectsPage.tsx",
-  "CharacterLibrary.tsx","CharacterSelection.tsx","CharacterReferenceSelection.tsx",
+  "ProjectsPage.tsx",
+  "CharacterLibrary.tsx","CharacterSelection.tsx",
   "SourceFrameSelection.tsx","FirstFrameSelection.tsx","TaskRecordsPanel.tsx",
-  "WalletPanel.tsx","PromptMarkdown.tsx","GenerationComposer.tsx",
-  "GenerationLauncher.tsx","ScriptEditor.tsx","VideoResultStage.tsx",
-  "SimpleCharacterUpload.tsx","SettingsPanel.tsx","WorkspaceTabs.tsx",
+  "WalletPanel.tsx","VideoResultStage.tsx",
+  "SimpleCharacterUpload.tsx","SettingsPanel.tsx",
 ];
 // 客户账户屏：customer/*.tsx 全量 + RootApp（目录扫描，防手工清单漏项）
 const accessFiles = ["RootApp.tsx"];
 for (const f of readdirSync(resolve(SRC, "customer"))) {
   if (f.endsWith(".tsx")) accessFiles.push("customer/" + f);
 }
-const internalFiles = ["App.tsx"];
+// 内部壳：App.tsx 死壳已删除（2026-10-31），内部 lane 暂无独立类使用方；
+// 管理端使用方由下方 adminU（AdminApp.tsx / admin-main.tsx）单独跟踪。
+const internalFiles = [];
 
 function classesUsed(files) {
   const set = new Set();

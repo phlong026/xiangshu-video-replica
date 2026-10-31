@@ -1,7 +1,7 @@
 /* 客户工作台老组件样式（经 LiveWorkspacePanel 挂载：拆解/项目/人物/任务/钱包等）。
  * 由 styles.css 拆出（前端分析报告 F-01/P0-1 修复）；管理端样式仍在 styles.css。
  * 本文件不得引入任何管理域（admin 域）规则（CW-019）。
- * 再生成：node scripts/split_customer_styles.mjs（见脚本头注释）。
+ * 拆分是一次性的：重跑 split_customer_styles.mjs 无法复现本文件，日常修改直接编辑。
  */
 
 .empty-state {
