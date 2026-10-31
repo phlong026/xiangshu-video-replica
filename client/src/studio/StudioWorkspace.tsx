@@ -121,7 +121,6 @@ import {
   MIN_REFERENCE_MEDIA_SECONDS,
   mergeStudioAssets,
   navigateStudioState,
-  pageTitles,
   patchStudioDraft,
   resolveSubmittedRatio,
   resolveVideoMode,
@@ -377,7 +376,6 @@ export function StudioWorkspace({
   const generationRef = useRef<StudioTask["type"] | undefined>(undefined);
   const generationDialogRevisionRef = useRef(0);
   const mountedRef = useRef(true);
-  const [newCreation, setNewCreation] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const closeMenu = () => {
@@ -2699,14 +2697,6 @@ export function StudioWorkspace({
           >
             <BrandIdentity />
           </button>
-          <Button
-            variant="primary"
-            className="studio-new-button"
-            onClick={() => setNewCreation(true)}
-          >
-            <Icon name="plus" />
-            新建创作
-          </Button>
           <nav aria-label="主要导航">
             {visibleNavGroups.map((group, index) => (
               <div
@@ -2881,45 +2871,6 @@ export function StudioWorkspace({
         )}
         {picker && (
           <StudioPicker kind={picker} onClose={() => setPicker(undefined)} />
-        )}
-        {newCreation && (
-          <StudioDialog title="新建创作" onClose={() => setNewCreation(false)}>
-            <p>选择创作方式。当前文案和素材会保留，可继续复用。</p>
-            <div className="studio-new-options">
-              {(
-                ["replica", "replacement", "video", "oral"] as StudioPage[]
-              ).map((page) => (
-                <Button
-                  key={page}
-                  onClick={() => {
-                    navigate(page);
-                    setNewCreation(false);
-                  }}
-                >
-                  {pageTitles[page]}
-                  <Icon name="arrow" />
-                </Button>
-              ))}
-            </div>
-            <Button
-              variant="quiet"
-              onClick={() => {
-                setState((previous) => ({ ...previous, draft: createDraft() }));
-                // 只清内存的话，云端那一行会在下次打开时把旧内容原样带回来。
-                draftTouchedRef.current = false;
-                setPendingRestore(null);
-                if (currentUserRoleRef.current !== "auditor")
-                  void discardStoredDraft().catch(() => {
-                    if (mountedRef.current)
-                      notify("云端上次内容未能清除，请稍后重试。");
-                  });
-                navigate("workbench");
-                setNewCreation(false);
-              }}
-            >
-              从空白创作开始
-            </Button>
-          </StudioDialog>
         )}
         {generation && (
           <StudioDialog

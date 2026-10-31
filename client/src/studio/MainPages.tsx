@@ -35,7 +35,7 @@ import {
 } from "./live";
 import { PlatformLogo } from "./PlatformLogo";
 import { readPageCache, writePageCache } from "./pageCache";
-import { draftFromTask } from "./state";
+import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioData, StudioTask, StudioVideo } from "./types";
 import {
@@ -228,8 +228,10 @@ export function WorkbenchPage() {
     openLive,
     notify,
     patchDraft,
+    patchState,
     updateData,
     state,
+    discardSavedDraft,
     extractScriptFromUpload,
     extractViralCopy,
     refresh,
@@ -966,6 +968,37 @@ export function WorkbenchPage() {
             文件， 上传完成后点击“提取文案”。
           </p>
         )}
+      </div>
+      {/* 原侧边栏「新建创作」弹窗的四个创作方式迁到这里（2026-10-31 信息架构
+          精简）；空白创作 = 回到干净草稿并放弃云端「上次内容」，否则旧草稿会
+          在下次进创作页时反复弹恢复提示。 */}
+      <div className="studio-create-row">
+        <span className="studio-create-row-label">开始创作</span>
+        <div className="studio-create-row-items">
+          {(
+            [
+              ["replica", "视频拆解", "video"],
+              ["replacement", "人物置换", "person"],
+              ["video", "视频生成", "sparkles"],
+              ["oral", "数字人口播", "audio"],
+            ] as const
+          ).map(([page, title, icon]) => (
+            <Button key={page} onClick={() => navigate(page)}>
+              <Icon name={icon} size={18} />
+              {title}
+            </Button>
+          ))}
+          <Button
+            variant="quiet"
+            onClick={() => {
+              patchState({ draft: createDraft() });
+              discardSavedDraft();
+            }}
+          >
+            <Icon name="plus" size={18} />
+            空白创作
+          </Button>
+        </div>
       </div>
       <div className="studio-home-metrics">
         {[

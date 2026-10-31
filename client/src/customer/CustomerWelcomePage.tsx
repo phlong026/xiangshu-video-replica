@@ -5,7 +5,7 @@ import { WorkbenchPage } from "../studio/MainPages";
 import { navGroups } from "../studio/StudioWorkspace";
 import { createState } from "../studio/state";
 import type { StudioContextValue } from "../studio/types";
-import { Button, Icon } from "../studio/ui";
+import { Icon } from "../studio/ui";
 import "../studio/studio.css";
 
 /** Public home reuses the production workbench. It never loads account data. */
@@ -53,14 +53,6 @@ export function CustomerWelcomePage({ onLogin }: { onLogin(): void }) {
           <div className="studio-brand">
             <BrandIdentity />
           </div>
-          <Button
-            variant="primary"
-            className="studio-new-button"
-            onClick={onLogin}
-          >
-            <Icon name="plus" />
-            新建创作
-          </Button>
           <nav aria-label="主要导航">
             {navGroups.map((group, index) => (
               <div className="studio-nav-group" key={group.label ?? index}>

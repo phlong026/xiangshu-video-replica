@@ -149,13 +149,6 @@ html:has(.studio-shell) {
   color: #edb73b;
   padding: 6px 8px;
 }
-.studio-new-button {
-  width: calc(100% - 12px);
-  align-self: center;
-  min-height: 49px;
-  font-size: var(--font-body);
-  margin: 0 0 23px;
-}
 .studio-nav-group {
   margin-bottom: 13px;
 }
@@ -816,6 +809,33 @@ html:has(.studio-shell) {
   margin: 22px 0 0;
   line-height: 1.8;
   text-align: center;
+}
+/* 工作台创作入口条：原侧边栏「新建创作」弹窗的四个创作方式 + 空白创作
+   在这里的落点（2026-10-31 信息架构精简，侧边栏不再放新建按钮）。 */
+.studio-create-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 18px 0 0;
+}
+.studio-create-row-label {
+  flex: none;
+  color: #999c93;
+  font-size: var(--font-label);
+}
+.studio-create-row-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.studio-create-row-items > .studio-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 14px;
+  font-size: var(--font-body);
 }
 .studio-home-metrics {
   display: grid;
@@ -1556,7 +1576,6 @@ html:has(.studio-shell) {
   margin: 15px 12px 0 0;
 }
 .studio-picker-grid,
-.studio-new-options,
 .studio-search-results {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1652,11 +1671,9 @@ html:has(.studio-shell) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.studio-new-options,
 .studio-search-results {
   grid-template-columns: 1fr 1fr;
 }
-.studio-new-options .studio-button,
 .studio-search-results .studio-button {
   justify-content: space-between;
   white-space: normal;
@@ -1780,10 +1797,6 @@ html:has(.studio-shell) {
   }
   .studio-brand {
     margin-bottom: 16px;
-  }
-  .studio-new-button {
-    margin-bottom: 16px;
-    min-height: 44px;
   }
   .studio-nav-group {
     margin-bottom: 5px;
@@ -2049,14 +2062,6 @@ html:has(.studio-shell) {
   .studio-shell--sidebar-collapsed .studio-brand .brand-identity__text,
   .studio-shell--sidebar-collapsed .studio-nav-label {
     display: none;
-  }
-  .studio-shell--sidebar-collapsed .studio-new-button {
-    font-size: 0;
-    min-height: 40px;
-    margin-bottom: 12px;
-  }
-  .studio-shell--sidebar-collapsed .studio-new-button .studio-icon {
-    width: 20px;
   }
   .studio-shell--sidebar-collapsed .studio-nav-group {
     margin-bottom: 8px;
