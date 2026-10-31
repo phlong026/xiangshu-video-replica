@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -97,8 +97,15 @@ class PgReadyInfo:
     pool_size: int
 
 
-def _is_customer_production() -> bool:
-    return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
+def is_customer_production(*, environ: Mapping[str, str] | None = None) -> bool:
+    """客户生产形态判定（T09/DB-08 安全闸门）的唯一定义。
+
+    正本放在 db_pg（``CUSTOMER_PRODUCTION_ENV`` 常量的家），此前 bootstrap /
+    control_auth / control_routes / admin_auth_routes 各持一份逐字副本；
+    ``environ`` 参数保留给需要注入环境的调用方（bootstrap 时代的签名兼容）。
+    """
+    source = os.environ if environ is None else environ
+    return source.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
 
 
 def _sqlite_path_from_url(url: str) -> str:
@@ -182,7 +189,7 @@ def validate_customer_production(config: DatabaseConfig) -> None:
     ``VIDEO_REPLICA_DB_PATH`` alongside a PG URL is likewise rejected: an
     ambiguous customer-production configuration is an error, not a hint.
     """
-    if not _is_customer_production():
+    if not is_customer_production():
         return
     if config.mode is not DatabaseMode.POSTGRESQL:
         raise RuntimeError(

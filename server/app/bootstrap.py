@@ -18,6 +18,7 @@ from cryptography.fernet import Fernet
 
 from app import content_store
 from app.db_pg import (
+    is_customer_production,
     CUSTOMER_PRODUCTION_ENV,
     DatabaseMode,
     PgReadyInfo,
@@ -50,7 +51,6 @@ from app.storage import (
 logger = logging.getLogger(__name__)
 
 # T09 / DB-08 — customer-production security gate (dev doc §17).
-_TRUTHY = {"1", "true", "yes", "on"}
 _ADMIN_SESSION_HMAC_KEY_ENV = "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY"
 _ADMIN_KEY_VERSION_PREFIX = f"{_ADMIN_SESSION_HMAC_KEY_ENV}_V"
 CUSTOMER_PUBLIC_ORIGIN_ENV = "VIDEO_REPLICA_PUBLIC_ORIGIN"
@@ -92,11 +92,6 @@ def issue_exchange_credential(
         ttl_seconds=ttl_seconds,
         key_version=key_version,
     )
-
-
-def is_customer_production(*, environ: Mapping[str, str] | None = None) -> bool:
-    source = os.environ if environ is None else environ
-    return source.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
 
 
 def customer_public_origin(*, environ: Mapping[str, str] | None = None) -> str:

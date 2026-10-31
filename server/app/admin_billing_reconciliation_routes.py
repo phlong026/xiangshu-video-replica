@@ -12,8 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter
-from app.auth import CurrentUser
+from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter, admin_to_current_user
 from app.billing_reconciliation import (
     enqueue_stuck_billing_operations,
     list_reconciliation_items,
@@ -25,15 +24,6 @@ from app.db_portable import BusinessConnection
 from app.permissions import write_audit
 
 router = APIRouter(prefix="/api/control/billing-reconciliation", tags=["admin-billing"])
-
-
-def _admin_to_current_user(actor: AdminActor) -> CurrentUser:
-    return CurrentUser(
-        id=actor.user_id,
-        username=actor.username,
-        display_name=actor.display_name,
-        role="admin",
-    )
 
 
 class ReconciliationResolveRequest(BaseModel):
@@ -97,7 +87,7 @@ def resolve_item(
         )
         write_audit(
             conn,
-            actor=_admin_to_current_user(actor),
+            actor=admin_to_current_user(actor),
             action="billing_reconciliation.resolve",
             entity_type="billing_reconciliation_item",
             entity_id=item_id,

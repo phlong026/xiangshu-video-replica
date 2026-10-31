@@ -29,6 +29,7 @@ from app.character_reference_matching import (
 from app.characters import character_is_available, get_project_main_character, read_character
 from app.db_portable import BusinessConnection
 from app.external_calls import CallTimer, endpoint_from_url, record_external_call, recorded_urlopen
+from app.image_dimensions import scan_jpeg_dimensions
 from app.net_safety import FAKE_IP_NETWORK
 from app.permissions import (
     require_asset_access,
@@ -1294,29 +1295,9 @@ def png_dimensions(content: bytes) -> tuple[int, int] | None:
     return int.from_bytes(content[16:20], "big"), int.from_bytes(content[20:24], "big")
 
 
-def jpeg_dimensions(content: bytes) -> tuple[int, int] | None:
-    if len(content) < 4 or content[:2] != b"\xff\xd8":
-        return None
-    offset = 2
-    while offset + 9 <= len(content):
-        if content[offset] != 0xFF:
-            offset += 1
-            continue
-        marker = content[offset + 1]
-        offset += 2
-        if marker in {0xD8, 0xD9}:
-            continue
-        if offset + 2 > len(content):
-            return None
-        segment_length = int.from_bytes(content[offset : offset + 2], "big")
-        if segment_length < 7 or offset + segment_length > len(content):
-            return None
-        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
-            height = int.from_bytes(content[offset + 3 : offset + 5], "big")
-            width = int.from_bytes(content[offset + 5 : offset + 7], "big")
-            return width, height
-        offset += segment_length
-    return None
+# JPEG SOF 扫描走共享实现（image_dimensions）：本处契约即「解析不出返回
+# None」，直接复用，不再各自维护一份遍历。
+jpeg_dimensions = scan_jpeg_dimensions
 
 
 def safe_filename(filename: str) -> str:
