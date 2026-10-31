@@ -2389,7 +2389,7 @@ function formatMaterialSizeBytes(bytes: number): string {
 }
 
 export function MaterialsPage() {
-  const { user, notify } = useStudio();
+  const { notify } = useStudio();
   const [tab, setTab] = useState("");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<TrainingMaterialPublicPage | null>(null);
@@ -2416,9 +2416,10 @@ export function MaterialsPage() {
     }
   }, []);
 
+  // 换账号时按 key 重挂载由调用方保证（与旧页同语义）；这里只随筛选与页码重拉。
   useEffect(() => {
     void load(tab, page);
-  }, [load, tab, page, user.id]);
+  }, [load, tab, page]);
 
   async function playVideo(item: TrainingMaterialPublicItem) {
     if (playUrls[item.id] || busyId) return;

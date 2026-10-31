@@ -1766,7 +1766,7 @@ export function TaskDetailPage() {
     user,
   } = useStudio();
   const [actionBusy, setActionBusy] = useState<
-    "download" | "retry" | "archive"
+    "download" | "retry"
   >();
   const [previewLoad, setPreviewLoad] = useState<{
     key?: string;
