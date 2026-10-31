@@ -44,7 +44,7 @@ from app.admin_permissions import (
 )
 from app.api_errors import http_error as _http
 from app.auth import CurrentUser
-from app.db_pg import CUSTOMER_PRODUCTION_ENV, is_customer_production, pg_transaction
+from app.db_pg import is_customer_production, pg_transaction
 from app.ops_metrics import (
     get_or_create_request_id,
     set_current_result_code,

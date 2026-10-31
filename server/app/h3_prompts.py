@@ -101,7 +101,8 @@ class Reference(BaseModel):
 class GenerationContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
     route: Literal["text_image", "reference", "replica"] = "replica"
-    duration_seconds: int = Field(default=15, ge=4, le=15, strict=True)
+    # 16-30 秒为独立计费长档（独立创作入口专用）；复刻流调用方仍传 ≤15。
+    duration_seconds: int = Field(default=15, ge=4, le=30, strict=True)
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
     # 分辨率仅作为优化器的清晰度预期上下文（见 prompt_rules/optimizer.txt），
     # 不写进提示词正文、不据此增删剧情；复刻流等旧调用方不传时为 None。

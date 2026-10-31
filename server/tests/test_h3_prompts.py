@@ -341,11 +341,11 @@ def test_silent_prompt_drops_narration_rules_that_contradict_no_voice_over() -> 
 
 def test_customer_duration_options_match_what_the_provider_accepts() -> None:
     """档位曾被收窄成 {4, 15}，导致 12 秒的源视频被拉成 15 秒或压成 4 秒（见
-    docs/prompt-spec 方案文档问题 3）。provider 与报价端点都支持 4–15 的每一秒，
-    客户档位不应再自行收窄；把两者绑在一起，防止日后又被改回去。"""
+    docs/prompt-spec 方案文档问题 3）。provider 与报价端点都支持 4–30 的每一秒
+    （16–30 为长档计费），客户档位不应再自行收窄；把两者绑在一起，防止日后又被改回去。"""
     from app.generation import CUSTOMER_DURATION_OPTIONS, validate_h3_request
 
-    assert set(CUSTOMER_DURATION_OPTIONS) == set(range(4, 16))
+    assert set(CUSTOMER_DURATION_OPTIONS) == set(range(4, 31))
     for seconds in sorted(CUSTOMER_DURATION_OPTIONS):
         validate_h3_request(
             {
@@ -354,6 +354,44 @@ def test_customer_duration_options_match_what_the_provider_accepts() -> None:
                 "resolution": "768P",
                 "duration": seconds,
                 "ratio": "9:16",
+            }
+        )
+
+
+def test_provider_duration_gate_rejects_2k_long_tier() -> None:
+    """2K 不存在长档：超 15 秒的 2K 组合在提交前本地拒绝，不触达供应商。"""
+    import pytest
+
+    from app.generation import validate_h3_request
+
+    with pytest.raises(ValueError, match="15 seconds"):
+        validate_h3_request(
+            {
+                "model": "MiniMax-H3",
+                "content": [{"type": "text", "text": "正文"}],
+                "resolution": "2K",
+                "duration": 16,
+                "ratio": "16:9",
+            }
+        )
+    # 同时长 768P 合法；非整数与超上限同样拒绝。
+    validate_h3_request(
+        {
+            "model": "MiniMax-H3",
+            "content": [{"type": "text", "text": "正文"}],
+            "resolution": "768P",
+            "duration": 30,
+            "ratio": "16:9",
+        }
+    )
+    with pytest.raises(ValueError, match="4-30"):
+        validate_h3_request(
+            {
+                "model": "MiniMax-H3",
+                "content": [{"type": "text", "text": "正文"}],
+                "resolution": "768P",
+                "duration": 31,
+                "ratio": "16:9",
             }
         )
 

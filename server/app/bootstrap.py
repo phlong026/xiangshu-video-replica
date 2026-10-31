@@ -18,12 +18,11 @@ from cryptography.fernet import Fernet
 
 from app import content_store
 from app.db_pg import (
-    is_customer_production,
-    CUSTOMER_PRODUCTION_ENV,
     DatabaseMode,
     PgReadyInfo,
     check_pg_ready,
     close_pg_pool,
+    is_customer_production,
     pg_transaction,
     resolve_database_config,
     validate_customer_production,

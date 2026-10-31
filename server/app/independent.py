@@ -81,7 +81,8 @@ class IndependentVideoRequest(BaseModel):
     first_frame_asset_id: str | None = Field(default=None, min_length=1)
     last_frame_asset_id: str | None = Field(default=None, min_length=1)
     reference_asset_ids: list[str] = Field(default_factory=list, max_length=_MAX_REFERENCE_TOTAL)
-    output_duration_seconds: int = Field(ge=4, le=15)
+    # 16-30 秒走独立计费长档（上游长视频规则），档位未开放时建单闸 fail-closed。
+    output_duration_seconds: int = Field(ge=4, le=30)
     resolution: Literal["768P", "2K"] = "768P"
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
     quantity: int = Field(ge=1)
@@ -102,16 +103,24 @@ class IndependentCapabilities(BaseModel):
     max_reference_videos: int = MAX_REFERENCE_VIDEOS
     max_reference_audios: int = MAX_REFERENCE_AUDIOS
     max_quantity: int
+    # 768P 可选时长上限：16-30 秒长档（后台价目启用）开放时为 30，否则 15。
+    # 2K 恒为 15（上游契约），前端按分辨率分别取上限。
+    max_output_duration_seconds: int = 15
 
 
 def read_independent_capabilities(conn: BusinessConnection) -> IndependentCapabilities:
-    # 所有能力默认全部开放
+    # 所有能力默认全部开放；长档开关 = video_768p_long 价目已启用且已定价。
+    from app.billing_catalog import read_tariff
+
+    tier = read_tariff(conn, "video_768p_long")
+    long_enabled = bool(tier and tier.enabled and tier.unit_credits)
     return IndependentCapabilities(
         extended_modes_enabled=True,
         t2v_enabled=True,
         i2v_enabled=True,
         r2v_enabled=True,
         last_frame_enabled=True,
+        max_output_duration_seconds=30 if long_enabled else 15,
         max_quantity=read_runtime_limits(conn)["max_generation_count_per_batch"],
     )
 
@@ -301,6 +310,29 @@ def create_independent_batch(
                 "This idempotency key was already used for a different request.",
             )
         return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+    # 长档（16-30 秒）双重前置闸：2K 不支持超 15 秒（上游契约）；768P 长档必须
+    # 已在后台启用价目——没有启用的价目就没有可冻结的单价，绝不能让长任务按
+    # 0 积分放行。闸在幂等回放之后：档位中途关闭不影响已建任务的回放取回。
+    if request.output_duration_seconds > 15:
+        if request.resolution == "2K":
+            raise generation_error(
+                422,
+                "DURATION_RESOLUTION_UNSUPPORTED",
+                "2K 分辨率目前最长支持 15 秒，请选择 768P 或缩短时长。",
+            )
+        from app.billing_catalog import generation_service_for, read_tariff
+
+        tier = read_tariff(
+            conn,
+            generation_service_for(request.resolution, request.output_duration_seconds),
+        )
+        if tier is None or not tier.enabled or not tier.unit_credits:
+            raise generation_error(
+                422,
+                "LONG_DURATION_TIER_DISABLED",
+                "16-30 秒时长档暂未开放，请选择 15 秒及以内的时长。",
+            )
 
     # 与复刻流同源的生产红线：客户生产禁止模拟任务；metaso 需配置就绪并
     # 遵守付费试用限额。仅对“真正的新提交”生效——幂等回放已在上面返回，

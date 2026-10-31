@@ -8,8 +8,8 @@ from typing import Annotated, cast
 
 from fastapi import Depends, Header, HTTPException, Request
 
-from app.db_pg import CUSTOMER_PRODUCTION_ENV, is_customer_production
 from app.auth import CurrentUser, Database, Role, authenticate_user
+from app.db_pg import is_customer_production
 
 CONTROL_PROXY_TOKEN_DIGEST_ENV = "CONTROL_PROXY_TOKEN_DIGEST"
 CONTROL_ADMIN_USER_ID_ENV = "CONTROL_ADMIN_USER_ID"
