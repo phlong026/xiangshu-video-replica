@@ -18,8 +18,6 @@ from cryptography.fernet import Fernet
 
 from app import content_store
 from app.db_pg import (
-    is_customer_production,
-    CUSTOMER_PRODUCTION_ENV,
     DatabaseMode,
     PgReadyInfo,
     check_pg_ready,
@@ -28,6 +26,10 @@ from app.db_pg import (
     resolve_database_config,
     validate_customer_production,
 )
+
+# 显式再导出（mypy no_implicit_reexport）：全仓统一从 bootstrap 取环境判定（C6a），
+# bootstrap 自身不直接使用该符号。
+from app.db_pg import is_customer_production as is_customer_production
 from app.db_portable import BusinessConnection
 from app.media_tools import (
     FFMPEG_DIR_ENV,

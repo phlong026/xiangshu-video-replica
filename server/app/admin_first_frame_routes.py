@@ -12,7 +12,7 @@ from typing import Literal
 
 from fastapi import APIRouter
 
-from app.admin_auth_routes import AdminActor, AdminWriter, admin_to_current_user
+from app.admin_auth_routes import AdminWriter, admin_to_current_user
 from app.api_errors import http_error as _http
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection

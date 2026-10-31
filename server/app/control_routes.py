@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 import logging
-import os
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -17,7 +16,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from app.db_pg import CUSTOMER_PRODUCTION_ENV, is_customer_production
 from app.admin_audit_business import audit_changes, provider_audit_changes
 from app.admin_dates import append_admin_date_filters
 from app.admin_write_contract import (
@@ -39,6 +37,7 @@ from app.control_auth import (
     ControlUser,
 )
 from app.csv_export import spreadsheet_safe_cell
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
 from app.failure_runbook import failed_record_explanation
