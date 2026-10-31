@@ -49,6 +49,19 @@ function jsonResponse(payload: unknown, status = 200) {
 // `token:` followed by a quoted literal) stays quiet — the T29 precedent.
 const CSRF_TOKEN_TEXT = "csrf-token-1";
 
+// requestControl 发出的 headers 统一为 Headers 实例（2026-10-31 与 api.ts
+// 收敛为共享工厂后），断言用同一表示读取；nth 为 1 基，与
+// toHaveBeenNthCalledWith 对齐。
+function lastHeaders(fetchMock: ReturnType<typeof vi.fn>): Headers {
+  const call = fetchMock.mock.calls.at(-1);
+  return new Headers((call?.[1] as RequestInit | undefined)?.headers);
+}
+
+function nthHeaders(fetchMock: ReturnType<typeof vi.fn>, nth: number): Headers {
+  const call = fetchMock.mock.calls[nth - 1];
+  return new Headers((call?.[1] as RequestInit | undefined)?.headers);
+}
+
 it("只读价格试算使用 GET 和精确客户编号，不携带写契约", async () => {
   setAdminCsrfToken("");
   const fetchMock = vi
@@ -160,10 +173,6 @@ describe("admin request contract regressions", () => {
         expect.objectContaining({
           method: "POST",
           credentials: "include",
-          headers: expect.objectContaining({
-            "X-Admin-CSRF": CSRF_TOKEN_TEXT,
-            "Idempotency-Key": "revoke-key",
-          }),
           body: JSON.stringify({
             session_epoch: 7,
             confirm: true,
@@ -171,6 +180,9 @@ describe("admin request contract regressions", () => {
           }),
         }),
       );
+      const revokeHeaders = lastHeaders(fetchMock);
+      expect(revokeHeaders.get("X-Admin-CSRF")).toBe(CSRF_TOKEN_TEXT);
+      expect(revokeHeaders.get("Idempotency-Key")).toBe("revoke-key");
     }
   });
 
@@ -393,12 +405,10 @@ describe("admin activation API adapter", () => {
       expect.objectContaining({
         method: "PUT",
         credentials: "include",
-        headers: expect.objectContaining({
-          "X-Admin-CSRF": CSRF_TOKEN_TEXT,
-        }),
         body: JSON.stringify({ password }),
       }),
     );
+    expect(nthHeaders(fetchMock, 2).get("X-Admin-CSRF")).toBe(CSRF_TOKEN_TEXT);
   });
 
   it("rejects writes before any request when no CSRF token is held in memory", async () => {
@@ -454,11 +464,6 @@ describe("admin activation API adapter", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.objectContaining({
-          "Content-Type": "application/json",
-          "X-Admin-CSRF": "csrf-token-1",
-          "Idempotency-Key": expect.any(String),
-        }),
         body: JSON.stringify({
           name: "首批",
           face_value_fen: 10000,
@@ -471,6 +476,10 @@ describe("admin activation API adapter", () => {
         }),
       }),
     );
+    const batchHeaders = lastHeaders(fetchMock);
+    expect(batchHeaders.get("Content-Type")).toBe("application/json");
+    expect(batchHeaders.get("X-Admin-CSRF")).toBe("csrf-token-1");
+    expect(batchHeaders.get("Idempotency-Key")).toEqual(expect.any(String));
     expect(result.batch_id).toBe("batch-1");
     expect(result.request_id).toBe("req-batch-1");
   });
@@ -533,10 +542,13 @@ describe("admin activation API adapter", () => {
     const keys = fetchMock.mock.calls
       .filter(([url]) => String(url).endsWith("/suspend"))
       .map(([, options]) => {
-        const headers = (options as RequestInit).headers as
-          | Record<string, string>
-          | undefined;
-        return String(headers?.["Idempotency-Key"] ?? "");
+        // requestControl 统一用 Headers 实例发头（2026-10-31 与 api.ts 收敛
+        // 为共享工厂），读取用同一表示，与文件内其它断言一致。
+        return String(
+          new Headers((options as RequestInit).headers).get(
+            "Idempotency-Key",
+          ) ?? "",
+        );
       });
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBeTruthy();
@@ -673,10 +685,6 @@ describe("admin activation API adapter", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.objectContaining({
-          "X-Admin-CSRF": "csrf-token-1",
-          "Idempotency-Key": expect.any(String),
-        }),
         body: JSON.stringify({
           quantity: 20,
           confirm: true,
@@ -684,6 +692,9 @@ describe("admin activation API adapter", () => {
         }),
       }),
     );
+    const generateHeaders = nthHeaders(fetchMock, 2);
+    expect(generateHeaders.get("X-Admin-CSRF")).toBe("csrf-token-1");
+    expect(generateHeaders.get("Idempotency-Key")).toEqual(expect.any(String));
     expect(generated.export_id).toBe("export-1");
 
     const download = await downloadActivationCodeExport("export-1", "线下交付");
@@ -693,13 +704,12 @@ describe("admin activation API adapter", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.objectContaining({
-          "X-Admin-CSRF": "csrf-token-1",
-          "Idempotency-Key": expect.any(String),
-        }),
         body: JSON.stringify({ confirm: true, reason: "线下交付" }),
       }),
     );
+    const downloadHeaders = nthHeaders(fetchMock, 3);
+    expect(downloadHeaders.get("X-Admin-CSRF")).toBe("csrf-token-1");
+    expect(downloadHeaders.get("Idempotency-Key")).toEqual(expect.any(String));
     expect(download.codes).toEqual(["XS-AAAA-BBBB-01"]);
     expect(download.request_id).toBe("req-download-1");
   });
@@ -781,7 +791,6 @@ describe("admin activation API adapter", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.objectContaining({ "X-Admin-CSRF": "csrf-token-1" }),
         body: JSON.stringify({
           channel: "offline",
           external_order_ref: "order-9",
@@ -791,6 +800,7 @@ describe("admin activation API adapter", () => {
         }),
       }),
     );
+    expect(nthHeaders(fetchMock, 2).get("X-Admin-CSRF")).toBe("csrf-token-1");
     expect(delivered.delivery_id).toBe("delivery-1");
 
     await resumeActivationCode("code-1", "复核通过恢复");
@@ -867,9 +877,9 @@ describe("admin activation API adapter", () => {
       expect.objectContaining({
         method: "DELETE",
         credentials: "include",
-        headers: expect.objectContaining({ "X-Admin-CSRF": "csrf-token-1" }),
       }),
     );
+    expect(lastHeaders(fetchMock).get("X-Admin-CSRF")).toBe("csrf-token-1");
   });
 
   it("reads and updates a customer's API-controlled unit price", async () => {
@@ -911,10 +921,6 @@ describe("admin activation API adapter", () => {
       expect.objectContaining({
         method: "PUT",
         credentials: "include",
-        headers: expect.objectContaining({
-          "X-Admin-CSRF": CSRF_TOKEN_TEXT,
-          "Idempotency-Key": "price-idem-1",
-        }),
         body: JSON.stringify({
           confirm: true,
           reason: "客户合同价",
@@ -922,6 +928,9 @@ describe("admin activation API adapter", () => {
         }),
       }),
     );
+    const priceHeaders = nthHeaders(fetchMock, 3);
+    expect(priceHeaders.get("X-Admin-CSRF")).toBe(CSRF_TOKEN_TEXT);
+    expect(priceHeaders.get("Idempotency-Key")).toBe("price-idem-1");
   });
 });
 
@@ -976,11 +985,6 @@ describe("billing report export", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.objectContaining({
-          "X-Admin-CSRF": CSRF_TOKEN_TEXT,
-          "Idempotency-Key": "report-key",
-          "Content-Type": "application/json",
-        }),
         body: JSON.stringify({
           format: "csv",
           start_date: "2026-07-01",
@@ -989,6 +993,10 @@ describe("billing report export", () => {
         }),
       }),
     );
+    const exportHeaders = lastHeaders(fetchMock);
+    expect(exportHeaders.get("X-Admin-CSRF")).toBe(CSRF_TOKEN_TEXT);
+    expect(exportHeaders.get("Idempotency-Key")).toBe("report-key");
+    expect(exportHeaders.get("Content-Type")).toBe("application/json");
     expect(result).toEqual({
       filename: "billing_export_20260922_101530.csv.gz",
       bytes: 2,
@@ -1103,8 +1111,8 @@ describe("paid probe idempotency", () => {
   }
 
   function keyOf(call: unknown[]): string {
-    const init = call[1] as { headers: Record<string, string> };
-    return init.headers["Idempotency-Key"];
+    const init = call[1] as RequestInit;
+    return String(new Headers(init.headers).get("Idempotency-Key") ?? "");
   }
 
   async function signedInFetch() {

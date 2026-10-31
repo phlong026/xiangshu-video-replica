@@ -42,6 +42,7 @@ import {
   savePendingRegeneration,
 } from "./regenerationPending";
 import { isCurrentQuote, isQuoteRejection } from "./studio/quoteConfirmation";
+import { formatTaskStatus } from "./taskStatusLabels";
 import { VideoPreview } from "./VideoPreview";
 import {
   generationBatchDisplayStatus,
@@ -2063,25 +2064,9 @@ function taskStage(task: GenerationTask) {
   return formatStatus(task.status);
 }
 
+// 状态文案统一走 taskStatusLabels（与 VideoResultStage 共享同一映射）。
 function formatStatus(status: string) {
-  const labels: Record<string, string> = {
-    ARCHIVED: "已归档",
-    ARCHIVING: "归档中",
-    ARCHIVE_FAILED: "归档失败",
-    CANCELLED: "已取消",
-    COMPLETED: "已归档",
-    COMPLETED_WITH_FAILURES: "部分失败",
-    FAILED: "失败",
-    NEEDS_ATTENTION: "需要处理",
-    PENDING: "等待中",
-    QUALITY_FAILED: "结果暂不可用",
-    QUEUED: "排队中",
-    RUNNING: "生成中",
-    SUBMISSION_UNCERTAIN: "提交结果待确认",
-    SUBMITTING: "提交中",
-    SUCCEEDED: "已完成",
-  };
-  return labels[status] ?? status;
+  return formatTaskStatus(status);
 }
 
 function formatDuration(value: number | null | undefined) {

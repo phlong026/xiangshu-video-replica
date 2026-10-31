@@ -19,10 +19,11 @@ import {
   clearAdminCsrfToken,
   getAdminCsrfToken,
   notifyAdminSessionExpired,
-  resolveApiBaseUrl,
   resolveManagedMediaUrl,
   setAdminCsrfToken,
 } from "./api";
+import { apiBaseUrl } from "./apiBase";
+import { createControlRequest } from "./controlRequest";
 
 export async function getCustomerPricing(): Promise<CustomerPricing> {
   const response = await requestControl(
@@ -291,14 +292,6 @@ export function createIdempotencyKey(): string {
   return newIdempotencyKey();
 }
 
-function apiBaseUrl(): string {
-  return resolveApiBaseUrl(
-    import.meta.env.VITE_API_BASE_URL,
-    import.meta.env.PROD,
-    window.location,
-  );
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -332,45 +325,24 @@ async function parseActivationError(
   return new AdminActivationError(text, response.status, code);
 }
 
-async function requestControl(
-  path: string,
-  init: RequestInit & { headers?: Record<string, string> },
-  timeoutMs: number = DEFAULT_TIMEOUT_MS,
-): Promise<Response> {
-  const csrfAtStart = getAdminCsrfToken();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const headers: Record<string, string> = { ...(init.headers ?? {}) };
-  if (init.body && !(init.body instanceof FormData)) {
-    headers["Content-Type"] = "application/json";
-  }
-  try {
-    const response = await fetch(`${apiBaseUrl()}${path}`, {
-      ...init,
-      headers,
-      credentials: "include",
-      signal: controller.signal,
-    });
-    // Authentication failures are handled by the login/restore form itself.
-    // Protected reads and writes must also close the active management UI.
-    if (
-      response.status === 401 &&
-      path !== "/api/control/admin/session/password" &&
-      path !== "/api/control/admin/session/exchange" &&
-      !(path === "/api/control/admin/session" && init.method === "GET")
-    ) {
-      notifyAdminSessionExpired(csrfAtStart);
-    }
-    return response;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new AdminActivationError("请求超时，请重试");
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
+// 控制面请求骨架统一走 controlRequest 工厂（与 api.ts 共享）；本侧策略：
+// 5 秒默认超时；401 通知豁免登录/换登/会话读三条路径（认证失败由登录
+// 表单自己处理，受保护读写才关闭管理界面）；写路径的 CSRF 一律由
+// adminWrite 显式携带，不做隐式自动补；超时抛 AdminActivationError。
+// 会话函数用惰性引用：页面测试会对 ../api 做整体 mock（只给业务函数），
+// 配置在模块初始化期就读绑定会把这类既有 mock 全部炸掉。
+const requestControl = createControlRequest({
+  defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
+  baseUrl: apiBaseUrl,
+  csrfSnapshot: () => getAdminCsrfToken(),
+  onUnauthorized: (csrfAtStart) => notifyAdminSessionExpired(csrfAtStart),
+  unauthorizedExempt: (path, init) =>
+    path === "/api/control/admin/session/password" ||
+    path === "/api/control/admin/session/exchange" ||
+    (path === "/api/control/admin/session" && init.method === "GET"),
+  autoCsrfForWrites: false,
+  timeoutError: (message) => new AdminActivationError(message),
+});
 
 export async function adminWrite<T>(
   path: string,

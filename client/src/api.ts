@@ -7,6 +7,7 @@ import {
   openCharacterOperation,
   saveCharacterOperation,
 } from "./characterTaskOperation";
+import { createControlRequest } from "./controlRequest";
 import { attachCustomerTaskReferences } from "./customerTaskReferences";
 import type { components } from "./generated/api";
 
@@ -6727,48 +6728,17 @@ async function requestAdmin(
   return requestApi(path, init, timeoutMs);
 }
 
-async function requestControl(
-  path: string,
-  init: RequestInit,
-  timeoutMs: number = REQUEST_TIMEOUT_MS,
-): Promise<Response> {
-  const csrfAtStart = getAdminCsrfToken();
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  const headers = new Headers(init.headers);
-  if (init.body && !(init.body instanceof FormData)) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (
-    init.method &&
-    ["POST", "PUT", "PATCH", "DELETE"].includes(init.method.toUpperCase()) &&
-    !headers.has("X-Admin-CSRF")
-  ) {
-    const csrf = getAdminCsrfToken();
-    if (csrf) {
-      headers.set("X-Admin-CSRF", csrf);
-    }
-  }
-  try {
-    const response = await fetch(`${apiBaseUrl()}${path}`, {
-      ...init,
-      headers,
-      credentials: "include",
-      signal: controller.signal,
-    });
-    if (response.status === 401) {
-      notifyAdminSessionExpired(csrfAtStart);
-    }
-    return response;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("请求超时，请重试");
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
+// 控制面请求骨架统一走 controlRequest 工厂（与 api.admin.ts 共享）；本侧
+// 策略：10 秒默认超时；401 一律通知会话过期；写方法缺省时自动补
+// X-Admin-CSRF；超时抛普通 Error（本侧无 AdminActivationError 契约）。
+const requestControl = createControlRequest({
+  defaultTimeoutMs: REQUEST_TIMEOUT_MS,
+  baseUrl: apiBaseUrl,
+  csrfSnapshot: getAdminCsrfToken,
+  onUnauthorized: notifyAdminSessionExpired,
+  autoCsrfForWrites: true,
+  timeoutError: (message) => new Error(message),
+});
 
 /** 多步账号操作不得在会话切换后继续使用新用户的登录态。 */
 export function captureWorkspaceCredentialContext(): () => void {

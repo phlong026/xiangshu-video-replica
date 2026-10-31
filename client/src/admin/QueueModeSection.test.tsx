@@ -75,12 +75,10 @@ describe("QueueModeSection", () => {
     );
     expect(patchCall).toBeDefined();
     const [, init] = patchCall ?? [];
-    const headers = ((init as RequestInit).headers ?? {}) as Record<
-      string,
-      string
-    >;
-    expect(headers["X-Admin-CSRF"]).toBe("csrf-token-1");
-    expect(headers["Idempotency-Key"]).toMatch(/^idem-|^[0-9a-f-]{36}$/);
+    // requestControl 统一以 Headers 实例发头（2026-10-31 收敛共享工厂）。
+    const headers = new Headers((init as RequestInit).headers);
+    expect(headers.get("X-Admin-CSRF")).toBe("csrf-token-1");
+    expect(headers.get("Idempotency-Key")).toMatch(/^idem-|^[0-9a-f-]{36}$/);
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({
       fair_queue_enabled: true,
       confirm: true,

@@ -71,9 +71,9 @@ it("探测先读最新费用，取消不调用上游服务，确认带价格快�
     reason: "虚构通道验收",
     expected_cost_snapshot: "2".repeat(64),
   });
-  expect(writes[0][1]?.headers).toMatchObject({
-    "X-Admin-CSRF": "fake-probe-csrf",
-  });
+  expect(new Headers(writes[0][1]?.headers).get("X-Admin-CSRF")).toBe(
+    "fake-probe-csrf",
+  );
 });
 it("只读不探测，已过期结果不显示可用", async () => {
   const fetchMock = vi.fn(

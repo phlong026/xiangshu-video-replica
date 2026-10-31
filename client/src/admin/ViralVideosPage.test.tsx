@@ -447,10 +447,9 @@ describe("ViralVideosPage", () => {
       reason: "准备素材或调整顺序",
       confirm: true,
     });
-    expect(post?.[1]?.headers).toMatchObject({
-      "X-Admin-CSRF": "csrf-curation-test",
-      "Idempotency-Key": expect.any(String),
-    });
+    const postHeaders = new Headers(post?.[1]?.headers);
+    expect(postHeaders.get("X-Admin-CSRF")).toBe("csrf-curation-test");
+    expect(postHeaders.get("Idempotency-Key")).toEqual(expect.any(String));
   });
 
   it("列表直接给出封面与头像，点标题打开详情抽屉且不预取视频", async () => {
@@ -586,9 +585,9 @@ describe("ViralVideosPage", () => {
       confirm: true,
       reason: "上首页",
     });
-    expect(patch?.[1]?.headers).toMatchObject({
-      "X-Admin-CSRF": "csrf-curation-test",
-    });
+    expect(new Headers(patch?.[1]?.headers).get("X-Admin-CSRF")).toBe(
+      "csrf-curation-test",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.change(screen.getByLabelText("操作原因"), {
@@ -735,9 +734,9 @@ describe("ViralVideosPage", () => {
       url.includes("/statistics"),
     );
     expect(write?.[0]).toContain("opaque%2Fvideo%3Did/statistics");
-    expect(write?.[1]?.headers).toMatchObject({
-      "X-Admin-CSRF": "csrf-curation-test",
-    });
+    expect(new Headers(write?.[1]?.headers).get("X-Admin-CSRF")).toBe(
+      "csrf-curation-test",
+    );
     expect(JSON.parse(String(write?.[1]?.body))).toMatchObject({
       confirm: true,
     });
@@ -800,10 +799,9 @@ describe("ViralVideosPage", () => {
     expect(String(JSON.parse(String(searchCall?.[1]?.body)).reason)).toContain(
       "农村自建房",
     );
-    expect(searchCall?.[1]?.headers).toMatchObject({
-      "X-Admin-CSRF": "csrf-curation-test",
-      "Idempotency-Key": expect.any(String),
-    });
+    const searchHeaders = new Headers(searchCall?.[1]?.headers);
+    expect(searchHeaders.get("X-Admin-CSRF")).toBe("csrf-curation-test");
+    expect(searchHeaders.get("Idempotency-Key")).toEqual(expect.any(String));
   });
 
   it("搜索对象不在库当前页时仍能在当前搜索批量准备，确认列出准确平台和ID", async () => {
@@ -928,11 +926,9 @@ describe("ViralVideosPage", () => {
           url.includes("batch-0/statistics"),
         );
         expect(calls).toHaveLength(2);
-        expect(calls[1][1]?.headers).toMatchObject({
-          "Idempotency-Key": new Headers(firstCall?.[1]?.headers).get(
-            "Idempotency-Key",
-          ),
-        });
+        expect(new Headers(calls[1][1]?.headers).get("Idempotency-Key")).toBe(
+          new Headers(firstCall?.[1]?.headers).get("Idempotency-Key"),
+        );
         fireEvent.click(screen.getByRole("button", { name: "取消" }));
         for (const request of pending.slice(3))
           request.resolve(
@@ -1225,9 +1221,9 @@ describe("ViralVideosPage", () => {
       confirm: true,
       reason: "内容不符合上架要求",
     });
-    expect(patch?.[1]?.headers).toMatchObject({
-      "X-Admin-CSRF": "csrf-curation-test",
-    });
+    expect(new Headers(patch?.[1]?.headers).get("X-Admin-CSRF")).toBe(
+      "csrf-curation-test",
+    );
     await screen.findByRole("button", { name: "恢复显示" });
   });
 
