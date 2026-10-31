@@ -116,12 +116,6 @@ html:has(.studio-shell) {
 .studio-shell button.studio-brand:hover:not(:disabled) {
   background: transparent;
 }
-.studio-brand small {
-  display: block;
-  margin-top: 10px;
-  font-size: var(--font-caption);
-  color: #c8c8c1;
-}
 .studio-button {
   border: 1px solid #33342e;
   border-radius: 7px;
@@ -2051,8 +2045,8 @@ html:has(.studio-shell) {
   .studio-shell--sidebar-collapsed .studio-sidebar {
     padding: 16px 6px;
   }
+  /* 副行已收进 brand-identity__text，收起态隐藏文案块即同时隐藏两行。 */
   .studio-shell--sidebar-collapsed .studio-brand .brand-identity__text,
-  .studio-shell--sidebar-collapsed .studio-brand small,
   .studio-shell--sidebar-collapsed .studio-nav-label {
     display: none;
   }

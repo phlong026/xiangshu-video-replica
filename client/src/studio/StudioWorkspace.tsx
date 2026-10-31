@@ -2698,7 +2698,6 @@ export function StudioWorkspace({
             }}
           >
             <BrandIdentity />
-            <small>乡墅爆款视频创作平台</small>
           </button>
           <Button
             variant="primary"

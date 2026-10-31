@@ -52,7 +52,6 @@ export function CustomerWelcomePage({ onLogin }: { onLogin(): void }) {
         <aside className="studio-sidebar">
           <div className="studio-brand">
             <BrandIdentity />
-            <small>乡墅爆款视频创作平台</small>
           </div>
           <Button
             variant="primary"
