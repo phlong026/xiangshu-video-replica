@@ -15,6 +15,7 @@ import {
   regenerateCharacterAsset,
   reviewCharacterAsset,
 } from "./api";
+import { errorMessage } from "./errorMessage";
 import "./legacy-panels.css";
 
 const VIEW_LABELS: Record<RequiredCharacterViewType, string> = {
@@ -48,10 +49,6 @@ const VERSION_STATUS_LABELS: Record<CharacterVersion["status"], string> = {
 const CHARACTER_VERSION_PROVIDER = "apilio";
 const CHARACTER_VERSION_MODEL = "gpt-image-2";
 const POLL_INTERVAL_MS = 5000;
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
-}
 
 function isActiveTask(task: CharacterGenerationTask): boolean {
   return task.status === "PENDING" || task.status === "RUNNING";

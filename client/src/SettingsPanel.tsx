@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from "react";
-
 import {
   type BillingSettings,
   getSettings,
@@ -21,6 +20,7 @@ import {
   updateProviderSettings,
   updateRuntimeSettings,
 } from "./api";
+import { errorMessage as visibleErrorMessage } from "./errorMessage";
 
 /**
  * 设置面板的数据后端。工作台面（`/api/admin/settings`）由本模块内置；
@@ -78,12 +78,6 @@ export type SettingsPanelProps = {
       readOnly?: boolean;
     }
 );
-
-function visibleErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.trim()
-    ? error.message
-    : fallback;
-}
 
 type ProviderField = {
   name: string;

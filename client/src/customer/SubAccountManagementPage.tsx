@@ -16,6 +16,7 @@ import {
   customerSetSubAccountQuota,
   customerUpdateSubAccount,
 } from "../api";
+import { errorMessage } from "../errorMessage";
 import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import {
   BUSINESS_FEATURES,
@@ -1103,10 +1104,4 @@ function isSessionFailure(cause: unknown): boolean {
   // 它必须落在页面错误区展示服务端文案，绝不能触发 onSessionExpired 把
   // 在线用户踢回登录页（上线前检查 P1-1）。会话失效只有 401。
   return cause instanceof CustomerApiError && cause.status === 401;
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.trim()
-    ? error.message
-    : fallback;
 }

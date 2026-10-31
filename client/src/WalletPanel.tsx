@@ -1,5 +1,4 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-
 import {
   type CreatedRechargeOrder,
   createRechargeOrder,
@@ -11,6 +10,8 @@ import {
   type WalletSnapshot,
   type WalletTransaction,
 } from "./api";
+import { errorMessage } from "./errorMessage";
+import { formatFen } from "./formatFen";
 
 const RECHARGE_PRESETS_YUAN = [100, 200, 500, 1000] as const;
 const PENDING_ORDER_STORAGE_KEY = "wallet.pendingOrderNo";
@@ -373,11 +374,6 @@ function clearPendingOrderNo(storageKey: string) {
   }
 }
 
-function formatFen(amountFen: number): string {
-  const yuan = amountFen / 100;
-  return `${Number.isInteger(yuan) ? yuan : yuan.toFixed(2)}元`;
-}
-
 function signedNumber(value: number): string {
   return value > 0 ? `+${value}` : String(value);
 }
@@ -401,10 +397,4 @@ function transactionTypeLabel(type: WalletTransaction["type"]): string {
     // 管理端审计调账的反向记账（20260923T1200_admin_refund_adjustment）。
     REFUND: "退款调账",
   }[type];
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.trim()
-    ? error.message
-    : fallback;
 }

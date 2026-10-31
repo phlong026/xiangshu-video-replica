@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-
 import {
   CharacterSheetTaskError,
   type CharacterViewType,
@@ -17,6 +16,7 @@ import {
 } from "./api";
 import { CharacterScenePanel } from "./CharacterScenePanel";
 import { CharacterVersionDialog } from "./CharacterVersionDialog";
+import { errorMessage } from "./errorMessage";
 import { SimpleCharacterUpload } from "./SimpleCharacterUpload";
 
 const VIEW_LABELS: Record<CharacterViewType, string> = {
@@ -27,10 +27,6 @@ const VIEW_LABELS: Record<CharacterViewType, string> = {
   LEFT_SIDE: "左侧面",
 };
 const CHARACTER_PAGE_SIZE = 12;
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
-}
 
 function entryAssetIds(entry: SimpleLibraryEntry): string[] {
   return [
