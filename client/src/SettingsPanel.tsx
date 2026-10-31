@@ -890,7 +890,7 @@ function RuntimeForm({
       </div>
       <p className="storage-provider-hint">
         人物图片、参考视频与首帧保存到腾讯云存储（需在桶 CORS 放行
-        PUT/GET/HEAD，否则上传失败）；生成的成片可在任务结果中保存到素材库，或下载到本机。
+        PUT/GET/HEAD，否则上传失败）；生成的成片可在任务结果中直接下载到本机留存。
       </p>
       {runtime.active_storage_provider === "local" ? (
         <div>

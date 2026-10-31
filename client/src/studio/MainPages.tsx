@@ -29,7 +29,6 @@ import {
   removeStudioGenerationTask,
   renameStudioGenerationTask,
   retryStudioTask,
-  saveTaskPreview,
   studioVideoFromViral,
   uploadWorkbenchSourceVideo,
 } from "./live";
@@ -971,35 +970,38 @@ export function WorkbenchPage() {
       </div>
       {/* 原侧边栏「新建创作」弹窗的四个创作方式迁到这里（2026-10-31 信息架构
           精简）；空白创作 = 回到干净草稿并放弃云端「上次内容」，否则旧草稿会
-          在下次进创作页时反复弹恢复提示。 */}
-      <div className="studio-create-row">
-        <span className="studio-create-row-label">开始创作</span>
-        <div className="studio-create-row-items">
-          {(
-            [
-              ["replica", "视频拆解", "video"],
-              ["replacement", "人物置换", "person"],
-              ["video", "视频生成", "sparkles"],
-              ["oral", "数字人口播", "audio"],
-            ] as const
-          ).map(([page, title, icon]) => (
-            <Button key={page} onClick={() => navigate(page)}>
-              <Icon name={icon} size={18} />
-              {title}
+          在下次进创作页时反复弹恢复提示。欢迎页（未登录访客）不再展示创作入口
+          （2026-11-01 拍板与侧边栏按钮同删），访客的转化路径以登录为先。 */}
+      {!requireLogin && (
+        <div className="studio-create-row">
+          <span className="studio-create-row-label">开始创作</span>
+          <div className="studio-create-row-items">
+            {(
+              [
+                ["replica", "视频拆解", "video"],
+                ["replacement", "人物置换", "person"],
+                ["video", "视频生成", "sparkles"],
+                ["oral", "数字人口播", "audio"],
+              ] as const
+            ).map(([page, title, icon]) => (
+              <Button key={page} onClick={() => navigate(page)}>
+                <Icon name={icon} size={18} />
+                {title}
+              </Button>
+            ))}
+            <Button
+              variant="quiet"
+              onClick={() => {
+                patchState({ draft: createDraft() });
+                discardSavedDraft();
+              }}
+            >
+              <Icon name="plus" size={18} />
+              空白创作
             </Button>
-          ))}
-          <Button
-            variant="quiet"
-            onClick={() => {
-              patchState({ draft: createDraft() });
-              discardSavedDraft();
-            }}
-          >
-            <Icon name="plus" size={18} />
-            空白创作
-          </Button>
+          </div>
         </div>
-      </div>
+      )}
       <div className="studio-home-metrics">
         {[
           {
@@ -2020,6 +2022,7 @@ export function TaskDetailPage() {
         "—",
     ],
     ["提交时间", formatTaskTime(task.submitted)],
+    // IA 改版第 5 项：成片不再归档进素材库（素材库已替换为平台培训内容）。
     ["资产状态", result?.saved ? "已保存到素材库" : "以任务返回结果为准"],
   ];
   const recreate = (page: "copy" | "oral" | "replica") => {
@@ -2042,49 +2045,6 @@ export function TaskDetailPage() {
       },
     );
     if (!review) notify("已创建新的创作草稿，请核对正文与素材后重新确认。");
-  };
-  const saveResult = async () => {
-    if (!result || result.saved || actionBusy) return;
-    const requestedContext = previewContextKey;
-    setActionBusy("archive");
-    try {
-      const asset = await saveTaskPreview(result);
-      if (previewContextRef.current !== requestedContext) return;
-      updateData((current) => ({
-        ...current,
-        assets: [
-          ...current.assets.filter(
-            (item) => item.id !== result.id && item.id !== asset.id,
-          ),
-          asset,
-        ],
-        tasks: current.tasks.map((item) =>
-          item.id === task.id ? { ...item, resultId: asset.id } : item,
-        ),
-      }));
-      setPreviewLoad({ key: requestedContext, status: "ready", asset });
-      notify("成片已保存到素材库，可复用或创建发布草稿。未重复扣费。");
-    } catch (error) {
-      if (previewContextRef.current === requestedContext) {
-        notify(
-          error instanceof Error ? error.message : "保存成片失败，请重试。",
-        );
-        if (isResultUrlExpired(error)) {
-          // 直链已失效：重新读取也拿不到，直接进入「文件已失效」态。
-          setPreviewLoad({
-            key: requestedContext,
-            status: "expired",
-            asset: result,
-          });
-          return;
-        }
-        // 超时不代表服务端停止归档；只重新读取结果，不重发保存或生成请求。
-        await previewResult();
-      }
-    } finally {
-      if (previewContextRef.current === requestedContext)
-        setActionBusy(undefined);
-    }
   };
   const downloadResult = async () => {
     if (review) {
@@ -2215,17 +2175,6 @@ export function TaskDetailPage() {
           <h2>动作</h2>
           <div className="studio-result-actions">
             {!review &&
-              result?.generationTaskId &&
-              !result.saved &&
-              previewStatus !== "expired" && (
-                <Button
-                  onClick={() => void saveResult()}
-                  disabled={actionBusy === "archive"}
-                >
-                  {actionBusy === "archive" ? "正在保存成片…" : "保存到素材库"}
-                </Button>
-              )}
-            {!review &&
               taskDeliverable &&
               previewStatus !== "expired" &&
               (!result?.url || previewStatus === "error") && (
@@ -2252,18 +2201,6 @@ export function TaskDetailPage() {
               {actionBusy === "download" ? "正在下载…" : "下载成片"}
             </Button>
             <Button
-              disabled={!result?.saved || !taskDeliverable}
-              onClick={() =>
-                navigate("materials", {
-                  selectedAssetId: result?.id,
-                  returnTo: "task-detail",
-                })
-              }
-            >
-              <Icon name="folder" />
-              查看素材
-            </Button>
-            <Button
               variant="primary"
               disabled={!result?.saved || !taskDeliverable}
               onClick={() =>
@@ -2284,7 +2221,7 @@ export function TaskDetailPage() {
           {result && !result.saved && previewStatus !== "expired" && (
             <Hint>
               {DIRECT_RESULT_RETENTION_HINT}
-              保存到素材库后可复用和创建发布草稿，保存不会重新生成或扣积分。
+              成片请在有效期内下载到本地留存；发布可从发布管理页直接发起。
             </Hint>
           )}
           {!review && taskDeliverable && (

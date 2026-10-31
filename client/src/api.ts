@@ -2393,7 +2393,7 @@ export const RESULT_URL_EXPIRED_MESSAGE =
   "成片文件已失效：生成服务提供的下载链接已过期，无法再预览、下载或保存。如需帮助，请联系客服并提供任务编号。";
 /** 拿到直链交付的成片时给用户的提醒：直链可能有有效期，尽快落到本地或素材库。 */
 export const DIRECT_RESULT_RETENTION_HINT =
-  "成片由生成服务以直链交付，链接可能存在有效期，请尽快下载到本地或保存到素材库，以免失效后无法找回。";
+  "成片由生成服务以直链交付，链接可能存在有效期，请尽快下载到本地留存，以免失效后无法找回。";
 
 export function isResultUrlExpired(error: unknown): boolean {
   return (
@@ -2943,6 +2943,52 @@ export async function listMaterials(
     `/api/studio/materials${suffix}`,
     "读取素材库失败",
   );
+}
+
+// --- 平台培训素材库（IA 改版第 5 项：客户只读）-------------------------------
+
+export interface TrainingMaterialPublicItem {
+  id: string;
+  title: string;
+  description: string;
+  kind: "video" | "training";
+  kind_label: string;
+  content_type: string;
+  file_suffix: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface TrainingMaterialPublicPage {
+  items: TrainingMaterialPublicItem[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export async function listTrainingMaterials(
+  options: { kind?: string; page?: number; pageSize?: number } = {},
+): Promise<TrainingMaterialPublicPage> {
+  const params = new URLSearchParams();
+  if (options.kind) params.set("kind", options.kind);
+  if (options.page) params.set("page", String(options.page));
+  if (options.pageSize) params.set("page_size", String(options.pageSize));
+  const query = params.toString();
+  return requestApiJson<TrainingMaterialPublicPage>(
+    `/api/training-materials${query ? `?${query}` : ""}`,
+    "读取培训素材失败",
+  );
+}
+
+export async function trainingMaterialDownloadUrl(
+  materialId: string,
+): Promise<string> {
+  const result = await requestApiJson<{ url: string }>(
+    `/api/training-materials/${encodeURIComponent(materialId)}/download-url`,
+    "获取下载链接失败",
+    { method: "POST" },
+  );
+  return resolveManagedMediaUrl(result.url);
 }
 
 export async function resolveMaterials(

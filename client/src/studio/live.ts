@@ -429,24 +429,6 @@ export async function loadTaskPreview(
   };
 }
 
-export async function saveTaskPreview(
-  asset: StudioAsset,
-): Promise<StudioAsset> {
-  if (!asset.generationTaskId || asset.saved)
-    throw new Error("当前成片无需保存。");
-  const result = await archiveGenerationTask(asset.generationTaskId);
-  if (!result.result_asset_id) throw new Error("成片尚未保存完成，请重试。");
-  const id = result.result_asset_id;
-  const resolved = await resolveMaterials([`asset:${id}`]);
-  const material = resolved.items.find((item) => item.asset_id === id);
-  if (!material)
-    throw new Error("成片已保存，但素材信息尚未读取成功，请重试。");
-  return {
-    ...studioAssetFromMaterial(material),
-    url: (await getAssetDownloadUrl(id)).url,
-  };
-}
-
 export async function loadProjectDraft(
   project: Project,
 ): Promise<{ draft: StudioDraft; errors: string[] }> {
