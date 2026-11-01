@@ -130,9 +130,7 @@ def refresh_viral_statistics_billed(
             # 链接导入条目（share_url + export_id、无 nonce）走数据源详情会
             # 失败：分流到登录态解析通道回落；未注入则跳过且不记失败——统计
             # 保持导入时的值，留给下次配置可用后补采。
-            if video.native.get("share_url") and not (
-                isinstance(nonce, str) and bool(nonce)
-            ):
+            if video.native.get("share_url") and not (isinstance(nonce, str) and bool(nonce)):
                 if wechat_client is None:
                     continue
                 pending_link.append(video)
