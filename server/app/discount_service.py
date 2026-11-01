@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import psycopg
@@ -80,18 +80,10 @@ def validate_discount_rate(rate: object) -> Decimal:
     return value
 
 
-def calculate_discounted_price(original_price_fen: int, discount_rate: Decimal | None) -> int:
-    """折后售价（分），``ceil`` 向上取整确保平台不损失分位精度（§2.3）.
-
-    ``discount_rate=None`` 表示无折扣，原样返回 ``original_price_fen``。向上取整是消耗侧
-    折扣的既定口径（``reserve`` 时 ``ceil(billed_seconds × discount_rate)``），宁多收一分
-    也不少收，避免累计侵蚀。仅作用于售价，绝不涉及成本（R-A）。
-    """
-    if discount_rate is None:
-        return original_price_fen
-    rate = validate_discount_rate(discount_rate)
-    discounted = Decimal(original_price_fen) * rate
-    return int(discounted.to_integral_value(rounding=ROUND_CEILING))
+# calculate_discounted_price（早期折后价实现）已删：真实链路是
+# billing_catalog.merge_customer_discount 在计价快照里落 discount_rate_snapshot，
+# 本函数与 get_discount_rate 仅测试引用（2026-10-31 计费域审计确认）；
+# ceil 口径的既定实现随零售快照在 billing_catalog 维护。
 
 
 # ---------------------------------------------------------------------------
@@ -173,15 +165,3 @@ def get_best_discount(
         conn, user_id=user_id, interface_key=interface_key, at_time=at_time
     )
     return discounts[0] if discounts else None
-
-
-def get_discount_rate(
-    conn: psycopg.Connection,
-    *,
-    user_id: str,
-    interface_key: str | None = None,
-    at_time: datetime | None = None,
-) -> Decimal | None:
-    """用户当前生效的折扣率；无折扣返回 ``None``（reserve 侧按原价，CW-076 消费）。"""
-    best = get_best_discount(conn, user_id=user_id, interface_key=interface_key, at_time=at_time)
-    return best.discount_rate if best is not None else None

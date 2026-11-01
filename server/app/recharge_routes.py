@@ -5,7 +5,6 @@ import csv
 import io
 import json
 import logging
-import sqlite3
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, cast
@@ -68,7 +67,7 @@ from app.customer_ledger import (
     read_ledger_page,
 )
 from app.customer_pricing import read_pricing
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.ops_metrics import set_current_trace_fields
 from app.payment_provider import (
     DeploymentConfig,
@@ -474,7 +473,7 @@ def create_recharge_order(
                     deployment=deployment,
                     provider=provider,
                 )
-        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
+        except psycopg.errors.UniqueViolation as exc:
             # The merchant-order-number collision is a retryable random draw; any
             # other integrity failure is a real bug and must surface.
             if _retryable_merchant_order_collision(exc):
@@ -679,7 +678,7 @@ def create_customer_recharge_order(
                     recovery_expires_at=recovery_expires_at,
                 )
                 return order
-        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
+        except psycopg.errors.UniqueViolation as exc:
             if _retryable_merchant_order_collision(exc):
                 continue
             raise
@@ -1593,7 +1592,7 @@ def list_customer_recharge_orders(
         ).fetchall()
         return RechargeOrderPage(
             items=[
-                RechargeOrderStatusResponse(**serialize_recharge_order(cast(sqlite3.Row, row)))
+                RechargeOrderStatusResponse(**serialize_recharge_order(cast(BusinessRow, row)))
                 for row in rows
             ],
             total=total,

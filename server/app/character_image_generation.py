@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import sqlite3
 import struct
 import zlib
 from dataclasses import dataclass
@@ -39,7 +38,7 @@ from app.character_identity import (
     require_identity_active,
 )
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.external_calls import external_call_context
 from app.operation_costs import begin_operation_cost, complete_operation_cost
 from app.permissions import require_role, write_audit
@@ -270,7 +269,7 @@ def create_character_generation_tasks(
     identity = read_identity_row(conn, str(persona["identity_id"]))
     require_identity_active(identity)
     owner_user_id = str(identity["owner_user_id"] or identity["created_by"] or actor.id)
-    task_rows: list[sqlite3.Row]
+    task_rows: list[BusinessRow]
     try:
         conn.execute("BEGIN IMMEDIATE")
         latest_version = read_version_row(conn, version_id)
@@ -338,21 +337,6 @@ def create_character_generation_tasks(
     except HTTPException:
         conn.rollback()
         raise
-    except sqlite3.IntegrityError as exc:
-        conn.rollback()
-        concurrent = find_idempotent_character_tasks(
-            conn,
-            version_id=version_id,
-            idempotency_key=clean_key,
-        )
-        if concurrent:
-            require_matching_character_request(concurrent, request_hash=request_hash)
-            return [character_task_from_row(row) for row in concurrent]
-        raise character_error(
-            409,
-            "CHARACTER_GENERATION_CONFLICT",
-            "角色图片候选编号发生并发冲突，请重试。",
-        ) from exc
     task_rows = find_idempotent_character_tasks(
         conn,
         version_id=version_id,
@@ -473,7 +457,7 @@ def acquire_character_generation_task(
     conn: BusinessConnection,
     *,
     worker_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     locked_until = (
         datetime.now(UTC) + timedelta(seconds=CHARACTER_GENERATION_LEASE_SECONDS)
     ).isoformat()
@@ -515,7 +499,7 @@ def acquire_character_generation_task(
     except Exception:
         conn.rollback()
         raise
-    return cast(sqlite3.Row | None, row)
+    return cast(BusinessRow | None, row)
 
 
 def finalize_expired_character_generation_leases(conn: BusinessConnection) -> None:
@@ -567,7 +551,7 @@ def run_next_character_generation_task(
     worker_id: str,
     storage: StorageAdapter,
     provider: CharacterImageProvider | None = None,
-    lease: sqlite3.Row | None = None,
+    lease: BusinessRow | None = None,
 ) -> CharacterGenerationTask | None:
     if lease is None:
         task = acquire_character_generation_task(conn, worker_id=worker_id)
@@ -590,7 +574,7 @@ def _run_character_generation_task(
     worker_id: str,
     storage: StorageAdapter,
     provider: CharacterImageProvider | None,
-    task: sqlite3.Row,
+    task: BusinessRow,
 ) -> CharacterGenerationTask | None:
     cost_record_id = ""
     cost_completed = False
@@ -806,7 +790,7 @@ def _run_character_generation_task(
 def load_character_image_request(
     conn: BusinessConnection,
     *,
-    task: sqlite3.Row,
+    task: BusinessRow,
     storage: StorageAdapter,
 ) -> CharacterImageRequest:
     snapshot = decode_object(task["request_snapshot_json"])
@@ -852,8 +836,8 @@ def load_character_image_request(
 def require_character_generation_context_active(
     conn: BusinessConnection,
     *,
-    task: sqlite3.Row,
-) -> sqlite3.Row:
+    task: BusinessRow,
+) -> BusinessRow:
     version = read_version_row(conn, str(task["character_version_id"]))
     if str(version["status"]) not in GENERATABLE_CHARACTER_VERSION_STATUSES:
         raise CharacterImageProviderFailed(
@@ -875,7 +859,7 @@ def require_character_generation_context_active(
 def require_character_generation_lease_owned(
     conn: BusinessConnection,
     *,
-    task: sqlite3.Row,
+    task: BusinessRow,
     worker_id: str,
 ) -> None:
     current = conn.execute(
@@ -936,7 +920,7 @@ def validate_character_image_result(result: CharacterImageResult) -> None:
 def finish_character_generation_failure(
     conn: BusinessConnection,
     *,
-    task: sqlite3.Row,
+    task: BusinessRow,
     worker_id: str,
     error: CharacterImageProviderFailed,
     provider_task_id: str | None = None,
@@ -1013,7 +997,7 @@ def finish_character_generation_failure(
 def record_stale_character_generation_result(
     conn: BusinessConnection,
     *,
-    task: sqlite3.Row,
+    task: BusinessRow,
     worker_id: str,
     provider_task_id: str,
     cost_amount: float,
@@ -1041,7 +1025,7 @@ def record_stale_character_generation_result(
 def insert_character_worker_audit(
     conn: BusinessConnection,
     *,
-    task: sqlite3.Row,
+    task: BusinessRow,
     action: str,
     metadata: dict[str, object],
 ) -> None:
@@ -1194,7 +1178,7 @@ def character_provider_for_name(
 
 
 def normalize_generation_views(
-    version: sqlite3.Row,
+    version: BusinessRow,
     requested: list[RequiredCharacterViewType] | None,
 ) -> list[RequiredCharacterViewType]:
     required = decode_string_list(version["required_view_types_json"])
@@ -1216,7 +1200,7 @@ def normalize_generation_views(
 
 
 def require_version_generatable(
-    version: sqlite3.Row,
+    version: BusinessRow,
 ) -> None:
     if str(version["status"]) not in GENERATABLE_CHARACTER_VERSION_STATUSES:
         raise character_error(
@@ -1249,7 +1233,7 @@ def next_character_candidate_number(
 
 def character_generation_snapshot(
     *,
-    version: sqlite3.Row,
+    version: BusinessRow,
     owner_user_id: str,
     task_id: str,
     view_type: RequiredCharacterViewType,
@@ -1276,7 +1260,7 @@ def character_generation_snapshot(
 
 def character_generation_request_hash(
     *,
-    version: sqlite3.Row,
+    version: BusinessRow,
     view_types: list[RequiredCharacterViewType],
     candidates_per_view: int,
 ) -> str:
@@ -1295,9 +1279,9 @@ def find_idempotent_character_tasks(
     *,
     version_id: str,
     idempotency_key: str,
-) -> list[sqlite3.Row]:
+) -> list[BusinessRow]:
     return cast(
-        list[sqlite3.Row],
+        list[BusinessRow],
         conn.execute(
             """
             SELECT * FROM character_generation_tasks
@@ -1310,7 +1294,7 @@ def find_idempotent_character_tasks(
 
 
 def require_matching_character_request(
-    rows: list[sqlite3.Row],
+    rows: list[BusinessRow],
     *,
     request_hash: str,
 ) -> None:
@@ -1322,7 +1306,7 @@ def require_matching_character_request(
         )
 
 
-def character_task_from_row(row: sqlite3.Row) -> CharacterGenerationTask:
+def character_task_from_row(row: BusinessRow) -> CharacterGenerationTask:
     return CharacterGenerationTask(
         id=str(row["id"]),
         character_version_id=str(row["character_version_id"]),
@@ -1351,7 +1335,7 @@ def character_task_from_row(row: sqlite3.Row) -> CharacterGenerationTask:
     )
 
 
-def character_asset_from_row(row: sqlite3.Row) -> CharacterAsset:
+def character_asset_from_row(row: BusinessRow) -> CharacterAsset:
     return CharacterAsset(
         id=str(row["id"]),
         character_version_id=str(row["character_version_id"]),

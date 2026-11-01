@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -11,7 +10,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.permissions import write_audit
 
 MAIN_CHARACTER_VERSION_KIND = "main_character"
@@ -591,7 +590,7 @@ def read_character(conn: BusinessConnection, character_id: str) -> CharacterData
     return character_from_row(row)
 
 
-def character_from_row(row: sqlite3.Row) -> CharacterData:
+def character_from_row(row: BusinessRow) -> CharacterData:
     return CharacterData(
         id=str(row["id"]),
         name=str(row["name"]),

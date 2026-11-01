@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import time
 from _thread import LockType
 from dataclasses import dataclass
@@ -30,7 +29,7 @@ from app.auth import (
 )
 from app.customer_fence import BusinessDbDep
 from app.db_pg import DATABASE_URL_ENV, is_customer_production, pg_transaction
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.material_thumbs import THUMBNAIL_URL_EXPIRES_IN, thumbnail_key_for
 from app.media import storage_key_from_uri
 from app.media_routes import (
@@ -151,7 +150,7 @@ def _character_cache_root() -> Path:
     return (local_storage_root() / ".cache" / "character-images").resolve()
 
 
-def _character_cache_identity(row: sqlite3.Row) -> tuple[str, str]:
+def _character_cache_identity(row: BusinessRow) -> tuple[str, str]:
     kind = str(row["kind"])
     content_type = str(row["content_type"] or "").split(";", 1)[0].strip().lower()
     if kind not in CHARACTER_CACHE_KINDS or content_type not in CHARACTER_CACHE_SUFFIXES:
@@ -254,7 +253,7 @@ def _read_verified_character_cache_source(
 
 def _prepare_customer_character_cache(
     conn: BusinessConnection,
-    row: sqlite3.Row,
+    row: BusinessRow,
 ) -> CustomerCharacterCachePlan:
     cache_name, content_type = _character_cache_identity(row)
     storage_uri = str(row["storage_uri"])
@@ -318,7 +317,7 @@ def _populate_customer_character_cache(
 
 def _populate_character_cache(
     conn: BusinessConnection,
-    row: sqlite3.Row,
+    row: BusinessRow,
 ) -> tuple[str, str]:
     cache_name, content_type = _character_cache_identity(row)
     try:
@@ -870,9 +869,9 @@ def read_project(
 def project_detail_row(
     conn: BusinessConnection,
     project_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        "sqlite3.Row | None",
+        "BusinessRow | None",
         conn.execute(
             """
         SELECT
@@ -989,7 +988,7 @@ def _create_download_grant(
 
 def _grant_download_for_asset(
     conn: BusinessConnection, *, actor: CurrentUser, asset_id: str
-) -> tuple[sqlite3.Row, str]:
+) -> tuple[BusinessRow, str]:
     """单资产授权主体：属主校验 → 完整性校验 → 逐资产审计 → 签名 URL。
 
     单资产端点与批量端点（MATERIAL-PERF-A）共用，保证两条通道的授权、
@@ -1133,7 +1132,7 @@ def _signed_thumbnail_url(
     conn: BusinessConnection,
     *,
     actor: CurrentUser,
-    row: sqlite3.Row,
+    row: BusinessRow,
     asset_id: str,
 ) -> str | None:
     """MATERIAL-THUMBS-B / MATERIAL-UX-02：为带缩略图键的视频/图片签出 7 天缩略图对象 URL。
@@ -1387,7 +1386,7 @@ def read_audit_logs(
     return [audit_log_response(row) for row in rows]
 
 
-def asset_response(row: sqlite3.Row) -> AssetResponse:
+def asset_response(row: BusinessRow) -> AssetResponse:
     return AssetResponse(
         id=str(row["id"]),
         project_id=None if row["project_id"] is None else str(row["project_id"]),
@@ -1398,7 +1397,7 @@ def asset_response(row: sqlite3.Row) -> AssetResponse:
     )
 
 
-def project_response(row: sqlite3.Row) -> ProjectResponse:
+def project_response(row: BusinessRow) -> ProjectResponse:
     reference_asset_id = (
         None
         if "reference_asset_id" not in row.keys() or row["reference_asset_id"] is None
@@ -1445,7 +1444,7 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
     )
 
 
-def audit_log_response(row: sqlite3.Row) -> AuditLogResponse:
+def audit_log_response(row: BusinessRow) -> AuditLogResponse:
     return AuditLogResponse(
         id=str(row["id"]),
         actor_user_id=None if row["actor_user_id"] is None else str(row["actor_user_id"]),

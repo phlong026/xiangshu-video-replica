@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -40,7 +39,7 @@ from app.async_compat import reject_legacy_sync_operation
 from app.auth import AuthenticatedUser, CurrentUser, Database, Role
 from app.customer_fence import BusinessDbDep
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.h3_prompts import GenerationContext
 from app.media import (
     DURATION_ROUNDING_TOLERANCE_SECONDS,
@@ -641,7 +640,7 @@ def validate_analysis_enqueue(
     actor: CurrentUser,
     project_id: str,
     request: CreateAnalysisRequest,
-) -> tuple[sqlite3.Row, float]:
+) -> tuple[BusinessRow, float]:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1298,7 +1297,7 @@ def cancel_analysis_task(
     *,
     task_id: str,
     actor: CurrentUser,
-) -> sqlite3.Row:
+) -> BusinessRow:
     """Cancel a queued or running analysis task and release the reservation.
 
     Switching the source video used to leave the old task running (and paying)
@@ -1364,7 +1363,7 @@ def cancel_analysis_task(
     from app.usage_billing import finish_source
 
     finish_source(conn, task_id, units=0, succeeded=False, cancelled=True)
-    return cast(sqlite3.Row, updated)
+    return cast(BusinessRow, updated)
 
 
 def load_task_actor(conn: BusinessConnection, user_id: str) -> CurrentUser:
@@ -1382,14 +1381,14 @@ def load_task_actor(conn: BusinessConnection, user_id: str) -> CurrentUser:
     )
 
 
-def load_analysis_task(conn: BusinessConnection, task_id: str) -> sqlite3.Row:
+def load_analysis_task(conn: BusinessConnection, task_id: str) -> BusinessRow:
     row = conn.execute("SELECT * FROM analysis_tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "ANALYSIS_TASK_NOT_FOUND"})
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
-def analysis_task_response(row: sqlite3.Row) -> AnalysisTaskResponse:
+def analysis_task_response(row: BusinessRow) -> AnalysisTaskResponse:
     return AnalysisTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -1443,7 +1442,7 @@ def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
     )
 
 
-def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> sqlite3.Row:
+def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> BusinessRow:
     try:
         row = get_version(conn, analysis_id)
     except LookupError as exc:
@@ -1460,7 +1459,7 @@ def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> sqlite3
     return row
 
 
-def version_response(row: sqlite3.Row) -> VersionResponse:
+def version_response(row: BusinessRow) -> VersionResponse:
     return VersionResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),

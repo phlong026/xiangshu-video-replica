@@ -492,19 +492,10 @@ def complete_attempt(
     )
 
 
-def record_attempt(
-    conn: BusinessConnection,
-    *,
-    operation_id: str,
-    attempt_key: str,
-    usage: Decimal | str | int | float | None,
-    service: str | None = None,
-) -> str:
-    attempt_id = begin_attempt(
-        conn, operation_id=operation_id, attempt_key=attempt_key, service=service
-    )
-    complete_attempt(conn, attempt_id=attempt_id, usage=usage)
-    return attempt_id
+# record_attempt（begin+complete 一步到位的旧变体）已删：真实链路是
+# billing_meter/generation_worker 分别调 begin_attempt/complete_attempt，
+# 该函数仅测试引用（2026-10-31 计费域审计确认 billing_attempts 的活跃
+# 写入方为 billing_meter、generation_worker、operation_costs 三处）。
 
 
 def begin_source_attempt(

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import sqlite3
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -24,7 +23,7 @@ import psycopg.errors as psycopg_errors
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.generation import (
     H3_MODEL,
     BatchResult,
@@ -134,8 +133,8 @@ def _independent_request_hash(request: IndependentVideoRequest) -> str:
 
 def _find_independent_batch(
     conn: BusinessConnection, *, actor_id: str, key: str
-) -> sqlite3.Row | None:
-    row: sqlite3.Row | None = conn.execute(
+) -> BusinessRow | None:
+    row: BusinessRow | None = conn.execute(
         """
         SELECT id, request_hash
         FROM generation_batches
@@ -624,7 +623,7 @@ def create_independent_batch(
             )
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
-    except (sqlite3.IntegrityError, psycopg_errors.UniqueViolation):
+    except psycopg_errors.UniqueViolation:
         # SQLite：写锁保证事务内复查可见，可安全回放；
         # PG：NULL project 不受 UNIQUE 约束保护，由 075 的部分唯一索引兜底。
         # fenced 事务冲突后已中止，无法在同事务内回放——返回 409 让客户端

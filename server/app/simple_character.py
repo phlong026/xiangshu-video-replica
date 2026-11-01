@@ -13,7 +13,6 @@ import binascii
 import hashlib
 import json
 import logging
-import sqlite3
 import struct
 import uuid
 import zlib
@@ -46,7 +45,7 @@ from app.character_identity import (
     validate_key_segment,
 )
 from app.character_image_generation import png_chunk
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.first_frames import (
     FirstFrameModel,
     ImageInput,
@@ -981,7 +980,7 @@ def _profile_constraint(constraints: dict[str, object], key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _snapshot_contact_sheet_asset_id(row: sqlite3.Row | None) -> str | None:
+def _snapshot_contact_sheet_asset_id(row: BusinessRow | None) -> str | None:
     """Read ``contact_sheet_asset_id`` from a publication snapshot.
 
     Versions published before the contact sheet feature have no such field,
@@ -999,7 +998,7 @@ def _snapshot_contact_sheet_asset_id(row: sqlite3.Row | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _snapshot_generation_source(row: sqlite3.Row | None) -> str | None:
+def _snapshot_generation_source(row: BusinessRow | None) -> str | None:
     if row is None or row["snapshot_json"] is None:
         return None
     try:
@@ -1012,8 +1011,8 @@ def _snapshot_generation_source(row: sqlite3.Row | None) -> str | None:
     return value if value in {"image_provider", "local_placeholder"} else None
 
 
-def _group_by_identity(rows: list[sqlite3.Row]) -> dict[str, list[sqlite3.Row]]:
-    grouped: dict[str, list[sqlite3.Row]] = {}
+def _group_by_identity(rows: list[BusinessRow]) -> dict[str, list[BusinessRow]]:
+    grouped: dict[str, list[BusinessRow]] = {}
     for row in rows:
         grouped.setdefault(str(row["identity_id"]), []).append(row)
     return grouped
@@ -1745,7 +1744,7 @@ def list_simple_scene_looks_page(
         """,
         (identity_id, limit, offset),
     ).fetchall()
-    grouped: dict[str, list[sqlite3.Row]] = {}
+    grouped: dict[str, list[BusinessRow]] = {}
     for row in rows:
         grouped.setdefault(str(row["persona_id"]), []).append(row)
 

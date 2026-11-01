@@ -22,7 +22,29 @@ from test_customer_pricing import (  # noqa: F401
 from app.billing_catalog import SERVICES, Tariff, calculate_credits
 from app.billing_reports import date_bounds, operation_rows, statistics
 from app.db_portable import BusinessConnection
-from app.usage_billing import accept_operation, finish_operation, record_attempt
+from app.usage_billing import (
+    accept_operation,
+    begin_attempt,
+    complete_attempt,
+    finish_operation,
+)
+
+
+def record_attempt(
+    conn,
+    *,
+    operation_id: str,
+    attempt_key: str,
+    usage,
+    service: str | None = None,
+) -> str:
+    """测试播种辅助：begin+complete 一步落一条 attempt（原生产函数已删，
+    语义即 begin_attempt + complete_attempt 的组合）。"""
+    attempt_id = begin_attempt(
+        conn, operation_id=operation_id, attempt_key=attempt_key, service=service
+    )
+    complete_attempt(conn, attempt_id=attempt_id, usage=usage)
+    return attempt_id
 
 
 def test_panorama_name_and_stable_id_filter_match_operations(pricing_client, route_state):

@@ -6,7 +6,6 @@ storage 网络调用（付费调用在 worker 事务外）；轮询走只读任�
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -15,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.analysis_routes import get_video_analysis_provider
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessRow
 from app.ops_metrics import get_or_create_request_id
 from app.permissions import (
     remap_security_denial,
@@ -74,7 +74,7 @@ class ReplicaPromptVersionResponse(BaseModel):
     created_at: str
 
 
-def replica_prompt_task_response(row: sqlite3.Row) -> ReplicaPromptTaskResponse:
+def replica_prompt_task_response(row: BusinessRow) -> ReplicaPromptTaskResponse:
     return ReplicaPromptTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -98,7 +98,7 @@ def replica_prompt_task_response(row: sqlite3.Row) -> ReplicaPromptTaskResponse:
     )
 
 
-def _measured_asset_duration(asset: sqlite3.Row) -> float:
+def _measured_asset_duration(asset: BusinessRow) -> float:
     import json
 
     try:
@@ -291,7 +291,7 @@ def read_latest_replica_prompt_result(
     )
 
 
-def _version_payload(row: sqlite3.Row) -> dict[str, Any]:
+def _version_payload(row: BusinessRow) -> dict[str, Any]:
     import json
 
     try:
