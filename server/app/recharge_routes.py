@@ -67,7 +67,7 @@ from app.customer_ledger import (
     read_ledger_page,
 )
 from app.customer_pricing import read_pricing
-from app.db_portable import BusinessConnection, BusinessRow
+from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
 from app.ops_metrics import set_current_trace_fields
 from app.payment_provider import (
     DeploymentConfig,
@@ -473,7 +473,7 @@ def create_recharge_order(
                     deployment=deployment,
                     provider=provider,
                 )
-        except psycopg.errors.UniqueViolation as exc:
+        except IntegrityConstraintError as exc:
             # The merchant-order-number collision is a retryable random draw; any
             # other integrity failure is a real bug and must surface.
             if _retryable_merchant_order_collision(exc):
@@ -678,7 +678,7 @@ def create_customer_recharge_order(
                     recovery_expires_at=recovery_expires_at,
                 )
                 return order
-        except psycopg.errors.UniqueViolation as exc:
+        except IntegrityConstraintError as exc:
             if _retryable_merchant_order_collision(exc):
                 continue
             raise
