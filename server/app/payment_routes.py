@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -239,7 +238,7 @@ def zpay_notify(
     except PaymentConfirmationError as exc:
         logger.warning("ZPay callback rejected: %s", exc.code)
         return PlainTextResponse("failure", status_code=exc.status_code)
-    except (sqlite3.OperationalError, psycopg.errors.OperationalError) as exc:
+    except psycopg.errors.OperationalError as exc:
         logger.warning("ZPay callback deferred because the payment database is busy: %s", exc)
         return PlainTextResponse("retry", status_code=503)
     return PlainTextResponse("success")
@@ -350,7 +349,7 @@ def _handle_wechat_notification(
     except PaymentConfirmationError as exc:
         logger.warning("WeChat callback settlement rejected: %s", exc.code)
         return _wechat_fail(exc.code, status_code=exc.status_code)
-    except (sqlite3.OperationalError, psycopg.errors.OperationalError) as exc:
+    except psycopg.errors.OperationalError as exc:
         logger.warning("WeChat callback deferred because the payment database is busy: %s", exc)
         return _wechat_fail("PAYMENT_DATABASE_BUSY", status_code=503)
     return _wechat_success()
@@ -485,14 +484,6 @@ def sync_recharge_order(
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": str(exc)},
-        ) from exc
-    except sqlite3.OperationalError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "PAYMENT_DATABASE_BUSY",
-                "message": "Payment settlement is temporarily busy.",
-            },
         ) from exc
     return RechargeOrderStatusResponse(**serialize_recharge_order(confirmed))
 

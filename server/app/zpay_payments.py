@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
-from app.db_portable import BusinessConnection, IntegrityConstraintError
+from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
 from app.recharge_packages import grant_discount_from_snapshot, parse_package_snapshot
 from app.wechat_native_client import (
     NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS,
@@ -97,9 +96,9 @@ def read_recharge_order(
     conn: BusinessConnection,
     *,
     merchant_order_no: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             """
             SELECT
@@ -115,7 +114,7 @@ def read_recharge_order(
 
 def _read_settlement_order(
     conn: BusinessConnection, *, merchant_order_no: str, trade_no_column: str
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     """Read a recharge order for settlement, aliasing the trade reference column.
 
     Same projection as ``read_recharge_order`` but the provider trade reference is
@@ -127,7 +126,7 @@ def _read_settlement_order(
     if trade_no_column not in _SETTLEMENT_TRADE_COLUMNS:
         raise ValueError(f"Unsupported settlement trade column: {trade_no_column}")
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             f"""
             SELECT
@@ -144,7 +143,7 @@ def _read_settlement_order(
     )
 
 
-def serialize_recharge_order(row: sqlite3.Row) -> RechargeOrderData:
+def serialize_recharge_order(row: BusinessRow) -> RechargeOrderData:
     return {
         "order_no": str(row["merchant_order_no"]),
         "status": cast(RechargeStatus, str(row["status"])),
@@ -380,7 +379,7 @@ def confirm_recharge_payment(
     source_digest: str,
     allowed_channels: Collection[str] | None = None,
     provider_spec: SettlementProviderSpec = ZPAY_SETTLEMENT_SPEC,
-) -> sqlite3.Row:
+) -> BusinessRow:
     """Idempotently settle a recharge order and credit the owner's wallet.
 
     ``provider_trade_no`` carries the provider's trade reference *value* regardless of
