@@ -4,6 +4,7 @@ import hashlib
 import struct
 
 from app.character_contracts import RequiredCharacterViewType
+from app.image_dimensions import scan_jpeg_dimensions
 
 CHARACTER_QUALITY_SCHEMA_VERSION = "character-quality.v1"
 
@@ -65,26 +66,11 @@ def png_dimensions(content: bytes) -> tuple[int, int]:
 
 
 def jpeg_dimensions(content: bytes) -> tuple[int, int]:
-    """扫描 SOF 段取尺寸：段内第 3-6 字节是高 2 字节 + 宽 2 字节。"""
-    offset = 2
-    while offset + 9 <= len(content):
-        if content[offset] != 0xFF:
-            offset += 1
-            continue
-        marker = content[offset + 1]
-        if marker in {0xD8, 0x01} or 0xD0 <= marker <= 0xD7:
-            offset += 2
-            continue
-        if marker in {0xD9, 0xDA}:
-            break
-        segment_length = struct.unpack(">H", content[offset + 2 : offset + 4])[0]
-        if segment_length < 2 or offset + 2 + segment_length > len(content):
-            break
-        if 0xC0 <= marker <= 0xCF and marker not in {0xC4, 0xC8, 0xCC}:
-            height, width = struct.unpack(">HH", content[offset + 5 : offset + 9])
-            return width, height
-        offset += 2 + segment_length
-    raise ValueError("invalid JPEG content")
+    """SOF 尺寸扫描走共享实现（image_dimensions），失败维持 ValueError 契约。"""
+    dimensions = scan_jpeg_dimensions(content)
+    if dimensions is None:
+        raise ValueError("invalid JPEG content")
+    return dimensions
 
 
 def webp_dimensions(content: bytes) -> tuple[int, int]:

@@ -19,10 +19,11 @@ import {
   clearAdminCsrfToken,
   getAdminCsrfToken,
   notifyAdminSessionExpired,
-  resolveApiBaseUrl,
   resolveManagedMediaUrl,
   setAdminCsrfToken,
 } from "./api";
+import { apiBaseUrl } from "./apiBase";
+import { createControlRequest } from "./controlRequest";
 
 export async function getCustomerPricing(): Promise<CustomerPricing> {
   const response = await requestControl(
@@ -291,14 +292,6 @@ export function createIdempotencyKey(): string {
   return newIdempotencyKey();
 }
 
-function apiBaseUrl(): string {
-  return resolveApiBaseUrl(
-    import.meta.env.VITE_API_BASE_URL,
-    import.meta.env.PROD,
-    window.location,
-  );
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -332,45 +325,24 @@ async function parseActivationError(
   return new AdminActivationError(text, response.status, code);
 }
 
-async function requestControl(
-  path: string,
-  init: RequestInit & { headers?: Record<string, string> },
-  timeoutMs: number = DEFAULT_TIMEOUT_MS,
-): Promise<Response> {
-  const csrfAtStart = getAdminCsrfToken();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const headers: Record<string, string> = { ...(init.headers ?? {}) };
-  if (init.body && !(init.body instanceof FormData)) {
-    headers["Content-Type"] = "application/json";
-  }
-  try {
-    const response = await fetch(`${apiBaseUrl()}${path}`, {
-      ...init,
-      headers,
-      credentials: "include",
-      signal: controller.signal,
-    });
-    // Authentication failures are handled by the login/restore form itself.
-    // Protected reads and writes must also close the active management UI.
-    if (
-      response.status === 401 &&
-      path !== "/api/control/admin/session/password" &&
-      path !== "/api/control/admin/session/exchange" &&
-      !(path === "/api/control/admin/session" && init.method === "GET")
-    ) {
-      notifyAdminSessionExpired(csrfAtStart);
-    }
-    return response;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new AdminActivationError("请求超时，请重试");
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
+// 控制面请求骨架统一走 controlRequest 工厂（与 api.ts 共享）；本侧策略：
+// 5 秒默认超时；401 通知豁免登录/换登/会话读三条路径（认证失败由登录
+// 表单自己处理，受保护读写才关闭管理界面）；写路径的 CSRF 一律由
+// adminWrite 显式携带，不做隐式自动补；超时抛 AdminActivationError。
+// 会话函数用惰性引用：页面测试会对 ../api 做整体 mock（只给业务函数），
+// 配置在模块初始化期就读绑定会把这类既有 mock 全部炸掉。
+const requestControl = createControlRequest({
+  defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
+  baseUrl: apiBaseUrl,
+  csrfSnapshot: () => getAdminCsrfToken(),
+  onUnauthorized: (csrfAtStart) => notifyAdminSessionExpired(csrfAtStart),
+  unauthorizedExempt: (path, init) =>
+    path === "/api/control/admin/session/password" ||
+    path === "/api/control/admin/session/exchange" ||
+    (path === "/api/control/admin/session" && init.method === "GET"),
+  autoCsrfForWrites: false,
+  timeoutError: (message) => new AdminActivationError(message),
+});
 
 export async function adminWrite<T>(
   path: string,
@@ -4146,6 +4118,14 @@ export type AdminViralSearchResult = {
   timeRange: string;
 };
 
+export type AdminViralLinkImportResult = {
+  items: CollectedViralVideo[];
+  platform: string;
+  videoId: string;
+  /** false = 平台转存槽位被占用：条目已入库，需稍后手动转存 */
+  archiveQueued: boolean;
+};
+
 /**
  * 管理端实时搜索：走管理端写契约（confirm + reason + 幂等键），结果直接
  * upsert 进内容池，但**不扣任何客户积分**（供应商成本记平台账）。响应行
@@ -4173,6 +4153,29 @@ export async function adminSearchViralVideos(
     240_000,
   );
   // 命中行与爆款视频库同构，封面同样是站内代理地址，必须一并绝对化后再 `<img>`。
+  return { ...result, items: result.items.map(withManagedCover) };
+}
+
+/**
+ * 管理端粘贴链接采集：解析（抖音 / 小红书 / 视频号）→ 入内容池 → 入队媒体
+ * 转存主存储，加盟商播放与复刻都走自有签名链接。不计客户积分；
+ * archiveQueued=false 表示平台转存槽位被占用，条目已入库、需稍后手动转存。
+ */
+export async function adminImportViralLink(
+  url: string,
+  reason: string,
+  idempotencyKey: string,
+): Promise<AdminViralLinkImportResult> {
+  const result = await adminWrite<AdminViralLinkImportResult>(
+    "/api/control/viral/link-import",
+    { url },
+    reason,
+    "链接采集失败",
+    idempotencyKey,
+    "POST",
+    // 与搜索同量级：解析通道外呼（视频号为三步链）+ 封面归档，远慢于普通读。
+    240_000,
+  );
   return { ...result, items: result.items.map(withManagedCover) };
 }
 
@@ -4399,70 +4402,6 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     throw await parseActivationError(response, "读取仪表盘失败");
   }
   return (await response.json()) as DashboardSummary;
-}
-export type LegacyCreditPolicy = {
-  version: number;
-  mode: "keep" | "convert";
-  numerator: number;
-  denominator: number;
-};
-export type LegacyCreditConversion = {
-  user_id: string;
-  before_credits: number;
-  after_credits: number;
-  converted: boolean;
-  policy: LegacyCreditPolicy;
-};
-export async function getLegacyCreditPolicy(): Promise<LegacyCreditPolicy> {
-  const response = await requestControl(
-    "/api/control/settings/legacy-credit-policy",
-    {},
-  );
-  if (!response.ok)
-    throw await parseActivationError(response, "历史积分策略加载失败");
-  return response.json();
-}
-export function saveLegacyCreditPolicy(
-  policy: Omit<LegacyCreditPolicy, "version"> & { expected_version: number },
-  reason: string,
-  key: string,
-): Promise<LegacyCreditPolicy> {
-  return adminWrite(
-    "/api/control/settings/legacy-credit-policy",
-    policy,
-    reason,
-    "保存历史积分策略失败",
-    key,
-    "PUT",
-  );
-}
-export async function getLegacyCreditConversion(
-  userId: string,
-): Promise<LegacyCreditConversion> {
-  const response = await requestControl(
-    `/api/control/customers/${encodeURIComponent(userId)}/credit-conversion`,
-    {},
-  );
-  if (!response.ok)
-    throw await parseActivationError(response, "转换预览不可用");
-  return response.json();
-}
-export function applyLegacyCreditConversion(
-  userId: string,
-  preview: LegacyCreditConversion,
-  reason: string,
-  key: string,
-): Promise<LegacyCreditConversion> {
-  return adminWrite(
-    `/api/control/customers/${encodeURIComponent(userId)}/credit-conversion`,
-    {
-      expected_version: preview.policy.version,
-      expected_balance: preview.before_credits,
-    },
-    reason,
-    "历史积分转换失败",
-    key,
-  );
 }
 
 // ---------------------------------------------------------------------------

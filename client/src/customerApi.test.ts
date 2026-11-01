@@ -9,7 +9,6 @@ import {
   customerApproveDevicePairing,
   customerCloseRechargeOrder,
   customerDismissDevicePairing,
-  customerEnrollDevice,
   customerHeartbeat,
   customerListDevices,
   customerLogin,
@@ -416,65 +415,7 @@ describe("customer API adapter requests", () => {
     expect(headers.get("Idempotency-Key")).toBe("idem-unbind");
   });
 
-  it("surfaces both enroll outcomes from the pairing state machine", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(202, {
-          pairing_request_id: "pairing-1",
-          status: "PENDING",
-          expires_at: "2099-01-01T00:00:00+00:00",
-          request_id: "req-1",
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse(201, {
-          device_id: "device-2",
-          slot_no: 2,
-          device_token: oneTimeTokenText,
-          request_id: "req-2",
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const enrollInput = {
-      activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-      deviceFingerprint: "fingerprint-2",
-      deviceName: "备用手机",
-      devicePlatform: "android",
-      idempotencyKey: "idem-enroll",
-    };
-    const waiting = await customerEnrollDevice(enrollInput);
-    const granted = await customerEnrollDevice(enrollInput);
-
-    expect(waiting).toEqual({
-      status: 202,
-      replayed: false,
-      pending: {
-        pairing_request_id: "pairing-1",
-        status: "PENDING",
-        expires_at: "2099-01-01T00:00:00+00:00",
-        request_id: "req-1",
-      },
-    });
-    expect(granted).toEqual({
-      status: 201,
-      replayed: false,
-      credential: {
-        device_id: "device-2",
-        slot_no: 2,
-        device_token: oneTimeTokenText,
-        request_id: "req-2",
-      },
-    });
-    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      `${BASE}/api/customer/devices/enroll`,
-    );
-    expect((options.headers as Headers).get("Idempotency-Key")).toBe(
-      "idem-enroll",
-    );
-  });
+  // enroll（第二设备配对注册）用例已随激活码方案退役（2026-10-31 冗余清理）。
 
   it("approves a pairing with the first device's credential", async () => {
     const fetchMock = vi.fn().mockResolvedValue(

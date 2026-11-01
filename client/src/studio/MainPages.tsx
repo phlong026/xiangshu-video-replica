@@ -35,7 +35,7 @@ import {
 } from "./live";
 import { PlatformLogo } from "./PlatformLogo";
 import { readPageCache, writePageCache } from "./pageCache";
-import { draftFromTask } from "./state";
+import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioData, StudioTask, StudioVideo } from "./types";
 import {
@@ -228,8 +228,10 @@ export function WorkbenchPage() {
     openLive,
     notify,
     patchDraft,
+    patchState,
     updateData,
     state,
+    discardSavedDraft,
     extractScriptFromUpload,
     extractViralCopy,
     refresh,
@@ -893,7 +895,7 @@ export function WorkbenchPage() {
           </button>
           <input
             aria-label="视频链接"
-            placeholder="粘贴抖音或小红书视频链接"
+            placeholder="粘贴抖音 / 小红书 / 视频号分享链接"
             value={sourceLink}
             onChange={(event) => {
               linkOperationRef.current += 1;
@@ -944,8 +946,9 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          支持抖音、小红书的视频链接；其他平台请上传 MP4/MOV 文件；视频复刻支持
-          4-15 秒、200 MB 以内的视频，更长的视频会自动提取音轨用于提取文案
+          支持抖音、小红书、视频号的分享链接；其他平台请上传 MP4/MOV
+          文件；视频复刻支持 4-30 秒、200 MB
+          以内的视频，更长的视频会自动提取音轨用于提取文案
           （桌面端，原视频不上传）。
         </p>
         {linkState.status === "loading" && (
@@ -966,6 +969,37 @@ export function WorkbenchPage() {
             文件， 上传完成后点击“提取文案”。
           </p>
         )}
+      </div>
+      {/* 原侧边栏「新建创作」弹窗的四个创作方式迁到这里（2026-10-31 信息架构
+          精简）；空白创作 = 回到干净草稿并放弃云端「上次内容」，否则旧草稿会
+          在下次进创作页时反复弹恢复提示。 */}
+      <div className="studio-create-row">
+        <span className="studio-create-row-label">开始创作</span>
+        <div className="studio-create-row-items">
+          {(
+            [
+              ["replica", "视频拆解", "video"],
+              ["replacement", "人物置换", "person"],
+              ["video", "视频生成", "sparkles"],
+              ["oral", "数字人口播", "audio"],
+            ] as const
+          ).map(([page, title, icon]) => (
+            <Button key={page} onClick={() => navigate(page)}>
+              <Icon name={icon} size={18} />
+              {title}
+            </Button>
+          ))}
+          <Button
+            variant="quiet"
+            onClick={() => {
+              patchState({ draft: createDraft() });
+              discardSavedDraft();
+            }}
+          >
+            <Icon name="plus" size={18} />
+            空白创作
+          </Button>
+        </div>
       </div>
       <div className="studio-home-metrics">
         {[
@@ -1176,6 +1210,26 @@ export function WorkbenchPage() {
                       </span>
                     </div>
                     <div className="studio-home-viral-actions">
+                      {/* 与爆款视频页卡片同一套 4–30s 门槛的主 CTA：一键复刻
+                          直达详情页自动开跑；超限视频保留提取文案方向。 */}
+                      {typeof video.durationMs === "number" &&
+                        video.durationMs >= 4_000 &&
+                        video.durationMs <= 30_000 && (
+                          <Button
+                            variant="primary"
+                            aria-label={`一键复刻：${video.title}`}
+                            onClick={() => {
+                              navigate("viral-detail", {
+                                selectedVideoId: video.id,
+                                returnTo: "workbench",
+                                viralReplicateIntent: true,
+                              });
+                              persistWorkbenchViralDetailUrl(video);
+                            }}
+                          >
+                            一键复刻
+                          </Button>
+                        )}
                       <Button
                         variant="quiet"
                         aria-label={`查看详情：${video.title}`}
@@ -1461,7 +1515,7 @@ export function TasksPage() {
   };
   return (
     <section className="studio-tasks-page">
-      <h1>任务中心</h1>
+      {/* 页面标题由数据看板外壳（页签行）提供，这里不再重复 h1。 */}
       <div className="studio-page-actions">
         {!review && (
           <Button onClick={() => openLive("tasks")}>历史任务与下载</Button>

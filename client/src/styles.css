@@ -3,7 +3,7 @@
 /* 管理端与内部壳基础样式表。
  * 客户 lane 专属样式已拆出：customer/customer-access.css（RootApp 引入）、legacy-panels.css（LiveWorkspacePanel 引入）。
  * 管理入口经 admin-main.tsx 引入本文件（ADMIN-UI-AUDIT-20260911）；客户制品禁止包含本文件（CW-019）。
- * 再生成拆分：node scripts/split_customer_styles.mjs。
+ * 拆分是一次性的：三个文件此后独立演进，重跑 split_customer_styles.mjs 无法复现现状。
  */
 
 :root {

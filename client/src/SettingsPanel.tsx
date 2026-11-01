@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from "react";
-
 import {
   type BillingSettings,
   getSettings,
@@ -21,6 +20,7 @@ import {
   updateProviderSettings,
   updateRuntimeSettings,
 } from "./api";
+import { errorMessage as visibleErrorMessage } from "./errorMessage";
 
 /**
  * 设置面板的数据后端。工作台面（`/api/admin/settings`）由本模块内置；
@@ -78,12 +78,6 @@ export type SettingsPanelProps = {
       readOnly?: boolean;
     }
 );
-
-function visibleErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.trim()
-    ? error.message
-    : fallback;
-}
 
 type ProviderField = {
   name: string;
@@ -212,6 +206,14 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
       },
     ],
   },
+  yuanbao: {
+    title: "视频号解析",
+    note: "视频号分享链接 → 无水印视频与统计。登录态过期需重新在浏览器登录后整串复制 Cookie 更新；测试连接只校验登录态是否有效。",
+    fields: [
+      { name: "cookie", label: "登录态 Cookie", secret: true },
+      { name: "agent_id", label: "会话 ID（浏览器地址栏 /chat/ 后一段）" },
+    ],
+  },
 };
 
 const PROVIDER_ORDER: ProviderName[] = [
@@ -223,6 +225,7 @@ const PROVIDER_ORDER: ProviderName[] = [
   "tikhub",
   "dashscope",
   "douyidou",
+  "yuanbao",
   "ses",
 ];
 

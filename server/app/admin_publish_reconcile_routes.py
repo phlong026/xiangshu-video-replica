@@ -13,8 +13,7 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter
-from app.auth import CurrentUser
+from app.admin_auth_routes import AdminReader, AdminWriter, admin_to_current_user
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.publish_records import (
@@ -24,15 +23,6 @@ from app.publish_records import (
 )
 
 router = APIRouter(prefix="/api/control/publish-records", tags=["admin-publish-reconcile"])
-
-
-def _admin_to_current_user(actor: AdminActor) -> CurrentUser:
-    return CurrentUser(
-        id=actor.user_id,
-        username=actor.username,
-        display_name=actor.display_name,
-        role="admin",
-    )
 
 
 class PublishReconcileRequest(BaseModel):
@@ -71,7 +61,7 @@ def reconcile_record(
         record = reconcile_submission_unknown(
             conn,
             record_id=record_id,
-            actor=_admin_to_current_user(actor),
+            actor=admin_to_current_user(actor),
             outcome=request.outcome,
             platform_item_id=request.platform_item_id,
             note=request.note,

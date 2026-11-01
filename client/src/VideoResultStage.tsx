@@ -8,6 +8,7 @@ import {
   type GenerationTaskSummary,
   type VideoDownloadResult,
 } from "./api";
+import { formatTaskStatus } from "./taskStatusLabels";
 import { VideoPreview } from "./VideoPreview";
 
 // 生成结果舞台 = 客户视角的结果消费视图：大预览框 + 真实进度叙事 +
@@ -1129,15 +1130,8 @@ function formatCost(value: number | null | undefined) {
     : `¥${value.toFixed(2)}`;
 }
 
+// 状态文案统一走 taskStatusLabels：此前本文件把 PENDING/QUEUED 都显示成
+// 「生成中」，与任务记录面板（等待中/排队中）及自身步骤条口径不一致。
 function formatStatus(status: string) {
-  const labels: Record<string, string> = {
-    CANCELLED: "已取消",
-    COMPLETED_WITH_FAILURES: "部分失败",
-    FAILED: "失败",
-    NEEDS_ATTENTION: "需要处理",
-    PENDING: "生成中",
-    QUEUED: "生成中",
-    SUCCEEDED: "已完成",
-  };
-  return labels[status] ?? status;
+  return formatTaskStatus(status);
 }

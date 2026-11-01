@@ -449,8 +449,9 @@ def test_desktop_installer_workflow_builds_three_internal_test_targets() -> None
     assert "workflow_dispatch:" in workflow
     assert "push:" in workflow
     push_config = workflow.split("\n  push:\n", 1)[1].split("\n\npermissions:", 1)[0]
-    assert "main" in push_config
-    assert "feat/desktop-actions-20260917" in push_config
+    assert "branches: [main]" in push_config
+    # 2026-10-31 冗余清理移除了过期任务分支监听（本地与远端均无该分支）。
+    assert "desktop-actions" not in push_config
     assert "pull_request:" not in workflow
     assert "permissions:\n  contents: read" in workflow
     assert workflow.count("- platform:") == 3

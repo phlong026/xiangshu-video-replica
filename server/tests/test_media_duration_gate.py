@@ -54,9 +54,9 @@ def _prepared(purpose: str, storage: FakeStorageAdapter) -> PreparedUploadComple
     ("duration", "purpose", "expect_error"),
     [
         (10.0, "replica", False),
-        # 15s + 0.1s 容差以内仍放行，与复刻分析入口的上限一致。
-        (15.05, "replica", False),
-        (15.2, "replica", True),
+        # 30s + 0.1s 容差以内仍放行，与复刻分析入口的上限一致。
+        (30.05, "replica", False),
+        (30.2, "replica", True),
         (3.8, "replica", True),
         # 提取文案：上限放开，下限保留（太短的素材没有转写价值，也防损坏文件）。
         (60.0, "script", False),
@@ -82,8 +82,8 @@ def test_validate_duration_splits_by_purpose(
 
 def test_validate_duration_error_copy_matches_scenario() -> None:
     with pytest.raises(HTTPException) as replica_failure:
-        validate_duration(20.0)
-    assert "4–15 秒" in replica_failure.value.detail["message"]
+        validate_duration(40.0)
+    assert "4–30 秒" in replica_failure.value.detail["message"]
 
     with pytest.raises(HTTPException) as script_failure:
         validate_duration(2.0, purpose="script")

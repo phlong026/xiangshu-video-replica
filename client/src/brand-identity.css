@@ -1,9 +1,8 @@
 .brand-identity {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  /* Preserve the original horizontal lockup, enlarged by exactly 20%. */
-  gap: 3.6px;
+  /* 两行版式：logo 与文案块垂直居中，文案块内部两行左缘对齐。 */
+  gap: 9px;
   color: #e9b63d;
   text-align: left;
   white-space: nowrap;
@@ -16,11 +15,19 @@
 }
 .brand-identity__text {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   font-size: 15.6px;
   font-weight: 500;
   line-height: 1.5;
 }
 .brand-identity__text > strong {
   font-weight: inherit;
+}
+.brand-identity__text > small {
+  font-size: 11.7px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: #c8c8c1;
 }

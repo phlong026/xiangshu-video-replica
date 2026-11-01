@@ -97,7 +97,6 @@ import {
   ProfilePage,
   type StudioAccountSummary,
   TaskDetailPage,
-  TasksPage,
   WorkbenchPage,
 } from "./MainPages";
 import { PeoplePage, PersonPage } from "./PeoplePages";
@@ -121,7 +120,6 @@ import {
   MIN_REFERENCE_MEDIA_SECONDS,
   mergeStudioAssets,
   navigateStudioState,
-  pageTitles,
   patchStudioDraft,
   resolveSubmittedRatio,
   resolveVideoMode,
@@ -269,10 +267,7 @@ export const navGroups: {
   pages: { id: StudioPage; title: string; icon: string }[];
 }[] = [
   {
-    pages: [
-      { id: "workbench", title: "工作台", icon: "home" },
-      { id: "tasks", title: "任务中心", icon: "tasks" },
-    ],
+    pages: [{ id: "workbench", title: "工作台", icon: "home" }],
   },
   {
     label: "创作",
@@ -377,7 +372,6 @@ export function StudioWorkspace({
   const generationRef = useRef<StudioTask["type"] | undefined>(undefined);
   const generationDialogRevisionRef = useRef(0);
   const mountedRef = useRef(true);
-  const [newCreation, setNewCreation] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const closeMenu = () => {
@@ -2631,12 +2625,14 @@ export function StudioWorkspace({
   const savedAtLabel = pendingRestore
     ? formatDraftSavedAt(pendingRestore.updatedAt)
     : "";
+  // 任务中心已下沉为数据看板的页签（2026-10-31）：tasks / task-detail 都归属
+  // 「数据看板」导航项高亮，进行中任务角标也挪到该导航项上。
   const activeNav = state.page.startsWith("person-")
     ? "people"
     : state.page === "viral-detail"
       ? "viral"
-      : state.page === "task-detail"
-        ? "tasks"
+      : state.page === "task-detail" || state.page === "tasks"
+        ? "analytics"
         : creationPages.has(state.page)
           ? "replica"
           : state.page;
@@ -2698,16 +2694,7 @@ export function StudioWorkspace({
             }}
           >
             <BrandIdentity />
-            <small>乡墅爆款视频创作平台</small>
           </button>
-          <Button
-            variant="primary"
-            className="studio-new-button"
-            onClick={() => setNewCreation(true)}
-          >
-            <Icon name="plus" />
-            新建创作
-          </Button>
           <nav aria-label="主要导航">
             {visibleNavGroups.map((group, index) => (
               <div
@@ -2728,7 +2715,7 @@ export function StudioWorkspace({
                   >
                     <Icon name={item.icon} />
                     <span>{item.title}</span>
-                    {item.id === "tasks" && activeCount > 0 && (
+                    {item.id === "analytics" && activeCount > 0 && (
                       <small>{activeCount}</small>
                     )}
                   </button>
@@ -2882,45 +2869,6 @@ export function StudioWorkspace({
         )}
         {picker && (
           <StudioPicker kind={picker} onClose={() => setPicker(undefined)} />
-        )}
-        {newCreation && (
-          <StudioDialog title="新建创作" onClose={() => setNewCreation(false)}>
-            <p>选择创作方式。当前文案和素材会保留，可继续复用。</p>
-            <div className="studio-new-options">
-              {(
-                ["replica", "replacement", "video", "oral"] as StudioPage[]
-              ).map((page) => (
-                <Button
-                  key={page}
-                  onClick={() => {
-                    navigate(page);
-                    setNewCreation(false);
-                  }}
-                >
-                  {pageTitles[page]}
-                  <Icon name="arrow" />
-                </Button>
-              ))}
-            </div>
-            <Button
-              variant="quiet"
-              onClick={() => {
-                setState((previous) => ({ ...previous, draft: createDraft() }));
-                // 只清内存的话，云端那一行会在下次打开时把旧内容原样带回来。
-                draftTouchedRef.current = false;
-                setPendingRestore(null);
-                if (currentUserRoleRef.current !== "auditor")
-                  void discardStoredDraft().catch(() => {
-                    if (mountedRef.current)
-                      notify("云端上次内容未能清除，请稍后重试。");
-                  });
-                navigate("workbench");
-                setNewCreation(false);
-              }}
-            >
-              从空白创作开始
-            </Button>
-          </StudioDialog>
         )}
         {generation && (
           <StudioDialog
@@ -3101,7 +3049,9 @@ function StudioPageContent({
     case "oral-audio":
       return <OralPage />;
     case "tasks":
-      return <TasksPage />;
+    case "analytics":
+      // 任务中心是数据看板的页签；「任务进度」入口统一落在这里。
+      return <AnalyticsPage />;
     case "task-detail":
       return <TaskDetailPage />;
     case "people":
@@ -3115,8 +3065,6 @@ function StudioPageContent({
       return <MaterialsPage />;
     case "publishing":
       return <PublishPage />;
-    case "analytics":
-      return <AnalyticsPage />;
     case "settings":
       return <StudioSettingsPage />;
     case "profile":

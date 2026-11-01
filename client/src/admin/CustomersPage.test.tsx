@@ -26,9 +26,6 @@ vi.mock("../api.admin", () => ({
     other_consumed_credits: 0,
     tokens: [],
   }),
-  getLegacyCreditConversion: vi
-    .fn()
-    .mockRejectedValue(new Error("已有新积分，不适用转换")),
   listCustomers: vi.fn(),
   suspendCustomer: vi.fn().mockResolvedValue({}),
   resumeCustomer: vi.fn().mockResolvedValue({}),

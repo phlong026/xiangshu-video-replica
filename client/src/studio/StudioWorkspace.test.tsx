@@ -231,6 +231,13 @@ const api = vi.hoisted(() => ({
     },
   })),
   uploadMaterial: vi.fn(),
+  // 爆款列表：恢复/路由用例路过 ViralPage 时必须拿到数组，不能是 undefined。
+  listViralVideos: vi.fn(async () => ({
+    items: [],
+    total: 0,
+    hasMore: false,
+    nextCursor: null,
+  })),
   getOralPrice: vi.fn(async () => ({
     unit_price_fen: 500,
     estimated_credits: 500,
@@ -241,7 +248,16 @@ const api = vi.hoisted(() => ({
   createOralTask: vi.fn(),
   createIndependentVideoTask: vi.fn(),
   listUserSavedPrompts: vi.fn(async (): Promise<unknown[]> => []),
-  listMaterials: vi.fn(),
+  listMaterials: vi.fn(
+    async (): Promise<{
+      items: unknown[];
+      page?: number;
+      page_size?: number;
+      total: number;
+      hasMore?: boolean;
+      nextCursor?: string | null;
+    }> => ({ items: [], total: 0 }),
+  ),
   getAssetDownloadUrl: vi.fn(),
   getLatestScriptRewriteTask: vi.fn(async (): Promise<unknown> => null),
   getLatestProjectShotCards: vi.fn(async () => null),
@@ -660,15 +676,16 @@ describe("V1.4 workspace integration", () => {
     expect(main).toHaveClass("studio-route-workbench");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
 
+    // 2026-10-31：任务中心下沉为数据看板页签，导航项换成「数据看板」。
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
         "button",
-        { name: /任务中心/ },
+        { name: /数据看板/ },
       ),
     );
 
     expect(shell?.className).not.toContain("studio-route-");
-    expect(main).toHaveClass("studio-route-tasks");
+    expect(main).toHaveClass("studio-route-analytics");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
   });
 
@@ -1064,7 +1081,10 @@ describe("V1.4 workspace integration", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "查看视频" })[0]);
     expect(window.location.hash).toContain("returnTo=analytics");
-    fireEvent.click(screen.getByRole("button", { name: "任务中心" }));
+    // 任务中心下沉后：详情页经导航「数据看板」回到看板，再切「任务中心」页签。
+    fireEvent.click(screen.getByRole("button", { name: "数据看板" }));
+    expect(window.location.hash).toBe("#studio/analytics");
+    fireEvent.click(screen.getByRole("tab", { name: "任务中心" }));
     expect(window.location.hash).toBe("#studio/tasks");
     fireEvent.click(screen.getAllByRole("button", { name: "查看结果" })[1]);
     expect(window.location.hash).toBe(
@@ -1475,16 +1495,14 @@ describe("V1.4 workspace integration", () => {
         expect(screen.getByRole("button", { name: DISCARD })).toBeDisabled();
       });
 
-      it("「从空白创作开始」同时清掉云端草稿，下次打开不再回来", async () => {
+      it("「空白创作」同时清掉云端草稿，下次打开不再回来", async () => {
         live.loadStudioData.mockResolvedValue(emptyStudioData);
         live.loadCloudDraft.mockResolvedValue(undefined);
         live.discardCloudDraft.mockResolvedValue(undefined);
         render(<StudioWorkspace currentUser={reviewUser} />);
 
-        fireEvent.click(await findEnabledButton("新建创作"));
-        fireEvent.click(
-          await screen.findByRole("button", { name: "从空白创作开始" }),
-        );
+        // 2026-10-31 信息架构精简：入口从侧边栏弹窗迁到工作台创作条。
+        fireEvent.click(await findEnabledButton("空白创作"));
 
         await waitFor(() =>
           expect(live.discardCloudDraft).toHaveBeenCalledTimes(1),
@@ -3713,7 +3731,9 @@ describe("视频生成（C2 独立创作）", () => {
 
   async function openVideoPage() {
     // 侧边栏「视频拆解」进入复刻页签组，再切到「视频生成」。
-    fireEvent.click(screen.getByRole("button", { name: "视频拆解" }));
+    // 收窄到导航容器：工作台创作条也有同名入口，全局查询会有歧义。
+    const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
+    fireEvent.click(nav.getByRole("button", { name: "视频拆解" }));
     fireEvent.click(screen.getByRole("tab", { name: "AI 视频" }));
     await waitFor(() =>
       expect(screen.getByLabelText("提示词")).toBeInTheDocument(),
@@ -4201,8 +4221,9 @@ describe("视频生成（C2 独立创作）", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "重试读取草稿参考图" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "新建创作" }));
-    fireEvent.click(screen.getByRole("button", { name: "从空白创作开始" }));
+    // 切换草稿的载体：2026-10-31 起走工作台创作条的「空白创作」。
+    fireEvent.click(await screen.findByRole("button", { name: "工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: "空白创作" }));
     resolveRetry?.({
       assets: [
         {
@@ -4610,7 +4631,8 @@ describe("视频生成（C2 独立创作）", () => {
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      updatedAt: "2026-10-12T00:00:00Z",
+      // 必须用窗口内的相对时间：硬编码日期会随日历流逝跌出 7 天提示窗口。
+      updatedAt: freshUpdatedAt(),
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
     render(

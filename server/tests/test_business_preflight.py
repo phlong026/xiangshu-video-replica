@@ -95,10 +95,10 @@ def test_first_frame_cloud_bucket_mismatch_cannot_fall_back_to_local(monkeypatch
 
 
 def test_first_frame_legacy_local_read_remains_forbidden_in_customer_production(monkeypatch):
-    from app import bootstrap, first_frames
+    from app import db_pg, first_frames
     from app.storage import FakeStorageAdapter
 
-    monkeypatch.setattr(bootstrap, "is_customer_production", lambda: True)
+    monkeypatch.setattr(db_pg, "is_customer_production", lambda: True)
     local = Mock(side_effect=AssertionError("Production must not read legacy local assets"))
     monkeypatch.setattr(first_frames, "create_local_storage_from_environment", local)
     with pytest.raises(HTTPException) as failure:

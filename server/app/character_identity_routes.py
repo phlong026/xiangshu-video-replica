@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.analysis import APILIO_DEFAULT_BASE_URL, APILIO_GEMINI_MODEL
 from app.auth import AuthenticatedUser, CurrentUser, Database
-from app.bootstrap import is_customer_production
 from app.character_contracts import CharacterPersona, CharacterVersion, PersonIdentity
 from app.character_identity import (
     ApilioSourceImageInspector,
@@ -36,6 +35,7 @@ from app.character_identity import (
     update_person_identity,
 )
 from app.customer_fence import BusinessReadConn
+from app.db_pg import is_customer_production
 from app.media_routes import get_media_storage
 from app.permissions import require_role
 from app.settings import SettingsRepository, SettingsUnavailableError

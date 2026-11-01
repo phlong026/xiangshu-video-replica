@@ -43,7 +43,8 @@ from app.admin_permissions import (
     SETTINGS_WRITE,
 )
 from app.api_errors import http_error as _http
-from app.db_pg import pg_transaction
+from app.auth import CurrentUser
+from app.db_pg import is_customer_production, pg_transaction
 from app.ops_metrics import (
     get_or_create_request_id,
     set_current_result_code,
@@ -70,7 +71,6 @@ ADMIN_CSRF_HEADER = "X-Admin-CSRF"
 ADMIN_SESSION_HMAC_KEY_ENV = "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY"
 ADMIN_SESSION_TTL_ENV = "VIDEO_REPLICA_ADMIN_SESSION_TTL_SECONDS"
 ADMIN_SESSION_IDLE_TIMEOUT_ENV = "VIDEO_REPLICA_ADMIN_SESSION_IDLE_TIMEOUT_SECONDS"
-CUSTOMER_PRODUCTION_ENV = "VIDEO_REPLICA_CUSTOMER_PRODUCTION"
 
 DEFAULT_ADMIN_SESSION_TTL_SECONDS = 8 * 3600
 DEFAULT_ADMIN_SESSION_IDLE_TIMEOUT_SECONDS = 30 * 60
@@ -91,7 +91,6 @@ SCRYPT_DKLEN = 32
 SCRYPT_SALT_BYTES = 16
 ADMIN_CSRF_CONTEXT = b"video-replica:admin-csrf:v1"
 
-_TRUTHY = {"1", "true", "yes", "on"}
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _ADMIN_ROLES = frozenset({"admin", "auditor"})
 _RECOVERY_OPERATIONS = frozenset(
@@ -105,10 +104,6 @@ _RECOVERY_OPERATIONS = frozenset(
 
 class ExchangeCredentialError(ValueError):
     """Raised when an admin exchange credential fails verification."""
-
-
-def is_customer_production() -> bool:
-    return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +422,20 @@ class AdminActor:
         if self.role == "admin":
             return True
         return point == EXPORT or point.endswith(".read")
+
+
+def admin_to_current_user(actor: AdminActor) -> CurrentUser:
+    """管理端操作落到业务层时的统一署名口径（原四份同名私有副本收敛）。
+
+    审计与幂等记录里署真实的管理员账号；预扣/结算的对象由业务层按批次
+    归属取任务所有者，不在这里指定。
+    """
+    return CurrentUser(
+        id=actor.user_id,
+        username=actor.username,
+        display_name=actor.display_name,
+        role="admin",
+    )
 
 
 def _admin_exchange_identifier(request: Request) -> str:

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Pagination } from "../admin/ui/Pagination";
 import {
   type CreatedRechargeOrder,
-  CustomerApiError,
   type CustomerRechargePackage,
   type CustomerWalletLedgerPage,
   customerCloseRechargeOrder,
@@ -18,6 +17,8 @@ import {
   type RechargeOrderPage,
   type WalletSnapshot,
 } from "../api";
+import { errorMessage } from "../errorMessage";
+import { formatFen } from "../formatFen";
 import {
   discountSourceLabel,
   formatDiscountZhe,
@@ -837,11 +838,6 @@ function submitPaymentForm(order: CreatedRechargeOrder) {
   form.remove();
 }
 
-function formatFen(amountFen: number): string {
-  const yuan = amountFen / 100;
-  return `${Number.isInteger(yuan) ? yuan : yuan.toFixed(2)}元`;
-}
-
 function orderStatusLabel(status: RechargeOrder["status"]): string {
   return {
     PENDING: "待支付",
@@ -849,13 +845,4 @@ function orderStatusLabel(status: RechargeOrder["status"]): string {
     FAILED: "支付失败",
     CLOSED: "已关闭",
   }[status];
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  if (error instanceof CustomerApiError && error.message.trim()) {
-    return error.message;
-  }
-  return error instanceof Error && error.message.trim()
-    ? error.message
-    : fallback;
 }

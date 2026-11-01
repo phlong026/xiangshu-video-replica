@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { StudioWorkspace } from "./studio/StudioWorkspace";
@@ -138,7 +138,14 @@ describe("App canonical replica entry", () => {
       screen.queryByRole("button", { name: "模拟一键生成完成" }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "任务中心" }));
+    // 2026-10-31：任务中心下沉为数据看板页签——侧边栏「数据看板」→「任务中心」页签。
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
+        "button",
+        { name: /数据看板/ },
+      ),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "任务中心" }));
     fireEvent.click(await screen.findByRole("button", { name: "查看结果" }));
     expect(
       await screen.findByRole("heading", { name: "夏日咖啡馆复刻成片" }),

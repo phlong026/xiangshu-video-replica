@@ -349,13 +349,11 @@ def route_client(pg_env: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestC
     from app.admin_auth_routes import ADMIN_SESSION_HMAC_KEY_ENV
     from app.admin_runtime_routes import router as runtime_router
     from app.control_routes import router as control_router
-    from app.provider_gateway_routes import router as gateway_router
 
     application = FastAPI()
     application.include_router(control_router)
     application.include_router(account_router)
     application.include_router(runtime_router)
-    application.include_router(gateway_router)
     from cryptography.fernet import Fernet
 
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
@@ -1096,11 +1094,8 @@ def test_technical_routes_reject_non_super_admin_sessions(
         ("PUT", "/api/control/settings/h3-accounts/fake"),
         ("GET", "/api/control/settings/queue-mode"),
         ("PATCH", "/api/control/settings/queue-mode"),
-        ("GET", "/api/admin/providers/list"),
-        ("GET", "/api/admin/providers/metaso/status"),
-        ("POST", "/api/admin/providers/metaso/switch"),
-        ("GET", "/api/admin/providers/metaso/usage-history"),
-        ("POST", "/api/admin/providers/test-connection"),
+        # /api/admin/providers/* 已随 provider_gateway 路由删除（2026-10-31
+        # 冗余清理：生产 main.py 从未挂载该路由，属确认死代码）。
         ("GET", "/api/control/external-calls"),
     ]
     for method, path in routes:

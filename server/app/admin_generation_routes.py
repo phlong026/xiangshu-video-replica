@@ -27,9 +27,8 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import ConfigDict
 
-from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter
+from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter, admin_to_current_user
 from app.admin_write_contract import AdminWriteContract, require_write_contract
-from app.auth import CurrentUser
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.generation import GenerationTaskRetryRequest, retry_generation_task
@@ -64,17 +63,6 @@ class AdminGenerationRetryRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
 
 
-def _admin_to_current_user(actor: AdminActor) -> CurrentUser:
-    # 与 admin_first_frame_routes 同一约定：审计与幂等记录里署真实的管理员
-    # 账号；预扣积分的对象由业务层按批次归属取任务所有者，不在这里指定。
-    return CurrentUser(
-        id=actor.user_id,
-        username=actor.username,
-        display_name=actor.display_name,
-        role="admin",
-    )
-
-
 def _localized_retry_error(exc: HTTPException) -> HTTPException:
     detail = exc.detail
     if isinstance(detail, dict):
@@ -105,7 +93,7 @@ def retry_generation_record(
             result = retry_generation_task(
                 BusinessConnection.postgres(raw),
                 task_id=record_id,
-                actor=_admin_to_current_user(actor),
+                actor=admin_to_current_user(actor),
                 request=GenerationTaskRetryRequest(
                     idempotency_key=idempotency_key,
                     retry_reason=reason,
@@ -310,7 +298,7 @@ def get_generation_record_content(
             )
         write_audit(
             conn,
-            actor=_admin_to_current_user(actor),
+            actor=admin_to_current_user(actor),
             action="generation_record.content_view",
             entity_type="generation_record",
             entity_id=record_id,

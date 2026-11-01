@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
 } from "react";
-
 import {
   type CreatedRechargeOrder,
   CustomerApiError,
@@ -18,6 +17,7 @@ import {
   customerListRechargePackages,
   type WalletSnapshot,
 } from "../api";
+import { formatFen } from "../formatFen";
 import {
   matchingPackagesForAmount,
   packageBelowMinimum,
@@ -603,11 +603,6 @@ export function CustomerRechargeDialog({
       </section>
     </div>
   );
-}
-
-function formatFen(amountFen: number): string {
-  const yuan = amountFen / 100;
-  return `${Number.isInteger(yuan) ? yuan : yuan.toFixed(2)}元`;
 }
 
 function visibleError(cause: unknown, fallback: string): string {

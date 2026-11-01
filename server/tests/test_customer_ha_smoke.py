@@ -50,7 +50,7 @@ def test_w19_generation_cli_reuses_one_instance_id_and_changes_it_on_restart(
 ) -> None:
     from datetime import UTC, datetime
 
-    from app import bootstrap, generation_worker
+    from app import bootstrap, db_pg, generation_worker
 
     observed: list[str] = []
     closed: list[bool] = []
@@ -62,7 +62,7 @@ def test_w19_generation_cli_reuses_one_instance_id_and_changes_it_on_restart(
     )
     monkeypatch.setattr(generation_worker, "validate_customer_production", lambda _: None)
     monkeypatch.setattr(bootstrap, "assert_customer_production_security", lambda: None)
-    monkeypatch.setattr(bootstrap, "is_customer_production", lambda: False)
+    monkeypatch.setattr(db_pg, "is_customer_production", lambda: False)
     monkeypatch.setattr(
         generation_worker,
         "check_pg_ready",
@@ -435,7 +435,7 @@ def test_customer_readiness_returns_generic_503_without_leaking_dependency(
 def test_direct_customer_worker_fails_before_entering_loop_when_cos_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import bootstrap, generation_worker
+    from app import bootstrap, db_pg, generation_worker
 
     monkeypatch.setattr(sys, "argv", ["generation-worker"])
     monkeypatch.setattr(
@@ -445,7 +445,7 @@ def test_direct_customer_worker_fails_before_entering_loop_when_cos_is_unavailab
     )
     monkeypatch.setattr(generation_worker, "validate_customer_production", lambda _: None)
     monkeypatch.setattr(bootstrap, "assert_customer_production_security", lambda: None)
-    monkeypatch.setattr(bootstrap, "is_customer_production", lambda: True)
+    monkeypatch.setattr(db_pg, "is_customer_production", lambda: True)
 
     def unavailable() -> None:
         raise RuntimeError("customer production requires private COS")

@@ -37,6 +37,7 @@ from app.character_policy import (
 )
 from app.db_portable import BusinessConnection
 from app.external_calls import external_call_model
+from app.image_dimensions import scan_jpeg_dimensions
 from app.permissions import require_role, write_audit
 from app.storage import (
     StorageAdapter,
@@ -1280,46 +1281,19 @@ def image_dimensions(content: bytes, *, content_type: str) -> tuple[int, int]:
 
 
 def jpeg_dimensions(content: bytes) -> tuple[int, int]:
+    # SOF 扫描走共享实现（image_dimensions）；此处保留两条失败文案与
+    # validate_image_dimensions 的尺寸闸门——materials 依赖本函数抛
+    # HTTPException 的契约，两种失败（魔数不符 / 读不出尺寸）分开报。
     if len(content) < 4 or content[:2] != b"\xff\xd8":
         raise character_error(422, "SOURCE_IMAGE_INVALID", "JPG 文件内容无效。")
-    offset = 2
-    start_of_frame_markers = {
-        0xC0,
-        0xC1,
-        0xC2,
-        0xC3,
-        0xC5,
-        0xC6,
-        0xC7,
-        0xC9,
-        0xCA,
-        0xCB,
-        0xCD,
-        0xCE,
-        0xCF,
-    }
-    while offset + 3 < len(content):
-        if content[offset] != 0xFF:
-            offset += 1
-            continue
-        marker = content[offset + 1]
-        offset += 2
-        if marker in {0xD8, 0xD9}:
-            continue
-        if offset + 2 > len(content):
-            break
-        segment_length = struct.unpack(">H", content[offset : offset + 2])[0]
-        if segment_length < 2 or offset + segment_length > len(content):
-            break
-        if marker in start_of_frame_markers and segment_length >= 7:
-            height, width = struct.unpack(">HH", content[offset + 3 : offset + 7])
-            return validate_image_dimensions(width, height)
-        offset += segment_length
-    raise character_error(
-        422,
-        "SOURCE_IMAGE_INVALID",
-        "无法读取 JPG 像素尺寸，请重新导出后上传。",
-    )
+    dimensions = scan_jpeg_dimensions(content)
+    if dimensions is None:
+        raise character_error(
+            422,
+            "SOURCE_IMAGE_INVALID",
+            "无法读取 JPG 像素尺寸，请重新导出后上传。",
+        )
+    return validate_image_dimensions(*dimensions)
 
 
 def evaluate_source_image_quality(

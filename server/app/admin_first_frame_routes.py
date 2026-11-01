@@ -12,9 +12,8 @@ from typing import Literal
 
 from fastapi import APIRouter
 
-from app.admin_auth_routes import AdminActor, AdminWriter
+from app.admin_auth_routes import AdminWriter, admin_to_current_user
 from app.api_errors import http_error as _http
-from app.auth import CurrentUser
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.first_frame_routes import get_image_provider
@@ -26,15 +25,6 @@ from app.image_tasks import (
 )
 
 router = APIRouter(prefix="/api/control", tags=["admin-first-frame"])
-
-
-def _admin_to_current_user(actor: AdminActor) -> CurrentUser:
-    return CurrentUser(
-        id=actor.user_id,
-        username=actor.username,
-        display_name=actor.display_name,
-        role="admin",
-    )
 
 
 @router.post("/first-frame-tasks/{task_id}/reconcile")
@@ -70,6 +60,6 @@ def reconcile_first_frame_task(task_id: str, actor: AdminWriter) -> dict[str, ob
             task_id=task_id,
             decision=decision,
             detail_code=detail_code,
-            actor=_admin_to_current_user(actor),
+            actor=admin_to_current_user(actor),
         )
     return {"task_id": task_id, "result": result, "detail_code": detail_code}

@@ -975,7 +975,7 @@ export function CopyPage() {
                 <Button onClick={() => refreshExtractions()}>重试读取</Button>
               }
             />
-          ) : extractions && extractions.length ? (
+          ) : extractions?.length ? (
             extractions.map((record) => (
               <div
                 className="creation-extraction-row"

@@ -7,6 +7,7 @@ import {
   openCharacterOperation,
   saveCharacterOperation,
 } from "./characterTaskOperation";
+import { createControlRequest } from "./controlRequest";
 import { attachCustomerTaskReferences } from "./customerTaskReferences";
 import type { components } from "./generated/api";
 
@@ -297,7 +298,8 @@ export type ProviderName =
   | "tikhub"
   | "dashscope"
   | "douyidou"
-  | "ses";
+  | "ses"
+  | "yuanbao";
 
 export type ProviderSettings = {
   provider: ProviderName;
@@ -6514,9 +6516,9 @@ const CUSTOMER_ACCOUNT_ERROR_MESSAGES: Readonly<Record<string, string>> = {
     "当前视频尚未就绪，无法交给云端分析。请联系管理员配置云端素材存储，再重新上传视频。",
   SINGLE_PERSON_SOURCE_REQUIRED:
     "当前参考画面未通过单人检查。请选择只有一位清晰人物的画面，再生成首帧。",
-  // ACTIVATION_UNAVAILABLE / PAIRING_UNAVAILABLE 保留：它们属于仍在使用的
-  // 激活/配对登录流程（ActivationPage / DevicePairingPage / useCustomerSession），
-  // 不在本次「个人中心 UI 残留」清理范围内。
+  // ACTIVATION_UNAVAILABLE / PAIRING_UNAVAILABLE 保留：错误映射仍可能命中激活
+  // 流程（ActivationPage / useCustomerSession）；配对页虽已下线（2026-10-31），
+  // 服务端仍会返回这些码，客户端文案保持兜底。
   ACTIVATION_UNAVAILABLE: "该激活码当前无法使用，请确认激活码仍在有效期内。",
   PAIRING_UNAVAILABLE: "该激活码当前无法用于设备配对，请联系服务人员处理。",
   SESSION_CONFLICT: "另一台设备当前正在使用此账号，请稍后重新打开应用。",
@@ -6727,48 +6729,17 @@ async function requestAdmin(
   return requestApi(path, init, timeoutMs);
 }
 
-async function requestControl(
-  path: string,
-  init: RequestInit,
-  timeoutMs: number = REQUEST_TIMEOUT_MS,
-): Promise<Response> {
-  const csrfAtStart = getAdminCsrfToken();
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  const headers = new Headers(init.headers);
-  if (init.body && !(init.body instanceof FormData)) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (
-    init.method &&
-    ["POST", "PUT", "PATCH", "DELETE"].includes(init.method.toUpperCase()) &&
-    !headers.has("X-Admin-CSRF")
-  ) {
-    const csrf = getAdminCsrfToken();
-    if (csrf) {
-      headers.set("X-Admin-CSRF", csrf);
-    }
-  }
-  try {
-    const response = await fetch(`${apiBaseUrl()}${path}`, {
-      ...init,
-      headers,
-      credentials: "include",
-      signal: controller.signal,
-    });
-    if (response.status === 401) {
-      notifyAdminSessionExpired(csrfAtStart);
-    }
-    return response;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("请求超时，请重试");
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
+// 控制面请求骨架统一走 controlRequest 工厂（与 api.admin.ts 共享）；本侧
+// 策略：10 秒默认超时；401 一律通知会话过期；写方法缺省时自动补
+// X-Admin-CSRF；超时抛普通 Error（本侧无 AdminActivationError 契约）。
+const requestControl = createControlRequest({
+  defaultTimeoutMs: REQUEST_TIMEOUT_MS,
+  baseUrl: apiBaseUrl,
+  csrfSnapshot: getAdminCsrfToken,
+  onUnauthorized: notifyAdminSessionExpired,
+  autoCsrfForWrites: true,
+  timeoutError: (message) => new Error(message),
+});
 
 /** 多步账号操作不得在会话切换后继续使用新用户的登录态。 */
 export function captureWorkspaceCredentialContext(): () => void {
@@ -7087,10 +7058,6 @@ type CustomerLoginResponse = components["schemas"]["LoginResponse"] & {
 type CustomerHeartbeatResponse = components["schemas"]["HeartbeatResponse"];
 export type CustomerDeviceListResponse =
   components["schemas"]["DeviceListResponse"];
-type CustomerEnrollPendingResponse =
-  components["schemas"]["DeviceEnrollPendingResponse"];
-type CustomerEnrollConsumedResponse =
-  components["schemas"]["DeviceEnrollConsumedResponse"];
 type CustomerPairingApproveResponse =
   components["schemas"]["PairingApproveResponse"];
 
@@ -7701,67 +7668,9 @@ export async function customerUnbindDevice(
   );
 }
 
-/**
- * @deprecated 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
- * 本类型保留仅为兼容旧代码（DevicePairingPage.tsx / CustomerPairingFlow.tsx），将在后续 PR 中删除。
- */
-export type CustomerEnrollInput = {
-  activationCode: string;
-  deviceFingerprint: string;
-  deviceName: string;
-  devicePlatform: string;
-  idempotencyKey: string;
-  /** Optional correlation id; omitted, the transport mints one. */
-  requestId?: string;
-};
-
-export type CustomerEnrollResult =
-  | { status: 202; replayed: boolean; pending: CustomerEnrollPendingResponse }
-  | {
-      status: 201;
-      replayed: boolean;
-      credential: CustomerEnrollConsumedResponse;
-    };
-
-/**
- * Start (or finish) the second-device pairing
- * (POST /api/customer/devices/enroll): 202 while waiting for the first
- * device's approval, 201 with the one-time device credential once an approved
- * pairing is consumed.
- *
- * @deprecated 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
- * 本函数保留仅为兼容旧代码（DevicePairingPage.tsx:44 / CustomerPairingFlow.tsx:135），将在后续 PR 中删除。
- */
-export async function customerEnrollDevice(
-  input: CustomerEnrollInput,
-): Promise<CustomerEnrollResult> {
-  const { response, body } = await customerJson<
-    CustomerEnrollPendingResponse | CustomerEnrollConsumedResponse
-  >("/api/customer/devices/enroll", {
-    method: "POST",
-    body: {
-      activation_code: input.activationCode,
-      device_fingerprint: input.deviceFingerprint,
-      device_name: input.deviceName,
-      device_platform: input.devicePlatform,
-    },
-    idempotencyKey: input.idempotencyKey,
-    requestId: input.requestId,
-  });
-  const replayed = isReplayed(response);
-  if (response.status === 202) {
-    return {
-      status: 202,
-      replayed,
-      pending: body as CustomerEnrollPendingResponse,
-    };
-  }
-  return {
-    status: 201,
-    replayed,
-    credential: body as CustomerEnrollConsumedResponse,
-  };
-}
+// 配对 enroll（POST /api/customer/devices/enroll）的客户端封装已随激活码方案
+// 一起退役（2026-09-19 决策，入口 CustomerPairingFlow/DevicePairingPage 于
+// 2026-10-31 冗余清理删除）；服务端端点与首端审批（approve）仍保留。
 
 /** The first bound device approves a PENDING pairing request
  * (POST /api/customer/device-pairings/{id}/approve). */

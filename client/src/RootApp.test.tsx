@@ -207,8 +207,8 @@ describe("RootApp", () => {
     );
     expect(welcomeLogo).toHaveAttribute("width", "50.4");
     expect(welcomeLogo).toHaveAttribute("height", "43.2");
-    expect(screen.getByText("众墅之家")).toBeVisible();
-    expect(screen.getByText("AI 即创")).toBeVisible();
+    // 2026-10-31 品牌区两行版式：文案合并为单节点「众墅之家 AI 即创」。
+    expect(screen.getByText("众墅之家 AI 即创")).toBeVisible();
 
     await loginThroughAccountForm();
     const workspaceLogo = screen.getByRole("img", { name: "众墅之家" });
@@ -231,7 +231,6 @@ describe("RootApp", () => {
     const preAuthAllowed = [
       "/api/customer/browser-session",
       "/api/customer/activate",
-      "/api/customer/devices/enroll",
       "/api/customer/sessions/login",
     ];
     expect(

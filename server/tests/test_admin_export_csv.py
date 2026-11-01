@@ -14,7 +14,7 @@ from datetime import date
 
 import pytest
 
-from app.export_controller import ExportRequest, generate_csv_content
+from app.export_controller import ExportRequest, generate_csv_content, validate_request
 
 
 class _FakeResult:
@@ -88,3 +88,50 @@ def test_none_username_renders_na() -> None:
     content = generate_csv_content(_FakeConn([_row(None)]), _request())
 
     assert _csv_rows(content)[1][2] == "N/A"
+
+
+# validate_request 的参数闸门：根目录遗留的 test_export_controller.py 断言
+# 仍是 90 天上限（现实现为 92），该孤儿文件已删，校验面在此按现行为重建。
+def test_validate_request_rejects_inverted_range() -> None:
+    ok, message = validate_request(
+        ExportRequest(start_date=date(2026, 9, 30), end_date=date(2026, 9, 1))
+    )
+
+    assert ok is False
+    assert "before or equal" in message
+
+
+def test_validate_request_rejects_range_over_92_days() -> None:
+    ok, message = validate_request(
+        ExportRequest(start_date=date(2026, 1, 1), end_date=date(2026, 6, 30))
+    )
+
+    assert ok is False
+    assert "92 days" in message
+
+
+def test_validate_request_rejects_unsupported_format() -> None:
+    ok, message = validate_request(
+        ExportRequest(
+            format="xlsx",
+            start_date=date(2026, 9, 1),
+            end_date=date(2026, 9, 2),
+        )
+    )
+
+    assert ok is False
+    assert "Unsupported format" in message
+
+
+def test_validate_request_accepts_normal_range() -> None:
+    ok, message = validate_request(
+        ExportRequest(
+            start_date=date(2026, 9, 1),
+            end_date=date(2026, 9, 30),
+            min_revenue_fen=100,
+            max_revenue_fen=10_000,
+        )
+    )
+
+    assert ok is True
+    assert message == ""

@@ -345,6 +345,37 @@ def test_groups_counts_default_buckets_scoped_to_the_user(pg, client) -> None:
     assert _groups(client) == {"我的上传": 2, "项目素材": 1}
 
 
+def test_project_materials_exclude_viral_import_assets(pg, client) -> None:
+    """爆款链接导入 / 文案上传的参考素材不进素材库（云盘素材只来自管理端采集）.
+
+    资产本身保留——复刻/文案管线需要项目内参考资产作输入；排除发生在
+    素材投影（metadata 标记 shared_content / viral_copy_upload，见 viral_import）。
+    """
+    _seed_project_asset(pg, "ux01-p1", project_id="ux01-proj1", owner=EMP1)
+    for asset_id, marker in (("ux01-v1", "shared_content"), ("ux01-v2", "viral_copy_upload")):
+        project_id = f"ux01-proj-{asset_id}"
+        pg.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s) "
+            "ON CONFLICT (id) DO NOTHING",
+            (project_id, EMP1, f"UX01 {asset_id}"),
+        )
+        pg.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, created_by_user_id, metadata_json) "
+            "VALUES (%s, %s, 'reference_video', %s, %s, 4096, 'video/mp4', %s, %s)",
+            (
+                asset_id,
+                project_id,
+                f"local://ux01/{asset_id}.mp4",
+                hashlib.sha256(asset_id.encode()).hexdigest(),
+                EMP1,
+                json.dumps({marker: True, "platform": "douyin", "video_id": "v-1"}),
+            ),
+        )
+
+    assert _groups(client) == {"项目素材": 1}
+
+
 def test_groups_override_moves_count_and_hidden_is_excluded(pg, client) -> None:
     """override 后计数随有效分组迁移；hidden 素材不计入任何分组。"""
     _seed_upload(pg, "ux01-a1", EMP1)

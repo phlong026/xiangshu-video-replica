@@ -9,16 +9,11 @@ from typing import Annotated, cast
 from fastapi import Depends, Header, HTTPException, Request
 
 from app.auth import CurrentUser, Database, Role, authenticate_user
+from app.db_pg import is_customer_production
 
 CONTROL_PROXY_TOKEN_DIGEST_ENV = "CONTROL_PROXY_TOKEN_DIGEST"
 CONTROL_ADMIN_USER_ID_ENV = "CONTROL_ADMIN_USER_ID"
-CUSTOMER_PRODUCTION_ENV = "VIDEO_REPLICA_CUSTOMER_PRODUCTION"
-_TRUTHY = {"1", "true", "yes", "on"}
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-
-
-def _is_customer_production() -> bool:
-    return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
 
 
 def get_control_user(
@@ -30,7 +25,7 @@ def get_control_user(
     # operator through per-operator admin sessions (admin_auth_routes); a
     # misconfigured boot that slips past the startup gate is still rejected
     # here before any token comparison or database lookup.
-    if _is_customer_production():
+    if is_customer_production():
         raise HTTPException(
             status_code=403,
             detail={
@@ -85,7 +80,7 @@ def get_control_route_user(
     control identity.  Bulk exports do not ride this read-level adapter: they
     take :func:`get_control_writer` instead (see its docstring).
     """
-    if not _is_customer_production():
+    if not is_customer_production():
         return get_control_user(conn, proxy_token)
 
     # Local import keeps the two compatibility modules acyclic: the session
@@ -127,7 +122,7 @@ def get_control_writer(
     method (the internal lane already requires an active ``admin`` actor, see
     :func:`get_control_user`).
     """
-    if not _is_customer_production():
+    if not is_customer_production():
         # Internal P0 keeps the proxy-token identity; get_control_user already
         # refuses any actor whose role is not ``admin``.
         return get_control_user(conn, proxy_token)
@@ -194,7 +189,7 @@ def get_control_exporter(
     内部 P0 线沿用代理令牌身份（它本来只认 ``admin``）。写接口继续用
     ``ControlWriter``，不受影响。
     """
-    if not _is_customer_production():
+    if not is_customer_production():
         return get_control_user(conn, proxy_token)
 
     from app.admin_auth_routes import get_admin_actor
@@ -229,7 +224,7 @@ def _require_control_point(
     内部 P0 线沿用代理令牌身份（它本来只认 admin，没有「模板」的概念）。
     """
     actor = get_control_writer(request, conn, proxy_token)
-    if not _is_customer_production():
+    if not is_customer_production():
         return actor
     from app.admin_auth_routes import get_admin_actor
     from app.admin_permissions import POINT_LABELS

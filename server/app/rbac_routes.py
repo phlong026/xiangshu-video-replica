@@ -28,9 +28,8 @@ from app.auth import (
     authenticate_request,
     identity_source,
 )
-from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep
-from app.db_pg import DATABASE_URL_ENV, pg_transaction
+from app.db_pg import DATABASE_URL_ENV, is_customer_production, pg_transaction
 from app.db_portable import BusinessConnection
 from app.material_thumbs import THUMBNAIL_URL_EXPIRES_IN, thumbnail_key_for
 from app.media import storage_key_from_uri

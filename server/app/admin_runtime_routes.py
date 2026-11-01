@@ -1402,6 +1402,12 @@ class ViralAdminSearchRequest(AdminWriteContract):
     cursor: str | None = Field(default=None, max_length=2048)
 
 
+class ViralAdminLinkImportRequest(AdminWriteContract):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=2000)
+
+
 @router.post("/viral/search")
 def search_viral_videos_for_admin(
     payload: ViralAdminSearchRequest,
@@ -1587,6 +1593,169 @@ def search_viral_videos_for_admin(
                 "RESULT_WRITE",
             )
         raise
+
+
+@router.post("/viral/link-import", status_code=202)
+def import_viral_link_for_admin(
+    payload: ViralAdminLinkImportRequest,
+    request: Request,
+    response: Response,
+    actor: ContentWriter,
+) -> dict[str, object]:
+    """管理端粘贴链接采集：解析 → 入内容池 → 入队媒体转存，一次动作完成.
+
+    与客户侧 ``POST /api/viral/link-resolutions`` 的三点区别：不做复刻时长
+    预检（采集是囤料，30 秒门禁只约束复刻用途）；解析成功后立即入队
+    ``single_archive`` 把媒体转存主存储（``viral/prepared/...``），加盟商
+    在线播放与一键复刻都走自有签名链接；不计客户积分。条目不落「链接导入」
+    分类——那是客户导入的待补全标记，管理端采集带着完整元数据，推送/上首页
+    不应被它拦住。
+
+    外呼失败走 http_error 抛出：整个事务回滚（含入队），幂等键保持可用。
+    平台转存槽位被占用时不回滚：条目保留在内容池，响应里标注转存未入队，
+    运营可在采集任务空闲后手动转存。
+    """
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        import logging
+        from dataclasses import replace as dataclass_replace
+
+        from app.media_routes import get_media_storage
+        from app.viral_content_observations import record_content_source
+        from app.viral_import_routes import _resolved_video
+        from app.viral_link import (
+            DouyidouLinkClient,
+            ViralLinkError,
+            douyidou_link_client_from_settings,
+            normalize_supported_link,
+            supported_link_platform,
+        )
+        from app.viral_media import CoverEnricher, UrlFetcher
+        from app.viral_store import update_viral_cover, upsert_viral_videos
+        from app.viral_wechat_link import WechatLinkClient, wechat_link_client_from_settings
+
+        business_conn = BusinessConnection.postgres(conn)
+        raw_url = payload.url.strip()
+        if not raw_url:
+            raise http_error(422, "VIRAL_LINK_INVALID", "请粘贴视频分享链接。")
+        try:
+            normalized_url = normalize_supported_link(raw_url)
+            # 限时外呼与管理端搜索同一纪律：解析通道各有传输超时，不能让
+            # 外呼挂在写事务里无限等待。
+            resolver: DouyidouLinkClient | WechatLinkClient
+            if supported_link_platform(normalized_url) == "wechat_channels":
+                resolver = wechat_link_client_from_settings(business_conn)
+            else:
+                resolver = douyidou_link_client_from_settings(business_conn)
+            resolved = resolver.resolve(normalized_url, purpose="replica")
+        except ViralLinkError as exc:
+            raise http_error(exc.status_code, exc.code, exc.message) from exc
+        video = dataclass_replace(_resolved_video(resolved), category="")
+        storage = get_media_storage(business_conn)
+        inserted = upsert_viral_videos(business_conn, [video], commit=False)
+        record_content_source(
+            business_conn,
+            batch_id=f"link-import:{request_id}",
+            source_kind="admin_link_import",
+            platform=video.platform,
+            video_id=video.video_id,
+            keyword="",
+            is_new=(video.platform, video.video_id) in inserted,
+        )
+        try:
+            enriched_cover = CoverEnricher(
+                storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024), metered=True
+            ).enrich(video)
+            if getattr(enriched_cover, "cover_key", None):
+                update_viral_cover(
+                    business_conn,
+                    platform=video.platform,
+                    video_id=video.video_id,
+                    cover_key=str(enriched_cover.cover_key),
+                    commit=False,
+                )
+        except Exception as exc:  # noqa: BLE001 - 封面归档失败不阻塞采集
+            logging.getLogger(__name__).warning(
+                "Admin link import cover archive failed for %s/%s: %s",
+                video.platform,
+                video.video_id,
+                type(exc).__name__,
+            )
+        # 入队单条转存：与人工转存共用 latest 槽位；槽位被别的任务占用时只
+        # 跳过入队，不让整次采集回滚。同视频已在队即视为已转存。
+        archive_queued = False
+        active = conn.execute(
+            "SELECT id,collection_config_json FROM viral_refresh_tasks "
+            "WHERE platform=%s AND status IN ('PENDING','RUNNING') FOR UPDATE",
+            (video.platform,),
+        ).fetchall()
+        already_queued = any(
+            json.loads(task[1]).get("kind") == "single_archive"
+            and json.loads(task[1]).get("video_id") == video.video_id
+            for task in active
+        )
+        if already_queued:
+            archive_queued = True
+        elif not active:
+            queued = conn.execute(
+                """INSERT INTO viral_refresh_tasks(id,platform,sort,collection_config_json)
+                VALUES(%s,%s,'latest',%s) ON CONFLICT(platform,sort) DO UPDATE SET
+                    status='PENDING',collection_config_json=excluded.collection_config_json,
+                    checkpoint_json='{}',retry_count=0,locked_by=NULL,locked_until=NULL,
+                    error_code=NULL,error_message_redacted=NULL,retryable=0,
+                    started_at=NULL,completed_at=NULL,updated_at=CURRENT_TIMESTAMP RETURNING id""",
+                (
+                    str(uuid.uuid4()),
+                    video.platform,
+                    json.dumps({"kind": "single_archive", "video_id": video.video_id}),
+                ),
+            ).fetchone()
+            if queued is None:
+                raise RuntimeError("viral archive task enqueue did not persist")
+            archive_queued = True
+        found = conn.execute(
+            f"{_COLLECTED_VIRAL_ROW_SELECT} "
+            "WHERE v.deleted_at IS NULL AND v.platform = %s AND v.video_id = %s",
+            (video.platform, video.video_id),
+        ).fetchone()
+        items = [_collected_video_payload(dict(found))] if found is not None else []
+        conn.execute(
+            """INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json)
+            VALUES(%s,%s,'viral_video.admin_link_import','viral_video',%s,%s)""",
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                f"{video.platform}:{video.video_id}",
+                json.dumps(
+                    {
+                        "platform": video.platform,
+                        "video_id": video.video_id,
+                        "archive_queued": archive_queued,
+                        "is_new": (video.platform, video.video_id) in inserted,
+                        "reason": payload.reason.strip(),
+                        "request_id": request_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        return {
+            "items": items,
+            "platform": video.platform,
+            "videoId": video.video_id,
+            "archiveQueued": archive_queued,
+        }
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=202,
+        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    )
 
 
 def _enqueue_archive_batch(
@@ -1788,6 +1957,7 @@ def refresh_collected_wechat_statistics(
     from app.viral_statistics import refresh_viral_statistics
     from app.viral_store import STATISTICS_CHECKED_AT_KEY, STATISTICS_RETRY_AT_KEY
     from app.viral_tikhub import viral_source_client_from_settings
+    from app.viral_wechat_link import wechat_link_client_from_settings_or_none
 
     def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
         require_cost_snapshot(raw, payload.expected_cost_snapshot)
@@ -1811,6 +1981,7 @@ def refresh_collected_wechat_statistics(
             conn,
             viral_source_client_from_settings(conn),
             [video_id],
+            wechat_client=wechat_link_client_from_settings_or_none(conn),
         )
         if not videos:
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频已删除。")

@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 import logging
-import os
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -38,6 +37,7 @@ from app.control_auth import (
     ControlUser,
 )
 from app.csv_export import spreadsheet_safe_cell
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
 from app.failure_runbook import failed_record_explanation
@@ -73,8 +73,6 @@ from app.zpay import deployment_config_from_environment
 
 router = APIRouter(prefix="/api/control", tags=["control"])
 logger = logging.getLogger(__name__)
-CUSTOMER_PRODUCTION_ENV = "VIDEO_REPLICA_CUSTOMER_PRODUCTION"
-_TRUTHY = {"1", "true", "yes", "on"}
 # 诊断是定点查询：任务编号/问题编号理论上唯一，命中上限只是「一个请求号关联到
 # 一批任务」时的安全阀，不做分页——检索无结果是常态而非异常。
 ANALYSIS_DIAGNOSTIC_MATCH_LIMIT = 20
@@ -508,10 +506,6 @@ def _deployment_settings_snapshot() -> DeploymentSettings:
     )
 
 
-def _is_customer_production() -> bool:
-    return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
-
-
 @dataclass(frozen=True)
 class _ControlWriteActor:
     user_id: str
@@ -525,7 +519,7 @@ def _run_control_settings_write(
     conn: Database,
     business: Callable[[BusinessConnection, str], dict[str, object]],
 ) -> dict[str, object]:
-    if not _is_customer_production():
+    if not is_customer_production():
         _require_write_contract(request, body)
         return business(conn, get_or_create_request_id(request))
 

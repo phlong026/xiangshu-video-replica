@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis import get_version, insert_version, next_version_number
 from app.auth import CurrentUser, Role
-from app.bootstrap import is_customer_production
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.external_calls import (
     endpoint_from_url,

@@ -985,11 +985,12 @@ function ViralCard({
   const { review, navigate, notify, openLive } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
   const [downloadBusy, setDownloadBusy] = useState(false);
-  // ADM-17 卡片级直达：与详情页同一条 4–15s 门槛；未知/超限不渲染入口。
+  // ADM-17 卡片级直达：与详情页同一条 4–30s 门槛；未知/超限不渲染复刻入口，
+  // 只保留提取文案方向。
   const canReplicateFromCard =
     typeof video.durationMs === "number" &&
     video.durationMs >= 4_000 &&
-    video.durationMs <= 15_000;
+    video.durationMs <= 30_000;
   const { playback, play, retry, markFailed, activate } = useViralPlayback(
     video,
     active,
@@ -1026,13 +1027,26 @@ function ViralCard({
       try {
         if (!cacheAvailable()) {
           // Web 端没有本地缓存：抖音走一次计费直链在新窗口打开；视频号
-          // 是加密视频流，离开桌面解密无法得到可播放文件。
+          // 归档后主存储里是解密后的明文 MP4，直接用自有签名链接下载，
+          // 未归档（转存中/已回收）才引导桌面端。
           if (platformKey === "douyin") {
             const source = await fetchViralVideoSource(platformKey, nativeId);
             window.open(source.fullUrl, "_blank", "noopener");
             notify("已开始下载，请在新窗口完成保存");
           } else {
-            notify("视频号为加密视频流，请使用桌面客户端下载");
+            try {
+              const media = await fetchViralVideoMedia(
+                platformKey,
+                nativeId,
+                "video",
+              );
+              window.open(media.url, "_blank", "noopener");
+              notify("已开始下载，请在新窗口完成保存");
+            } catch {
+              notify(
+                "视频号素材尚未转存到云端，请使用桌面客户端下载或稍后重试",
+              );
+            }
           }
           return;
         }
@@ -1114,12 +1128,13 @@ function ViralCard({
           ))}
         </div>
         <div className="content-card-actions">
-          <Button variant="quiet" onClick={openDetail}>
-            查看详情
-          </Button>
+          {/* 2026-10-31：一键复刻升级为卡片主 CTA——复刻是这个页面的核心转化
+              动作，放首位并用 primary 样式；时长门槛与详情页共用 4–30s。
+              提取文案是第二方向（文案二创/口播线），同为意图式跳详情执行。 */}
           {canReplicateFromCard ? (
             <Button
-              variant="outline"
+              variant="primary"
+              aria-label={`一键复刻：${video.title}`}
               onClick={() => {
                 navigate("viral-detail", {
                   selectedVideoId: video.id,
@@ -1129,9 +1144,28 @@ function ViralCard({
                 persistViralDetailUrl(video);
               }}
             >
-              去复刻
+              一键复刻
             </Button>
           ) : null}
+          {video.platformKey && video.nativeId ? (
+            <Button
+              variant="outline"
+              aria-label={`提取文案：${video.title}`}
+              onClick={() => {
+                navigate("viral-detail", {
+                  selectedVideoId: video.id,
+                  returnTo: "viral",
+                  viralExtractIntent: true,
+                });
+                persistViralDetailUrl(video);
+              }}
+            >
+              提取文案
+            </Button>
+          ) : null}
+          <Button variant="quiet" onClick={openDetail}>
+            查看详情
+          </Button>
           <Button
             variant="outline"
             aria-label={`下载视频 ${video.title}`}
@@ -2187,22 +2221,44 @@ export function ViralDetailPage() {
   // 详情页不再单独发起统计请求。
   const { playback, play, retry, markFailed } = useViralPlayback(video);
   const beginReplicateRef = useRef<() => void>(() => {});
+  const requestExtractRef = useRef<() => void>(() => {});
   // ADM-17 卡片「去复刻」直达：意图即焚；handler 经 ref 晚绑定，保持 hook
   // 顺序稳定（beginReplicate 的定义在组件 early return 之后）。
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 只应在意图或视频变化时触发；notify/patchState 每次渲染新建，列入依赖会让意图被重复消费判断。
   useEffect(() => {
     if (!state.viralReplicateIntent || !video) return;
     patchState({ viralReplicateIntent: false });
-    if (
-      typeof video.durationMs !== "number" ||
-      video.durationMs < 4_000 ||
-      video.durationMs > 15_000
-    ) {
-      notify("该视频不在 4–15 秒复刻范围，请走「提取文案」方向");
+    // 卡片一键复刻对超限视频的降级提示：讲清替代方向而不是干巴巴的拒绝。
+    // >30s 平台视频暂不能自动走长视频拆解（服务端 canAnalyze 门禁 4–30s），
+    // 服务端放开后这里接 handOffLongReplicaSource 路由。
+    if (typeof video.durationMs !== "number") {
+      notify(
+        "该视频时长未知，暂不支持自动复刻；可在本页「提取文案」后由口播数字人翻拍。",
+      );
+      return;
+    }
+    if (video.durationMs > 30_000) {
+      notify(
+        "该视频超过 30 秒，暂不支持自动复刻；可用「提取文案」获取文案后由口播数字人翻拍。",
+      );
+      return;
+    }
+    if (video.durationMs < 4_000) {
+      notify("该视频不足 4 秒，请走「提取文案」方向");
       return;
     }
     beginReplicateRef.current();
   }, [state.viralReplicateIntent, video, notify, patchState]);
+  // 卡片「提取文案」直达：与复刻意图同款即焚消费，复用下方 requestExtract
+  // 的双端分流（桌面本地抽音轨 / Web claim-first 回落服务端导入）。
+  useEffect(() => {
+    if (!state.viralExtractIntent || !video) return;
+    patchState({ viralExtractIntent: false });
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少平台标识，无法提取文案");
+      return;
+    }
+    requestExtractRef.current();
+  }, [state.viralExtractIntent, video, notify, patchState]);
 
   // hooks 必须在提前 return 之前声明完毕（刷新按钮渲染在下方详情分支里）。
   const [refreshBusy, setRefreshBusy] = useState(false);
@@ -2295,12 +2351,14 @@ export function ViralDetailPage() {
     }
     void start(video, "copy", goExtract);
   };
-  // 复刻方向只适用于 4–15s 的爆款；与服务端参考视频校验保持一致。
+  // 卡片「提取文案」意图的晚绑定入口（定义在 early return 之后，ref 保序）。
+  requestExtractRef.current = requestExtract;
+  // 复刻方向只适用于 4–30s 的爆款；与服务端参考视频校验保持一致。
   // 时长未知或超限时隐藏入口，视频仍可走「提取文案→口播数字人」方向。
   const canReplicate =
     typeof video.durationMs === "number" &&
     video.durationMs >= 4_000 &&
-    video.durationMs <= 15_000;
+    video.durationMs <= 30_000;
   const goReplica = (task: ViralImportTask) => {
     if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
       notify("该来源暂不支持视频复刻");
