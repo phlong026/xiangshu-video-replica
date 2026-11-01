@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,10 @@ def test_rollout_uses_installed_topology_before_fetching_new_release() -> None:
     assert "text.replace(old, new)" not in script
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only：断言 0600 权限位，Windows 的 st_mode 结构性不满足",
+)
 def test_image_override_changes_parameterized_images_without_touching_topology(tmp_path) -> None:
     script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text(encoding="utf-8")
     start = script.index("write_image_override() {")
