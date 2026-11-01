@@ -696,8 +696,8 @@ test("uses the same gold logo and brand names as the studio", async () => {
   expect(
     screen.getByRole("img", { name: "众墅之家" }).getAttribute("src"),
   ).toMatch(/^data:image\/svg\+xml|zhongshu-logo-mark\.svg$/);
-  expect(screen.getByText("众墅之家")).toBeVisible();
-  expect(screen.getByText("AI 即创")).toBeVisible();
+  // BrandIdentity 两行版式：品牌名与口号合并进同一个 strong 元素。
+  expect(screen.getByText("众墅之家 AI 即创")).toBeVisible();
 });
 
 test("opening account records refreshes a balance changed by an administrator", async () => {

@@ -4611,7 +4611,9 @@ describe("视频生成（C2 独立创作）", () => {
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      updatedAt: "2026-10-12T00:00:00Z",
+      // 恢复提示只对 7 天内的草稿出现（DRAFT_PROMPT_MAX_AGE_MS）：
+      // 硬编码日期会随时间腐烂，这里用「一天前」保持在窗口内。
+      updatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
     render(
