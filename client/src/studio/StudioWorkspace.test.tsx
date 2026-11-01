@@ -231,6 +231,13 @@ const api = vi.hoisted(() => ({
     },
   })),
   uploadMaterial: vi.fn(),
+  // 爆款列表：恢复/路由用例路过 ViralPage 时必须拿到数组，不能是 undefined。
+  listViralVideos: vi.fn(async () => ({
+    items: [],
+    total: 0,
+    hasMore: false,
+    nextCursor: null,
+  })),
   getOralPrice: vi.fn(async () => ({
     unit_price_fen: 500,
     estimated_credits: 500,
@@ -241,7 +248,16 @@ const api = vi.hoisted(() => ({
   createOralTask: vi.fn(),
   createIndependentVideoTask: vi.fn(),
   listUserSavedPrompts: vi.fn(async (): Promise<unknown[]> => []),
-  listMaterials: vi.fn(),
+  listMaterials: vi.fn(
+    async (): Promise<{
+      items: unknown[];
+      page?: number;
+      page_size?: number;
+      total: number;
+      hasMore?: boolean;
+      nextCursor?: string | null;
+    }> => ({ items: [], total: 0 }),
+  ),
   getAssetDownloadUrl: vi.fn(),
   getLatestScriptRewriteTask: vi.fn(async (): Promise<unknown> => null),
   getLatestProjectShotCards: vi.fn(async () => null),
@@ -4615,7 +4631,8 @@ describe("视频生成（C2 独立创作）", () => {
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      updatedAt: "2026-10-12T00:00:00Z",
+      // 必须用窗口内的相对时间：硬编码日期会随日历流逝跌出 7 天提示窗口。
+      updatedAt: freshUpdatedAt(),
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
     render(

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Pagination } from "../admin/ui/Pagination";
 import {
   type CreatedRechargeOrder,
-  CustomerApiError,
   type CustomerRechargePackage,
   type CustomerWalletLedgerPage,
   customerCloseRechargeOrder,

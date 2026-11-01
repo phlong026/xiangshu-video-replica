@@ -279,7 +279,7 @@ it("客户运营页：全选本页；只读角色没有勾选列", async () => {
 });
 
 it("公告页：编辑预填原值并按北京时间提交区间，可把失效时间清回不限", async () => {
-  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => ({
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ({
     ok: true,
     status: 200,
     json: async () =>
