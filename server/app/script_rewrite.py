@@ -16,11 +16,10 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import HTTPException
-from psycopg import errors as psycopg_errors
 from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection, BusinessRow
+from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
 from app.external_calls import CallTimer, Outcome, record_external_call
 from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.settings import SettingsRepository, SettingsUnavailableError
@@ -528,7 +527,7 @@ def enqueue_script_rewrite_task(
                     """,
                     (_time_text(datetime.now(UTC)), replay["id"]),
                 ).fetchone()
-            except psycopg_errors.UniqueViolation as exc:
+            except IntegrityConstraintError as exc:
                 conn.rollback()
                 raise _script_rewrite_error(
                     409,
