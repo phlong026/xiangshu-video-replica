@@ -895,7 +895,7 @@ export function WorkbenchPage() {
           </button>
           <input
             aria-label="视频链接"
-            placeholder="粘贴抖音或小红书视频链接"
+            placeholder="粘贴抖音 / 小红书 / 视频号分享链接"
             value={sourceLink}
             onChange={(event) => {
               linkOperationRef.current += 1;
@@ -946,8 +946,9 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          支持抖音、小红书的视频链接；其他平台请上传 MP4/MOV 文件；视频复刻支持
-          4-15 秒、200 MB 以内的视频，更长的视频会自动提取音轨用于提取文案
+          支持抖音、小红书、视频号的分享链接；其他平台请上传 MP4/MOV
+          文件；视频复刻支持 4-30 秒、200 MB
+          以内的视频，更长的视频会自动提取音轨用于提取文案
           （桌面端，原视频不上传）。
         </p>
         {linkState.status === "loading" && (
@@ -1209,6 +1210,26 @@ export function WorkbenchPage() {
                       </span>
                     </div>
                     <div className="studio-home-viral-actions">
+                      {/* 与爆款视频页卡片同一套 4–30s 门槛的主 CTA：一键复刻
+                          直达详情页自动开跑；超限视频保留提取文案方向。 */}
+                      {typeof video.durationMs === "number" &&
+                        video.durationMs >= 4_000 &&
+                        video.durationMs <= 30_000 && (
+                          <Button
+                            variant="primary"
+                            aria-label={`一键复刻：${video.title}`}
+                            onClick={() => {
+                              navigate("viral-detail", {
+                                selectedVideoId: video.id,
+                                returnTo: "workbench",
+                                viralReplicateIntent: true,
+                              });
+                              persistWorkbenchViralDetailUrl(video);
+                            }}
+                          >
+                            一键复刻
+                          </Button>
+                        )}
                       <Button
                         variant="quiet"
                         aria-label={`查看详情：${video.title}`}
@@ -1494,7 +1515,7 @@ export function TasksPage() {
   };
   return (
     <section className="studio-tasks-page">
-      <h1>任务中心</h1>
+      {/* 页面标题由数据看板外壳（页签行）提供，这里不再重复 h1。 */}
       <div className="studio-page-actions">
         {!review && (
           <Button onClick={() => openLive("tasks")}>历史任务与下载</Button>

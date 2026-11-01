@@ -25,6 +25,7 @@ import csv
 import io
 import os
 import secrets
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 import psycopg
@@ -110,6 +111,12 @@ def _create_sub(client, headers, username: str, display_name: str) -> str:
     return created.json()["id"]
 
 
+def _in_window(hour_offset: int = 0, minute: int = 0) -> str:
+    """落在「近 30 天」窗口内的种子时间（now-2 天 + 时/分偏移，保同日时序）."""
+    moment = datetime.now() - timedelta(days=2, hours=-hour_offset, minutes=minute)
+    return moment.strftime("%Y-%m-%d %H:%M:%S+08")
+
+
 def _seed_transaction(
     dsn: str,
     *,
@@ -189,7 +196,7 @@ def test_sub_account_filter_narrows_to_that_actor(client, registration_dsn) -> N
         kind="RESERVE",
         credits=500,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
     _seed_transaction(
         registration_dsn,
@@ -198,7 +205,7 @@ def test_sub_account_filter_narrows_to_that_actor(client, registration_dsn) -> N
         kind="SETTLE",
         credits=30,
         actor_id=sub_a,
-        created_at="2026-09-20 11:00:00+08",
+        created_at=_in_window(1),
     )
     _seed_transaction(
         registration_dsn,
@@ -207,7 +214,7 @@ def test_sub_account_filter_narrows_to_that_actor(client, registration_dsn) -> N
         kind="SETTLE",
         credits=70,
         actor_id=sub_b,
-        created_at="2026-09-20 12:00:00+08",
+        created_at=_in_window(2),
     )
 
     everything = client.get(TRANSACTIONS_PATH, headers=master_headers)
@@ -232,7 +239,7 @@ def test_ledger_never_crosses_wallets(client, registration_dsn) -> None:
         kind="RESERVE",
         credits=10,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
     _seed_transaction(
         registration_dsn,
@@ -241,7 +248,7 @@ def test_ledger_never_crosses_wallets(client, registration_dsn) -> None:
         kind="RESERVE",
         credits=99,
         actor_id=None,
-        created_at="2026-09-20 10:05:00+08",
+        created_at=_in_window(0, 5),
     )
 
     assert _transaction_ids(client.get(TRANSACTIONS_PATH, headers=mine_headers)) == {"tx-mine"}
@@ -271,7 +278,7 @@ def test_sub_account_summary_reports_both_directions(client, registration_dsn) -
         kind="SETTLE",
         credits=120,
         actor_id=sub_a,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
     _seed_transaction(
         registration_dsn,
@@ -280,7 +287,7 @@ def test_sub_account_summary_reports_both_directions(client, registration_dsn) -
         kind="SETTLE",
         credits=80,
         actor_id=sub_a,
-        created_at="2026-09-20 10:10:00+08",
+        created_at=_in_window(0, 10),
     )
     _seed_transaction(
         registration_dsn,
@@ -289,7 +296,7 @@ def test_sub_account_summary_reports_both_directions(client, registration_dsn) -
         kind="RELEASE",
         credits=25,
         actor_id=sub_a,
-        created_at="2026-09-20 10:20:00+08",
+        created_at=_in_window(0, 20),
     )
 
     response = client.get(
@@ -320,7 +327,7 @@ def test_sub_account_summary_honours_the_active_filters(client, registration_dsn
         kind="RESERVE",
         credits=300,
         actor_id=sub_a,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
     _seed_transaction(
         registration_dsn,
@@ -329,7 +336,7 @@ def test_sub_account_summary_honours_the_active_filters(client, registration_dsn
         kind="SETTLE",
         credits=40,
         actor_id=sub_a,
-        created_at="2026-09-20 10:30:00+08",
+        created_at=_in_window(0, 30),
     )
 
     # 只看 SETTLE：列表只应有一行，摘要也只能统计这一行。
@@ -374,7 +381,7 @@ def test_csv_export_is_well_formed(client, registration_dsn) -> None:
         kind="SETTLE",
         credits=66,
         actor_id=sub_a,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
 
     response = client.get(EXPORT_PATH, headers=master_headers)
@@ -410,7 +417,7 @@ def test_csv_export_respects_the_sub_account_filter(client, registration_dsn) ->
         kind="SETTLE",
         credits=11,
         actor_id=sub_a,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
     _seed_transaction(
         registration_dsn,
@@ -419,7 +426,7 @@ def test_csv_export_respects_the_sub_account_filter(client, registration_dsn) ->
         kind="SETTLE",
         credits=22,
         actor_id=sub_b,
-        created_at="2026-09-20 10:01:00+08",
+        created_at=_in_window(0, 1),
     )
 
     everything = _parse_csv(client.get(EXPORT_PATH, headers=master_headers).text)
@@ -448,7 +455,7 @@ def test_consumption_by_business_groups_settled_rows(client, registration_dsn) -
         kind="SETTLE",
         credits=40,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
         service="asr",
     )
     _seed_transaction(
@@ -458,7 +465,7 @@ def test_consumption_by_business_groups_settled_rows(client, registration_dsn) -
         kind="SETTLE",
         credits=60,
         actor_id=None,
-        created_at="2026-09-20 11:00:00+08",
+        created_at=_in_window(1),
         service="asr",
     )
     _seed_transaction(
@@ -468,7 +475,7 @@ def test_consumption_by_business_groups_settled_rows(client, registration_dsn) -
         kind="SETTLE",
         credits=25,
         actor_id=None,
-        created_at="2026-09-20 12:00:00+08",
+        created_at=_in_window(2),
         service="video_768p",
     )
     # 退回不是消费、预扣会随后被结算或退回——两者都不该出现在构成里
@@ -479,7 +486,7 @@ def test_consumption_by_business_groups_settled_rows(client, registration_dsn) -
         kind="RELEASE",
         credits=30,
         actor_id=None,
-        created_at="2026-09-20 13:00:00+08",
+        created_at=_in_window(3),
     )
     _seed_transaction(
         registration_dsn,
@@ -488,7 +495,7 @@ def test_consumption_by_business_groups_settled_rows(client, registration_dsn) -
         kind="RESERVE",
         credits=99,
         actor_id=None,
-        created_at="2026-09-20 14:00:00+08",
+        created_at=_in_window(4),
     )
 
     response = client.get(
@@ -521,7 +528,7 @@ def test_consumption_by_business_folds_billing_subjects_into_business_keys(
         kind="SETTLE",
         credits=25,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
         service="video_768p",
     )
     _seed_transaction(
@@ -531,7 +538,7 @@ def test_consumption_by_business_folds_billing_subjects_into_business_keys(
         kind="SETTLE",
         credits=75,
         actor_id=None,
-        created_at="2026-09-20 11:00:00+08",
+        created_at=_in_window(1),
         service="video_2k",
     )
 
@@ -590,7 +597,7 @@ def test_csv_export_and_list_agree_on_the_business_filter(client, registration_d
         kind="SETTLE",
         credits=42,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
         service="video_768p",
     )
 
@@ -612,7 +619,7 @@ def test_csv_export_maps_historical_like_the_list(client, registration_dsn) -> N
         kind="SETTLE",
         credits=7,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
 
     exported = _parse_csv(
@@ -631,7 +638,7 @@ def test_csv_carries_both_ledger_columns(client, registration_dsn) -> None:
         kind="SETTLE",
         credits=66,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
 
     header, row = _parse_csv(client.get(EXPORT_PATH, headers=master_headers).text)[:2]
@@ -664,7 +671,7 @@ def test_csv_export_signals_truncation(client, registration_dsn) -> None:
         kind="SETTLE",
         credits=5,
         actor_id=None,
-        created_at="2026-09-20 10:00:00+08",
+        created_at=_in_window(0),
     )
 
     capped = client.get(EXPORT_PATH, headers=master_headers, params={"limit": 1})

@@ -3368,7 +3368,7 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
                 )
             ]
 
-    def stream(self, url):
+    def stream(self, url, *, extra_headers=None):
         streams.append(url)
         if failing and failure == "media" and url.endswith("bad.mp4"):
             raise ViralSourceError("temporary download failure")
@@ -3732,7 +3732,7 @@ def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
         "app.viral_collection.viral_source_client_from_settings", lambda _conn: stub
     )
 
-    def stream(self, url):
+    def stream(self, url, *, extra_headers=None):
         yield b"\x00\x00\x00\x18ftypisom"
 
     monkeypatch.setattr("app.viral_media.UrlFetcher.iter_fetch", stream)
@@ -3967,7 +3967,7 @@ def test_collection_applies_saved_quality_rules_before_admitting_videos(
         def douyin_search(self, *, keyword: str, category: str) -> list[ViralVideo]:
             return candidates
 
-    def stream(self, url):
+    def stream(self, url, *, extra_headers=None):
         streams.append(url)
         yield b"\x00\x00\x00\x18ftypisom"
 

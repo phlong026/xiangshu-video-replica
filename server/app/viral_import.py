@@ -145,11 +145,11 @@ def enqueue_viral_import_task(
         != "available"
     ):
         raise _error(409, "VIRAL_VIDEO_UNAVAILABLE", "该爆款视频当前不可用于创作。")
-    if request.purpose == "replica" and not 4_000 <= video.duration_ms <= 15_000:
+    if request.purpose == "replica" and not 4_000 <= video.duration_ms <= 30_000:
         raise _error(
             422,
             "VIRAL_IMPORT_DURATION_OUT_OF_RANGE",
-            "参考视频需为 4–15 秒，请更换素材后重试。",
+            "参考视频需为 4–30 秒，请更换素材后重试。",
             retryable=False,
         )
     request_payload = {

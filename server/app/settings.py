@@ -24,7 +24,16 @@ from app.storage import (
 from app.zpay import parse_enabled_channels
 
 ProviderName = Literal[
-    "apilio", "metaso", "cos", "deepseek", "hifly", "tikhub", "dashscope", "douyidou", "ses"
+    "apilio",
+    "metaso",
+    "cos",
+    "deepseek",
+    "hifly",
+    "tikhub",
+    "dashscope",
+    "douyidou",
+    "ses",
+    "yuanbao",
 ]
 
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
@@ -40,6 +49,9 @@ SECRET_FIELDS = (
     "token",
     "password",
     "authorization",
+    # 视频号解析通道的登录态凭据：泄露即等于账号被接管，必须与 api_key 同级
+    # 掩码与加密（漏加这里，管理端回显会吐明文，掩码回传会写坏真实值）。
+    "cookie",
 )
 REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     # Apilio can use a dedicated Gemini key while image generation is not configured yet.
@@ -60,6 +72,10 @@ REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     "dashscope": ("api_key",),
     # 链接解析（C3）：抖音/快手/小红书等去水印与文案提取网关凭据。
     "douyidou": ("app_id", "app_secret"),
+    # 视频号链接解析（2026-10 需求）：登录态凭据 + 助理会话 ID。cookie 在
+    # 网页端开发者工具里整串复制；agent_id 是解析请求头与 Referer 需要的
+    # 会话标识（浏览器地址栏 /chat/{agent_id} 段）。两者任一过期即需管理员更新。
+    "yuanbao": ("cookie", "agent_id"),
     # 邮件推送：客户绑定邮箱与找回密码的验证码。只用模板发信（内地地域不支持
     # 自由正文），模板变量约定见 app.email_delivery。
     "ses": ("secret_id", "secret_key", "from_address", "code_template_id"),
@@ -1099,13 +1115,17 @@ def remove_cos_lifecycle_rules(
 
 
 def get_provider_tester() -> ProviderTester:
-    # 函数内导入：email_delivery 反向依赖本模块的 SettingsRepository。
+    # 函数内导入：email_delivery 与 viral_wechat_link 反向依赖本模块的
+    # SettingsRepository，模块级导入会成环。
     from app.email_delivery import EmailProviderTester
+    from app.viral_wechat_link import YuanbaoProviderTester
 
     return StorageProviderTester(
         fallback=HiflyProviderTester(
             fallback=MetasoProviderTester(
-                fallback=EmailProviderTester(fallback=NoopProviderTester())
+                fallback=YuanbaoProviderTester(
+                    fallback=EmailProviderTester(fallback=NoopProviderTester())
+                )
             )
         )
     )

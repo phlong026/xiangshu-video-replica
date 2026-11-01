@@ -83,7 +83,7 @@ class _Intent:
 class FakeFetcher:
     last_content_type = None
 
-    def iter_fetch(self, url: str):
+    def iter_fetch(self, url: str, *, extra_headers=None):
         content = self.fetch(url)
         for offset in range(0, len(content), 65536):
             yield content[offset : offset + 65536]
@@ -107,7 +107,7 @@ def test_pipeline_never_materializes_whole_video_and_closes_on_failure(tmp_path,
         def fetch(self, url):
             pytest.fail("whole-file download used")
 
-        def iter_fetch(self, url):
+        def iter_fetch(self, url, *, extra_headers=None):
             try:
                 yield b"\x00\x00\x00\x18ftypisom"
                 for _ in range(8):

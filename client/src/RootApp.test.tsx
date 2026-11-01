@@ -207,8 +207,7 @@ describe("RootApp", () => {
     );
     expect(welcomeLogo).toHaveAttribute("width", "50.4");
     expect(welcomeLogo).toHaveAttribute("height", "43.2");
-    // 品牌区两行版式（logo 左、文案右）：品牌名与口号合并进 BrandIdentity 的
-    // 同一个 strong 元素，不再是可以单独命中的两段文本。
+    // 2026-10-31 品牌区两行版式：文案合并为单节点「众墅之家 AI 即创」。
     expect(screen.getByText("众墅之家 AI 即创")).toBeVisible();
 
     await loginThroughAccountForm();

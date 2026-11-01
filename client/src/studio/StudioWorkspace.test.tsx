@@ -231,6 +231,13 @@ const api = vi.hoisted(() => ({
     },
   })),
   uploadMaterial: vi.fn(),
+  // 爆款列表：恢复/路由用例路过 ViralPage 时必须拿到数组，不能是 undefined。
+  listViralVideos: vi.fn(async () => ({
+    items: [],
+    total: 0,
+    hasMore: false,
+    nextCursor: null,
+  })),
   getOralPrice: vi.fn(async () => ({
     unit_price_fen: 500,
     estimated_credits: 500,
@@ -241,7 +248,16 @@ const api = vi.hoisted(() => ({
   createOralTask: vi.fn(),
   createIndependentVideoTask: vi.fn(),
   listUserSavedPrompts: vi.fn(async (): Promise<unknown[]> => []),
-  listMaterials: vi.fn(),
+  listMaterials: vi.fn(
+    async (): Promise<{
+      items: unknown[];
+      page?: number;
+      page_size?: number;
+      total: number;
+      hasMore?: boolean;
+      nextCursor?: string | null;
+    }> => ({ items: [], total: 0 }),
+  ),
   getAssetDownloadUrl: vi.fn(),
   getLatestScriptRewriteTask: vi.fn(async (): Promise<unknown> => null),
   getLatestProjectShotCards: vi.fn(async () => null),
@@ -660,15 +676,16 @@ describe("V1.4 workspace integration", () => {
     expect(main).toHaveClass("studio-route-workbench");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
 
+    // 2026-10-31：任务中心下沉为数据看板页签，导航项换成「数据看板」。
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
         "button",
-        { name: /任务中心/ },
+        { name: /数据看板/ },
       ),
     );
 
     expect(shell?.className).not.toContain("studio-route-");
-    expect(main).toHaveClass("studio-route-tasks");
+    expect(main).toHaveClass("studio-route-analytics");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
   });
 
@@ -1064,7 +1081,10 @@ describe("V1.4 workspace integration", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "查看视频" })[0]);
     expect(window.location.hash).toContain("returnTo=analytics");
-    fireEvent.click(screen.getByRole("button", { name: "任务中心" }));
+    // 任务中心下沉后：详情页经导航「数据看板」回到看板，再切「任务中心」页签。
+    fireEvent.click(screen.getByRole("button", { name: "数据看板" }));
+    expect(window.location.hash).toBe("#studio/analytics");
+    fireEvent.click(screen.getByRole("tab", { name: "任务中心" }));
     expect(window.location.hash).toBe("#studio/tasks");
     fireEvent.click(screen.getAllByRole("button", { name: "查看结果" })[1]);
     expect(window.location.hash).toBe(
@@ -4611,9 +4631,8 @@ describe("视频生成（C2 独立创作）", () => {
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      // 恢复提示只对 7 天内的草稿出现（DRAFT_PROMPT_MAX_AGE_MS）：
-      // 硬编码日期会随时间腐烂，这里用「一天前」保持在窗口内。
-      updatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      // 必须用窗口内的相对时间：硬编码日期会随日历流逝跌出 7 天提示窗口。
+      updatedAt: freshUpdatedAt(),
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
     render(

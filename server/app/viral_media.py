@@ -1,7 +1,9 @@
 """爆款视频共享媒体管线。
 
-每周采集或用户主动解析链接时，通过服务端临时文件分块下载，视频号仅解密
-前 128 KiB，然后归档到主存储。PG 租约协调跨进程的不可变对象发布。
+每周采集或用户主动解析链接时，通过服务端临时文件分块下载，然后归档到主
+存储。视频号有两条取流路径：关键词采集条目走详情接口的加密流（仅解密前
+128 KiB 校验，逐块解密落盘），链接导入条目走解析通道的明文直链（带站点
+Referer 直下）。PG 租约协调跨进程的不可变对象发布。
 列表播放和项目导入使用 cached_only，只读取已归档对象并生成新签名。
 项目持有独立副本；临时文件退出即清理，共享云对象不自动删除。
 """
@@ -18,7 +20,7 @@ import ssl
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -29,6 +31,7 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 from app.net_safety import FAKE_IP_NETWORK
 from app.storage import DownloadIntent, StorageAdapter, StoredObject
 from app.viral_decrypt import decrypt_chunks, is_encrypted_mp4
+from app.viral_link import ViralLinkError
 from app.viral_media_preparation import ViralMediaPreparation
 from app.viral_resource_metering import ResourceMeasurement, measured_chunks, stored_resource
 from app.viral_tikhub import (
@@ -40,6 +43,7 @@ from app.viral_tikhub import (
     ViralVideo,
     WechatVideoDetail,
 )
+from app.viral_wechat_link import WechatLinkClient
 
 VIRAL_STORAGE_PREFIX = "viral"
 VIRAL_MEDIA_URL_TTL = timedelta(hours=6)
@@ -152,10 +156,12 @@ class UrlFetcher:
         self.last_content_type: str | None = None
         self._connection_factory = connection_factory or _pinned_connection
 
-    def fetch(self, url: str) -> bytes:
-        return b"".join(self.iter_fetch(url))
+    def fetch(self, url: str, *, extra_headers: Mapping[str, str] | None = None) -> bytes:
+        return b"".join(self.iter_fetch(url, extra_headers=extra_headers))
 
-    def iter_fetch(self, url: str) -> Iterator[bytes]:
+    def iter_fetch(
+        self, url: str, *, extra_headers: Mapping[str, str] | None = None
+    ) -> Iterator[bytes]:
         self.last_content_type = None
         current_url = url
         for _redirect in range(6):
@@ -171,10 +177,13 @@ class UrlFetcher:
                 scheme, hostname, port, connect_ip, self.timeout_seconds
             )
             try:
+                request_headers = {"Host": host_header, "User-Agent": _USER_AGENT}
+                if extra_headers:
+                    request_headers.update(extra_headers)
                 connection.request(
                     "GET",
                     target,
-                    headers={"Host": host_header, "User-Agent": _USER_AGENT},
+                    headers=request_headers,
                 )
                 response = connection.getresponse()
                 if response.status in {301, 302, 303, 307, 308}:
@@ -488,6 +497,7 @@ class ViralMediaPipeline:
         cached_only: bool = False,
         refresh_video: Callable[[ViralVideo], ViralVideo] | None = None,
         cancellation_check: Callable[[], None] | None = None,
+        wechat_link_client: WechatLinkClient | None = None,
     ) -> None:
         self._client = client
         self._storage = storage
@@ -497,6 +507,7 @@ class ViralMediaPipeline:
         self._cached_only = cached_only
         self._refresh_video = refresh_video
         self._cancellation_check = cancellation_check or (lambda: None)
+        self._wechat_link_client = wechat_link_client
         self.detail: WechatVideoDetail | None = None
 
     def fetch(self, video: ViralVideo, *, prefer: str | None = None) -> ViralMediaResult:
@@ -577,12 +588,19 @@ class ViralMediaPipeline:
         self, video: ViralVideo, kind: str, key: str, content_type: str, check: Callable[[], None]
     ) -> StoredObject:
         decode_key: str | None = None
+        extra_headers = self._download_headers(video)
         if video.platform == PLATFORM_WECHAT:
-            detail = self._wechat_detail(video)
-            self.detail = detail
-            url, decode_key = detail.full_url, detail.decode_key
-            if not url or not decode_key:
-                raise ViralMediaError("该视频素材暂时无法获取，请稍后重试")
+            if video.native.get("share_url"):
+                # 链接导入条目：解析通道给的直链是明文 MP4，不经加密详情。
+                url = self._wechat_link_source_url(video)
+                if not url:
+                    raise ViralMediaError("该视频素材暂时无法获取，请稍后重试")
+            else:
+                detail = self._wechat_detail(video)
+                self.detail = detail
+                url, decode_key = detail.full_url, detail.decode_key
+                if not url or not decode_key:
+                    raise ViralMediaError("该视频素材暂时无法获取，请稍后重试")
         else:
             url = video.audio_url if kind == "audio" else video.play_url
         if not url:
@@ -599,7 +617,9 @@ class ViralMediaPipeline:
             try:
                 with (
                     _closing_chunks(
-                        measured_chunks(self._fetcher.iter_fetch(url), download)
+                        measured_chunks(
+                            self._fetcher.iter_fetch(url, extra_headers=extra_headers), download
+                        )
                     ) as source,
                     path.open("wb") as output,
                 ):
@@ -670,6 +690,34 @@ class ViralMediaPipeline:
             return self._client.wechat_video_detail(export_id=export_id, object_nonce_id=nonce)
         except ViralSourceError as exc:
             raise ViralMediaError("该视频素材暂时无法获取，请稍后重试") from exc
+
+    def _wechat_link_source_url(self, video: ViralVideo) -> str | None:
+        """链接导入条目的明文直链.
+
+        优先用解析时落库的 play_url（解析后紧接着下载，直链仍新鲜，不再消耗
+        解析通道调用）；直链缺失（如缓存回收后重下）且注入了解析通道时重取
+        一条新直链。都不可得返回 None，由调用方按素材暂不可用降级。
+        """
+        if video.play_url:
+            return video.play_url
+        client = self._wechat_link_client
+        share_url = str((video.native or {}).get("share_url") or "")
+        if client is None or not share_url:
+            return None
+        try:
+            return client.fetch_snapshot(share_url).video_url
+        except ViralLinkError as exc:
+            logger.warning(
+                "Wechat link media refresh failed for %s: %s", video.video_id, type(exc).__name__
+            )
+            return None
+
+    @staticmethod
+    def _download_headers(video: ViralVideo) -> dict[str, str] | None:
+        # 视频号预览直链的 CDN 校验站点来源：缺 Referer 常返回 403。
+        if video.platform == PLATFORM_WECHAT:
+            return {"Referer": "https://channels.weixin.qq.com/"}
+        return None
 
     def _result(
         self,

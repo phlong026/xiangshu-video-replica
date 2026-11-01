@@ -696,7 +696,7 @@ test("uses the same gold logo and brand names as the studio", async () => {
   expect(
     screen.getByRole("img", { name: "众墅之家" }).getAttribute("src"),
   ).toMatch(/^data:image\/svg\+xml|zhongshu-logo-mark\.svg$/);
-  // BrandIdentity 两行版式：品牌名与口号合并进同一个 strong 元素。
+  // BrandIdentity 品牌文案合并为单节点「众墅之家 AI 即创」。
   expect(screen.getByText("众墅之家 AI 即创")).toBeVisible();
 });
 

@@ -62,6 +62,7 @@ from app.viral_import import (
     viral_import_task_response,
 )
 from app.viral_link import (
+    DouyidouLinkClient,
     ResolvedViralLink,
     ViralLinkError,
     douyidou_link_client_from_settings,
@@ -91,11 +92,12 @@ from app.viral_store import (
     viral_video_availability,
 )
 from app.viral_tikhub import ViralSourceError, ViralVideo
+from app.viral_wechat_link import WechatLinkClient, wechat_link_client_from_settings
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
 logger = logging.getLogger(__name__)
 _LINK_RECEIPT_LEASE = timedelta(minutes=2)
-# 与上传/拆解预检保持一致：15 秒硬上限 + 舍入容差。
+# 与上传/拆解预检保持一致：30 秒硬上限 + 舍入容差。
 _MAX_LINK_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERANCE_SECONDS
 _MAX_LINK_DURATION_MS = int(_MAX_LINK_DURATION_SECONDS * 1000)
 
@@ -290,6 +292,9 @@ def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
         native={
             "source_description": resolved.source_description,
             "link_resolved": True,
+            # 解析通道回填的溯源键（视频号 share_url/export_id）原样并入：
+            # 媒体管线重取直链、统计刷新回落都靠这两把钥匙。
+            **dict(resolved.native),
         },
     )
 
@@ -297,14 +302,14 @@ def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
 def preflight_resolved_media(
     resolved: ResolvedViralLink, *, purpose: str, storage: StorageAdapter
 ) -> None:
-    # 链接解析已带时长时，先拦截超过 15 秒上限的参考视频，避免无谓下载与后续静默失败；
-    # 提取文案（copy）以原视频音轨转写，不受复刻的 15 秒上限约束。
+    # 链接解析已带时长时，先拦截超过 30 秒上限的参考视频，避免无谓下载与后续静默失败；
+    # 提取文案（copy）以原视频音轨转写，不受复刻的 30 秒上限约束。
     if purpose != "copy" and resolved.duration_ms > _MAX_LINK_DURATION_MS:
         raise ViralLinkError(
             422,
             "VIRAL_LINK_DURATION_EXCEEDED",
-            f"视频时长约 {round(resolved.duration_ms / 1000)} 秒，超过 15 秒上限，"
-            "无法复刻；请截取 15 秒以内片段后重试。",
+            f"视频时长约 {round(resolved.duration_ms / 1000)} 秒，超过 30 秒上限，"
+            "无法复刻；请截取 30 秒以内片段后重试。",
             retryable=False,
         )
     # 文案链路直接缓存解析返回的音频（2026-09-30 拍板：上游音频已可直接用于转写），
@@ -422,7 +427,7 @@ def validate_resolved_media_content(
             "链接媒体无法播放，请上传 MP4 或 MOV 文件。",
             retryable=False,
         )
-    # 仅复刻链路的视频受 15 秒上限约束；提取文案（copy）与口播声音样本（audio）
+    # 仅复刻链路的视频受 30 秒上限约束；提取文案（copy）与口播声音样本（audio）
     # 时长可较长，不在此拦截。
     if (
         purpose != "copy"
@@ -432,8 +437,8 @@ def validate_resolved_media_content(
         raise ViralLinkError(
             422,
             "VIRAL_LINK_MEDIA_DURATION_EXCEEDED",
-            f"视频实测时长 {round(metadata.duration_seconds)} 秒，超过 15 秒上限，"
-            "无法复刻；请截取 15 秒以内片段后重试。",
+            f"视频实测时长 {round(metadata.duration_seconds)} 秒，超过 30 秒上限，"
+            "无法复刻；请截取 30 秒以内片段后重试。",
             retryable=False,
         )
 
@@ -477,7 +482,13 @@ def resolve_viral_link(
                 )
             if created:
                 with conn:
-                    resolver = douyidou_link_client_from_settings(conn)
+                    # 按域名分发解析通道：抖音/小红书走去水印网关，视频号走
+                    # 登录态解析链（三步外呼在服务端完成，客户无感知差异）。
+                    resolver: DouyidouLinkClient | WechatLinkClient
+                    if supported_link_platform(normalized_url) == "wechat_channels":
+                        resolver = wechat_link_client_from_settings(conn)
+                    else:
+                        resolver = douyidou_link_client_from_settings(conn)
                     from app.usage_billing import accept_operation
 
                     accept_operation(

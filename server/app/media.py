@@ -60,7 +60,9 @@ MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 # 200MB 装不下。超过通用预算的完成校验走临时文件流式路径，不整载内存。
 REPLICA_PROMPT_MAX_UPLOAD_BYTES = 600 * 1024 * 1024
 MIN_DURATION_SECONDS = 4.0
-MAX_DURATION_SECONDS = 15.0
+# 2026-10-31 起 4-30 秒：30 秒以内的爆款直接进一键复刻，不再分流长视频
+# 拆解；输出档位（单镜头 4-15 秒）是生成侧供应商约束，与源片上限无关。
+MAX_DURATION_SECONDS = 30.0
 MAX_REPLICA_PROMPT_DURATION_SECONDS = 180.0
 DURATION_ROUNDING_TOLERANCE_SECONDS = 0.1
 UPLOAD_INTENT_EXPIRES_IN = timedelta(minutes=15)
@@ -363,8 +365,8 @@ def reuse_owned_completed_upload(
         if isinstance(stored_duration, int | float) and not isinstance(stored_duration, bool)
         else None
     )
-    # 复用不能绕过本次用途的时长门禁：同一文件先以「提取文案」（放开 15 秒上限）
-    # 上传、再拿去复刻时，必须按复刻的 4–15 秒重新校验，与正常 complete 同一错误码。
+    # 复用不能绕过本次用途的时长门禁：同一文件先以「提取文案」（放开 30 秒上限）
+    # 上传、再拿去复刻时，必须按复刻的 4–30 秒重新校验，与正常 complete 同一错误码。
     if duration is not None:
         validate_duration(duration, purpose=purpose)
     asset_id = source_asset_id
@@ -596,7 +598,7 @@ def probe_upload_completion(
     if prepared.expected_sha256 and content_sha256 != prepared.expected_sha256.lower():
         raise media_error(409, "UPLOAD_HASH_MISMATCH", "Uploaded content differs from its digest.")
     metadata = probe_video(probe, content, filename=Path(storage_key).name)
-    # 裁剪爆款（replica）仍是 4–15 秒硬约束；提取文案（script）只卡下限、放开 15 秒
+    # 裁剪爆款（replica）仍是 4–30 秒硬约束；提取文案（script）只卡下限、放开 30 秒
     # 上限；长视频提示词（replica_prompt）放宽到 4–180 秒——复刻侧的时长守护由
     # 分析入口（analysis_duration_for_asset）兜底，长视频侧由 replica_prompt 任务入口兜底。
     validate_duration(metadata.duration_seconds, purpose=prepared.purpose)
@@ -981,7 +983,7 @@ def _probe_oversized_upload_completion(
 
 
 def duration_limit_for_purpose(purpose: str) -> float | None:
-    """用途 → 时长上限（None 为不限）：复刻 15 秒 / 长视频提示词 180 秒 / 提取文案不限."""
+    """用途 → 时长上限（None 为不限）：复刻 30 秒 / 长视频提示词 180 秒 / 提取文案不限."""
     if purpose == "script":
         return None
     if purpose == "replica_prompt":

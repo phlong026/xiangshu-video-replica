@@ -37,6 +37,7 @@ from app.viral_store import (
     viral_video_availability,
 )
 from app.viral_tikhub import ViralSourceError, ViralVideo, viral_source_client_from_settings
+from app.viral_wechat_link import wechat_link_client_from_settings_or_none
 
 
 @dataclass(frozen=True)
@@ -296,10 +297,16 @@ def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video
             ):
                 raise ViralSourceError("视频已删除、下架或屏蔽，停止准备。")
             client = viral_source_client_from_settings(conn)
+            # 链接导入条目的直链可能已过期：注入解析通道以便重取；未配置则退化为直链直下。
+            wechat_link_client = wechat_link_client_from_settings_or_none(conn)
         if video is None:
             raise ViralSourceError("视频已删除，停止归档。")
         pipeline = ViralMediaPipeline(
-            client=client, storage=storage, shared=True, cancellation_check=check
+            client=client,
+            storage=storage,
+            shared=True,
+            cancellation_check=check,
+            wechat_link_client=wechat_link_client,
         )
         pipeline.fetch(video, prefer="video")
         check()

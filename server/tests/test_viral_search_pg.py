@@ -368,7 +368,7 @@ def test_archive_search_covers_threads_and_falls_back(monkeypatch) -> None:
         def put_object(self, key, data, *, content_type=None):
             self.puts[key] = (data, content_type)
 
-    def fake_iter_fetch(self, url):
+    def fake_iter_fetch(self, url, *, extra_headers=None):
         if "bad.example" in url:
             raise viral_media.ViralMediaError("媒体地址无法解析")
         yield b"\xff\xd8\xff\xe0fakejpeg"
@@ -597,7 +597,7 @@ class _FakeCoverStorage:
 def _patch_search_infra(monkeypatch) -> None:
     from app import viral_media
 
-    def fake_iter_fetch(self, url):
+    def fake_iter_fetch(self, url, *, extra_headers=None):
         yield b"\xff\xd8\xff\xe0fakejpeg"
 
     monkeypatch.setattr(viral_media.UrlFetcher, "iter_fetch", fake_iter_fetch)
@@ -1397,7 +1397,7 @@ def _use_refresh_stub(refresh_client, stub) -> None:
 def _patch_refresh_infra(monkeypatch) -> None:
     from app import viral_media
 
-    def fake_iter_fetch(self, url):
+    def fake_iter_fetch(self, url, *, extra_headers=None):
         yield b"\xff\xd8\xff\xe0fakejpeg"
 
     monkeypatch.setattr(viral_media.UrlFetcher, "iter_fetch", fake_iter_fetch)

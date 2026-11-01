@@ -32,10 +32,8 @@ import { ViralOverviewPage } from "./admin/ViralOverviewPage";
 import { ViralVideosPage } from "./admin/ViralVideosPage";
 import { WorkerObservationsPage } from "./admin/WorkerObservationsPage";
 import "./admin/admin-login.css";
-import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
 import { PageBanner } from "./admin/ui/PageBanner";
 import { AdminPermissionsProvider, canFromActor } from "./admin/ui/permissions";
-import { TabBar } from "./admin/ui/TabBar";
 import { roleLabel } from "./admin/ui/vocabulary";
 import { SESSION_EXPIRED_EVENT } from "./api";
 import {
@@ -1167,58 +1165,56 @@ export function AdminApp() {
             {/* 一个层级只导航一次（整改 T08）：总览不再放与左侧菜单重复的快捷栏，
               经营分析、生成记录也不再渲染与菜单同名的页内页签。 */}
             {viewTab === "overview" ? (
-              <>
-                <OverviewPage
-                  readOnly={readOnly}
-                  onNavigate={(destination, target = {}) => {
-                    const routes: Record<string, AdminTab> = {
-                      customerAdjustments: "customersMgmt",
-                      customerPackage: "customersMgmt",
-                      customerRefund: "customersMgmt",
-                      costDetails: "analytics",
-                      // 待结算 / 成本待核对 / 收入未确定都是计费操作口径，落在
-                      // 经营分析而不是资金流水（方案 P0-5）。
-                      pendingOperations: "analytics",
-                      unknownCost: "analytics",
-                      unknownRevenue: "analytics",
-                      failedGenerationRecords: "generationRecords",
-                      analysisFailures: "generationRecords",
-                      rates: "systemSettings",
-                      recon: "funds",
-                    };
-                    // 全局待办（T11）落到带筛选的清单：条数与待办计数同口径。
-                    const filtered: Record<
-                      string,
-                      { tab: AdminTab; target: Record<string, string> }
-                    > = {
-                      pendingOrders: {
-                        tab: "funds",
-                        target: { sub: "orders", status: "PENDING" },
-                      },
-                      queueAttention: { tab: "workerObservations", target: {} },
-                      openTickets: {
-                        tab: "supportTickets",
-                        target: { status: "unresolved" },
-                      },
-                      contentFailed: {
-                        tab: "viralVideos",
-                        target: { listQuery: "libraryStatus=failed" },
-                      },
-                      activeAlerts: { tab: "alerts", target: {} },
-                    };
-                    const direct = filtered[destination];
-                    if (direct) {
-                      navigateAdmin(direct.tab, "", direct.target);
-                      return;
-                    }
-                    navigateAdmin(
-                      routes[destination] ?? (destination as AdminTab),
-                      destination,
-                      target,
-                    );
-                  }}
-                />
-              </>
+              <OverviewPage
+                readOnly={readOnly}
+                onNavigate={(destination, target = {}) => {
+                  const routes: Record<string, AdminTab> = {
+                    customerAdjustments: "customersMgmt",
+                    customerPackage: "customersMgmt",
+                    customerRefund: "customersMgmt",
+                    costDetails: "analytics",
+                    // 待结算 / 成本待核对 / 收入未确定都是计费操作口径，落在
+                    // 经营分析而不是资金流水（方案 P0-5）。
+                    pendingOperations: "analytics",
+                    unknownCost: "analytics",
+                    unknownRevenue: "analytics",
+                    failedGenerationRecords: "generationRecords",
+                    analysisFailures: "generationRecords",
+                    rates: "systemSettings",
+                    recon: "funds",
+                  };
+                  // 全局待办（T11）落到带筛选的清单：条数与待办计数同口径。
+                  const filtered: Record<
+                    string,
+                    { tab: AdminTab; target: Record<string, string> }
+                  > = {
+                    pendingOrders: {
+                      tab: "funds",
+                      target: { sub: "orders", status: "PENDING" },
+                    },
+                    queueAttention: { tab: "workerObservations", target: {} },
+                    openTickets: {
+                      tab: "supportTickets",
+                      target: { status: "unresolved" },
+                    },
+                    contentFailed: {
+                      tab: "viralVideos",
+                      target: { listQuery: "libraryStatus=failed" },
+                    },
+                    activeAlerts: { tab: "alerts", target: {} },
+                  };
+                  const direct = filtered[destination];
+                  if (direct) {
+                    navigateAdmin(direct.tab, "", direct.target);
+                    return;
+                  }
+                  navigateAdmin(
+                    routes[destination] ?? (destination as AdminTab),
+                    destination,
+                    target,
+                  );
+                }}
+              />
             ) : null}
             {viewTab === "analytics" || viewTab === "costReview" ? (
               <AnalyticsPage
