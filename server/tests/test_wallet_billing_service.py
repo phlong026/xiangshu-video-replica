@@ -167,6 +167,18 @@ def _deltas() -> list[tuple[str, int, int]]:
     ]
 
 
+def _terminal_keys() -> list[str]:
+    """task_1 的终态入账幂等键（T2b 计费收敛的黄金冻结面）。"""
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        rows = conn.execute(
+            "SELECT idempotency_key FROM wallet_transactions "
+            "WHERE task_id = 'task_1' AND type IN ('SETTLE', 'RELEASE') "
+            "ORDER BY ledger_sequence"
+        ).fetchall()
+    return [str(row["idempotency_key"]) for row in rows]
+
+
 def test_reserve_and_finalize_support_multiple_seconds_per_round(wallet_db: str) -> None:
     """W11 按秒计费：预留/结算/释放按提交档位秒数记账（不再固定 1）。"""
     seed_task(wallet_db, available_credits=20)
@@ -259,6 +271,82 @@ def test_missing_video_duration_stays_pending_until_verified_evidence(wallet_db:
         )
     assert wallet_state() == (8, 0)
     assert transaction_types() == [("RESERVE", 1), ("SETTLE", 1), ("RELEASE", 1)]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "terminal_prefix"),
+    [("success", "settle"), ("failed", "release"), ("cancelled", "release")],
+)
+def test_finalize_terminal_idempotency_keys_are_frozen(
+    wallet_db: str, outcome: str, terminal_prefix: str
+) -> None:
+    """T2b（internal_billing 入账收敛）的黄金前置：终态幂等键逐字符冻结。
+
+    三条 finalize 腿的键格式 ``{type}:{task_id}:{billing_round}`` 是防双记的
+    精确契约——任何实现收敛若改变键（哪怕大小写或分隔符），同键重放语义
+    即被破坏；本测试先红是实现漂移的第一道闸。回放恰好一条终态行同时锁定。
+    """
+    seed_task(wallet_db, available_credits=1)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        reserve_internal_billing(conn, user_id="user_1", task_id="task_1", billing_round=1)
+        if outcome == "success":
+            conn.execute(
+                "INSERT INTO assets ("
+                " id, project_id, kind, storage_uri, sha256, size_bytes, content_type, "
+                " created_by_user_id"
+                ") VALUES ('result_1', 'project_1', 'video', 'cos://bucket/result.mp4', "
+                " 'sha', 12, 'video/mp4', 'user_1')"
+            )
+            conn.execute(
+                "UPDATE generation_tasks "
+                "SET status = 'SUCCEEDED', actual_output_seconds = 1, archive_status = "
+                "'ARCHIVED', result_asset_id = 'result_1' "
+                "WHERE id = 'task_1'"
+            )
+        else:
+            conn.execute(
+                "UPDATE generation_tasks SET status = %s WHERE id = 'task_1'",
+                ("FAILED" if outcome == "failed" else "CANCELLED",),
+            )
+        first = finalize_internal_billing(conn, task_id="task_1", outcome=outcome)
+        replay = finalize_internal_billing(conn, task_id="task_1", outcome=outcome)
+    assert first.transaction_type == replay.transaction_type
+    # 回放不新增终态行；主路径（经 billing_operations）的终态键契约是
+    # usage:{TYPE}:{operation_id}——与悬空预留分支的键格式不同，分开锁定。
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        operation_id = str(
+            conn.execute("SELECT id FROM billing_operations WHERE source_id = 'task_1'").fetchone()[
+                "id"
+            ]
+        )
+    assert _terminal_keys() == [f"usage:{first.transaction_type}:{operation_id}"]
+
+
+def test_finalize_dangling_reservation_terminal_key_is_frozen(wallet_db: str) -> None:
+    """悬空预留（无 billing_operation）走 internal_billing 自有 INSERT 分支。
+
+    这是 T2b 三处 INSERT 收敛的直接改动面：终态键格式
+    ``{type}:{task_id}:{billing_round}`` 逐字符冻结，回放恰好一条终态行。
+    """
+    seed_task(wallet_db, available_credits=1)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute("UPDATE wallets SET reserved_credits = 1 WHERE user_id = 'user_1'")
+        conn.execute(
+            "INSERT INTO wallet_transactions ("
+            " id, user_id, type, available_delta, reserved_delta, "
+            " task_id, billing_round, idempotency_key"
+            ") VALUES ("
+            " 'dangling-reserve-1', 'user_1', 'RESERVE', -1, 1, "
+            " 'task_1', 1, 'dangling-reserve-key')"
+        )
+        conn.execute("UPDATE generation_tasks SET status = 'FAILED' WHERE id = 'task_1'")
+        first = finalize_internal_billing(conn, task_id="task_1", outcome="failed")
+        replay = finalize_internal_billing(conn, task_id="task_1", outcome="failed")
+    assert first.transaction_type == replay.transaction_type == "RELEASE"
+    assert _terminal_keys() == ["release:task_1:1"]
 
 
 def test_reserve_moves_one_credit_and_is_idempotent(wallet_db: str) -> None:
