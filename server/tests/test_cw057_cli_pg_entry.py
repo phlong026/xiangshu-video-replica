@@ -189,34 +189,11 @@ CURRENT_CLI_MODULES: tuple[CommandRow, ...] = tuple(
     )
 )
 
+# 历史 SQLite lane 的三条 CLI 已随 T3 批 C-4 退役删除（2026-11-01，
+# 业务确认无存量桌面快照）；本表保留为空以维持清单断言结构。
 HISTORICAL_CLI_ROWS: tuple[CommandRow, ...] = tuple(
     CommandRow(row[0], row[1], row[2], row[3], row[4], row[5])
     for row in (
-        (
-            "python -m app.backup <check|backup|restore|daily>",
-            "app/backup.py",
-            "historical-internal-p0",
-            "SQLite file (internal P0 lane)",
-            "internal backup",
-            "customer path is deploy/postgres/pitr-*.sh; excluded from the customer "
-            "package (CW-032); exits with CW-040/CW-042",
-        ),
-        (
-            "python -m scripts.sqlite_to_postgres",
-            "scripts/sqlite_to_postgres.py",
-            "historical-cw060",
-            "SQLite source → PG target (one-shot)",
-            "historical import",
-            "CW-060 isolated operator artifact only",
-        ),
-        (
-            "python -m scripts.reconcile_customer_billing",
-            "scripts/reconcile_customer_billing.py",
-            "historical-cw060",
-            "SQLite source → PG target (one-shot)",
-            "historical reconciliation",
-            "CW-060 isolated operator artifact only",
-        ),
         (
             "python -m scripts.backfill_content_objects",
             "scripts/backfill_content_objects.py",
@@ -358,14 +335,7 @@ def test_customer_deployment_chain_has_no_sqlite_backup_entry() -> None:
     assert "pitr" in env_example.lower()
 
 
-def test_historical_import_tools_stay_outside_cw057_boundary() -> None:
-    """The CW-060 pair must not be silently reworked by the CW-057 entry."""
-
-    for name in ("sqlite_to_postgres.py", "reconcile_customer_billing.py"):
-        source = (SERVER_DIR / "scripts" / name).read_text(encoding="utf-8")
-        assert "resolve_cli_pg_dsn" not in source, (
-            f"{name} belongs to the CW-060 isolated artifact, not the unified entry"
-        )
+# 历史 import 双工具的边界用例已随其删除（T3 批 C-4，2026-11-01）退役。
 
 
 # ---------------------------------------------------------------------------

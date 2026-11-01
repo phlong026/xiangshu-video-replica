@@ -27,15 +27,7 @@ Pinned contracts here:
 
 from __future__ import annotations
 
-import io
-import sys
-from contextlib import redirect_stdout
 from pathlib import Path
-
-import pytest
-
-from app.backup import main as backup_main
-from app.db import CUSTOMER_PRODUCTION_ENV
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _CI_YML = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -128,45 +120,8 @@ def test_customer_deploy_templates_have_no_internal_toolchain_references() -> No
 
 
 # ---------------------------------------------------------------------------
-# Process-level entry: the historical backup CLI rides the CW-042-a choke point
+# 历史 SQLite backup CLI（python -m app.backup）已随 T3 批 C-4 退役删除
+# （2026-11-01，业务确认无存量桌面快照）；其「客户生产拒绝启动」闸门由
+# db_pg.validate_customer_production 与 migrations/env.py 的守卫继续承载
+# （test_cw056 的静默降级用例仍锁定该行为）。
 # ---------------------------------------------------------------------------
-
-
-def test_backup_cli_refuses_in_customer_production(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    db_path = tmp_path / "prod.db"
-    db_path.write_bytes(b"")  # backup_database checks source existence first
-    monkeypatch.setenv(CUSTOMER_PRODUCTION_ENV, "true")
-    saved_argv = sys.argv
-    sys.argv = ["backup", "backup", str(db_path), str(tmp_path / "out.db")]
-    try:
-        with pytest.raises(RuntimeError, match=_REFUSAL_SNIPPET):
-            backup_main()
-    finally:
-        sys.argv = saved_argv
-
-
-def test_backup_cli_still_serves_the_internal_lane(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Scope guard: the deferred retirement must not break the internal lane
-    before CW-051 stops internal writes (backup/restore stays available)."""
-    monkeypatch.delenv(CUSTOMER_PRODUCTION_ENV, raising=False)
-    # initialize a tiny internal database, then back it up through the CLI path.
-    from app.db import initialize_database
-
-    source = tmp_path / "internal.db"
-    conn = initialize_database(source)
-    conn.close()
-
-    backup_target = tmp_path / "backup.db"
-    buffer = io.StringIO()
-    saved_argv = sys.argv
-    sys.argv = ["backup", "backup", str(source), str(backup_target)]
-    try:
-        with redirect_stdout(buffer):
-            backup_main()
-    finally:
-        sys.argv = saved_argv
-    assert backup_target.exists(), "internal-lane backup CLI must keep working"
