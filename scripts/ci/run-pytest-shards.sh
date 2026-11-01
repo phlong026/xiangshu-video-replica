@@ -35,7 +35,10 @@ PG_DB="${PG_FIXTURE_DB:-customer_v3_test}"
 DEFAULT_DSN="postgresql://${PG_USER}:${PG_PASSWORD}@localhost:${BASE_PORT}/${PG_DB}"
 
 # pytest command mirroring the tail of `npm run check`.
-UV_PYTEST=(uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server)
+# --durations=0：分片日志自带逐用例时长，集成窗口把 4 份分片日志拼装后喂给
+# build-test-shards.py --from-log 即可刷新 test-durations 基线（T9 流程，
+# 2026-11-01 起）；对测试行为零影响，只多打日志行。
+UV_PYTEST=(uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server --durations=0)
 
 log() { printf '%s\n' "$*"; }
 
