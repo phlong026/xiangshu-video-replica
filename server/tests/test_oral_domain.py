@@ -3910,6 +3910,26 @@ def test_oral_manual_billing_reconciliation_is_admin_only_audited_and_idempotent
 
     assert denied.status_code == 403
     assert released.status_code == replay.status_code == 200
+    # T2b 黄金冻结：手工对账腿的终态键为 oral-manual-{resolution}:{task}:{round}，
+    # 回放后仍恰好一条终态行（防双记）。
+    with pg_transaction() as raw:
+        terminal_rows = raw.execute(
+            "SELECT idempotency_key, billing_round FROM wallet_transactions "
+            "WHERE oral_task_id = %s AND type = 'RELEASE' ORDER BY ledger_sequence",
+            (release_task.task_id,),
+        ).fetchall()
+    assert len(terminal_rows) == 1
+    (terminal_key,) = terminal_rows
+    # 主路径（有 billing_operation）的终态键是 usage:RELEASE:{operation_id}；
+    # oral-manual-* 前缀只在悬空预留分支出现（见 wallet 黄金测试的悬空用例）。
+    with pg_transaction() as raw:
+        operation_id = str(
+            raw.execute(
+                "SELECT id FROM billing_operations WHERE source_id = %s",
+                (release_task.task_id,),
+            ).fetchone()["id"]
+        )
+    assert terminal_key["idempotency_key"] == f"usage:RELEASE:{operation_id}"
     assert (
         released.json()
         == replay.json()
