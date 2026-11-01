@@ -138,6 +138,14 @@ CURRENT_CLI_MODULES: tuple[CommandRow, ...] = tuple(
             "no database access",
         ),
         (
+            "python -m scripts.probe_video_long_tier",
+            "scripts/probe_video_long_tier.py",
+            "current-offline",
+            "none (external video-generation API; key via env, never logged)",
+            "paid probe",
+            "no database access; submits real billed probe tasks only when run manually",
+        ),
+        (
             "python -m scripts.pitr_recovery_facts",
             "scripts/pitr_recovery_facts.py",
             "current-pg",
