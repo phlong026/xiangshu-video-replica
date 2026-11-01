@@ -42,7 +42,6 @@ README = PACKAGE_DIR / "README.md"
 BOOTSTRAP = PACKAGE_DIR / "bootstrap-base-image.sh"
 ROLLOUT = REPO_ROOT / "deploy" / "customer-git-rollout.sh"
 NGINX = REPO_ROOT / "deploy" / "nginx" / "customer.conf.example"
-LOGGING_YAML = REPO_ROOT / "docker-compose.logging.yml"
 
 # The closed inventory of the formal delivery package.
 PACKAGE_FILES = ("compose.yaml", "README.md", "bootstrap-base-image.sh", "healthcheck.py")
@@ -328,13 +327,13 @@ def test_compose_caps_container_logs_with_json_file_rotation() -> None:
         )
 
 
-def test_readme_and_logging_stack_document_rotation_and_retention() -> None:
+def test_readme_documents_log_rotation_and_retention() -> None:
     # The rotation parameters are only honest if the operator manual states
     # where rotated files live, how to query recent lines, and what the
     # retention boundary is (json-file keeps ~50 MB per container; long-term
     # retention is explicitly out of package scope).
-    logging_yml = LOGGING_YAML.read_text(encoding="utf-8")
-    assert logging_yml.count("logging: *default-logging") == 3  # loki/promtail/grafana
+    # （根目录的 loki/promtail/logging compose 三件套已删：交付包清单与
+    # deploy/customer 从未包含它们，属早期运维实验残留——2026-10-31 T4。）
     readme = README.read_text(encoding="utf-8")
     assert "max-size" in readme and "max-file" in readme
     assert "/var/lib/docker/containers" in readme
