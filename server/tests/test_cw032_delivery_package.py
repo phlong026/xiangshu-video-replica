@@ -338,3 +338,23 @@ def test_readme_documents_log_rotation_and_retention() -> None:
     assert "max-size" in readme and "max-file" in readme
     assert "/var/lib/docker/containers" in readme
     assert "logs --since" in readme and "logs -f" in readme
+
+
+def test_customer_rollout_excludes_historical_sqlite_tooling() -> None:
+    """客户交付链对历史 SQLite 工具的防回流闸门（原 CW-060 用例迁入）。
+
+    operator 打包器与 CW-060 守卫已随 SQLite lane 退役（2026-11-01 T3），
+    但客户构建侧的 fail-closed 检查保留：backup.py / server/scripts /
+    历史导入 CLI 一旦回流进客户镜像即失败。
+    """
+    rollout = ROLLOUT.read_text(encoding="utf-8")
+
+    assert 'rm -f "$BUILD_CTX/server/app/backup.py"' in rollout
+    assert "server/app/backup.py server/scripts" in rollout
+    assert "PRECHECK_FAILED: historical SQLite tooling" in rollout
+    assert "! test -e /opt/video-replica/server/app/backup.py" in rollout
+    assert "! test -e /opt/video-replica/server/scripts/sqlite_to_postgres.py" in rollout
+    assert "! test -e /opt/video-replica/server/scripts/reconcile_customer_billing.py" in rollout
+    assert "historical SQLite tooling in the customer image" in rollout
+    assert "COPY server/scripts" not in rollout
+    assert 'cp -a "$SOURCE/server/scripts"' not in rollout
