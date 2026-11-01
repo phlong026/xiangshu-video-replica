@@ -32,10 +32,8 @@ from pg_test_kit import (
 from app.db_pg import close_pg_pool
 from app.discount_service import (
     DiscountRecord,
-    calculate_discounted_price,
     get_active_discounts,
     get_best_discount,
-    get_discount_rate,
     validate_discount_rate,
 )
 
@@ -169,31 +167,8 @@ def test_validate_discount_rate_invalid_type_rejected() -> None:
         validate_discount_rate([0.85])
 
 
-def test_calculate_discounted_price_no_discount() -> None:
-    assert calculate_discounted_price(1000, None) == 1000
-
-
-def test_calculate_discounted_price_85_percent() -> None:
-    assert calculate_discounted_price(1000, Decimal("0.85")) == 850
-
-
-def test_calculate_discounted_price_ceiling_rounding() -> None:
-    # 1001 * 0.85 = 850.85 → ceil → 851（宁多收一分，不侵蚀平台）
-    assert calculate_discounted_price(1001, Decimal("0.85")) == 851
-
-
-def test_calculate_discounted_price_full_rate() -> None:
-    assert calculate_discounted_price(1000, Decimal("1.0")) == 1000
-
-
-def test_calculate_discounted_price_min_discount() -> None:
-    # 10000 * 0.0001 = 1.0000 → ceil → 1
-    assert calculate_discounted_price(10000, Decimal("0.0001")) == 1
-
-
-def test_calculate_discounted_price_invalid_rate_rejected() -> None:
-    with pytest.raises(ValueError, match="discount_rate must be > 0"):
-        calculate_discounted_price(1000, Decimal("0"))
+# 折后价六条用例已随其死实现删除（2026-10-31 计费域审计：ceil 口径的
+# 真实实现与测试在 billing_catalog 的零售快照用例里）。
 
 
 # ===========================================================================
@@ -207,7 +182,7 @@ def test_get_active_discounts_empty(pg_dsn: str) -> None:
     _seed_customer(pg_dsn, user_id)
     with psycopg.connect(pg_dsn) as conn:
         assert get_active_discounts(conn, user_id=user_id) == []
-        assert get_discount_rate(conn, user_id=user_id) is None
+        assert get_best_discount(conn, user_id=user_id) is None
 
 
 def test_get_active_discounts_single(pg_dsn: str) -> None:
@@ -217,7 +192,7 @@ def test_get_active_discounts_single(pg_dsn: str) -> None:
     _seed_discount(pg_dsn, user_id, rate=Decimal("0.8500"), priority=10)
     with psycopg.connect(pg_dsn) as conn:
         discounts = get_active_discounts(conn, user_id=user_id)
-        rate = get_discount_rate(conn, user_id=user_id)
+        rate = get_best_discount(conn, user_id=user_id).discount_rate
     assert len(discounts) == 1
     assert isinstance(discounts[0], DiscountRecord)
     assert discounts[0].discount_rate == Decimal("0.8500")

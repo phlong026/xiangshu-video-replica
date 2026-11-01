@@ -28,7 +28,12 @@ from pg_test_kit import (
 
 from app.auth import CurrentUser
 from app.db_portable import BusinessConnection
-from app.usage_billing import accept_operation, finish_operation, record_attempt
+from app.usage_billing import (
+    accept_operation,
+    begin_attempt,
+    complete_attempt,
+    finish_operation,
+)
 
 DATABASE = "billing_obs_records_test"
 
@@ -299,7 +304,10 @@ def _seed(dsn: str) -> dict[str, str]:
         operation = accept_operation(
             conn, user_id=user_id, service="analysis", source_id=ids["ok"], units=1
         )
-        record_attempt(conn, operation_id=operation, attempt_key="first", usage=1)
+        attempt_id = begin_attempt(
+            conn, operation_id=operation, attempt_key="first", service="analysis"
+        )
+        complete_attempt(conn, attempt_id=attempt_id, usage=1)
         finish_operation(conn, operation_id=operation, units=1, succeeded=True)
     ids["version"] = version_id
     return ids
