@@ -533,18 +533,6 @@ export type ShotCardPayload = {
   shots: ShotCard[];
 };
 
-export type Character = {
-  id: string;
-  name: string;
-  reference_asset_ids: string[];
-  authorization_project_ids: string[];
-  authorization_expires_at: string | null;
-  is_active: boolean;
-  created_by_user_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
 export type ProjectMainCharacter = Omit<
   components["schemas"]["ProjectMainCharacterResponse"],
   "character_snapshot"
@@ -3743,14 +3731,8 @@ export async function saveShotCards(
   );
 }
 
-export async function listProjectCharacters(
-  projectId: string,
-): Promise<Character[]> {
-  return requestApiJson<Character[]>(
-    `/api/characters?project_id=${encodeURIComponent(projectId)}`,
-    "读取可用人物失败",
-  );
-}
+// 旧轨 GET /api/characters 的封装（listProjectCharacters）已删：前端人物
+// 列表全面走新轨端点，本封装零调用方（2026-11-01 T1 第一步）。
 
 export async function listProjectCharacterVersions(
   projectId: string,
@@ -4508,16 +4490,8 @@ export async function getProjectMainCharacter(
   return (await response.json()) as ProjectMainCharacter | null;
 }
 
-export async function chooseProjectMainCharacter(
-  projectId: string,
-  characterId: string,
-): Promise<ProjectMainCharacter> {
-  return requestApiJson<ProjectMainCharacter>(
-    `/api/projects/${encodeURIComponent(projectId)}/main-character`,
-    "选择人物失败",
-    { method: "PUT", body: JSON.stringify({ character_id: characterId }) },
-  );
-}
+// PUT main-character 的 character_id 旧形态封装已删：前端仅剩 version 形态
+// （chooseProjectMainCharacterVersion）；服务端旧分支的下线随 T1 第二步。
 
 export async function chooseProjectMainCharacterVersion(
   projectId: string,
