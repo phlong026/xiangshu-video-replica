@@ -47,7 +47,7 @@ from pg_test_kit import (
 
 import app.internal_billing as internal_billing
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, IntegrityConstraintError
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
@@ -611,6 +611,32 @@ def test_concurrent_task_reservations_cannot_overspend(wallet_db: str) -> None:
         thread.join()
 
     assert sorted(results) == ["insufficient", "reserved"]
+
+
+def test_portable_layer_maps_unique_violation_for_race_backstops(wallet_db: str) -> None:
+    """T2a 契约：翻译层把唯一冲突统一抛 IntegrityConstraintError。
+
+    它是 psycopg.IntegrityError 的子类但**不是** UniqueViolation 的子类，
+    且携带 sqlstate/constraint_name——业务侧的幂等竞争兜底（充值订单号
+    碰撞重试、批次并发回放、口播稿互斥）必须捕它；本测试把类型关系与
+    属性载荷一次钉死，防止将来有人「改回」UniqueViolation 而兜底再次失活。
+    """
+    with psycopg.connect(wallet_db, autocommit=True) as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES (%s, true, 3) ON CONFLICT (service) DO UPDATE SET unit_credits = 3",
+            ("contract-tariff-t2a",),
+        )
+        with pytest.raises(IntegrityConstraintError) as exc_info:
+            conn.execute(
+                "INSERT INTO billing_tariffs(service,enabled,unit_credits) VALUES (%s, true, 3)",
+                ("contract-tariff-t2a",),
+            )
+    assert isinstance(exc_info.value, psycopg.IntegrityError)
+    assert not isinstance(exc_info.value, psycopg.errors.UniqueViolation)
+    assert exc_info.value.sqlstate == "23505"
+    assert "billing_tariffs_pkey" in str(exc_info.value.constraint_name)
     assert wallet_state() == (0, 1)
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)

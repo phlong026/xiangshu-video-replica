@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.analysis import get_version, insert_version, next_version_number
 from app.auth import CurrentUser, Role
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection, BusinessRow
+from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
 from app.external_calls import (
     endpoint_from_url,
     external_call_context,
@@ -2669,6 +2669,23 @@ def create_generation_batch(
         # row is upserted in the same transaction so rotation can serve them.
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
+    except IntegrityConstraintError:
+        conn.rollback()
+        # 同幂等键的并发提交者后到（事务已中止，无法在同事务内回放）：查既有
+        # 批次回放而非误报。T2a 2026-11-01 按翻译层真实类型恢复兜底——
+        # 此前 sqlite3/UniqueViolation 两个名字在 PG lane 都接不住翻译异常。
+        existing = _find_idempotent_batch(
+            conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
+        )
+        if existing is not None:
+            if str(existing["request_hash"]) != request_hash:
+                raise generation_error(
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                    "This idempotency key was already used for a different request.",
+                )
+            return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+        raise
     except Exception:
         conn.rollback()
         raise
@@ -5079,6 +5096,13 @@ def reconcile_generation_task(
             },
         )
         conn.commit()
+    except IntegrityConstraintError as exc:
+        conn.rollback()
+        raise generation_error(
+            409,
+            "RECONCILE_IN_PROGRESS",
+            "A reconciliation request is already in progress for this task.",
+        ) from exc
     except Exception:
         conn.rollback()
         raise

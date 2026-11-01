@@ -19,11 +19,10 @@ import re
 from typing import Any, Literal
 from uuid import uuid4
 
-import psycopg.errors as psycopg_errors
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection, BusinessRow
+from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
 from app.generation import (
     H3_MODEL,
     BatchResult,
@@ -623,11 +622,11 @@ def create_independent_batch(
             )
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
-    except psycopg_errors.UniqueViolation:
-        # SQLite：写锁保证事务内复查可见，可安全回放；
-        # PG：NULL project 不受 UNIQUE 约束保护，由 075 的部分唯一索引兜底。
-        # fenced 事务冲突后已中止，无法在同事务内回放——返回 409 让客户端
-        # 重试（重试会命中幂等回放）。
+    except IntegrityConstraintError:
+        # 并发同键提交者后到（075 部分唯一索引兜底 NULL project 场景）；
+        # 翻译层把唯一冲突统一抛 IntegrityConstraintError（T2a 2026-11-01
+        # 修正捕获类型），fenced 事务已中止无法回放——409 让客户端重试，
+        # 重试命中幂等回放。
         conn.rollback()
         if conn.is_postgres:
             raise generation_error(
