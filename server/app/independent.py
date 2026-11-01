@@ -23,7 +23,7 @@ from uuid import uuid4
 import psycopg.errors as psycopg_errors
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.bootstrap import is_customer_production
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.generation import (
     H3_MODEL,

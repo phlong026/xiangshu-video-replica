@@ -13,7 +13,7 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter, admin_to_current_user
+from app.admin_auth_routes import AdminReader, AdminWriter, admin_to_current_user
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.publish_records import (

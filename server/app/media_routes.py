@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 
 def api_base_url() -> str:
     """Use the public HTTPS origin on a server and localhost for desktop fallback."""
-    from app.bootstrap import is_customer_production
+    from app.db_pg import is_customer_production
 
     configured = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
     if not configured:
@@ -178,7 +178,7 @@ def get_media_storage(conn: BusinessReadConn) -> StorageAdapter:
     不经过这里，历史 ``local://`` 资产的只读追溯不受影响（搬迁归 CW-037）。
     """
     # 局部 import：bootstrap 间接依赖路由模块，顶层引入有循环依赖风险（CW-031 §8）。
-    from app.bootstrap import is_customer_production
+    from app.db_pg import is_customer_production
 
     try:
         repo = SettingsRepository(conn)
@@ -243,7 +243,7 @@ def storage_for_asset(conn: BusinessConnection, storage_uri: str) -> StorageAdap
         # CW-031：历史 local URI 只作为迁移期可追溯输入（只读），新写已被
         # get_media_storage 的闸门禁止。客户生产不该再有本地持久资产——若有，
         # 说明是 CW-037 未搬迁完的遗留，必须显式失败而不是静默服务。
-        from app.bootstrap import is_customer_production
+        from app.db_pg import is_customer_production
 
         if is_customer_production():
             logger.error("Legacy local asset URI rejected on the customer production lane")

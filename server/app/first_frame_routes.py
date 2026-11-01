@@ -10,8 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.async_compat import reject_legacy_sync_operation
 from app.auth import AuthenticatedUser, Database
-from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep, BusinessReadConn
+from app.db_pg import is_customer_production
 from app.first_frames import (
     APILIO_DEFAULT_BASE_URL,
     FIRST_FRAME_SELECTION_KIND,

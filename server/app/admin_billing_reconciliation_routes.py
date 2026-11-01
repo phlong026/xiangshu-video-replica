@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter, admin_to_current_user
+from app.admin_auth_routes import AdminReader, AdminWriter, admin_to_current_user
 from app.billing_reconciliation import (
     enqueue_stuck_billing_operations,
     list_reconciliation_items,
