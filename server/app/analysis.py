@@ -4,7 +4,6 @@ import json
 import logging
 import math
 import re
-import sqlite3
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -25,7 +24,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.external_calls import (
     endpoint_from_url,
     external_call_context,
@@ -1092,7 +1091,7 @@ def create_analysis_version(
     created_by_user_id: str,
     result: AnalysisResult,
     commit: bool = True,
-) -> sqlite3.Row:
+) -> BusinessRow:
     return insert_version(
         conn,
         project_id=project_id,
@@ -1116,7 +1115,7 @@ def create_or_recover_analysis_version(
     asset_uri: str,
     created_by_user_id: str,
     result: AnalysisResult,
-) -> tuple[sqlite3.Row, bool]:
+) -> tuple[BusinessRow, bool]:
     """Create one analysis version, or reuse the winner of a concurrent recovery."""
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1152,7 +1151,7 @@ def find_analysis_version_for_asset(
     *,
     project_id: str,
     asset_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT id, project_id, asset_id, kind, version_number, payload_json,
@@ -1164,7 +1163,7 @@ def find_analysis_version_for_asset(
         """,
         (project_id, asset_id, ANALYSIS_KIND),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def analysis_version_payload(
@@ -1185,11 +1184,11 @@ def analysis_version_payload(
 def create_shot_card_version(
     conn: BusinessConnection,
     *,
-    analysis_version: sqlite3.Row,
+    analysis_version: BusinessRow,
     created_by_user_id: str,
     shots: list[ShotCard],
     commit: bool = True,
-) -> sqlite3.Row:
+) -> BusinessRow:
     source_payload = json.loads(str(analysis_version["payload_json"]))
     analysis_payload = source_payload["analysis"]
     payload = {
@@ -1244,7 +1243,7 @@ def insert_version(
     created_by_user_id: str,
     payload: dict[str, Any],
     commit: bool = True,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = _insert_version(
         conn,
         project_id=project_id,
@@ -1263,7 +1262,7 @@ def find_latest_analysis_task(
     *,
     project_id: str,
     asset_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT * FROM analysis_tasks
@@ -1273,7 +1272,7 @@ def find_latest_analysis_task(
         """,
         (project_id, asset_id),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def enqueue_analysis_task(
@@ -1285,7 +1284,7 @@ def enqueue_analysis_task(
     duration_seconds: float,
     generation_context: dict[str, Any] | None = None,
     request_id: str | None = None,
-) -> tuple[sqlite3.Row, bool]:
+) -> tuple[BusinessRow, bool]:
     """Enqueue one analysis task, stamping the caller's request id.
 
     ``request_id`` is the API request that asked for the analysis (P0-1
@@ -1408,7 +1407,7 @@ def _insert_version(
     kind: str,
     created_by_user_id: str,
     payload: dict[str, Any],
-) -> sqlite3.Row:
+) -> BusinessRow:
     version_number = next_version_number(conn, project_id=project_id, kind=kind)
     version_id = str(uuid4())
     conn.execute(
@@ -1437,7 +1436,7 @@ def _insert_version(
     return get_version(conn, version_id)
 
 
-def get_version(conn: BusinessConnection, version_id: str) -> sqlite3.Row:
+def get_version(conn: BusinessConnection, version_id: str) -> BusinessRow:
     row = conn.execute(
         """
         SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
@@ -1449,7 +1448,7 @@ def get_version(conn: BusinessConnection, version_id: str) -> sqlite3.Row:
     ).fetchone()
     if row is None:
         raise LookupError("version not found")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def next_version_number(conn: BusinessConnection, *, project_id: str, kind: str) -> int:

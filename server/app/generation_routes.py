@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import math
-import sqlite3
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -15,7 +14,7 @@ from pydantic import BaseModel
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
 from app.db_pg import pg_transaction
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.generation import (
     RESULT_URL_EXPIRED_STATUSES,
     ApplySavedPromptRequest,
@@ -287,7 +286,7 @@ def read_latest_script_rewrite_task(
     return None if row is None else script_rewrite_task_response(row)
 
 
-def script_rewrite_task_response(row: sqlite3.Row) -> ScriptRewriteTaskResponse:
+def script_rewrite_task_response(row: BusinessRow) -> ScriptRewriteTaskResponse:
     snapshot = _script_rewrite_profile_summary(
         row["ip_profile_snapshot_json"],
         task_id=str(row["id"]),
@@ -795,7 +794,7 @@ def read_generation_price_quote(
     )
 
 
-def _generation_task_context(conn: Database, task_id: str) -> sqlite3.Row:
+def _generation_task_context(conn: Database, task_id: str) -> BusinessRow:
     row = conn.execute(
         """
         SELECT
@@ -811,7 +810,7 @@ def _generation_task_context(conn: Database, task_id: str) -> sqlite3.Row:
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND"})
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 @router.get(
@@ -1179,7 +1178,7 @@ def read_latest_generation_reconcile_operation(
 
 
 def generation_reconcile_operation_response(
-    row: sqlite3.Row,
+    row: BusinessRow,
 ) -> GenerationReconcileOperationResponse:
     result_status = str(row["result_status"])
     operation_status = (

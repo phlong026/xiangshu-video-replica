@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import socket
-import sqlite3
 import subprocess
 import tempfile
 import time
@@ -33,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.analysis import get_version, insert_version, next_version_number
 from app.auth import CurrentUser, Role
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.external_calls import (
     endpoint_from_url,
     external_call_context,
@@ -1103,9 +1102,9 @@ def latest_version(
     *,
     project_id: str,
     kind: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             """
             SELECT id, project_id, asset_id, kind, version_number, payload_json,
@@ -1123,7 +1122,7 @@ def latest_version(
 def require_latest_version(
     conn: BusinessConnection,
     *,
-    row: sqlite3.Row,
+    row: BusinessRow,
     project_id: str,
     kind: str,
     code: str,
@@ -1159,7 +1158,7 @@ def version_state(
     )
 
 
-def version_stale_reasons(conn: BusinessConnection, *, row: sqlite3.Row) -> list[str]:
+def version_stale_reasons(conn: BusinessConnection, *, row: BusinessRow) -> list[str]:
     project_id = str(row["project_id"])
     kind = str(row["kind"])
     payload = json.loads(str(row["payload_json"]))
@@ -1251,7 +1250,7 @@ def version_stale_reasons(conn: BusinessConnection, *, row: sqlite3.Row) -> list
 def shot_card_stale_reasons(
     conn: BusinessConnection,
     *,
-    row: sqlite3.Row,
+    row: BusinessRow,
 ) -> list[str]:
     payload = json.loads(str(row["payload_json"]))
     source_analysis_version_id = payload.get("source_analysis_version_id")
@@ -1342,7 +1341,7 @@ def create_script_version(
     project_id: str,
     actor: CurrentUser,
     request: ScriptRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1427,7 +1426,7 @@ def compile_prompt_version(
     project_id: str,
     actor: CurrentUser,
     request: PromptCompileRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1742,7 +1741,7 @@ def revise_prompt_version(
     actor: CurrentUser,
     request: PromptRevisionRequest,
     commit: bool = True,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1831,7 +1830,7 @@ def save_prompt_to_library(
     project_id: str,
     actor: CurrentUser,
     request: SavedPromptRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1940,7 +1939,7 @@ def list_saved_prompts(
     *,
     project_id: str,
     actor: CurrentUser,
-) -> list[sqlite3.Row]:
+) -> list[BusinessRow]:
     require_project_access(conn, actor=actor, project_id=project_id, action="saved_prompt.read")
     return list(
         conn.execute(
@@ -1963,7 +1962,7 @@ def apply_saved_prompt(
     saved_prompt_id: str,
     actor: CurrentUser,
     request: ApplySavedPromptRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -2020,7 +2019,7 @@ def lock_prompt_version(
     project_id: str,
     prompt_version_id: str,
     actor: CurrentUser,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -2082,7 +2081,7 @@ def lock_prompt_version(
 
 def _find_idempotent_batch(
     conn: BusinessConnection, *, actor_id: str, project_id: str | None, key: str
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     # 独立批次（project_id NULL）在 SQL 等值比较下永远不命中，须用 IS NULL。
     if project_id is None:
         clause = "created_by_user_id = %s AND project_id IS NULL AND idempotency_key = %s"
@@ -2091,7 +2090,7 @@ def _find_idempotent_batch(
         clause = "created_by_user_id = %s AND project_id = %s AND idempotency_key = %s"
         params = (actor_id, project_id, key)
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             f"""
             SELECT id, request_hash
@@ -2670,22 +2669,6 @@ def create_generation_batch(
         # row is upserted in the same transaction so rotation can serve them.
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        # A concurrent request committed the same idempotency key first; return
-        # the existing batch instead of a misleading 409.
-        existing = _find_idempotent_batch(
-            conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
-        )
-        if existing is not None:
-            if str(existing["request_hash"]) != request_hash:
-                raise generation_error(
-                    409,
-                    "IDEMPOTENCY_CONFLICT",
-                    "This idempotency key was already used for a different request.",
-                )
-            return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
-        raise
     except Exception:
         conn.rollback()
         raise
@@ -3339,7 +3322,7 @@ def canonical_snapshot_hash(snapshot: str) -> str:
     return content_hash(json.dumps(parsed, ensure_ascii=True, sort_keys=True))
 
 
-def require_matching_idempotent_batch(row: sqlite3.Row, *, request_hash: str) -> None:
+def require_matching_idempotent_batch(row: BusinessRow, *, request_hash: str) -> None:
     if str(row["request_hash"]) != request_hash:
         raise generation_error(
             409,
@@ -3366,7 +3349,7 @@ def require_regeneration_provider_ready(
     require_cos_first_frame_storage(conn)
 
 
-def require_task_paid_regeneration_state(row: sqlite3.Row) -> None:
+def require_task_paid_regeneration_state(row: BusinessRow) -> None:
     if str(row["archive_status"]) == "ARCHIVE_FAILED":
         raise generation_error(
             409,
@@ -3789,7 +3772,7 @@ def _idempotent_task_operation(
     action: str,
     idempotency_key: str,
     request_hash: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT request_hash, result_status
@@ -3804,7 +3787,7 @@ def _idempotent_task_operation(
             "IDEMPOTENCY_CONFLICT",
             "This idempotency key was already used for a different task operation.",
         )
-    return cast(sqlite3.Row | None, row)
+    return cast(BusinessRow | None, row)
 
 
 def _record_completed_task_operation(
@@ -4411,7 +4394,7 @@ def enqueue_generation_reconcile_operation(
     project_id: str,
     actor: CurrentUser,
     request: ReconcileGenerationTaskRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     action = "RECONCILE"
     request_hash = generation_task_operation_hash(
         action=action,
@@ -4453,7 +4436,7 @@ def enqueue_generation_reconcile_operation(
                 "This idempotency key was already used for a different task operation.",
             )
         conn.commit()
-        return cast(sqlite3.Row, existing)
+        return cast(BusinessRow, existing)
     active = conn.execute(
         """
         SELECT * FROM generation_task_operations
@@ -4464,7 +4447,7 @@ def enqueue_generation_reconcile_operation(
     ).fetchone()
     if active is not None:
         conn.commit()
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
     if str(row["status"]) != "SUBMISSION_UNCERTAIN":
         conn.rollback()
         raise generation_error(
@@ -4534,7 +4517,7 @@ def enqueue_generation_reconcile_operation(
         },
     )
     conn.commit()
-    return cast(sqlite3.Row, operation)
+    return cast(BusinessRow, operation)
 
 
 def acquire_generation_reconcile_operation(
@@ -4872,7 +4855,7 @@ def fail_generation_reconcile_operation(
 def load_generation_reconcile_operation(
     conn: BusinessConnection,
     operation_id: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         """
         SELECT operation.*, batch.project_id
@@ -4885,16 +4868,16 @@ def load_generation_reconcile_operation(
     ).fetchone()
     if row is None:
         raise generation_error(404, "RECONCILE_OPERATION_NOT_FOUND", "对账任务不存在。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def latest_generation_reconcile_operation(
     conn: BusinessConnection,
     *,
     task_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             """
             SELECT operation.*, batch.project_id
@@ -4913,7 +4896,7 @@ def latest_generation_reconcile_operation(
 def _require_owned_reconcile_operation(
     conn: BusinessConnection,
     lease: ReconcileOperationLease,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM generation_task_operations WHERE id = %s",
         (lease.id,),
@@ -4926,7 +4909,7 @@ def _require_owned_reconcile_operation(
         or int(row["attempt"]) != lease.attempt
     ):
         raise _reconcile_reservation_lost()
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def _timestamp_text(value: datetime) -> str:
@@ -5096,13 +5079,6 @@ def reconcile_generation_task(
             },
         )
         conn.commit()
-    except sqlite3.IntegrityError as exc:
-        conn.rollback()
-        raise generation_error(
-            409,
-            "RECONCILE_IN_PROGRESS",
-            "A reconciliation request is already in progress for this task.",
-        ) from exc
     except Exception:
         conn.rollback()
         raise
@@ -5384,14 +5360,6 @@ def _fair_queue_enabled(conn: BusinessConnection) -> bool:
         # Missing column is the documented "feature off" state (the desktop
         # SQLite lane has no such column; a PG database that never ran 041).
         return False
-    except sqlite3.OperationalError as exc:
-        # The SQLite lane reports a missing column as "no such column";
-        # anything else is a real fault and must fail loudly instead of
-        # silently degrading to global FIFO (M5 review P1-7).
-        if "no such column" in str(exc):
-            return False
-        logger.warning("fair_queue_enabled probe failed: %s: %s", type(exc).__name__, exc)
-        raise
     except Exception as exc:
         # Any other failure is a real fault and must fail loudly instead of
         # silently degrading to global FIFO (M5 review P1-7). The message
@@ -7847,7 +7815,7 @@ def require_version(
     version_id: str,
     project_id: str,
     kind: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     try:
         row = get_version(conn, version_id)
     except LookupError as exc:
@@ -8414,7 +8382,7 @@ def batch_status(stored_status: str, progress: BatchProgress) -> str:
     return stored_status
 
 
-def task_result(row: sqlite3.Row) -> TaskResult:
+def task_result(row: BusinessRow) -> TaskResult:
     summary = task_summary(row)
     prompt_snapshot = (
         None
@@ -8427,7 +8395,7 @@ def task_result(row: sqlite3.Row) -> TaskResult:
     )
 
 
-def task_summary(row: sqlite3.Row) -> TaskSummary:
+def task_summary(row: BusinessRow) -> TaskSummary:
     quality_issue_codes = parse_json_list(row["quality_issue_codes"])
     provider_task_id = optional_text(row["provider_task_id"])
     submitted_at = optional_text(row["submitted_at"])
@@ -8476,7 +8444,7 @@ def task_summary(row: sqlite3.Row) -> TaskSummary:
 
 
 def generation_task_available_actions(
-    row: sqlite3.Row,
+    row: BusinessRow,
 ) -> list[Literal["RETRY", "RECONCILE", "CONFIRM_NOT_CHARGED", "REGENERATE"]]:
     status = str(row["status"])
     archive_status = str(row["archive_status"])
@@ -8599,7 +8567,7 @@ def generation_quality_failed(quality_status: str, issue_codes: Sequence[str]) -
     )
 
 
-def version_result(row: sqlite3.Row) -> VersionResult:
+def version_result(row: BusinessRow) -> VersionResult:
     return VersionResult(
         id=str(row["id"]),
         project_id=str(row["project_id"]),

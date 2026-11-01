@@ -7,7 +7,6 @@ import json
 import logging
 import re
 import socket
-import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -27,7 +26,7 @@ from app.character_reference_matching import (
     current_character_reference_selection_for_generation,
 )
 from app.characters import character_is_available, get_project_main_character, read_character
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.external_calls import CallTimer, endpoint_from_url, record_external_call, recorded_urlopen
 from app.image_dimensions import scan_jpeg_dimensions
 from app.net_safety import FAKE_IP_NETWORK
@@ -2068,7 +2067,7 @@ def persist_project_character_appearance(
     conn: BusinessConnection,
     *,
     work: FirstFrameGenerationWork,
-) -> sqlite3.Row:
+) -> BusinessRow:
     latest = latest_version(conn, work.project_id, PROJECT_CHARACTER_APPEARANCE_KIND)
     if latest is not None:
         try:
@@ -2141,8 +2140,8 @@ def complete_first_frame_generation(
     work: FirstFrameGenerationWork,
     provider: ImageProvider,
     stored: StoredFirstFrameCandidates,
-    before_commit: Callable[[sqlite3.Row], None] | None = None,
-) -> sqlite3.Row:
+    before_commit: Callable[[BusinessRow], None] | None = None,
+) -> BusinessRow:
     """Revalidate inputs and atomically publish the already-archived images."""
 
     require_current_first_frame_inputs(
@@ -2285,7 +2284,7 @@ def confirm_first_frame(
     actor: CurrentUser,
     allow_unverified: bool = False,
     first_frame_candidates_version_id: str | None = None,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -2551,7 +2550,7 @@ def resolve_first_frame_character_inputs(
     )
 
 
-def current_first_frame_candidates(conn: BusinessConnection, *, project_id: str) -> sqlite3.Row:
+def current_first_frame_candidates(conn: BusinessConnection, *, project_id: str) -> BusinessRow:
     candidates = latest_version(conn, project_id, FIRST_FRAME_CANDIDATES_KIND)
     if candidates is None:
         raise first_frame_error(
@@ -2620,7 +2619,7 @@ def current_first_frame_candidates(conn: BusinessConnection, *, project_id: str)
 
 def first_frame_candidates_version_by_id(
     conn: BusinessConnection, *, project_id: str, version_id: str
-) -> sqlite3.Row:
+) -> BusinessRow:
     """按显式版本 id 读取首帧候选（历史版本确认/选择的放开路径）。
 
     与 ``current_first_frame_candidates`` 的差别：不要求该版本仍是最新、也不
@@ -2651,7 +2650,7 @@ def first_frame_candidates_version_by_id(
         raise first_frame_error(
             409, "FIRST_FRAME_CANDIDATES_INVALID", "Generate first-frame candidates again."
         )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def require_current_first_frame_inputs(
@@ -2745,7 +2744,7 @@ def read_character_reference_asset(
     actor: CurrentUser,
     asset_id: str,
     authorized_project_ids: list[str],
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         """
         SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type
@@ -2774,10 +2773,10 @@ def read_character_reference_asset(
             "CHARACTER_REFERENCE_INVALID",
             "Character references must be JPEG, PNG, or WebP images.",
         )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
-def asset_snapshot(asset: sqlite3.Row | Mapping[str, object]) -> dict[str, object]:
+def asset_snapshot(asset: BusinessRow | Mapping[str, object]) -> dict[str, object]:
     return {
         "id": asset["id"],
         "storage_uri": asset["storage_uri"],

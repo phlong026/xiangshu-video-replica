@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -22,7 +21,7 @@ from app.analysis import (
     find_latest_analysis_task,
 )
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.material_thumbs import store_video_thumbnail, store_video_thumbnail_from_file
 from app.permissions import (
     require_asset_access,
@@ -444,7 +443,7 @@ def _enqueue_reused_replica_analysis(
     storage_uri: str,
     duration_seconds: float | None,
     purpose: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     """复刻页上传命中去重时，与正常 complete 一样自动排队 AI 拆解。
 
     去重路径没有 complete 这一步，早先复刻页「上传即拆解」在重传同一文件时失效，
@@ -683,7 +682,7 @@ def persist_upload_completion(
             "Upload state changed while the object was being checked; restart completion.",
         )
 
-    analysis_task: sqlite3.Row | None = None
+    analysis_task: BusinessRow | None = None
     with conn:
         conn.execute(
             """
@@ -817,7 +816,7 @@ def _automatic_analysis_input_ready(conn: BusinessConnection, asset_uri: str) ->
         return False
 
 
-def is_reference_video_asset(row: sqlite3.Row) -> bool:
+def is_reference_video_asset(row: BusinessRow) -> bool:
     if str(row["kind"]) == "reference_video":
         return True
     return str(row["kind"]) == "video" and f"/projects/{row['project_id']}/uploads/" in str(
@@ -825,7 +824,7 @@ def is_reference_video_asset(row: sqlite3.Row) -> bool:
     )
 
 
-def is_project_source_asset(row: sqlite3.Row) -> bool:
+def is_project_source_asset(row: BusinessRow) -> bool:
     """上传完成链路认领 intent 资产：复刻参考视频，或提取文案的音频/长视频来源。
 
     与 `is_reference_video_asset` 的区别：文案提取的音频（reference_audio）也算

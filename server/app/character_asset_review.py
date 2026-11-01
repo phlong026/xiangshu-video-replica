@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -34,7 +33,7 @@ from app.character_identity import (
     require_character_admin,
     require_identity_active,
 )
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.permissions import require_role
 from app.storage import (
     StorageAdapter,
@@ -519,7 +518,7 @@ def load_selected_character_assets(
 def publication_snapshot(
     prepared: list[PreparedPublicationAsset],
     *,
-    version: sqlite3.Row,
+    version: BusinessRow,
     published_at: str,
 ) -> dict[str, object]:
     return {
@@ -579,7 +578,7 @@ def require_publication_sources_unchanged(
 
 
 def require_standard_publication_views(
-    version: sqlite3.Row,
+    version: BusinessRow,
 ) -> list[RequiredCharacterViewType]:
     required = decode_string_list(version["required_view_types_json"])
     if not set(REQUIRED_CHARACTER_VIEW_TYPES).issubset(set(required)):
@@ -645,7 +644,7 @@ def require_no_active_character_tasks(conn: BusinessConnection, version_id: str)
         )
 
 
-def require_version_publishable(version: sqlite3.Row) -> None:
+def require_version_publishable(version: BusinessRow) -> None:
     status = str(version["status"])
     if status == "ARCHIVED":
         raise character_error(409, "CHARACTER_VERSION_IMMUTABLE", "已归档角色版本不能发布。")
@@ -657,7 +656,7 @@ def require_version_publishable(version: sqlite3.Row) -> None:
         )
 
 
-def require_version_review_mutable(version: sqlite3.Row) -> None:
+def require_version_review_mutable(version: BusinessRow) -> None:
     if str(version["status"]) not in MUTABLE_REVIEW_STATUSES:
         raise character_error(
             409,
@@ -666,14 +665,14 @@ def require_version_review_mutable(version: sqlite3.Row) -> None:
         )
 
 
-def read_character_asset_row(conn: BusinessConnection, character_asset_id: str) -> sqlite3.Row:
+def read_character_asset_row(conn: BusinessConnection, character_asset_id: str) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM character_assets WHERE id = %s",
         (character_asset_id,),
     ).fetchone()
     if row is None:
         raise character_not_found("CHARACTER_ASSET_NOT_FOUND", "角色候选资产不存在。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def get_character_asset_review(
@@ -689,7 +688,7 @@ def get_character_asset_review(
     return character_asset_review_from_row(row)
 
 
-def character_asset_review_from_row(row: sqlite3.Row) -> CharacterAssetReview:
+def character_asset_review_from_row(row: BusinessRow) -> CharacterAssetReview:
     return CharacterAssetReview(
         id=str(row["id"]),
         character_asset_id=str(row["character_asset_id"]),
@@ -725,7 +724,7 @@ def normalize_review_comment(comment: str | None) -> str | None:
     return normalized or None
 
 
-def effective_owner_user_id(identity: sqlite3.Row, *, fallback: str) -> str:
+def effective_owner_user_id(identity: BusinessRow, *, fallback: str) -> str:
     return str(identity["owner_user_id"] or identity["created_by"] or fallback)
 
 

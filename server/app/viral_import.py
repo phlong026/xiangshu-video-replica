@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -16,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app import content_store
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.permissions import insert_audit, require_not_auditor, require_project_access
 from app.storage import (
     StorageAdapter,
@@ -75,7 +74,7 @@ class ViralImportError(HTTPException):
         self.retryable = retryable
 
 
-def viral_import_task_response(row: sqlite3.Row) -> ViralImportTaskResponse:
+def viral_import_task_response(row: BusinessRow) -> ViralImportTaskResponse:
     result = json.loads(str(row["result_json"])) if row["result_json"] else {}
     media_kind = result.get("mediaKind")
     return ViralImportTaskResponse(
@@ -128,7 +127,7 @@ def enqueue_viral_import_task(
     actor: CurrentUser,
     request: ViralImportRequest,
     idempotency_key: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_viral_import_enabled(conn)
     require_not_auditor(
         conn,
@@ -182,7 +181,7 @@ def enqueue_viral_import_task(
             ).fetchone()
             if replay is None:
                 raise _error(409, "VIRAL_IMPORT_ENQUEUE_CONFLICT", "导入任务状态已变化。")
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
 
     created_project = request.project_id is None
     project_id = request.project_id or str(uuid4())
@@ -230,7 +229,7 @@ def enqueue_viral_import_task(
             raise _error(409, "VIRAL_IMPORT_ENQUEUE_CONFLICT", "导入任务状态已变化，请重试。")
         if str(replay["request_hash"]) != request_hash:
             raise _error(409, "VIRAL_IMPORT_IDEMPOTENCY_CONFLICT", "幂等键已用于不同请求。")
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
     row = conn.execute("SELECT * FROM viral_import_tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
         raise _error(409, "VIRAL_IMPORT_ENQUEUE_CONFLICT", "导入任务状态已变化，请重试。")
@@ -242,7 +241,7 @@ def enqueue_viral_import_task(
         entity_id=task_id,
         metadata={"project_id": project_id, "platform": request.platform},
     )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 VIRAL_COPY_CONTENT_TYPE = "audio/mp4"
@@ -411,7 +410,7 @@ def register_viral_copy_source(
     return ViralCopySource(project_id=project_id, asset_id=asset_id, import_task_id=task_id)
 
 
-def _viral_copy_replay(row: sqlite3.Row, *, request_hash: str) -> ViralCopySource:
+def _viral_copy_replay(row: BusinessRow, *, request_hash: str) -> ViralCopySource:
     if str(row["request_hash"]) != request_hash:
         raise _error(409, "VIRAL_COPY_IDEMPOTENCY_CONFLICT", "幂等键已用于不同的提取请求。")
     if str(row["status"]) != "SUCCEEDED" or not row["source_asset_id"]:
@@ -423,11 +422,11 @@ def _viral_copy_replay(row: sqlite3.Row, *, request_hash: str) -> ViralCopySourc
     )
 
 
-def load_viral_import_task(conn: BusinessConnection, task_id: str) -> sqlite3.Row:
+def load_viral_import_task(conn: BusinessConnection, task_id: str) -> BusinessRow:
     row = conn.execute("SELECT * FROM viral_import_tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
         raise _error(404, "VIRAL_IMPORT_TASK_NOT_FOUND", "导入任务不存在。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 @dataclass(frozen=True)
@@ -517,7 +516,7 @@ def acquire_viral_import_task(
     )
 
 
-def _require_lease(conn: BusinessConnection, lease: ViralImportLease) -> sqlite3.Row:
+def _require_lease(conn: BusinessConnection, lease: ViralImportLease) -> BusinessRow:
     now = _time_text(datetime.now(UTC))
     row = conn.execute(
         """
@@ -529,7 +528,7 @@ def _require_lease(conn: BusinessConnection, lease: ViralImportLease) -> sqlite3
     ).fetchone()
     if row is None:
         raise _error(409, "VIRAL_IMPORT_LEASE_LOST", "导入任务租约已失效。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def _require_project_owner(conn: BusinessConnection, lease: ViralImportLease) -> None:

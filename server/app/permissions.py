@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass
 from typing import Any, Literal, Never, cast
 from uuid import uuid4
@@ -13,7 +12,7 @@ from fastapi import HTTPException
 from app.auth import CurrentUser, Role
 from app.character_policy import identity_values_are_current
 from app.db_pg import pg_transaction
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.ops_metrics import current_request_context, set_current_result_code
 
 logger = logging.getLogger(__name__)
@@ -232,7 +231,7 @@ def require_project_access(
     project_id: str,
     action: str,
     evidence_type: Literal["project", "asset"] = "project",
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         """
         SELECT id, owner_user_id, name, status
@@ -248,7 +247,7 @@ def require_project_access(
         )
 
     if actor.role in {"admin", "auditor"}:
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
 
     owner_user_id = str(row["owner_user_id"])
     if conn.is_postgres:
@@ -259,7 +258,7 @@ def require_project_access(
             resource_type=evidence_type,
         )
     if owner_user_id == actor.id:
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
 
     _raise_denial_with_audit(
         conn,
@@ -280,7 +279,7 @@ def require_asset_access(
     actor: CurrentUser,
     asset_id: str,
     action: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         """
         SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
@@ -319,17 +318,17 @@ def require_asset_access(
                     detail={"code": "ASSET_NOT_FOUND", "message": "Asset does not exist."},
                 ) from exc
             raise
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
 
     if actor.role in {"admin", "auditor"}:
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
 
     if (
         str(row["kind"]) in {"material_image", "material_audio", "material_video"}
         and row["created_by_user_id"] is not None
         and str(row["created_by_user_id"]) == actor.id
     ):
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
 
     if (
         str(row["kind"]) in {"oral_audio", "oral_compatible_video"}
@@ -339,7 +338,7 @@ def require_asset_access(
         # 口播域的两类无项目素材都由上传者本人创建：声音样本（oral_audio）与
         # 分身视频的本地兼容衍生品（oral_compatible_video，#44 兼容链路生成的
         # 预览用 mp4）。漏掉后者会让分身「制作素材」预览被折叠成 404。
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
 
     if str(row["kind"]) == "oral_video":
         owned_oral_result = conn.execute(
@@ -352,7 +351,7 @@ def require_asset_access(
             (asset_id, actor.id),
         ).fetchone()
         if owned_oral_result is not None:
-            return cast(sqlite3.Row, row)
+            return cast(BusinessRow, row)
 
     # Contact sheets live outside character_assets, so grant access through the
     # published character version referenced in their asset metadata.
@@ -363,7 +362,7 @@ def require_asset_access(
             and identity_owned_by_actor(sheet_identity, actor)
             and character_identity_is_current(sheet_identity)
         ):
-            return cast(sqlite3.Row, row)
+            return cast(BusinessRow, row)
 
     # Simple-upload source photos also live outside character_assets; grant
     # access through the identity recorded in their metadata so first-frame
@@ -375,7 +374,7 @@ def require_asset_access(
             and identity_owned_by_actor(source_identity, actor)
             and character_identity_is_current(source_identity)
         ):
-            return cast(sqlite3.Row, row)
+            return cast(BusinessRow, row)
 
     published_character = conn.execute(
         """
@@ -403,7 +402,7 @@ def require_asset_access(
         and identity_owned_by_actor(published_character, actor)
         and character_identity_is_current(published_character)
     ):
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
 
     _raise_denial_with_audit(
         conn,
@@ -418,7 +417,7 @@ def require_asset_access(
     )
 
 
-def character_identity_is_current(row: sqlite3.Row) -> bool:
+def character_identity_is_current(row: BusinessRow) -> bool:
     return identity_values_are_current(
         status=row["identity_status"],
         authorization_status=row["authorization_status"],
@@ -427,7 +426,7 @@ def character_identity_is_current(row: sqlite3.Row) -> bool:
     )
 
 
-def identity_owned_by_actor(row: sqlite3.Row, actor: CurrentUser) -> bool:
+def identity_owned_by_actor(row: BusinessRow, actor: CurrentUser) -> bool:
     owner_user_id = row["owner_user_id"]
     return owner_user_id is not None and str(owner_user_id) == actor.id
 
@@ -466,7 +465,7 @@ def _authorization_digest(user_id: str) -> str:
     return hashlib.sha256(f"t37-authorization:{user_id}".encode()).hexdigest()
 
 
-def _identity_from_asset_metadata(conn: BusinessConnection, row: sqlite3.Row) -> sqlite3.Row | None:
+def _identity_from_asset_metadata(conn: BusinessConnection, row: BusinessRow) -> BusinessRow | None:
     """Resolve the identity named in an asset's metadata, if any."""
     try:
         metadata = json.loads(str(row["metadata_json"] or ""))
@@ -475,7 +474,7 @@ def _identity_from_asset_metadata(conn: BusinessConnection, row: sqlite3.Row) ->
     identity_id = metadata.get("identity_id") if isinstance(metadata, dict) else None
     if not isinstance(identity_id, str) or not identity_id:
         return None
-    identity: sqlite3.Row | None = conn.execute(
+    identity: BusinessRow | None = conn.execute(
         """
         SELECT
             owner_user_id,
@@ -492,8 +491,8 @@ def _identity_from_asset_metadata(conn: BusinessConnection, row: sqlite3.Row) ->
 
 
 def _published_contact_sheet_identity(
-    conn: BusinessConnection, row: sqlite3.Row
-) -> sqlite3.Row | None:
+    conn: BusinessConnection, row: BusinessRow
+) -> BusinessRow | None:
     """Resolve the identity behind a contact sheet whose version is published."""
     try:
         metadata = json.loads(str(row["metadata_json"] or ""))
@@ -502,7 +501,7 @@ def _published_contact_sheet_identity(
     version_id = metadata.get("character_version_id") if isinstance(metadata, dict) else None
     if not isinstance(version_id, str) or not version_id:
         return None
-    identity: sqlite3.Row | None = conn.execute(
+    identity: BusinessRow | None = conn.execute(
         """
         SELECT
             identity.owner_user_id,

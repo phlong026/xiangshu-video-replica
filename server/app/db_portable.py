@@ -172,7 +172,7 @@ class _NamedRow:
         self._values = values
         self._names = names
 
-    def __getitem__(self, key: object) -> object:
+    def __getitem__(self, key: object) -> Any:  # Any：行载荷无类型，与 sqlite3.Row typeshed 同语义
         if isinstance(key, str):
             # A linear scan, not a dict lookup and not an exact-match-first
             # shortcut: sqlite3.Row answers ``row["OWNER"]`` with the *first*
@@ -203,6 +203,11 @@ class _NamedRow:
         # A fresh list, matching sqlite3.Row: a caller appending to it must not
         # corrupt the column names the next row of the same query reports.
         return list(self._names)
+
+
+# 业务层类型提示使用的公共行类型（psycopg 行 + 按列名取值，
+# 历史 sqlite3.Row 形状的镜像）；2026-11-01 起业务模块不再直接引用 sqlite3。
+BusinessRow = _NamedRow
 
 
 def _named_row_factory(cursor: psycopg.Cursor) -> Callable[[Sequence[object]], _NamedRow]:

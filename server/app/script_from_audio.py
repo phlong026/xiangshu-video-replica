@@ -15,7 +15,6 @@ import hashlib
 import json
 import logging
 import math
-import sqlite3
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -38,7 +37,7 @@ from app.asr import (
     TranscriptResult,
     get_asr_provider,
 )
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.media_tools import (
     MediaToolFailed,
     MediaToolUnavailable,
@@ -107,7 +106,7 @@ class ScriptFromAudioTaskResponse(BaseModel):
     completed_at: str | None
 
 
-def _row_viral_source(row: sqlite3.Row) -> tuple[str, str] | None:
+def _row_viral_source(row: BusinessRow) -> tuple[str, str] | None:
     """任务入队时服务端核验并写入的爆款身份；客户端自报的元数据不算数."""
     try:
         payload = json.loads(str(row["request_json"] or "{}"))
@@ -119,7 +118,7 @@ def _row_viral_source(row: sqlite3.Row) -> tuple[str, str] | None:
     return None
 
 
-def script_from_audio_task_response(row: sqlite3.Row) -> ScriptFromAudioTaskResponse:
+def script_from_audio_task_response(row: BusinessRow) -> ScriptFromAudioTaskResponse:
     viral_source = _row_viral_source(row)
     result_json = row["result_json"]
     result: ScriptFromAudioResult | None = None
@@ -190,7 +189,7 @@ class ScriptCachePending(Exception):
     """Another durable task owns this video's one upstream transcription."""
 
 
-def _viral_source(conn: BusinessConnection, asset: sqlite3.Row) -> tuple[str, str] | None:
+def _viral_source(conn: BusinessConnection, asset: BusinessRow) -> tuple[str, str] | None:
     # 客户端音轨与独立解析音频都不能证明原视频口播身份；只有服务端归档
     # 的原视频及其不可变内容对象可以成为跨用户共享的生产者。
     row = conn.execute(
@@ -362,11 +361,11 @@ def cached_transcripts(
 
 def _historical_transcripts(
     conn: BusinessConnection, source: tuple[str, str], *, exclude: str | None = None
-) -> list[sqlite3.Row]:
+) -> list[BusinessRow]:
     # One snapshot for successes and in-flight work: a legacy worker completing
     # between two separate queries must not become invisible to both queries.
     return cast(
-        list[sqlite3.Row],
+        list[BusinessRow],
         conn.execute(
             "SELECT t.id,t.status,t.provider_started_at,t.result_json "
             "FROM script_from_audio_tasks t "
@@ -386,13 +385,13 @@ def _historical_transcripts(
     )
 
 
-def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sqlite3.Row:
+def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> BusinessRow:
     inserted = conn.execute(
         "INSERT INTO viral_script_cache(platform,video_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
         source,
     )
     cache = cast(
-        sqlite3.Row,
+        BusinessRow,
         conn.execute(
             "SELECT * FROM viral_script_cache WHERE platform=%s AND video_id=%s FOR UPDATE",
             source,
@@ -429,7 +428,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
             chosen = next((old for old in previous if old["status"] != "SUCCEEDED"), None)
         if chosen is not None:
             cache = cast(
-                sqlite3.Row,
+                BusinessRow,
                 conn.execute(
                     "UPDATE viral_script_cache SET producer_task_id=%s,result_json=%s,"
                     "updated_at=now() "
@@ -448,7 +447,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
         ).fetchone()
         if previous_result is not None and _cached_transcript(previous_result["result_json"]):
             cache = cast(
-                sqlite3.Row,
+                BusinessRow,
                 conn.execute(
                     "UPDATE viral_script_cache SET result_json=%s,updated_at=now() "
                     "WHERE platform=%s AND video_id=%s RETURNING *",
@@ -480,7 +479,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
                     "storage_uri": str(proof["storage_uri"]),
                 }
                 cache = cast(
-                    sqlite3.Row,
+                    BusinessRow,
                     conn.execute(
                         "UPDATE viral_script_cache SET result_json=%s "
                         "WHERE platform=%s AND video_id=%s RETURNING *",
@@ -490,7 +489,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
     return cache
 
 
-def _cache_producer_state(conn: BusinessConnection, cache: sqlite3.Row) -> str:
+def _cache_producer_state(conn: BusinessConnection, cache: BusinessRow) -> str:
     if (
         cache["result_json"] is not None
         and _verified_cache_result(
@@ -548,7 +547,7 @@ def _time_text(value: datetime) -> str:
 
 def private_source_task(
     conn: BusinessConnection, *, owner_user_id: str, sha256: str, size_bytes: int
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     """私有音轨也按真实内容串行核对；更换项目或幂等键不能绕过未知提交。"""
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
@@ -570,7 +569,7 @@ def private_source_task(
             "SCRIPT_FROM_AUDIO_SOURCE_UNCERTAIN",
             "该音轨的上次提交结果尚未确认，请核对原任务；更换请求不能重新提交。",
         )
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def enqueue_script_from_audio_task(
@@ -580,7 +579,7 @@ def enqueue_script_from_audio_task(
     project_id: str,
     source_asset_id: str,
     idempotency_key: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,  # type: ignore[arg-type]
@@ -629,7 +628,7 @@ def enqueue_script_from_audio_task(
                 "SCRIPT_FROM_AUDIO_IDEMPOTENCY_CONFLICT",
                 "提取内容已经变化，请重新提交。",
             )
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
     if viral_source is None:
         source_task = private_source_task(
             conn,
@@ -654,7 +653,7 @@ def enqueue_script_from_audio_task(
                 "SCRIPT_FROM_AUDIO_ALREADY_RUNNING",
                 "该项目已有文案提取任务在进行，请等待完成。",
             )
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
 
     cache = _lock_script_cache(conn, viral_source) if viral_source else None
     if cache is not None and _viral_source(conn, asset) != viral_source:
@@ -726,7 +725,7 @@ def enqueue_script_from_audio_task(
             409, "SCRIPT_FROM_AUDIO_ALREADY_RUNNING", "该项目已有文案提取任务在进行，请等待完成。"
         )
     if str(row["id"]) != task_id:
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
     from app.permissions import write_audit
 
     cache_hit = cached is not None
@@ -773,7 +772,7 @@ def enqueue_script_from_audio_task(
             "cache_hit": cached is not None,
         },
     )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def acquire_script_from_audio_task(
@@ -841,7 +840,7 @@ def acquire_script_from_audio_task(
     )
 
 
-def _require_leased_task(conn: BusinessConnection, lease: ScriptFromAudioTaskLease) -> sqlite3.Row:
+def _require_leased_task(conn: BusinessConnection, lease: ScriptFromAudioTaskLease) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM script_from_audio_tasks WHERE id = %s AND status = 'RUNNING'",
         (lease.id,),
@@ -853,7 +852,7 @@ def _require_leased_task(conn: BusinessConnection, lease: ScriptFromAudioTaskLea
         or str(row["locked_until"] or "") <= _time_text(datetime.now(UTC))
     ):
         raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def _configured_asr(conn: BusinessConnection) -> AsrProvider:
@@ -868,7 +867,7 @@ def _configured_asr(conn: BusinessConnection) -> AsrProvider:
         ) from exc
 
 
-def _validate_source(asset: sqlite3.Row) -> None:
+def _validate_source(asset: BusinessRow) -> None:
     if not str(asset["content_type"] or "").lower().startswith(("audio/", "video/")):
         raise script_from_audio_error(
             422, "SCRIPT_FROM_AUDIO_SOURCE_TYPE_INVALID", "请选择有效的视频或音频文件。"
@@ -879,7 +878,7 @@ def _validate_source(asset: sqlite3.Row) -> None:
         )
 
 
-def _verified_task_payload(conn: BusinessConnection, row: sqlite3.Row) -> dict[str, object]:
+def _verified_task_payload(conn: BusinessConnection, row: BusinessRow) -> dict[str, object]:
     payload: dict[str, object] = json.loads(str(row["request_json"]))
     source = payload.get("viral_source")
     if not isinstance(source, list) or len(source) != 2 or payload.get("viral_archive_sha256"):
@@ -1339,19 +1338,19 @@ def fail_script_from_audio_task(
     conn.commit()
 
 
-def load_script_from_audio_task(conn: BusinessConnection, task_id: str) -> sqlite3.Row:
+def load_script_from_audio_task(conn: BusinessConnection, task_id: str) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM script_from_audio_tasks WHERE id = %s",
         (task_id,),
     ).fetchone()
     if row is None:
         raise script_from_audio_error(404, "SCRIPT_FROM_AUDIO_TASK_NOT_FOUND", "提取任务不存在。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def latest_script_from_audio_task(
     conn: BusinessConnection, *, project_id: str
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT * FROM script_from_audio_tasks
@@ -1360,7 +1359,7 @@ def latest_script_from_audio_task(
         """,
         (project_id,),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def _redacted_message(cause: Exception) -> str:

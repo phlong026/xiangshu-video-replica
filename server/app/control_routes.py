@@ -6,7 +6,6 @@ import io
 import json
 import logging
 import re
-import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast
@@ -38,7 +37,7 @@ from app.control_auth import (
 )
 from app.csv_export import spreadsheet_safe_cell
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.external_calls import summarize_provider_message
 from app.failure_runbook import failed_record_explanation
 from app.h3_account_pool import paid_probe_config
@@ -2589,7 +2588,7 @@ def get_analysis_diagnostics(
         (*params, ANALYSIS_DIAGNOSTIC_MATCH_LIMIT),
     ).fetchall()
     task_ids = [str(row["id"]) for row in rows]
-    attempts_by_task: dict[str, list[sqlite3.Row]] = {}
+    attempts_by_task: dict[str, list[BusinessRow]] = {}
     # attempts 是 PG-only 表（迁移在 SQLite 档案里跳过）；开发环境降级为
     # 「无重试历史」，生产 PG 走全量。
     if task_ids and conn.is_postgres:
@@ -4225,7 +4224,7 @@ def _has_candidate_asset(payload: dict[str, object]) -> bool:
 def _image_generation_record(
     *,
     conn: BusinessConnection,
-    row: sqlite3.Row,
+    row: BusinessRow,
     record_type: Literal["FIRST_FRAME_IMAGE", "CHARACTER_SHEET_IMAGE"],
     operation: str,
     provider: str | None,
@@ -4380,9 +4379,9 @@ def _upstream_diagnostic(raw: object) -> tuple[int | None, str | None]:
 
 
 def _analysis_diagnostic_record(
-    row: sqlite3.Row,
+    row: BusinessRow,
     *,
-    attempts: list[sqlite3.Row],
+    attempts: list[BusinessRow],
     postgres: bool,
 ) -> AnalysisDiagnosticRecord:
     """把任务行 + 尝试历史拼成诊断记录。

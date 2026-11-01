@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import re
-import sqlite3
 import struct
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -35,7 +34,7 @@ from app.character_policy import (
     authorization_is_expired,
     effective_identity_state_values,
 )
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.external_calls import external_call_model
 from app.image_dimensions import scan_jpeg_dimensions
 from app.permissions import require_role, write_audit
@@ -422,7 +421,7 @@ def update_person_identity(
     return get_person_identity(conn, actor=actor, identity_id=identity_id)
 
 
-def _identity_owner_user_id(identity: sqlite3.Row, *, actor: CurrentUser) -> str:
+def _identity_owner_user_id(identity: BusinessRow, *, actor: CurrentUser) -> str:
     """The tenant whose bytes an identity asset belongs to.
 
     Identity documents and source photos are private material, so this value is
@@ -436,7 +435,7 @@ def _retain_identity_content(
     conn: BusinessConnection,
     *,
     storage: StorageAdapter,
-    identity: sqlite3.Row,
+    identity: BusinessRow,
     actor: CurrentUser,
     asset_id: str,
     source_key: str,
@@ -1061,40 +1060,33 @@ def create_character_version(
     version_id = str(uuid4())
     version_number = next_character_version_number(conn, persona_id)
     snapshot = persona_snapshot(persona)
-    try:
-        with conn:
-            conn.execute(
-                """
-                INSERT INTO character_versions (
-                    id, persona_id, version_number, status, source_asset_id,
-                    source_sha256, persona_snapshot_json, provider, model,
-                    generation_params_json, template_version, template_hash,
-                    required_view_types_json, created_by
-                )
-                VALUES (%s, %s, %s, 'DRAFT', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    version_id,
-                    persona_id,
-                    version_number,
-                    source_asset_id,
-                    str(source_asset["sha256"]),
-                    encode_json(snapshot),
-                    clean_provider,
-                    clean_model,
-                    encode_json(generation_params_json),
-                    CHARACTER_TEMPLATE_VERSION,
-                    CHARACTER_TEMPLATE_HASH,
-                    encode_json(list(REQUIRED_CHARACTER_VIEW_TYPES)),
-                    actor.id,
-                ),
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO character_versions (
+                id, persona_id, version_number, status, source_asset_id,
+                source_sha256, persona_snapshot_json, provider, model,
+                generation_params_json, template_version, template_hash,
+                required_view_types_json, created_by
             )
-    except sqlite3.IntegrityError as exc:
-        raise character_error(
-            409,
-            "CHARACTER_VERSION_CONFLICT",
-            "角色版本号发生冲突，请重新创建。",
-        ) from exc
+            VALUES (%s, %s, %s, 'DRAFT', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                version_id,
+                persona_id,
+                version_number,
+                source_asset_id,
+                str(source_asset["sha256"]),
+                encode_json(snapshot),
+                clean_provider,
+                clean_model,
+                encode_json(generation_params_json),
+                CHARACTER_TEMPLATE_VERSION,
+                CHARACTER_TEMPLATE_HASH,
+                encode_json(list(REQUIRED_CHARACTER_VIEW_TYPES)),
+                actor.id,
+            ),
+        )
     write_audit(
         conn,
         actor=actor,
@@ -1338,37 +1330,37 @@ def evaluate_source_image_quality(
 
 def read_identity_row(
     conn: BusinessConnection, identity_id: str, *, for_update: bool = False
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM person_identities WHERE id = %s" + (" FOR UPDATE" if for_update else ""),
         (identity_id,),
     ).fetchone()
     if row is None:
         raise character_not_found("PERSON_IDENTITY_NOT_FOUND", "人物身份不存在或不可用。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
-def read_persona_row(conn: BusinessConnection, persona_id: str) -> sqlite3.Row:
+def read_persona_row(conn: BusinessConnection, persona_id: str) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM character_personas WHERE id = %s",
         (persona_id,),
     ).fetchone()
     if row is None:
         raise character_not_found("CHARACTER_PERSONA_NOT_FOUND", "角色人设不存在或不可用。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
-def read_version_row(conn: BusinessConnection, version_id: str) -> sqlite3.Row:
+def read_version_row(conn: BusinessConnection, version_id: str) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM character_versions WHERE id = %s",
         (version_id,),
     ).fetchone()
     if row is None:
         raise character_not_found("CHARACTER_VERSION_NOT_FOUND", "角色版本不存在或不可用。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
-def identity_from_row(row: sqlite3.Row, *, redact_assets: bool) -> PersonIdentity:
+def identity_from_row(row: BusinessRow, *, redact_assets: bool) -> PersonIdentity:
     authorization_status, status = effective_identity_state(row)
     return PersonIdentity(
         id=str(row["id"]),
@@ -1393,7 +1385,7 @@ def identity_from_row(row: sqlite3.Row, *, redact_assets: bool) -> PersonIdentit
     )
 
 
-def persona_from_row(row: sqlite3.Row) -> CharacterPersona:
+def persona_from_row(row: BusinessRow) -> CharacterPersona:
     return CharacterPersona(
         id=str(row["id"]),
         identity_id=str(row["identity_id"]),
@@ -1412,7 +1404,7 @@ def persona_from_row(row: sqlite3.Row) -> CharacterPersona:
     )
 
 
-def version_from_row(row: sqlite3.Row, *, redact_source: bool) -> CharacterVersion:
+def version_from_row(row: BusinessRow, *, redact_source: bool) -> CharacterVersion:
     return CharacterVersion(
         id=str(row["id"]),
         persona_id=str(row["persona_id"]),
@@ -1465,7 +1457,7 @@ def require_character_admin(
     )
 
 
-def require_current_authorization(identity: sqlite3.Row) -> None:
+def require_current_authorization(identity: BusinessRow) -> None:
     authorization_status, status = effective_identity_state(identity)
     if (
         authorization_status != "AUTHORIZED"
@@ -1479,14 +1471,14 @@ def require_current_authorization(identity: sqlite3.Row) -> None:
         )
 
 
-def require_identity_accepts_authorization_upload(identity: sqlite3.Row) -> None:
+def require_identity_accepts_authorization_upload(identity: BusinessRow) -> None:
     if str(identity["status"]) == "ARCHIVED":
         raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能更新授权。")
     if str(identity["status"]) == "REVOKED" or str(identity["authorization_status"]) == "REVOKED":
         raise character_error(409, "IDENTITY_REVOKED", "已撤销人物身份不能更新授权。")
 
 
-def require_identity_active(identity: sqlite3.Row) -> None:
+def require_identity_active(identity: BusinessRow) -> None:
     if not effective_identity_is_active(identity):
         raise character_error(
             409,
@@ -1495,7 +1487,7 @@ def require_identity_active(identity: sqlite3.Row) -> None:
         )
 
 
-def effective_identity_state(row: sqlite3.Row) -> tuple[str, str]:
+def effective_identity_state(row: BusinessRow) -> tuple[str, str]:
     return effective_identity_state_values(
         status=row["status"],
         authorization_status=row["authorization_status"],
@@ -1504,21 +1496,21 @@ def effective_identity_state(row: sqlite3.Row) -> tuple[str, str]:
     )
 
 
-def effective_identity_is_active(row: sqlite3.Row) -> bool:
+def effective_identity_is_active(row: BusinessRow) -> bool:
     authorization_status, status = effective_identity_state(row)
     return authorization_status == "AUTHORIZED" and status == "ACTIVE"
 
 
-def identity_has_usable_source(row: sqlite3.Row) -> bool:
+def identity_has_usable_source(row: BusinessRow) -> bool:
     return row["source_asset_id"] is not None and effective_identity_is_active(row)
 
 
-def identity_owned_by_actor(row: sqlite3.Row, actor: CurrentUser) -> bool:
+def identity_owned_by_actor(row: BusinessRow, actor: CurrentUser) -> bool:
     owner_user_id = row["owner_user_id"]
     return owner_user_id is not None and str(owner_user_id) == actor.id
 
 
-def identity_available_to_employee(conn: BusinessConnection, row: sqlite3.Row) -> bool:
+def identity_available_to_employee(conn: BusinessConnection, row: BusinessRow) -> bool:
     if not effective_identity_is_active(row):
         return False
     return (
@@ -1572,7 +1564,7 @@ def read_uploaded_identity_asset(
     identity_id: str,
     asset_id: str,
     purpose: IdentityAssetPurpose,
-) -> tuple[sqlite3.Row, Any, bytes]:
+) -> tuple[BusinessRow, Any, bytes]:
     asset = conn.execute("SELECT * FROM assets WHERE id = %s", (asset_id,)).fetchone()
     if asset is None:
         raise character_not_found("ASSET_NOT_FOUND", "上传记录不存在。")
@@ -1625,7 +1617,7 @@ def read_uploaded_identity_asset(
             "CHARACTER_STORAGE_UNAVAILABLE",
             "人物素材存储暂时不可用，请稍后重试。",
         ) from exc
-    return cast(sqlite3.Row, asset), stored, content
+    return cast(BusinessRow, asset), stored, content
 
 
 def validate_identity_upload_request(
@@ -1672,7 +1664,7 @@ def validate_authorization_content(content: bytes, *, content_type: str) -> None
 
 
 def completed_asset_metadata(
-    asset: sqlite3.Row,
+    asset: BusinessRow,
     *,
     stored_uri: str,
     stored_size: int,
@@ -1749,7 +1741,7 @@ def update_completed_asset(
 def persist_source_inspection_failure(
     conn: BusinessConnection,
     *,
-    asset: sqlite3.Row,
+    asset: BusinessRow,
     stored_uri: str,
     stored_size: int,
     sha256: str,
@@ -1849,7 +1841,7 @@ def normalize_persona_values(
     return result
 
 
-def persona_snapshot(row: sqlite3.Row) -> dict[str, object]:
+def persona_snapshot(row: BusinessRow) -> dict[str, object]:
     return {
         "id": str(row["id"]),
         "identity_id": str(row["identity_id"]),

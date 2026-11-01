@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import sqlite3
 from collections import defaultdict
 from uuid import uuid4
 
@@ -26,7 +25,7 @@ from app.characters import (
     get_project_main_character,
     next_version_number,
 )
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +100,7 @@ def list_available_project_character_versions(
         """,
         (character_version_id, character_version_id),
     ).fetchall()
-    assets_by_version: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    assets_by_version: dict[str, list[BusinessRow]] = defaultdict(list)
     for row in asset_rows:
         assets_by_version[str(row["character_version_id"])].append(row)
 
@@ -238,25 +237,12 @@ def choose_project_character_version(
     except HTTPException:
         conn.rollback()
         raise
-    except sqlite3.Error as exc:
-        conn.rollback()
-        logger.exception(
-            "Project character version selection failed",
-            extra={
-                "project_id": project_id,
-                "character_version_id": character_version_id,
-            },
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={"code": "PROJECT_CHARACTER_SELECTION_FAILED"},
-        ) from exc
     return result
 
 
 def available_option_from_rows(
-    version: sqlite3.Row,
-    asset_rows: list[sqlite3.Row],
+    version: BusinessRow,
+    asset_rows: list[BusinessRow],
     *,
     project_id: str,
 ) -> ProjectCharacterVersionOption | None:
@@ -339,7 +325,7 @@ def available_option_from_rows(
         return None
 
 
-def published_asset_matches(asset: sqlite3.Row, frozen: dict[str, object]) -> bool:
+def published_asset_matches(asset: BusinessRow, frozen: dict[str, object]) -> bool:
     return (
         frozen.get("approved_asset_id") == str(asset["asset_id"])
         and frozen.get("character_asset_id") == str(asset["character_asset_id"])
