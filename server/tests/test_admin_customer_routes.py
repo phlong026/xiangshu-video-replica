@@ -2795,11 +2795,13 @@ def test_reconcile_invariants_stay_green_after_a_refund(client: TestClient) -> N
     求和），要么已被类型/轮次条件排除在 `REFUND` 之外（配对只看 `CHARGE`，
     轮次只看 `task_id`+`billing_round` 非空）。
     """
-    from scripts.reconcile_customer_billing import validate_database_invariants
+    # 割接对账工具已退役（T3 批 C-4）；其 PG 侧四组不变量以逐字等价 SQL
+    # 保存在 tests/ledger_invariants.py，继续充当退款/调账的行为 oracle。
+    from tests.ledger_invariants import validate_pg_invariants
 
     def _invariants() -> tuple:
         with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
-            return validate_database_invariants(conn, "postgresql", "target")
+            return validate_pg_invariants(conn)
 
     # The seeded fixture is not invariant-clean and never claimed to be: the
     # 027 activation FK needs a PAID dummy order that has no CHARGE row, so the
