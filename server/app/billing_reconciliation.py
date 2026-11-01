@@ -22,9 +22,18 @@ from app.api_errors import http_error as _http
 from app.db_portable import BusinessConnection
 from app.usage_billing import finalize_pending_operation
 
-# 只扫真金白银的六条服务线；viral_* 等小额服务有自己的 30 分钟释放窗口，
-# 且它们的源行不在这六张任务表里，混进来会把正常条目误报成孤儿。
-_MONEY_SERVICES = ("video_768p", "video_2k", "oral", "first_frame", "asr", "character")
+# 只扫真金白银的服务线（768P 16-30 秒长档与 768P 同走 generation_tasks）；
+# viral_* 等小额服务有自己的 30 分钟释放窗口，且它们的源行不在这几张任务表里，
+# 混进来会把正常条目误报成孤儿。
+_MONEY_SERVICES = (
+    "video_768p",
+    "video_768p_long",
+    "video_2k",
+    "oral",
+    "first_frame",
+    "asr",
+    "character",
+)
 
 # 这些原因禁止自动收口：未知结果必须先核对（不自动重投也不自动退分），
 # first_frame 的交付数只认发布事务，孤儿没有源任务可核对。
@@ -93,7 +102,7 @@ def _classify(
     每个服务的 source_kind 固定（同一服务只可能落在对应任务表上），
     状态判断直接读行里的状态列。
     """
-    if service in ("video_768p", "video_2k"):
+    if service in ("video_768p", "video_768p_long", "video_2k"):
         if row["gen_status"] is None:
             return ("ORPHAN_SOURCE_MISSING", "generation")
         if row["gen_status"] == "SUCCEEDED":
@@ -233,6 +242,7 @@ def enqueue_stuck_billing_operations(conn: BusinessConnection, *, limit: int = 1
 # 20261002T0630 的登记口径一致。asr 任务不登记诊断引用，恒为 None。
 _DIAGNOSTIC_REFS: dict[str, tuple[tuple[str, str], ...]] = {
     "video_768p": (("generation_tasks", "VIDEO"),),
+    "video_768p_long": (("generation_tasks", "VIDEO"),),
     "video_2k": (("generation_tasks", "VIDEO"),),
     "oral": (("oral_tasks", "ORAL_VIDEO"),),
     "first_frame": (("first_frame_tasks", "FIRST_FRAME_IMAGE"),),

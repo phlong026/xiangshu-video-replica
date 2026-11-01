@@ -781,7 +781,8 @@ def read_generation_price_quote(
     conn: Database,
     actor: AuthenticatedUser,
     resolution: Literal["768P", "2K"] = Query(default="768P"),
-    duration_seconds: int = Query(default=8, ge=4, le=15),
+    # 16-30 秒为长档计价（generation_price_quote 内拒绝 2K 超档组合）。
+    duration_seconds: int = Query(default=8, ge=4, le=30),
     quantity: int = Query(default=1, ge=1),
 ) -> GenerationPriceQuote:
     # 子账号按母账号钱包计价：套餐权益也随钱包主人（T2.10）。

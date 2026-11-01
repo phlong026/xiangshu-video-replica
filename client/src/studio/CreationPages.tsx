@@ -27,6 +27,7 @@ import {
   getMaterialBatchPreviews,
   getScriptRewriteTask,
   type H3Mode,
+  type IndependentCapabilities,
   listUserSavedPrompts,
   type Project,
   type ProjectMainCharacter,
@@ -1483,15 +1484,30 @@ const REVIEW_SAMPLE_SHOTS: ShotCard[] = [
   },
 ];
 
-/** 归一到后端契约的 4–15 秒整数区间（`output_duration_seconds` 是
- * `ge=4, le=15`）。这里曾把时长折叠成 4/15 两档，那是 H3 早期只支持两档时的
- * 权宜；PR #160 放开到每秒后，折叠会让提示词上下文里的时长与实际生成时长
- * 对不上——按 12 秒生成、却按 15 秒写提示词。
+/** 归一到后端契约的 4–30 秒整数区间（`output_duration_seconds` 是
+ * `ge=4, le=30`；16–30 秒为长视频档，需后台启用价目后经 capabilities 放开，
+ * 复刻流等调用方维持默认上限 15）。这里曾把时长折叠成 4/15 两档，那是 H3
+ * 早期只支持两档时的权宜；PR #160 放开到每秒后，折叠会让提示词上下文里的
+ * 时长与实际生成时长对不上——按 12 秒生成、却按 15 秒写提示词。
  * 导出供独立创作页共用：非法时长按钳位处理，不允许任何路径静默回落 8 秒
  * （上线前检查 P1-4）。 */
-export function normalizeCustomerDuration(seconds: number): number {
-  if (!Number.isFinite(seconds)) return 15;
-  return Math.min(15, Math.max(4, Math.round(seconds)));
+export function normalizeCustomerDuration(seconds: number, max = 15): number {
+  const cap = Math.max(15, Math.min(30, max));
+  if (!Number.isFinite(seconds)) return cap;
+  return Math.min(cap, Math.max(4, Math.round(seconds)));
+}
+
+/** 视频生成的可选时长上限：2K 恒为 15（上游契约）；768P 取 capabilities
+ * 下发的长档上限（15 或 30），capabilities 未就绪时按保守值 15。 */
+export function customerDurationMax(
+  capabilities: IndependentCapabilities | undefined,
+  resolution: string,
+): number {
+  if (resolution === "2K") return 15;
+  return Math.max(
+    15,
+    Math.min(30, capabilities?.max_output_duration_seconds ?? 15),
+  );
 }
 
 export function ReplicaPage() {
@@ -2489,10 +2505,10 @@ export function ReplicaPage() {
   );
   // 输出时长跟随源视频。复刻页没有时长控件（时长下拉框属于独立创作页的
   // ParameterControls），草稿默认的 8 秒对用户既不可见也不可改；源视频在上传时
-  // 已被限定为 4–15 秒，与 output_duration_seconds 的契约值域完全重合，所以按源
-  // 时长生成总是可行的。不对齐的话，15 秒的源在默认 8 秒下必然撞上压缩门禁，而
-  // 用户手上没有任何把时长调上去的入口。向上取整是为了让对齐后的值不会反过来
-  // 落进 PromptEditor 那 0.25 秒容差的压缩判定里。
+  // 已被限定为 4–15 秒（契约本身已放宽到 4–30，但那是独立创作长档专用），
+  // 所以按源时长生成总是可行的。不对齐的话，15 秒的源在默认 8 秒下必然撞上
+  // 压缩门禁，而用户手上没有任何把时长调上去的入口。向上取整是为了让对齐后的
+  // 值不会反过来落进 PromptEditor 那 0.25 秒容差的压缩判定里。
   const alignedDuration = sourceDuration
     ? normalizeCustomerDuration(Math.ceil(sourceDuration))
     : 0;
@@ -3644,7 +3660,7 @@ const assetKindNames: Record<StudioAsset["kind"], string> = {
 };
 
 function ParameterControls() {
-  const { state, patchDraft, user } = useStudio();
+  const { state, patchDraft, user, videoCapabilities } = useStudio();
   const readOnly = user.role === "auditor";
   const draft = state.draft;
   // 供应商 ratio 契约（2026-09-19 真实付费核对）：
@@ -3658,6 +3674,13 @@ function ParameterControls() {
   const frameBased = mode === "i2v" || mode === "l2v";
   const ratioOptions =
     mode === "t2v" ? ratios.filter((r) => r !== "自动") : ratios;
+  // 16-30 秒长档：上限由 capabilities 下发（后台价目启用才放开）；2K 恒为 15。
+  const durationMax = customerDurationMax(videoCapabilities, draft.resolution);
+  // 上限收窄（切到 2K、或后台关闭长档）时把越界草稿钳回合法档位，
+  // 避免选择器显示值与实际提交值不一致。
+  useEffect(() => {
+    if (draft.duration > durationMax) patchDraft({ duration: durationMax });
+  }, [draft.duration, durationMax, patchDraft]);
   return (
     <div className="creation-parameters creation-parameters--inline">
       <Field label="分辨率">
@@ -3675,17 +3698,25 @@ function ParameterControls() {
         <select
           aria-label="时长"
           disabled={readOnly}
-          value={draft.duration}
+          value={Math.min(draft.duration, durationMax)}
           onChange={(event) =>
             patchDraft({ duration: Number(event.target.value) })
           }
         >
-          {Array.from({ length: 12 }, (_, i) => i + 4).map((seconds) => (
-            <option key={seconds} value={seconds}>
-              {seconds} 秒
-            </option>
-          ))}
+          {Array.from({ length: durationMax - 3 }, (_, i) => i + 4).map(
+            (seconds) => (
+              <option key={seconds} value={seconds}>
+                {seconds} 秒{seconds > 15 ? "（长档）" : ""}
+              </option>
+            ),
+          )}
         </select>
+        {durationMax > 15 ? (
+          <Hint>
+            16–30 秒为长视频档：单价为 15 秒及以内的 2 倍——选择 30 秒时总价即 15
+            秒成片的 2 倍，实际以确认弹窗报价为准。
+          </Hint>
+        ) : null}
       </Field>
       <Field label="画面比例">
         {frameBased ? (

@@ -723,8 +723,8 @@ def analysis_duration_for_asset(
             detail={
                 "code": "ANALYSIS_DURATION_EXCEEDED",
                 "message": (
-                    f"参考视频时长 {round(measured_duration)} 秒，超过 15 秒上限，"
-                    "无法拆解；请上传 15 秒以内的视频。"
+                    f"参考视频时长 {round(measured_duration)} 秒，超过 30 秒上限，"
+                    "无法拆解；请上传 30 秒以内的视频。"
                 ),
             },
         )

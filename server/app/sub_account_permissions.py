@@ -56,6 +56,7 @@ BUSINESS_LABELS: dict[str, str] = dict(BUSINESS_FEATURES)
 # 质检/修复、基础设施 cos/zpay）不受功能准入约束，直接放行。
 SERVICE_FEATURE: dict[str, str] = {
     "video_768p": "video",
+    "video_768p_long": "video",
     "video_2k": "video",
     "analysis": "analysis",
     "first_frame": "first_frame",

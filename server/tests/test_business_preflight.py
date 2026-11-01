@@ -263,7 +263,10 @@ def test_real_analysis_rejects_local_asset_before_creating_task(monkeypatch):
 
 
 def test_analysis_duration_rejects_reference_video_over_limit() -> None:
-    """参考视频实测时长超过 15 秒上限时，拆解入口必须明确报错而非静默失败。"""
+    """参考视频实测时长超过 30 秒上限时，拆解入口必须明确报错而非静默失败。
+
+    上限随「复刻 30 秒」改造（ebb6d23）从 15 放宽到 30；超限文案与
+    MAX_DURATION_SECONDS 保持一致（30），不要回写成旧值。"""
     import json
 
     conn = Mock()
@@ -276,4 +279,4 @@ def test_analysis_duration_rejects_reference_video_over_limit() -> None:
         )
     assert failure.value.status_code == 422
     assert failure.value.detail["code"] == "ANALYSIS_DURATION_EXCEEDED"
-    assert "15" in failure.value.detail["message"]
+    assert "30" in failure.value.detail["message"]

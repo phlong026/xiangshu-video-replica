@@ -189,10 +189,11 @@ REFERENCE_ROLE_MEDIA_KEYS = {
     "reference_video": "video_url",
     "reference_audio": "audio_url",
 }
-# 客户可选时长 = provider 接受的范围（validate_h3_request 校验 4–15 的每一秒），
-# 报价端点同样是 ge=4 le=15 的按秒线性计价。曾收窄成 {4, 15}，结果 12 秒的源视频
-# 被拉成 15 秒或压成 4 秒，动作节奏与口播必然失真。
-CUSTOMER_DURATION_OPTIONS = frozenset(range(4, 16))
+# 客户可选时长 = provider 接受的范围（validate_h3_request 校验 4–30 的每一秒；
+# 上游 16-30 秒走长视频规则、按基础费用 2 倍计费，2K 不支持超 15 秒）。
+# 报价端点同样是 ge=4 le=30 的按秒线性计价。曾收窄成 {4, 15}，结果 12 秒的
+# 源视频被拉成 15 秒或压成 4 秒，动作节奏与口播必然失真。
+CUSTOMER_DURATION_OPTIONS = frozenset(range(4, 31))
 CUSTOMER_QUANTITY_OPTIONS = {1, 2, 4}
 MAX_GENERATION_PROMPT_CHARS = 7_000
 # A real H3 request polls for up to five minutes. Leave headroom so another
@@ -245,7 +246,9 @@ class PromptCompileRequest(BaseModel):
     script_version_id: str = Field(min_length=1)
     shot_card_version_id: str = Field(min_length=1)
     first_frame_asset_id: str = Field(min_length=1)
-    output_duration_seconds: int = Field(ge=4, le=15)
+    # 编译/预览的时长上限与 CUSTOMER_DURATION_OPTIONS 同源（4–30）；复刻流调用方
+    # 的源片 ≤15 秒，实际取值仍 ≤15，这里放宽只为独立创作长档可用。
+    output_duration_seconds: int = Field(ge=4, le=30)
     resolution: Literal["768P", "2K"] = "768P"
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
     timeline_policy: Literal["preserve", "scale_confirmed"] = "preserve"
@@ -255,7 +258,7 @@ class PromptCompileRequest(BaseModel):
 class PromptPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    output_duration_seconds: int | None = Field(default=None, ge=4, le=15)
+    output_duration_seconds: int | None = Field(default=None, ge=4, le=30)
     resolution: Literal["768P", "2K"] = "768P"
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
 
@@ -948,6 +951,8 @@ class GenerationPriceQuote(BaseModel):
     resolution: Literal["768P", "2K"]
     duration_seconds: int
     quantity: int
+    # 计价档位：16-30 秒走独立档（单价为 15 秒及以内档的 2 倍）。
+    price_tier: Literal["4-15s", "16-30s"] = "4-15s"
     unit_price_fen_per_second: int
     estimated_seconds: int
     estimated_price_fen: int
@@ -1438,7 +1443,7 @@ def compile_prompt_version(
         raise generation_error(
             422,
             "DURATION_OPTION_INVALID",
-            "Customer generation duration must be an integer from 4 to 15 seconds.",
+            "Customer generation duration must be an integer from 4 to 30 seconds.",
         )
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1705,7 +1710,7 @@ def preview_prompt_text(
         raise generation_error(
             422,
             "DURATION_OPTION_INVALID",
-            "Customer generation duration must be an integer from 4 to 15 seconds.",
+            "Customer generation duration must be an integer from 4 to 30 seconds.",
         )
     prompt_text = compile_prompt_text(
         script_payload=script_payload,
@@ -2504,7 +2509,7 @@ def create_generation_batch(
             raise generation_error(
                 422,
                 "DURATION_OPTION_INVALID",
-                "Customer generation duration must be an integer from 4 to 15 seconds.",
+                "Customer generation duration must be an integer from 4 to 30 seconds.",
             )
         if actor.role == "customer" and request.quantity not in CUSTOMER_QUANTITY_OPTIONS:
             raise generation_error(
@@ -2541,12 +2546,13 @@ def create_generation_batch(
                 "Generation must use the first frame that was used to compile the locked prompt.",
             )
 
+        from app.billing_catalog import generation_service_for
         from app.quote_contracts import validate_quote
 
         pricing_snapshot = validate_quote(
             conn,
             user_id=actor.id,
-            service="video_2k" if request.resolution == "2K" else "video_768p",
+            service=generation_service_for(request.resolution, request.output_duration_seconds),
             units=request.output_duration_seconds,
             quantity=request.quantity,
             quote_token=request.quote_token,
@@ -3213,12 +3219,15 @@ def _validate_regeneration_quote(
     request: PaidRegenerationRequest,
     parameters: dict[str, Any],
 ) -> dict[str, Any]:
+    from app.billing_catalog import generation_service_for
     from app.quote_contracts import validate_quote
 
     return validate_quote(
         conn,
         user_id=user_id,
-        service="video_2k" if parameters["resolution"] == "2K" else "video_768p",
+        service=generation_service_for(
+            str(parameters["resolution"]), int(parameters["duration_seconds"])
+        ),
         units=parameters["duration_seconds"],
         quantity=parameters["quantity"],
         specification=parameters["specification"],
@@ -3979,15 +3988,13 @@ def _pre_provider_retry_pricing_snapshot(
 ) -> dict[str, Any] | None:
     from decimal import InvalidOperation
 
-    from app.billing_catalog import amount, credits_from_snapshot
+    from app.billing_catalog import amount, credits_from_snapshot, generation_service_for
 
     try:
         payload = json.loads(prompt_snapshot)
         if not isinstance(payload, dict):
             raise ValueError("原任务冻结参数无效")
-        service = (
-            "video_2k" if str(payload.get("resolution", "768P")).upper() == "2K" else "video_768p"
-        )
+        service = generation_service_for(str(payload.get("resolution", "768P")), seconds)
         previous = conn.execute(
             "SELECT user_id, service, state, budget_units, reserved_credits, charged_credits, "
             "pricing_snapshot_json FROM billing_operations "
@@ -7390,8 +7397,7 @@ def build_h3_request(
     """
     if not prompt_text.strip():
         raise ValueError("prompt_text is required")
-    if duration_seconds < 4 or duration_seconds > 15:
-        raise ValueError("duration must be between 4 and 15 seconds")
+    _validate_h3_duration(resolution, duration_seconds)
     if resolution not in SUPPORTED_RESOLUTIONS:
         raise ValueError("resolution must be 768P or 2K")
     if ratio not in SUPPORTED_RATIOS:
@@ -7468,6 +7474,15 @@ def build_h3_request(
     }
 
 
+def _validate_h3_duration(resolution: str, duration: Any) -> None:
+    # 上游契约：单次 4–30 秒整数；16–30 秒走长视频规则（按基础费用 2 倍计费），
+    # 2K 分辨率目前最长 15 秒——超档组合在提交前本地拒绝，不烧一次不确定的调用。
+    if not isinstance(duration, int) or isinstance(duration, bool) or not 4 <= duration <= 30:
+        raise ValueError("H3 duration must be 4-30 seconds")
+    if duration > 15 and str(resolution).upper() == "2K":
+        raise ValueError("H3 2K resolution currently supports up to 15 seconds")
+
+
 def validate_h3_request(request: dict[str, Any]) -> None:
     content = request.get("content")
     if not isinstance(content, list) or not content:
@@ -7475,9 +7490,7 @@ def validate_h3_request(request: dict[str, Any]) -> None:
     if content[0].get("type") != "text" or not str(content[0].get("text", "")).strip():
         raise ValueError("H3 I2V content requires non-empty text")
     roles = [str(item.get("role")) if isinstance(item, dict) else None for item in content[1:]]
-    duration = request.get("duration")
-    if not isinstance(duration, int) or duration < 4 or duration > 15:
-        raise ValueError("H3 duration must be 4-15 seconds")
+    _validate_h3_duration(str(request.get("resolution", "768P")), request.get("duration"))
     if request.get("ratio") not in SUPPORTED_RATIOS:
         raise ValueError("H3 ratio is unsupported")
     if not roles:
@@ -7533,9 +7546,7 @@ def _validate_h3_reference_request(
             raise ValueError(f"H3 R2V {role} object requires a url")
     if request.get("ratio") not in SUPPORTED_RATIOS:
         raise ValueError("H3 R2V ratio is unsupported")
-    duration = request.get("duration")
-    if not isinstance(duration, int) or duration < 4 or duration > 15:
-        raise ValueError("H3 R2V duration must be 4-15 seconds")
+    _validate_h3_duration(str(request.get("resolution", "768P")), request.get("duration"))
 
 
 def _metaso_json_object(content: bytes) -> dict[str, Any]:
@@ -8200,10 +8211,26 @@ def generation_price_quote(
 ) -> GenerationPriceQuote:
     from decimal import ROUND_CEILING, Decimal
 
-    from app.billing_catalog import snapshot_discount_rate
+    from app.billing_catalog import generation_service_for, snapshot_discount_rate
     from app.quote_contracts import issue_quote
 
-    subject = "video_2k" if resolution == "2K" else "video_768p"
+    if duration_seconds > 15 and resolution == "2K":
+        # 2K 不存在长档：不给出无法成交的报价，避免客户拿着报价过不了提交闸。
+        raise generation_error(
+            422, "DURATION_RESOLUTION_UNSUPPORTED", "2K 分辨率目前最长支持 15 秒。"
+        )
+    subject = generation_service_for(resolution, duration_seconds)
+    if duration_seconds > 15:
+        # 长档未启用时不给报价：0 积分报价会误导客户以为免费，提交闸也会拒绝。
+        from app.billing_catalog import read_tariff
+
+        tariff = read_tariff(conn, subject)
+        if tariff is None or not tariff.enabled or not tariff.unit_credits:
+            raise generation_error(
+                422,
+                "LONG_DURATION_TIER_DISABLED",
+                "16-30 秒时长档暂未开放，请选择 15 秒及以内的时长。",
+            )
     contract = issue_quote(
         conn,
         user_id=user_id or "",
@@ -8233,6 +8260,7 @@ def generation_price_quote(
         resolution=resolution,
         duration_seconds=duration_seconds,
         quantity=quantity,
+        price_tier="16-30s" if duration_seconds > 15 else "4-15s",
         unit_price_fen_per_second=unit_price,
         estimated_seconds=estimated_seconds,
         estimated_price_fen=unit_price * estimated_seconds,

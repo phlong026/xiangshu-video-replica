@@ -603,7 +603,7 @@ def finalize_pending_operation(
     """
     conn.execute("SAVEPOINT billing_reconcile_item")
     try:
-        if service in {"video_768p", "video_2k", "oral"}:
+        if service in {"video_768p", "video_768p_long", "video_2k", "oral"}:
             from app.internal_billing import finalize_internal_billing, finalize_oral_billing
 
             if service == "oral":

@@ -271,7 +271,9 @@ def test_two_tokens_share_atomic_wallet_without_overdraft(client, route_state):
     def attempt(args):
         key, task = args
         try:
-            reserve(route_state, uid, key, task, 20)
+            # 15 秒 × 4 积分 = 60：两笔并发合计超余额 100，必有一笔被拒；
+            # 不用更长的秒数，避免落进 16-30 秒长档选档逻辑改变计费科目。
+            reserve(route_state, uid, key, task, 15)
             return True
         except InsufficientCreditsError:
             return False
@@ -284,7 +286,7 @@ def test_two_tokens_share_atomic_wallet_without_overdraft(client, route_state):
             raw.execute(
                 "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s", (uid,)
             ).fetchone()
-        ) == (20, 80)
+        ) == (40, 60)
 
 
 def test_admin_price_publication_drives_authenticated_api_billing(pricing_client, route_state):

@@ -53,6 +53,7 @@ import {
 } from "./ContentPages";
 import {
   CopyPage,
+  customerDurationMax,
   normalizeCustomerDuration,
   OralPage,
   ReplacementPage,
@@ -219,12 +220,16 @@ function quoteMatchesInput(
   );
 }
 
-function videoQuoteInput(draft: StudioDraft): GenerationQuoteInput {
+function videoQuoteInput(
+  draft: StudioDraft,
+  durationMax: number,
+): GenerationQuoteInput {
   return {
     resolution: draft.resolution === "2K" ? "2K" : "768P",
     // P1-4：非法时长钳位（与复刻路径同口径），不再静默回落 8 秒——
     // 报价与提交同源归一，用户看到的时长即实际生成时长。
-    duration_seconds: normalizeCustomerDuration(draft.duration),
+    // 上限随长档 capabilities（16-30 秒）与分辨率（2K 恒 15）联动。
+    duration_seconds: normalizeCustomerDuration(draft.duration, durationMax),
     quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
   };
 }
@@ -963,10 +968,17 @@ export function StudioWorkspace({
   );
 
   // 视频生成确认弹窗：按分辨率/时长/条数拉取按秒报价；草稿参数变化自动刷新。
-  // P1-4：与提交/报价同源钳位（4–15），三处不得再出现「非法 → 8」旁路。
-  const videoDuration = normalizeCustomerDuration(state.draft.duration);
+  // P1-4：与提交/报价同源钳位（4–30，2K 恒 15），三处不得再出现「非法 → 8」旁路。
   const videoResolution: GenerationQuoteInput["resolution"] =
     state.draft.resolution === "2K" ? "2K" : "768P";
+  const videoDurationMax = customerDurationMax(
+    videoCapabilities,
+    videoResolution,
+  );
+  const videoDuration = normalizeCustomerDuration(
+    state.draft.duration,
+    videoDurationMax,
+  );
   const videoCount =
     state.draft.count === 2 || state.draft.count === 4 ? state.draft.count : 1;
   const currentVideoQuoteInput: GenerationQuoteInput = {
@@ -984,6 +996,11 @@ export function StudioWorkspace({
   const videoQuoteDiscountSource = videoQuoteReady
     ? discountSourceLabel(videoQuote?.discount_source)
     : null;
+  // 16-30 秒长档备注（产品口径：30s 价格 = 15s 的 2 倍），随报价一并展示。
+  const videoQuoteTierNote =
+    videoQuoteReady && videoQuote?.price_tier === "16-30s"
+      ? "长视频档单价为 15 秒及以内的 2 倍"
+      : null;
   const videoQuoteDiscountNote = videoQuoteDiscountZhe
     ? `已享${videoQuoteDiscountZhe}优惠${videoQuoteDiscountSource ? `（${videoQuoteDiscountSource}）` : ""}`
     : null;
@@ -1180,7 +1197,13 @@ export function StudioWorkspace({
   ): Promise<string | null> => {
     let result = await createPromptOptimization({
       route: "reference",
-      duration_seconds: normalizeCustomerDuration(draft.duration),
+      duration_seconds: normalizeCustomerDuration(
+        draft.duration,
+        customerDurationMax(
+          videoCapabilities,
+          draft.resolution === "2K" ? "2K" : "768P",
+        ),
+      ),
       ratio: draft.ratio as GenerationRatio,
       resolution: draft.resolution === "2K" ? "2K" : "768P",
       project_id: draft.projectId ?? null,
@@ -1255,7 +1278,13 @@ export function StudioWorkspace({
       notify("请先核对当前提示词与参考素材的绑定。");
       return;
     }
-    const quoteInput = videoQuoteInput(draft);
+    const quoteInput = videoQuoteInput(
+      draft,
+      customerDurationMax(
+        videoCapabilities,
+        draft.resolution === "2K" ? "2K" : "768P",
+      ),
+    );
     if (
       videoQuoteStatus !== "ready" ||
       !quoteMatchesInput(videoQuote, quoteInput)
@@ -1295,7 +1324,13 @@ export function StudioWorkspace({
             ? (draft.tailFrameId ?? null)
             : null,
         reference_asset_ids: mode === "r2v" ? draft.referenceIds : [],
-        output_duration_seconds: normalizeCustomerDuration(draft.duration),
+        output_duration_seconds: normalizeCustomerDuration(
+          draft.duration,
+          customerDurationMax(
+            videoCapabilities,
+            draft.resolution === "2K" ? "2K" : "768P",
+          ),
+        ),
         resolution:
           draft.resolution === "2K" ? ("2K" as const) : ("768P" as const),
         ratio: resolveSubmittedRatio(mode, draft.ratio),
@@ -2920,8 +2955,8 @@ export function StudioWorkspace({
                       : `${(oralPriceFen / 100).toFixed(2)} 元/秒`
                     : generation === "视频生成" && videoQuoteReady
                       ? videoQuote.estimated_credits !== undefined
-                        ? `${videoQuote.estimated_credits} 积分（${videoQuote.unit_credits} 积分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}`
-                        : `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}`
+                        ? `${videoQuote.estimated_credits} 积分（${videoQuote.unit_credits} 积分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}${videoQuoteTierNote ? ` · ${videoQuoteTierNote}` : ""}`
+                        : `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}${videoQuoteTierNote ? ` · ${videoQuoteTierNote}` : ""}`
                       : oralQuoteStatus === "loading" ||
                           videoQuoteStatus === "loading"
                         ? "正在读取服务端报价…"

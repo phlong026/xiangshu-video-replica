@@ -42,6 +42,7 @@ def record_evidence(
         service = str(operation["service"])
         table, column = {
             "video_768p": ("generation_tasks", "actual_output_seconds"),
+            "video_768p_long": ("generation_tasks", "actual_output_seconds"),
             "video_2k": ("generation_tasks", "actual_output_seconds"),
             "oral": ("oral_tasks", "duration_sec"),
             "asr": ("script_from_audio_tasks", "result_json"),
