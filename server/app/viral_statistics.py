@@ -17,6 +17,7 @@ from app.viral_store import (
     update_viral_statistics,
 )
 from app.viral_tikhub import PLATFORM_WECHAT, ViralSourceClient, ViralVideo, WechatVideoDetail
+from app.viral_wechat_link import WechatLinkClient
 
 STATISTICS_SUCCESS_TTL = timedelta(hours=24)
 STATISTICS_FAILURE_COOLDOWN = timedelta(minutes=10)
@@ -75,6 +76,12 @@ def _fetch_detail(client: ViralSourceClient, video: ViralVideo) -> WechatVideoDe
     )
 
 
+def _fetch_link_detail(client: WechatLinkClient, video: ViralVideo) -> WechatVideoDetail:
+    """链接导入条目的统计回落：经解析通道整链重取，拿回同构详情计数."""
+    share_url = str(video.native.get("share_url") or "")
+    return client.fetch_statistics(share_url)
+
+
 def _has_statistics(detail: WechatVideoDetail) -> bool:
     return any(
         value is not None
@@ -91,12 +98,18 @@ def refresh_viral_statistics_billed(
     conn: BusinessConnection,
     client: ViralSourceClient | None,
     video_ids: list[str],
+    *,
+    wechat_client: WechatLinkClient | None = None,
 ) -> tuple[list[ViralVideo], int]:
     """补采视频号互动数，返回 (最新条目, 实际外呼详情次数).
 
     实际外呼次数只统计真正触发了一次视频号详情外呼的条目（``pending``）：已命中
     24h 成功缓存、冷却期内、或缺少资源标识的条目不产生外呼、不计费。计费方按
     「每一次真实外呼对应一次扣费」据此结算。
+
+    链接导入条目（native 带 share_url、缺 object_nonce_id）走数据源详情会失败：
+    注入了解析通道时回落到整链重取；未注入则跳过且不记失败——统计保持导入时
+    的值，留给下次配置可用后补采。
     """
     with _refresh_lock:
         videos = _load_wechat_videos(conn, video_ids)
@@ -104,25 +117,40 @@ def refresh_viral_statistics_billed(
             return videos, 0
 
         pending: list[ViralVideo] = []
+        pending_link: list[ViralVideo] = []
         for video in videos:
             if not _needs_refresh(video):
                 continue
             export_id = video.native.get("export_id")
             object_id = video.native.get(STATISTICS_OBJECT_ID_KEY)
-            if not (isinstance(export_id, str) and export_id) and not (
-                isinstance(object_id, str) and object_id
+            nonce = video.native.get("object_nonce_id")
+            has_tikhub_identifier = (isinstance(export_id, str) and bool(export_id)) or (
+                isinstance(object_id, str) and bool(object_id)
+            )
+            # 链接导入条目（share_url + export_id、无 nonce）走数据源详情会
+            # 失败：分流到登录态解析通道回落；未注入则跳过且不记失败——统计
+            # 保持导入时的值，留给下次配置可用后补采。
+            if video.native.get("share_url") and not (
+                isinstance(nonce, str) and bool(nonce)
             ):
-                mark_viral_statistics_failure(
-                    conn, platform=video.platform, video_id=video.video_id
-                )
+                if wechat_client is None:
+                    continue
+                pending_link.append(video)
                 continue
-            pending.append(video)
-        fetched = len(pending)
+            if has_tikhub_identifier:
+                pending.append(video)
+                continue
+            mark_viral_statistics_failure(conn, platform=video.platform, video_id=video.video_id)
+        fetched = len(pending) + len(pending_link)
 
         futures: dict[Future[WechatVideoDetail], ViralVideo] = {}
         with ThreadPoolExecutor(max_workers=STATISTICS_MAX_WORKERS) as pool:
             for video in pending:
                 futures[pool.submit(_fetch_detail, client, video)] = video
+            if wechat_client is not None:
+                link_client = wechat_client
+                for video in pending_link:
+                    futures[pool.submit(_fetch_link_detail, link_client, video)] = video
             for future, video in futures.items():
                 try:
                     detail = future.result()
@@ -155,7 +183,11 @@ def refresh_viral_statistics(
     conn: BusinessConnection,
     client: ViralSourceClient | None,
     video_ids: list[str],
+    *,
+    wechat_client: WechatLinkClient | None = None,
 ) -> list[ViralVideo]:
     """补采已有视频号条目的互动数，并返回数据库中的最新条目."""
-    videos, _ = refresh_viral_statistics_billed(conn, client, video_ids)
+    videos, _ = refresh_viral_statistics_billed(
+        conn, client, video_ids, wechat_client=wechat_client
+    )
     return videos

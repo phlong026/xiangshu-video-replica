@@ -45,6 +45,7 @@ def refresh_statistics(
     from app.viral_search_routes import require_priced_viral_service
     from app.viral_statistics import refresh_viral_statistics_billed
     from app.viral_tikhub import ViralSourceUnavailable, viral_source_client_from_settings
+    from app.viral_wechat_link import wechat_link_client_from_settings_or_none
 
     video_ids = sorted(set(payload.videoIds))
     key = idempotency_key.strip()
@@ -80,9 +81,15 @@ def refresh_statistics(
             )
 
     # 补采在独立事务里（内部按视频逐条 commit）；供应商成本由 meter_call 落平台侧。
+    # 链接导入的视频号条目走解析通道回落，按实际外呼同价计费。
     with pg_transaction() as raw:
         videos, fetched = refresh_viral_statistics_billed(
-            BusinessConnection.postgres(raw), client, video_ids
+            BusinessConnection.postgres(raw),
+            client,
+            video_ids,
+            wechat_client=wechat_link_client_from_settings_or_none(
+                BusinessConnection.postgres(raw)
+            ),
         )
 
     # 结算：按实际外呼次数。单条失败已在 refresh 内部降级为库值，不会抛到这一层。

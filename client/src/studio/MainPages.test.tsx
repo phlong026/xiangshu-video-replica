@@ -1066,7 +1066,7 @@ describe("V1.4 工作台新版首页布局", () => {
         name: "粘贴一条爆款乡墅视频链接，快速生成它的原创视频",
       }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/支持抖音、小红书的视频链接/)).toHaveClass(
+    expect(screen.getByText(/支持抖音、小红书、视频号的分享链接/)).toHaveClass(
       "studio-start-helper",
     );
     expect(
@@ -2146,13 +2146,13 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(value.navigate).not.toHaveBeenCalled();
   });
 
-  it("工作台明确说明支持抖音、小红书与上传格式，不展示解析耗时", () => {
+  it("工作台明确说明支持抖音、小红书、视频号与上传格式，不展示解析耗时", () => {
     useStudio.mockReturnValue(workbench());
     render(<WorkbenchPage />);
 
     expect(
       screen.getByText(
-        /支持抖音、小红书的视频链接；其他平台请上传\s+MP4\/MOV\s+文件；视频复刻支持\s+4-15\s+秒、200\s+MB\s+以内的视频，更长的视频会自动提取音轨用于提取文案\s*（桌面端，原视频不上传）。/,
+        /支持抖音、小红书、视频号的分享链接；其他平台请上传\s+MP4\/MOV\s+文件；视频复刻支持\s+4-30\s+秒、200\s+MB\s+以内的视频，更长的视频会自动提取音轨用于提取文案\s*（桌面端，原视频不上传）。/,
       ),
     ).toBeInTheDocument();
   });

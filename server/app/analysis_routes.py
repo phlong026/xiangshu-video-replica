@@ -38,8 +38,8 @@ from app.analysis import (
 )
 from app.async_compat import reject_legacy_sync_operation
 from app.auth import AuthenticatedUser, CurrentUser, Database, Role
-from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep
+from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection
 from app.h3_prompts import GenerationContext
 from app.media import (

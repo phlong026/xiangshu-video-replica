@@ -878,7 +878,7 @@ describe("V1.4 内容与运营页面", () => {
         [...actions.querySelectorAll("button")].map(
           (button) => button.textContent,
         ),
-      ).toEqual(["查看详情", "下载视频"]);
+      ).toEqual(["提取文案", "查看详情", "下载视频"]);
     }
   });
 
@@ -941,9 +941,11 @@ describe("V1.4 内容与运营页面", () => {
       data: update?.(value.data) ?? value.data,
     });
     view.rerender(<ViralPage />);
+    // 16 秒在 4–30s 复刻门槛内：卡片主 CTA（一键复刻）随列表数据渲染；
+    // 提取文案仍经详情页意图发起。
     expect(
-      screen.queryByRole("button", { name: /复刻/ }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "一键复刻：已收藏的庭院视频" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "收藏 已收藏的庭院视频" }),
     ).toHaveAttribute("aria-pressed", "true");

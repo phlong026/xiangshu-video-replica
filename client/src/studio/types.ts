@@ -379,6 +379,8 @@ export type StudioState = {
   returnTo?: StudioPage;
   /** ADM-17：爆款卡片「去复刻」直达意图——进详情后自动发起一次复刻导入。 */
   viralReplicateIntent?: boolean;
+  /** 爆款卡片「提取文案」直达意图——进详情后按详情页双端分流发起提取。 */
+  viralExtractIntent?: boolean;
   selectedPersonId?: string;
   savedScripts: StudioScript[];
   favorites: string[];

@@ -895,7 +895,7 @@ export function WorkbenchPage() {
           </button>
           <input
             aria-label="视频链接"
-            placeholder="粘贴抖音或小红书视频链接"
+            placeholder="粘贴抖音 / 小红书 / 视频号分享链接"
             value={sourceLink}
             onChange={(event) => {
               linkOperationRef.current += 1;
@@ -946,8 +946,9 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          支持抖音、小红书的视频链接；其他平台请上传 MP4/MOV 文件；视频复刻支持
-          4-15 秒、200 MB 以内的视频，更长的视频会自动提取音轨用于提取文案
+          支持抖音、小红书、视频号的分享链接；其他平台请上传 MP4/MOV
+          文件；视频复刻支持 4-30 秒、200 MB
+          以内的视频，更长的视频会自动提取音轨用于提取文案
           （桌面端，原视频不上传）。
         </p>
         {linkState.status === "loading" && (
@@ -1209,11 +1210,11 @@ export function WorkbenchPage() {
                       </span>
                     </div>
                     <div className="studio-home-viral-actions">
-                      {/* 与爆款视频页卡片同一套 4–15s 门槛的主 CTA：一键复刻
+                      {/* 与爆款视频页卡片同一套 4–30s 门槛的主 CTA：一键复刻
                           直达详情页自动开跑；超限视频保留提取文案方向。 */}
                       {typeof video.durationMs === "number" &&
                         video.durationMs >= 4_000 &&
-                        video.durationMs <= 15_000 && (
+                        video.durationMs <= 30_000 && (
                           <Button
                             variant="primary"
                             aria-label={`一键复刻：${video.title}`}

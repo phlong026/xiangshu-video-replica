@@ -1480,7 +1480,7 @@ def test_resource_metering_tracks_shared_preparation_partial_reads_retention_and
         last_content_type = "video/mp4"
         calls = 0
 
-        def iter_fetch(self, url):
+        def iter_fetch(self, url, *, extra_headers=None):
             self.calls += 1
             yield content[:12]
             yield content[12:]
@@ -2443,7 +2443,7 @@ def _use_admin_search_source(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         "app.media_routes.get_media_storage", lambda conn: _AdminSearchFakeStorage()
     )
 
-    def fake_iter_fetch(self, url):
+    def fake_iter_fetch(self, url, *, extra_headers=None):
         yield b"\xff\xd8\xff\xe0fakejpeg"
 
     from app import viral_media
@@ -5520,3 +5520,290 @@ def test_admin_private_cover_missing_and_storage_failure_are_closed(
     response = client.get(path)
     assert response.status_code == (503 if case == "storage_down" else 404), response.text
     assert len(calls) == (1 if case == "storage_down" else 0)
+
+
+# ---------------------------------------------------------------------------
+# 粘贴链接采集（POST /api/control/viral/link-import）
+# ---------------------------------------------------------------------------
+
+
+def _stub_link_import_infra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """采集接口的外围桩：封面归档不外呼、存储用假适配器."""
+    from app.storage import FakeStorageAdapter
+
+    monkeypatch.setattr("app.viral_media.CoverEnricher.enrich", lambda self, video: video)
+    monkeypatch.setattr(
+        "app.media_routes.get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="cos", bucket="test"),
+    )
+
+
+@pytest.mark.pg
+def test_admin_link_import_resolves_upserts_and_queues_archive(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """粘贴链接采集：解析→入池（非「链接导入」分类）→入队单条转存→审计；重放不重复外呼."""
+    from app.viral_link import ResolvedViralLink
+
+    headers = _admin_session(client)
+    calls: list[str] = []
+
+    class Resolver:
+        def resolve(self, url: str, *, purpose: str) -> ResolvedViralLink:
+            calls.append(url)
+            return ResolvedViralLink(
+                platform="douyin",
+                video_id="link-import-1",
+                title="粘贴采集视频",
+                author="乡墅作者",
+                cover_url=None,
+                video_url="https://cdn.example/video.mp4",
+                audio_url=None,
+                duration_ms=12_000,
+                source_description="",
+            )
+
+    monkeypatch.setattr(
+        "app.viral_link.douyidou_link_client_from_settings", lambda conn: Resolver()
+    )
+    _stub_link_import_infra(monkeypatch)
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_refresh_tasks")
+
+    body = {
+        "url": "https://v.douyin.com/import-one",
+        "confirm": True,
+        "reason": "粘贴链接采集",
+    }
+    first = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-one"},
+        json=body,
+    )
+    assert first.status_code == 202, first.text
+    payload = first.json()
+    assert payload["archiveQueued"] is True
+    assert payload["items"][0]["video_id"] == "link-import-1"
+    assert calls == ["https://v.douyin.com/import-one"]
+
+    replay = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-one"},
+        json=body,
+    )
+    assert replay.status_code == 202
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert calls == ["https://v.douyin.com/import-one"]
+
+    with psycopg.connect(route_state) as raw:
+        row = raw.execute(
+            "SELECT category, title FROM viral_videos WHERE platform='douyin' "
+            "AND video_id='link-import-1'"
+        ).fetchone()
+        assert row is not None
+        # 管理端采集不落「链接导入」分类：推送/上首页不被待补全标记拦截。
+        assert row[0] == "" and row[1] == "粘贴采集视频"
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_content_sources "
+                "WHERE source_kind='admin_link_import' AND video_id='link-import-1'"
+            ).fetchone()[0]
+            == 1
+        )
+        task = raw.execute(
+            "SELECT status, collection_config_json FROM viral_refresh_tasks"
+        ).fetchone()
+        assert task is not None and task[0] == "PENDING"
+        assert json.loads(task[1]) == {"kind": "single_archive", "video_id": "link-import-1"}
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM audit_logs "
+                "WHERE action='viral_video.admin_link_import' "
+                "AND entity_id='douyin:link-import-1'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+@pytest.mark.pg
+def test_admin_link_import_routes_wechat_share_links_to_login_channel(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """视频号分享链接分发到登录态解析通道：native 带 share_url/export_id 两把钥匙."""
+    from app.viral_link import ResolvedViralLink
+
+    headers = _admin_session(client)
+
+    class WechatResolver:
+        def resolve(self, url: str, *, purpose: str) -> ResolvedViralLink:
+            return ResolvedViralLink(
+                platform="wechat_channels",
+                video_id="wx-export-1",
+                title="视频号粘贴采集",
+                author="庭院老周",
+                cover_url=None,
+                video_url="https://finder.example/h264.mp4",
+                audio_url=None,
+                duration_ms=21_000,
+                source_description="",
+                native={"share_url": url, "export_id": "wx-export-1"},
+            )
+
+    def _forbid_douyidou(conn: object) -> object:
+        raise AssertionError("视频号链接不得走抖音解析通道")
+
+    monkeypatch.setattr("app.viral_link.douyidou_link_client_from_settings", _forbid_douyidou)
+    monkeypatch.setattr(
+        "app.viral_wechat_link.wechat_link_client_from_settings",
+        lambda conn: WechatResolver(),
+    )
+    _stub_link_import_infra(monkeypatch)
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_refresh_tasks")
+
+    result = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-wx"},
+        json={
+            "url": "https://weixin.qq.com/sph/WxShare01",
+            "confirm": True,
+            "reason": "视频号采集",
+        },
+    )
+    assert result.status_code == 202, result.text
+    assert result.json()["platform"] == "wechat_channels"
+    with psycopg.connect(route_state) as raw:
+        native = raw.execute(
+            "SELECT native_json FROM viral_videos WHERE platform='wechat_channels' "
+            "AND video_id='wx-export-1'"
+        ).fetchone()[0]
+        parsed = json.loads(native) if isinstance(native, str) else native
+        assert parsed["share_url"] == "https://weixin.qq.com/sph/WxShare01"
+        assert parsed["export_id"] == "wx-export-1"
+        assert parsed["link_resolved"] is True
+
+
+@pytest.mark.pg
+def test_admin_link_import_failure_rolls_back_and_keeps_key_usable(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解析失败：整事务回滚（不留半条目），错误码透传，幂等键保持可用."""
+    from app.viral_link import ResolvedViralLink, ViralLinkError
+
+    headers = _admin_session(client)
+
+    class Exploding:
+        def resolve(self, url: str, *, purpose: str) -> ResolvedViralLink:
+            raise ViralLinkError(
+                422,
+                "VIRAL_WECHAT_PARSE_FAILED",
+                "视频号链接无法解析，请确认链接可正常访问后重试。",
+                retryable=False,
+            )
+
+    class Working:
+        def resolve(self, url: str, *, purpose: str) -> ResolvedViralLink:
+            return ResolvedViralLink(
+                platform="douyin",
+                video_id="recovered-import",
+                title="重试成功",
+                author="",
+                cover_url=None,
+                video_url="https://cdn.example/video.mp4",
+                audio_url=None,
+                duration_ms=10_000,
+                source_description="",
+            )
+
+    monkeypatch.setattr(
+        "app.viral_link.douyidou_link_client_from_settings", lambda conn: Exploding()
+    )
+    _stub_link_import_infra(monkeypatch)
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_refresh_tasks")
+
+    body = {
+        "url": "https://v.douyin.com/broken-import",
+        "confirm": True,
+        "reason": "失败重试",
+    }
+    failed = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-flaky"},
+        json=body,
+    )
+    assert failed.status_code == 422, failed.text
+    assert failed.json()["detail"]["code"] == "VIRAL_WECHAT_PARSE_FAILED"
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_videos WHERE video_id='broken-import'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert raw.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
+
+    monkeypatch.setattr("app.viral_link.douyidou_link_client_from_settings", lambda conn: Working())
+    retried = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-flaky"},
+        json=body,
+    )
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["items"][0]["video_id"] == "recovered-import"
+
+
+@pytest.mark.pg
+def test_admin_link_import_skips_archive_when_platform_slot_busy(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """平台转存槽位被占用：跳过入队但不回滚采集，条目保留在内容池."""
+    from app.viral_link import ResolvedViralLink
+
+    headers = _admin_session(client)
+
+    class Resolver:
+        def resolve(self, url: str, *, purpose: str) -> ResolvedViralLink:
+            return ResolvedViralLink(
+                platform="douyin",
+                video_id="busy-slot-import",
+                title="槽位占用采集",
+                author="",
+                cover_url=None,
+                video_url="https://cdn.example/video.mp4",
+                audio_url=None,
+                duration_ms=9_000,
+                source_description="",
+            )
+
+    monkeypatch.setattr(
+        "app.viral_link.douyidou_link_client_from_settings", lambda conn: Resolver()
+    )
+    _stub_link_import_infra(monkeypatch)
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_refresh_tasks")
+        raw.execute(
+            "INSERT INTO viral_refresh_tasks(id,platform,sort,status,collection_config_json) "
+            "VALUES('busy-task','douyin','latest','RUNNING',%s)",
+            (json.dumps({"kind": "collect", "keyword": "庭院"}),),
+        )
+
+    result = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-busy"},
+        json={
+            "url": "https://v.douyin.com/busy-slot",
+            "confirm": True,
+            "reason": "槽位占用采集",
+        },
+    )
+    assert result.status_code == 202, result.text
+    assert result.json()["archiveQueued"] is False
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_videos WHERE video_id='busy-slot-import'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert raw.execute("SELECT id FROM viral_refresh_tasks").fetchall() == [("busy-task",)]

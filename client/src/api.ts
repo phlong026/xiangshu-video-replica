@@ -298,7 +298,8 @@ export type ProviderName =
   | "tikhub"
   | "dashscope"
   | "douyidou"
-  | "ses";
+  | "ses"
+  | "yuanbao";
 
 export type ProviderSettings = {
   provider: ProviderName;
