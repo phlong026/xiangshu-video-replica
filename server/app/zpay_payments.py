@@ -397,7 +397,6 @@ def confirm_recharge_payment(
             status_code=400,
         )
 
-    conn.execute(f"PRAGMA busy_timeout = {ZPAY_NOTIFY_BUSY_TIMEOUT_MS}")
     # A PG nested transaction is a real savepoint. Route handlers may catch a
     # business error and return a normal response, so the rollback must happen
     # here before that catch. Releasing this savepoint never commits the outer

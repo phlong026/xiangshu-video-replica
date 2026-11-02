@@ -2167,8 +2167,6 @@ def complete_first_frame_generation(
             "FIRST_FRAME_PROJECT_APPEARANCE_STALE",
             "Video analysis changed. Generate first-frame candidates again.",
         )
-    if not conn.is_postgres:
-        conn.execute("BEGIN IMMEDIATE")
     try:
         appearance_version = persist_project_character_appearance(conn, work=work)
         for candidate in stored.candidates:

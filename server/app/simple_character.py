@@ -549,9 +549,6 @@ def create_simple_character(
 
     result: SimpleCharacterCreationResult
     try:
-        if not conn.is_postgres:
-            conn.execute("BEGIN IMMEDIATE")
-
         source_asset_id = _store_source_asset(
             conn,
             storage=storage,
@@ -1384,8 +1381,6 @@ def regenerate_simple_character_contact_sheet(
     attempted_keys: list[str] = []
     result: SimpleCharacterRegenerationResult
     try:
-        if not conn.is_postgres:
-            conn.execute("BEGIN IMMEDIATE")
         next_version_number = _next_version_number(conn, persona_id=persona_id)
         _insert_version(
             conn,
@@ -1552,8 +1547,6 @@ def create_simple_scene_look(
     now_iso = _utc_now_iso()
     attempted_keys: list[str] = []
     try:
-        if not conn.is_postgres:
-            conn.execute("BEGIN IMMEDIATE")
         _insert_scene_persona(
             conn,
             actor=actor,
