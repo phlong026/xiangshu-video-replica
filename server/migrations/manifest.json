@@ -919,7 +919,7 @@
     },
     "20261102T0900_customer_session_last_seen": {
       "file": "versions/20261102T0900_customer_session_last_seen.py",
-      "sha256": "130bdb83eea3f7ea49f6b6a7c04012f43a9c8e23c6b0ce17411ff07afc9a8382"
+      "sha256": "ef5ec2ab6bfd4f29cb7b805c80437a860c12c2efb3636538ed2bc2a4a209cd93"
     }
   },
   "task": "MIGRATION-GUARD-20260912"
