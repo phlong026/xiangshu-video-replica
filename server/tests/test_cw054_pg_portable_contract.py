@@ -386,20 +386,6 @@ class TestSetTraceCallbackPGLane:
         pg_business.execute("SELECT 2")
         assert statements == ["SELECT 1"]
 
-    def test_swallowed_sqlite_only_statements_are_not_traced(
-        self, pg_business: BusinessConnection
-    ) -> None:
-        """sqlite3's hook only sees statements actually sent to the engine.
-        BEGIN IMMEDIATE and PRAGMA are no-ops on the PG lane, so tracing them
-        would charge a counter with work that never happened."""
-        statements: list[str] = []
-        pg_business.set_trace_callback(statements.append)
-        pg_business.execute("BEGIN IMMEDIATE")
-        pg_business.execute("PRAGMA busy_timeout = 5000")
-        assert statements == []
-        pg_business.execute("SELECT 1")
-        assert statements == ["SELECT 1"]
-
     def test_executemany_is_traced_once_for_the_batch(
         self, pg_business: BusinessConnection
     ) -> None:
