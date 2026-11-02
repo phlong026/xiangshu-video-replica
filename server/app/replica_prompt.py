@@ -49,6 +49,7 @@ from app.permissions import (
     write_audit,
 )
 from app.storage import StorageAdapter
+from app.task_lease import claim_replica_prompt_task
 
 logger = logging.getLogger(__name__)
 
@@ -227,63 +228,11 @@ def acquire_replica_prompt_task(
     *,
     worker_id: str,
 ) -> ReplicaPromptTaskLease | None:
-    now = datetime.now(UTC)
-    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
-    locked_until = (now + timedelta(minutes=REPLICA_PROMPT_TASK_LEASE_MINUTES)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    """租约 SQL 统一住在 app.task_lease（T7）；域凭据含项目/素材/时长。"""
     try:
-        # 过期 RUNNING 视为 worker 中断：置为可重试失败，终态写不进历史表
-        # （v1 无 attempt 历史），错误字段保留在任务行上供用户与客服查看。
-        conn.execute(
-            """
-            UPDATE replica_prompt_tasks
-            SET status = 'FAILED',
-                error_code = %s,
-                error_message_redacted = '长视频拆解任务执行中断，请重新开始。',
-                retryable = 1,
-                locked_by = NULL,
-                locked_until = NULL,
-                completed_at = %s,
-                updated_at = %s
-            WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
-            """,
-            (ERROR_INTERRUPTED, now_text, now_text, now_text),
+        row = claim_replica_prompt_task(
+            conn, worker_id=worker_id, lease_minutes=REPLICA_PROMPT_TASK_LEASE_MINUTES
         )
-        # 认领前清掉 PENDING 行上残留的旧失败字段：新尝试从干净状态开始。
-        conn.execute(
-            """
-            UPDATE replica_prompt_tasks
-            SET error_code = NULL, error_message_redacted = NULL,
-                failure_phase = NULL, retryable = 0
-            WHERE status = 'PENDING'
-              AND (error_code IS NOT NULL OR failure_phase IS NOT NULL)
-            """,
-        )
-        row = conn.execute(
-            """
-            UPDATE replica_prompt_tasks
-            SET status = 'RUNNING',
-                attempt = attempt + 1,
-                locked_by = %s,
-                locked_until = %s,
-                started_at = COALESCE(started_at, %s),
-                updated_at = %s,
-                error_code = NULL,
-                error_message_redacted = NULL,
-                failure_phase = NULL,
-                retryable = 0
-            WHERE id = (
-                SELECT id FROM replica_prompt_tasks
-                WHERE status = 'PENDING'
-                ORDER BY created_at, id
-                LIMIT 1
-            ) AND status = 'PENDING'
-            RETURNING *
-            """,
-            (worker_id, locked_until, now_text, now_text),
-        ).fetchone()
-        conn.commit()
     except Exception:
         conn.rollback()
         raise
