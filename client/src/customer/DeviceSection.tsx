@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CustomerDeviceListResponse } from "../api";
 import { DeviceManagementPage } from "./DeviceManagementPage";
-import { HeartbeatStatus } from "./HeartbeatStatus";
 import { LeaseCountdown } from "./LeaseCountdown";
 import { PairingApprovalCard } from "./PairingApprovalCard";
 import type { CustomerSessionRuntime } from "./useCustomerSession";
@@ -60,7 +59,6 @@ export function DeviceSection({
   scope,
   onApprovePairing,
   onDismissPairing,
-  onManualHeartbeat,
   onPairDevice,
   onRecharge,
   onRefreshDevices,
@@ -73,7 +71,6 @@ export function DeviceSection({
   sessionRuntime?: CustomerSessionRuntime | null;
   onApprovePairing: (pairingId: string) => void;
   onDismissPairing: (pairingId: string) => void;
-  onManualHeartbeat?: () => void;
   onPairDevice?: () => void;
   onRecharge: () => void;
   onRefreshDevices?: () => Promise<void>;
@@ -152,18 +149,10 @@ export function DeviceSection({
 
       {sessionRuntime ? (
         <section className="uc-card uc-devices__health">
-          <h2>本机连接</h2>
+          <h2>本机会话</h2>
           <div className="customer-session-status">
-            <HeartbeatStatus
-              connectivity={sessionRuntime.connectivity}
-              lastHeartbeatAt={sessionRuntime.lastHeartbeatAt}
-              onRefresh={() => onManualHeartbeat?.()}
-            />
             {sessionRuntime.leaseExpiresAt ? (
-              <LeaseCountdown
-                expiresAt={sessionRuntime.leaseExpiresAt}
-                onRefresh={() => onManualHeartbeat?.()}
-              />
+              <LeaseCountdown expiresAt={sessionRuntime.leaseExpiresAt} />
             ) : null}
           </div>
         </section>
