@@ -135,7 +135,6 @@ def choose_project_character_version(
     character_version_id: str,
 ) -> dict[str, object]:
     try:
-        conn.execute("BEGIN IMMEDIATE")
         options = list_available_project_character_versions(
             conn,
             actor=actor,

@@ -496,7 +496,6 @@ def create_independent_batch(
         raise generation_error(422, issues[0].code, message)
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
         concurrent_existing = _find_independent_batch(
             conn, actor_id=actor.id, key=request.idempotency_key
         )

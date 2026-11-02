@@ -226,14 +226,6 @@ def _named_row_factory(cursor: psycopg.Cursor) -> Callable[[Sequence[object]], _
 # ---------------------------------------------------------------------------
 
 
-def _is_begin_immediate(sql: str) -> bool:
-    return sql.strip().upper() == "BEGIN IMMEDIATE"
-
-
-def _is_sqlite_pragma(sql: str) -> bool:
-    return sql.strip().upper().startswith("PRAGMA")
-
-
 class _NoopCursor:
     """The result of a swallowed SQLite-only statement on the PG lane."""
 
@@ -315,16 +307,6 @@ class BusinessConnection:
     # --- sqlite3-shaped surface ---
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> _BusinessCursor:
-        if isinstance(self._backend, PostgresBackend) and _is_begin_immediate(sql):
-            # Migrated write services still spell their write lock as
-            # ``BEGIN IMMEDIATE`` (the SQLite idiom). On the customer lane the
-            # fenced transaction is already open, so the statement must be a
-            # no-op — forwarding it to psycopg is a syntax error (PR #56 P1).
-            return _NOOP_CURSOR
-        if isinstance(self._backend, PostgresBackend) and _is_sqlite_pragma(sql):
-            # SQLite tuning statements (busy_timeout & friends) carry no
-            # meaning on the PG lane — pool timeouts own that concern.
-            return _NOOP_CURSOR
         if self._trace_callback is not None and isinstance(self._backend, PostgresBackend):
             # CW-054: sqlite3's trace hook only ever sees a statement that is
             # actually sent to the engine, so the swallowed BEGIN IMMEDIATE /

@@ -128,7 +128,6 @@ def create_character_reference_selection(
     )
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
         inputs = load_reference_selection_inputs(
             conn,
             project_id=project_id,

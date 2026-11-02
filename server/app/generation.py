@@ -1351,7 +1351,6 @@ def create_script_version(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="script.create")
     try:
-        conn.execute("BEGIN IMMEDIATE")
         shot_card = require_version(
             conn,
             version_id=request.shot_card_version_id,
@@ -1445,7 +1444,6 @@ def compile_prompt_version(
             "Customer generation duration must be an integer from 4 to 30 seconds.",
         )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         script = require_version(
             conn,
             version_id=request.script_version_id,
@@ -1751,7 +1749,6 @@ def revise_prompt_version(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="prompt.revise")
     try:
-        conn.execute("BEGIN IMMEDIATE")
         base = require_version(
             conn,
             version_id=request.base_prompt_version_id,
@@ -1894,7 +1891,6 @@ def save_prompt_to_library(
         "resolution": base_payload.get("resolution"),
     }
     try:
-        conn.execute("BEGIN IMMEDIATE")
         version_id = str(uuid4())
         conn.execute(
             """
@@ -2029,7 +2025,6 @@ def lock_prompt_version(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="prompt.lock")
     try:
-        conn.execute("BEGIN IMMEDIATE")
         row = require_version(
             conn,
             version_id=prompt_version_id,
@@ -2251,7 +2246,6 @@ def create_generation_batch(
         return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
         concurrent_existing = _find_idempotent_batch(
             conn,
             actor_id=actor.id,
@@ -2746,7 +2740,6 @@ def regenerate_generation_batch(
 
     new_batch_id = ""
     try:
-        conn.execute("BEGIN IMMEDIATE")
         source_batch = conn.execute(
             """
             SELECT id, project_id, created_by_user_id, creation_kind,
@@ -2960,7 +2953,6 @@ def regenerate_generation_task(
 
     new_batch_id = ""
     try:
-        conn.execute("BEGIN IMMEDIATE")
         source = conn.execute(
             """
             SELECT
@@ -4055,7 +4047,6 @@ def retry_generation_task(
         payload={"retry_reason": request.retry_reason},
     )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         existing = _idempotent_task_operation(
             conn,
             actor_id=actor.id,
@@ -4295,7 +4286,6 @@ def confirm_generation_task_not_charged(
         payload={"reason": request.reason},
     )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         existing = _idempotent_task_operation(
             conn,
             actor_id=actor.id,
@@ -4418,7 +4408,6 @@ def enqueue_generation_reconcile_operation(
         task_id=task_id,
         payload={},
     )
-    conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
         """
         SELECT status, provider_task_id, superseded_by_task_id
@@ -4953,7 +4942,6 @@ def reconcile_generation_task(
         payload={},
     )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
             SELECT
@@ -5677,7 +5665,6 @@ def acquire_generation_task_lease(
 ) -> dict[str, Any] | None:
     mark_expired_active_leases_needing_attention(conn)
     try:
-        conn.execute("BEGIN IMMEDIATE")
         from app.h3_account_pool import assign_task_account, pool_capacity
 
         lock_shared_generation_capacity(conn)
@@ -7293,7 +7280,6 @@ def cancel_generation_batch(
             "Only queued batches can be cancelled.",
         )
 
-    conn.execute("BEGIN IMMEDIATE")
     try:
         task_rows = conn.execute(
             """
