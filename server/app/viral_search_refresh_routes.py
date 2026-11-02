@@ -20,7 +20,7 @@ from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.usage_billing import finish_source
-from app.viral_search import archive_search_covers
+from app.viral_search import archive_search_covers_bounded
 from app.viral_search_routes import require_priced_viral_service
 from app.viral_store import get_viral_video, update_viral_cover, upsert_viral_videos
 from app.viral_tikhub import (
@@ -254,9 +254,13 @@ def refresh_viral_video(
                         fail_conn, source_id, units=0, succeeded=False, service=REFRESH_SERVICE
                     )
         raise
-    # 封面归档并 upsert 视频数据
-    enriched = archive_search_covers(storage, [enriched_video])
-    updated_video = enriched[0]
+    # 封面归档并 upsert 视频数据。用限时版：无界版在源站图床挂起时会无限
+    # 拖住整个刷新结果落库；超时保留源站封面链接兜底（CoverEnricher 的
+    # 单条失败语义），刷新与计费结算不受影响。
+    try:
+        updated_video = archive_search_covers_bounded(storage, [enriched_video])[0]
+    except TimeoutError:
+        updated_video = enriched_video
     with db.write() as (conn, completed_actor):
         with conn:
             if completed_actor.id != actor.id:

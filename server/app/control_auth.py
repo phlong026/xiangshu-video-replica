@@ -99,6 +99,42 @@ def get_control_route_user(
     )
 
 
+def get_control_route_user_short_tx(
+    request: Request,
+    proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+) -> CurrentUser:
+    """ControlUser 的短事务变体：认证完成立即提交归还连接.
+
+    供体内带支付网关查单外呼的路由专用（sync_recharge_order）。若经由
+    get_control_route_user 隐式携带请求级事务，外呼期间连接停在
+    idle-in-transaction，被 60s 护栏击杀（2026-11-02 生产池饿死事故的邻接
+    路径）。两条车道的行为与 get_control_route_user 逐字一致：
+    customer production 走 admin 会话 cookie（get_admin_actor 自管其 DB
+    访问、不占本依赖的连接），legacy 车道把代理令牌校验包进自开短事务。
+    """
+    if not is_customer_production():
+        from app.db_pg import pg_transaction
+        from app.db_portable import BusinessConnection
+
+        with pg_transaction() as pg_conn:
+            return get_control_user(BusinessConnection.postgres(pg_conn), proxy_token)
+
+    from app.admin_auth_routes import get_admin_actor, get_admin_writer
+
+    admin_actor = get_admin_actor(request)
+    if request.method.upper() in _WRITE_METHODS:
+        get_admin_writer(admin_actor)
+    return CurrentUser(
+        id=admin_actor.user_id,
+        username=admin_actor.username,
+        display_name=admin_actor.display_name,
+        role=cast(Role, admin_actor.role),
+    )
+
+
+ControlUserShortTx = Annotated[CurrentUser, Depends(get_control_route_user_short_tx)]
+
+
 def get_control_writer(
     request: Request,
     conn: Database,

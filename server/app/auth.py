@@ -86,6 +86,41 @@ def get_current_user(
     )
 
 
+def get_current_user_short_tx(
+    request: Request,
+    dev_user_id: Annotated[str | None, Header(alias="X-Dev-User-Id")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> CurrentUser:
+    """认证自开短事务：验证完成立即提交归还连接.
+
+    供「请求体接收/存储 I/O 以分钟计」的上传路由专用（put_local_object、
+    put_local_material）。若经由 get_current_user 隐式吃下请求级事务，整个
+    上传期间连接停在 idle-in-transaction，被 60s 护栏击杀（2026-11-02 生产
+    池饿死事故的 S2-9 路径）。认证语义与 get_current_user 完全一致，仅事务
+    边界更短；后续业务读写各自开短事务。
+    """
+    from app.api_key_service import touch_last_used
+    from app.customer_fence import _verify_api_key_in_transaction, resolve_api_key_user
+
+    with pg_transaction() as pg_conn:
+        conn = BusinessConnection.postgres(pg_conn)
+        principal = resolve_api_key_user(request)
+        if principal is not None:
+            _verify_api_key_in_transaction(cast(Any, conn.raw), principal)
+            touch_last_used(cast(Any, conn.raw), key_id=principal.key_id)
+            conn.api_key_id = principal.key_id
+            conn.auth_source = "api_key"
+            return authenticate_user(conn, principal.user_id)
+        return authenticate_request(
+            conn,
+            authorization=authorization,
+            dev_user_id=dev_user_id,
+        )
+
+
+ShortAuthUser = Annotated[CurrentUser, Depends(get_current_user_short_tx)]
+
+
 def authenticate_request(
     conn: BusinessConnection,
     *,

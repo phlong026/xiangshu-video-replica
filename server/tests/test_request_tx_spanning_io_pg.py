@@ -20,6 +20,7 @@ import psycopg
 import pytest
 from test_customer_center import account  # noqa: F401
 from test_customer_pricing import (  # noqa: F401
+    admin_login,
     client,
     registration_client,
     registration_dsn,
@@ -470,3 +471,287 @@ def test_wechat_notify_settlement_runs_outside_tx(
     # 回归形态是把结算包回请求级事务（深度变 2）——那里等订单行锁会拖死连接。
     assert ("confirm_recharge_payment", 1) in tx_depth.samples, tx_depth.samples
     assert all(depth <= 1 for _, depth in tx_depth.samples), tx_depth.samples
+
+
+# ---------------------------------------------------------------------------
+# 第二批（认证链手术）：上传/查单/回调路由脱离请求级事务窗口
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def batch2_client(detail_client):
+    """挂上第二批涉及的路由表（支付/媒体/素材/刷新/admin）.
+
+    控制面走 legacy 代理令牌车道（sync 用例自带 env + 请求头）。
+    """
+    from app.admin_auth_routes import router as admin_router
+    from app.material_routes import router as material_router
+    from app.media_routes import router as media_router
+    from app.payment_routes import router as payment_router
+
+    detail_client.app.include_router(admin_router)
+    detail_client.app.include_router(media_router)
+    detail_client.app.include_router(material_router)
+    detail_client.app.include_router(payment_router)
+    yield detail_client
+    detail_client.app.dependency_overrides.clear()
+
+
+class _CoverStubStorage:
+    """归档桩：head 恒 None（无既有封面），put 丢弃."""
+
+    provider = "local"
+    bucket = "tx-span"
+    cache_namespace = "tx-span"
+
+    def head_object(self, key):  # noqa: ANN001, ARG002
+        return None
+
+    def put_object(self, key, data, *, content_type=None):  # noqa: ANN001, ARG002
+        pass
+
+
+class _UploadSpyStorage:
+    provider = "local"
+    bucket = "tx-span"
+    cache_namespace = "tx-span"
+
+    def __init__(self, holder: _TxDepth) -> None:
+        self._holder = holder
+
+    def put_object(self, key, content, *, content_type=None):  # noqa: ANN001
+        self._holder.record(f"put_object({key})")
+
+
+def test_sync_recharge_order_gateway_query_outside_tx(
+    batch2_client,
+    route_state: str,
+    tx_depth: _TxDepth,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """查单外呼（慢网络/慢 DNS 可远超 60s）发生时刻事务深度必须为 0.
+
+    走 legacy 代理令牌车道（digest+admin 用户 env + 请求头），确定性最强。
+    """
+    import hashlib
+
+    from app import payment_routes
+    from app.payment_provider import DeploymentConfig, MerchantConfig, OrderQueryResult
+
+    proxy_token = "tx-span-proxy-token"
+    admin_uid = "tx-span-admin"
+    monkeypatch.setenv(
+        "CONTROL_PROXY_TOKEN_DIGEST",
+        hashlib.sha256(proxy_token.encode()).hexdigest(),
+    )
+    monkeypatch.setenv("CONTROL_ADMIN_USER_ID", admin_uid)
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role) VALUES "
+            "(%s, 'tx_span_admin', 'Tx Span Admin', 'admin') ON CONFLICT (id) DO NOTHING",
+            (admin_uid,),
+        )
+        raw.execute(
+            "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, status, "
+            "pricing_scope, base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
+            "min_recharge_fen_snapshot, recharge_step_fen_snapshot, amount_fen, credits) "
+            "VALUES ('tx-sync-order', %s, 'TX-SYNC-ORDER', 'zpay', 'PENDING', 'CUSTOMER_STANDARD', "
+            "1000, 1000, 10000, 1000, 20000, 20)",
+            (admin_uid,),
+        )
+        raw.commit()
+
+    class Gateway:
+        def load_merchant_config(self, conn):  # noqa: ANN001, ARG002
+            return MerchantConfig("zpay", {}, ("alipay",))
+
+        def load_deployment_config(self):  # noqa: ANN201
+            return DeploymentConfig("", "")
+
+        def query_order(self, **kwargs):  # noqa: ANN003, ARG002
+            tx_depth.record("query_order")
+            return OrderQueryResult(False, "TX-SYNC-ORDER", None, None, None, None)
+
+    monkeypatch.setattr(payment_routes, "get_payment_provider", lambda name: Gateway())
+
+    response = batch2_client.post(
+        "/api/control/recharge-orders/TX-SYNC-ORDER/sync",
+        headers={"X-Control-Proxy-Token": proxy_token, "Idempotency-Key": "tx-span-sync-1"},
+        json={"confirm": True, "reason": "tx-span probe"},
+    )
+    assert response.status_code == 200, response.text
+    assert ("query_order", 0) in tx_depth.samples, tx_depth.samples
+
+
+def test_local_object_upload_stream_outside_tx(
+    batch2_client,
+    route_state: str,
+    tx_depth: _TxDepth,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上传体接收与落盘（桌面端分钟级）发生时刻事务深度必须为 0."""
+    import json as _json
+    from uuid import uuid4
+
+    from app.media_routes import get_media_storage
+
+    headers, uid = account(batch2_client, "tx_upload_user")
+    project_id = f"tx-proj-{uuid4().hex[:8]}"
+    object_key = f"projects/{project_id}/ref.mp4"
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, 'tx-span')",
+            (project_id, uid),
+        )
+        raw.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, created_by_user_id, metadata_json) VALUES "
+            "('tx-asset-obj', %s, 'reference_video', %s, '', 0, 'video/mp4', %s, %s)",
+            (
+                project_id,
+                f"local://tx-span/{object_key}",
+                uid,
+                _json.dumps({"upload_status": "PENDING", "requested_size_bytes": 4}),
+            ),
+        )
+        raw.commit()
+
+    batch2_client.app.dependency_overrides[get_media_storage] = lambda: _UploadSpyStorage(tx_depth)
+
+    response = batch2_client.put(
+        f"/api/assets/local-objects/{object_key}",
+        content=b"abcd",
+        headers={**headers, "content-type": "video/mp4"},
+    )
+    assert response.status_code == 204, response.text
+    assert all(depth == 0 for _, depth in tx_depth.samples), tx_depth.samples
+    assert any(name.startswith("put_object(") for name, _ in tx_depth.samples), tx_depth.samples
+
+
+def test_local_material_upload_stream_outside_tx(
+    batch2_client,
+    route_state: str,
+    tx_depth: _TxDepth,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """素材本地上传：落盘时刻事务深度必须为 0（认证+意图校验走前置短事务）."""
+    import json as _json
+
+    from app.media_routes import get_media_storage
+
+    headers, uid = account(batch2_client, "tx_material_user")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, created_by_user_id, metadata_json) VALUES "
+            "('tx-asset-mat', NULL, 'material_video', 'local://tx-span/materials/x.mp4', '', "
+            "0, 'video/mp4', %s, %s)",
+            (uid, _json.dumps({"upload_status": "PENDING", "requested_size_bytes": 4})),
+        )
+        raw.commit()
+
+    batch2_client.app.dependency_overrides[get_media_storage] = lambda: _UploadSpyStorage(tx_depth)
+
+    response = batch2_client.put(
+        "/api/studio/materials/uploads/tx-asset-mat/content",
+        content=b"abcd",
+        headers={**headers, "content-type": "video/mp4"},
+    )
+    assert response.status_code == 204, response.text
+    assert all(depth == 0 for _, depth in tx_depth.samples), tx_depth.samples
+    assert any(name.startswith("put_object(") for name, _ in tx_depth.samples), tx_depth.samples
+
+
+def test_zpay_notify_verify_and_settle_outside_tx(
+    batch2_client,
+    tx_depth: _TxDepth,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ZPay 回调：验签（本地）与结算均不得骑在请求级事务上."""
+    from app import payment_routes
+    from app.payment_provider import MerchantConfig
+    from app.payment_routes import get_zpay_provider
+
+    class _Verification:
+        valid = True
+        error_code = None
+        merchant_order_no = "tx-span-zpay-1"
+        provider_trade_no = "zpay-tx-span-1"
+        amount_fen = 100
+        channel = "alipay"
+        source_digest = "tx-span-zpay-digest"
+
+    class _StubProvider:
+        def load_merchant_config(self, conn):  # noqa: ANN001, ARG002
+            return MerchantConfig("zpay", {}, ("alipay",))
+
+        def verify_notification(self, params, merchant):  # noqa: ANN001, ARG002
+            tx_depth.record("zpay_verify_notification")
+            return _Verification()
+
+    def fake_confirm(conn, **kwargs):  # noqa: ANN001, ANN003, ARG002
+        tx_depth.record("confirm_recharge_payment(zpay)")
+        return None
+
+    batch2_client.app.dependency_overrides[get_zpay_provider] = lambda: _StubProvider()
+    monkeypatch.setattr(payment_routes, "confirm_recharge_payment", fake_confirm)
+
+    response = batch2_client.get(
+        "/api/payments/zpay/notify?out_trade_no=tx-span-zpay-1&trade_status=TRADE_SUCCESS"
+    )
+    assert response.status_code == 200, response.text
+    assert response.text == "success"
+    assert ("zpay_verify_notification", 0) in tx_depth.samples, tx_depth.samples
+    # 结算自开短事务：深度恰为 1（防被包回请求级事务的回归形态）
+    assert ("confirm_recharge_payment(zpay)", 1) in tx_depth.samples, tx_depth.samples
+
+
+def test_refresh_cover_archive_timeout_degrades_gracefully(
+    refresh_client,
+    route_state: str,
+    tx_depth: _TxDepth,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """限时封面归档超时：刷新与结算不受影响（源站封面链接兜底）."""
+    from dataclasses import replace
+
+    from cryptography.fernet import Fernet
+
+    from app.viral_tikhub import ViralSourceClient
+
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
+    headers, uid = account(refresh_client, "tx_cover_to_user")
+    with psycopg.connect(route_state) as raw:
+        _seed_detail_video(raw, uid, video_id="v-tx-cvto")
+        _seed_refresh_tariff(raw)
+        _seed_tikhub_settings(route_state, uid)
+        raw.commit()
+
+    canned = replace(
+        _source_seed_video(), video_id="v-tx-cvto", play_url="https://cdn.example/c.mp4"
+    )
+
+    def fake_refresh(self, *, platform: str, video_id: str):  # noqa: ANN001, ARG002
+        return [canned]
+
+    monkeypatch.setattr(ViralSourceClient, "douyin_refresh", fake_refresh)
+
+    monkeypatch.setattr(
+        "app.viral_search_refresh_routes.get_media_storage",
+        lambda conn: _CoverStubStorage(),
+    )
+
+    def timed_out_bounded(storage, videos, **kwargs):  # noqa: ANN001, ANN003, ARG002
+        raise TimeoutError("tx-span probe timeout")
+
+    monkeypatch.setattr(
+        "app.viral_search_refresh_routes.archive_search_covers_bounded",
+        timed_out_bounded,
+    )
+
+    response = refresh_client.post(
+        "/api/viral/search/refresh",
+        headers={**headers, "Idempotency-Key": "tx-span-cvto-1"},
+        json={"platform": "douyin", "videoId": "v-tx-cvto"},
+    )
+    assert response.status_code == 200, response.text

@@ -15,8 +15,8 @@ import app.zpay_provider  # noqa: F401
 from app.admin_auth_routes import FundsWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.admin_write_contract import require_write_contract as _require_write_contract
-from app.auth import CurrentUser, Database
-from app.control_auth import ControlUser
+from app.auth import CurrentUser
+from app.control_auth import ControlUserShortTx
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.ops_metrics import get_or_create_request_id
@@ -208,11 +208,16 @@ WeChatProviderDep = Annotated[WeChatNativeProvider, Depends(get_wechat_provider)
 @router.get("/payments/zpay/notify", response_class=PlainTextResponse)
 def zpay_notify(
     request: Request,
-    conn: Database,
     provider: ZPayProviderDep,
 ) -> PlainTextResponse:
+    """商户配置读取自开短事务；本地验签与结算均不占请求级连接.
+
+    与 wechat_native_notify 同一事务纪律（2026-11-02 生产池饿死事故后的
+    统一改造）：回调路由体内不隐式携带请求级事务。
+    """
     params = _unique_query_params(request)
-    merchant = _load_merchant_config(conn, provider)
+    with pg_transaction() as pg_conn:
+        merchant = _load_merchant_config(BusinessConnection.postgres(pg_conn), provider)
 
     # Use provider abstraction for notification verification
     verification = provider.verify_notification(params, merchant)
@@ -227,15 +232,16 @@ def zpay_notify(
     assert verification.source_digest is not None
 
     try:
-        confirm_recharge_payment(
-            conn,
-            merchant_order_no=verification.merchant_order_no,
-            provider_trade_no=verification.provider_trade_no,
-            amount_fen=verification.amount_fen,
-            channel=verification.channel,
-            source_digest=verification.source_digest,
-            allowed_channels=merchant.allowed_channels,
-        )
+        with pg_transaction() as pg_conn:
+            confirm_recharge_payment(
+                BusinessConnection.postgres(pg_conn),
+                merchant_order_no=verification.merchant_order_no,
+                provider_trade_no=verification.provider_trade_no,
+                amount_fen=verification.amount_fen,
+                channel=verification.channel,
+                source_digest=verification.source_digest,
+                allowed_channels=merchant.allowed_channels,
+            )
     except PaymentConfirmationError as exc:
         logger.warning("ZPay callback rejected: %s", exc.code)
         return PlainTextResponse("failure", status_code=exc.status_code)
@@ -367,8 +373,7 @@ def sync_recharge_order(
     order_no: str,
     body: AdminWriteContract,
     request: Request,
-    conn: Database,
-    _actor: ControlUser,
+    _actor: ControlUserShortTx,
 ) -> RechargeOrderStatusResponse:
     """Manual single-order query with the admin write contract (A4, A2).
 
@@ -380,49 +385,60 @@ def sync_recharge_order(
 
     资金中心方案（P1）：所有渠道统一一个「查单补单」入口，网关按订单自身的
     provider 字段分派——微信订单不再只能从客户详情核验。
+
+    事务边界（2026-11-02 池饿死事故改造）：认证走 ControlUserShortTx；
+    审计行+订单预读+商户配置在一个**前置短事务**先行提交——查单外呼
+    （provider.query_order，慢网络/慢 DNS 下可远超 60s）期间不持任何事务；
+    结算自开短事务。行为差异：查单失败/结算失败时审计行保留（改前随请求级
+    事务一并回滚）——「谁发起」的意图记录因此更完整，属有意收紧。
     """
     _syncable_providers = ("zpay", "wechat_native")
     _key, reason = _require_write_contract(request, body)
     request_id = get_or_create_request_id(request)
-    write_audit(
-        conn,
-        actor=_actor,
-        action="payment.sync",
-        entity_type="recharge_order",
-        entity_id=order_no,
-        metadata={"reason": reason, "request_id": request_id},
-    )
-    local_order = read_recharge_order(conn, merchant_order_no=order_no)
-    if local_order is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "RECHARGE_ORDER_NOT_FOUND",
-                "message": "Recharge order does not exist.",
-            },
+    with pg_transaction() as pg_conn:
+        conn = BusinessConnection.postgres(pg_conn)
+        write_audit(
+            conn,
+            actor=_actor,
+            action="payment.sync",
+            entity_type="recharge_order",
+            entity_id=order_no,
+            metadata={"reason": reason, "request_id": request_id},
         )
-    if str(local_order["status"]) == "PAID":
-        return RechargeOrderStatusResponse(**serialize_recharge_order(local_order))
-    if str(local_order["status"]) != "PENDING":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "RECHARGE_ORDER_NOT_SYNCABLE",
-                "message": "Recharge order is not waiting for payment.",
-            },
-        )
-    provider_name = str(local_order["provider"])
-    if provider_name not in _syncable_providers:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "RECHARGE_ORDER_NOT_SYNCABLE",
-                "message": "This order is not placed through a payment channel.",
-            },
-        )
-    provider = get_payment_provider(provider_name)
-
-    merchant = _load_merchant_config(conn, provider)
+        local_order = read_recharge_order(conn, merchant_order_no=order_no)
+        if local_order is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "RECHARGE_ORDER_NOT_FOUND",
+                    "message": "Recharge order does not exist.",
+                },
+            )
+        if str(local_order["status"]) == "PAID":
+            result = RechargeOrderStatusResponse(**serialize_recharge_order(local_order))
+        elif str(local_order["status"]) != "PENDING":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "RECHARGE_ORDER_NOT_SYNCABLE",
+                    "message": "Recharge order is not waiting for payment.",
+                },
+            )
+        else:
+            provider_name = str(local_order["provider"])
+            if provider_name not in _syncable_providers:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "RECHARGE_ORDER_NOT_SYNCABLE",
+                        "message": "This order is not placed through a payment channel.",
+                    },
+                )
+            provider = get_payment_provider(provider_name)
+            merchant = _load_merchant_config(conn, provider)
+            result = None
+    if result is not None:
+        return result
     try:
         deployment = provider.load_deployment_config()
     except ValueError as exc:
@@ -471,19 +487,20 @@ def sync_recharge_order(
         )
 
     try:
-        confirmed = confirm_recharge_payment(
-            conn,
-            merchant_order_no=order_no,
-            provider_trade_no=remote_order.provider_trade_no,
-            amount_fen=remote_order.amount_fen,
-            channel=remote_order.channel,
-            source_digest=remote_order.response_digest,
-            allowed_channels=merchant.allowed_channels,
-            # 微信的支付凭证落在 transaction_id 列，结算规范必须跟着渠道走。
-            provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC
-            if provider_name == "wechat_native"
-            else ZPAY_SETTLEMENT_SPEC,
-        )
+        with pg_transaction() as pg_conn:
+            confirmed = confirm_recharge_payment(
+                BusinessConnection.postgres(pg_conn),
+                merchant_order_no=order_no,
+                provider_trade_no=remote_order.provider_trade_no,
+                amount_fen=remote_order.amount_fen,
+                channel=remote_order.channel,
+                source_digest=remote_order.response_digest,
+                allowed_channels=merchant.allowed_channels,
+                # 微信的支付凭证落在 transaction_id 列，结算规范必须跟着渠道走。
+                provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC
+                if provider_name == "wechat_native"
+                else ZPAY_SETTLEMENT_SPEC,
+            )
     except PaymentConfirmationError as exc:
         raise HTTPException(
             status_code=exc.status_code,
