@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
@@ -34,6 +34,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
+from app.task_lease import TaskLease, claim_next_task
 
 SOURCE_FRAME_CANDIDATES_KIND = "source_frame_candidates"
 SOURCE_FRAME_SELECTION_KIND = "source_frame_selection"
@@ -113,12 +114,8 @@ class StoredSourceFrameCandidates:
     semantic_model: str | None
 
 
-@dataclass(frozen=True)
-class SourceFrameTaskLease:
-    id: str
-    created_by_user_id: str
-    worker_id: str
-    attempt: int
+# 租约凭据统一为共享 TaskLease（T7 试点）；别名保住既有导入面。
+SourceFrameTaskLease = TaskLease
 
 
 class SourceFrameExtractor(Protocol):
@@ -683,45 +680,15 @@ def acquire_source_frame_task(
     *,
     worker_id: str,
 ) -> SourceFrameTaskLease | None:
-    now = _time_text(datetime.now(UTC))
-    locked_until = _time_text(
-        datetime.now(UTC) + timedelta(minutes=SOURCE_FRAME_TASK_LEASE_MINUTES)
-    )
-    conn.execute(
-        """
-        UPDATE source_frame_tasks
-        SET status = 'FAILED', locked_by = NULL, locked_until = NULL,
-            error_code = 'SOURCE_FRAME_TASK_RECOVERY_REQUIRED',
-            error_message_redacted = '取帧任务执行中断，请重新开始。',
-            retryable = 1, completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (now, now, now),
-    )
-    row = conn.execute(
-        """
-        UPDATE source_frame_tasks
-        SET status = 'RUNNING', attempt = attempt + 1,
-            locked_by = %s, locked_until = %s,
-            started_at = COALESCE(started_at, %s), updated_at = %s,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0
-        WHERE id = (
-            SELECT id FROM source_frame_tasks
-            WHERE status = 'PENDING'
-            ORDER BY created_at, id LIMIT 1
-        ) AND status = 'PENDING'
-        RETURNING *
-        """,
-        (worker_id, locked_until, now, now),
-    ).fetchone()
-    conn.commit()
-    if row is None:
-        return None
-    return SourceFrameTaskLease(
-        id=str(row["id"]),
-        created_by_user_id=str(row["created_by_user_id"]),
+    """T7 试点：认领取件走共享 task_lease（过期回收规格与历史实现逐字一致：
+    过期 RUNNING → FAILED + SOURCE_FRAME_TASK_RECOVERY_REQUIRED + retryable=1）。"""
+    return claim_next_task(
+        conn,
+        table="source_frame_tasks",
         worker_id=worker_id,
-        attempt=int(row["attempt"]),
+        lease_minutes=SOURCE_FRAME_TASK_LEASE_MINUTES,
+        recover_code="SOURCE_FRAME_TASK_RECOVERY_REQUIRED",
+        recover_message="取帧任务执行中断，请重新开始。",
     )
 
 
