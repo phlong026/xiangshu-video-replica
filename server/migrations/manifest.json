@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261101T1000_video_long_tier"
+      "20261102T0900_customer_session_last_seen"
     ],
     "parents": {
       "001_core": null,
@@ -195,9 +195,10 @@
       "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority",
       "20261014T1200_admin_role_templates": "20261014T1100_customer_ops_params",
       "20261016T1000_replica_prompt_tasks": "20261014T1200_admin_role_templates",
-      "20261101T1000_video_long_tier": "20261016T1000_replica_prompt_tasks"
+      "20261101T1000_video_long_tier": "20261016T1000_replica_prompt_tasks",
+      "20261102T0900_customer_session_last_seen": "20261101T1000_video_long_tier"
     },
-    "revision_count": 176
+    "revision_count": 177
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -915,6 +916,10 @@
     "20261101T1000_video_long_tier": {
       "file": "versions/20261101T1000_video_long_tier.py",
       "sha256": "b84b53ce6ad2df553056ca6fff2821e55702f4c926e94d12b896e5004cc7fb36"
+    },
+    "20261102T0900_customer_session_last_seen": {
+      "file": "versions/20261102T0900_customer_session_last_seen.py",
+      "sha256": "130bdb83eea3f7ea49f6b6a7c04012f43a9c8e23c6b0ce17411ff07afc9a8382"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

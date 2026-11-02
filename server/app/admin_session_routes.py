@@ -1,8 +1,8 @@
 """T34 — admin customer session API.
 
 Read-only endpoint for operators and auditors to view the live customer
-session state (revision 029 ``customer_session_state``: one row per user)
-joined to the bound device.
+session state (revision 029 ``customer_session_state``: one row per device,
+re-parented 2026-09-12) joined to the bound device.
 
 Fail-closed runtime: SQLite/missing DSN returns 503 SESSION_SERVICE_UNAVAILABLE
 instead of falling back to legacy control identity (the T12/T18 precedent).
@@ -19,7 +19,7 @@ from pydantic import Field, StrictInt
 from app.admin_auth_routes import AdminReader, CustomerWriter
 from app.admin_write_contract import AdminWriteContract, transaction_now_iso, write_with_idempotency
 from app.api_errors import http_error as _http
-from app.customer_session_service import revoke_session
+from app.customer_session_service import ONLINE_SESSION_PREDICATE, revoke_session
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
@@ -89,11 +89,14 @@ def list_live_sessions(
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
-    """Overview of every currently live customer session (A11, 2026-09-02).
+    """Overview of every currently online customer session (A11, 2026-09-02).
 
-    Same liveness semantics as the per-customer view (DB-clock lease check),
-    across all users instead of one — the console "今日概览/会话" entry point
-    so operators no longer need to know a customer id upfront.
+    Same liveness semantics as the per-customer view: the session must still
+    be valid *and* show activity within the 10-minute window
+    (``ONLINE_SESSION_PREDICATE``; the 7-day sliding contract made a bare
+    lease check恒真). Across all users instead of one — the console
+    "今日概览/会话" entry point so operators no longer need to know a
+    customer id upfront.
 
     ``keyword`` 同时匹配用户名与公司名（方案 P1 登录与设备改造：用名称找人），
     客户编号只在详情链路里出现。
@@ -122,7 +125,7 @@ def list_live_sessions(
                 JOIN customer_devices cd ON cd.id = css.device_id
                 JOIN users u ON u.id = css.user_id
                 WHERE cd.status = 'BOUND'
-                  AND css.lease_until::timestamptz > clock_timestamp(){keyword_filter}
+                  AND {ONLINE_SESSION_PREDICATE}{keyword_filter}
                 ORDER BY css.created_at DESC, css.session_id
                 {PAGE_CLAUSE}
                 """,
@@ -135,7 +138,7 @@ def list_live_sessions(
                 JOIN customer_devices cd ON cd.id = css.device_id
                 JOIN users u ON u.id = css.user_id
                 WHERE cd.status = 'BOUND'
-                  AND css.lease_until::timestamptz > clock_timestamp(){keyword_filter}
+                  AND {ONLINE_SESSION_PREDICATE}{keyword_filter}
                 """,
                 tuple(params),
             ).fetchone()
@@ -183,31 +186,29 @@ def list_customer_sessions(
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
-    """List the live session state for a target customer.
+    """List the online session state for a target customer.
 
-    The 029 model keeps exactly one session row per user
-    (``customer_session_state``, primary key *is* ``user_id``) so the list is
-    at most one row; device columns come from the bound ``customer_devices``
-    row and ``status`` filters on the device status (BOUND/UNBOUND/REVOKED).
-    Both admin and auditor roles can read (read-only).
+    The 20260912 model keeps one session row per device
+    (``customer_session_state``, primary key *is* ``device_id``); device
+    columns come from the bound ``customer_devices`` row and ``status``
+    filters on the device status (BOUND/UNBOUND/REVOKED). Both admin and
+    auditor roles can read (read-only).
 
-    "Live" is judged on the PostgreSQL clock: logout, revocation and natural
-    lease expiry keep the row (the lease is pulled into the past, the T16/T19
-    pattern) rather than deleting it, so a row's existence alone is not a
-    live session.
+    "Online" is judged on the PostgreSQL clock: the session must still be
+    valid (logout/revocation/expiry pull lease_until into the past, the
+    T16/T19 pattern, instead of deleting the row) *and* have recent activity
+    — the 7-day sliding contract makes a bare lease check 恒真, so the
+    10-minute activity window (``ONLINE_SESSION_PREDICATE``) carries the
+    "currently online" meaning.
     """
     bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
 
     clauses: list[str] = [
         "css.user_id = %s",
         "cd.status = 'BOUND'",
-        # Logout/revocation/expiry pull lease_until into the past instead of
-        # deleting the row; without this predicate administrators would see
-        # a supposedly live session indefinitely. The column is text holding
-        # mixed ISO / PG-text timestamps, so compare on the cast (the 029
-        # CHECK ``lease_until::timestamptz > created_at::timestamptz``
-        # guarantees every stored value parses) against the PostgreSQL clock.
-        "css.lease_until::timestamptz > clock_timestamp()",
+        # 会话仍有效 + 最近 10 分钟有活动（见 ONLINE_SESSION_PREDICATE 注释：
+        # 列为 text 存混合 ISO/PG 文本时间戳，029 CHECK 保证可解析）。
+        ONLINE_SESSION_PREDICATE,
     ]
     params: list[object] = [user_id]
 
