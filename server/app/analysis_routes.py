@@ -71,6 +71,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
+from app.task_lease import recover_analysis_interrupted
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 logger = logging.getLogger(__name__)
@@ -800,22 +801,7 @@ def acquire_analysis_task(
         "%Y-%m-%d %H:%M:%S"
     )
     try:
-        interrupted = conn.execute(
-            """
-            UPDATE analysis_tasks
-            SET status = 'FAILED',
-                error_code = 'ANALYSIS_WORKER_INTERRUPTED',
-                error_message_redacted = '拆解任务执行中断，请重新拆解。',
-                retryable = 1,
-                locked_by = NULL,
-                locked_until = NULL,
-                completed_at = %s,
-                updated_at = %s
-            WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
-            RETURNING id, attempt, request_id
-            """,
-            (now_text, now_text, now_text),
-        ).fetchall()
+        interrupted = recover_analysis_interrupted(conn)
         # P1-6：被接管的中断尝试也要留痕，否则失败历史只剩用户重试后的记录。
         for interrupted_row in interrupted:
             record_analysis_task_attempt(

@@ -34,7 +34,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
-from app.task_lease import TaskLease, claim_next_task
+from app.task_lease import TaskLease, claim_source_frame_task
 
 SOURCE_FRAME_CANDIDATES_KIND = "source_frame_candidates"
 SOURCE_FRAME_SELECTION_KIND = "source_frame_selection"
@@ -680,15 +680,9 @@ def acquire_source_frame_task(
     *,
     worker_id: str,
 ) -> SourceFrameTaskLease | None:
-    """T7 试点：认领取件走共享 task_lease（过期回收规格与历史实现逐字一致：
-    过期 RUNNING → FAILED + SOURCE_FRAME_TASK_RECOVERY_REQUIRED + retryable=1）。"""
-    return claim_next_task(
-        conn,
-        table="source_frame_tasks",
-        worker_id=worker_id,
-        lease_minutes=SOURCE_FRAME_TASK_LEASE_MINUTES,
-        recover_code="SOURCE_FRAME_TASK_RECOVERY_REQUIRED",
-        recover_message="取帧任务执行中断，请重新开始。",
+    """租约 SQL 统一住在 app.task_lease（T7）。"""
+    return claim_source_frame_task(
+        conn, worker_id=worker_id, lease_minutes=SOURCE_FRAME_TASK_LEASE_MINUTES
     )
 
 

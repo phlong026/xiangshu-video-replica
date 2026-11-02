@@ -47,6 +47,7 @@ from app.media_tools import (
 )
 from app.permissions import require_not_auditor, require_project_access
 from app.storage import StorageAdapter
+from app.task_lease import claim_script_from_audio_task
 
 logger = logging.getLogger("app.script_from_audio")
 
@@ -780,55 +781,10 @@ def acquire_script_from_audio_task(
     *,
     worker_id: str,
 ) -> ScriptFromAudioTaskLease | None:
-    now = _time_text(datetime.now(UTC))
-    locked_until = _time_text(
-        datetime.now(UTC) + timedelta(minutes=SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES)
+    """租约 SQL 统一住在 app.task_lease（T7）；本域凭据含 project_id。"""
+    row = claim_script_from_audio_task(
+        conn, worker_id=worker_id, lease_minutes=SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES
     )
-    conn.execute(
-        """
-        UPDATE script_from_audio_tasks
-        SET status = 'PENDING', locked_by = NULL, locked_until = NULL,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0,
-            updated_at = %s
-        WHERE status = 'RUNNING' AND (provider_started_at IS NULL OR provider_task_id IS NOT NULL)
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (now, now),
-    )
-    conn.execute(
-        """
-        UPDATE script_from_audio_tasks
-        SET status = 'SUBMISSION_UNCERTAIN', locked_by = NULL, locked_until = NULL,
-            error_code = 'SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN',
-            error_message_redacted = %s, retryable = 0,
-            completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL AND provider_task_id IS NULL
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (
-            "语音转写请求可能已经送达服务商，请人工确认后再决定是否重试。",
-            now,
-            now,
-            now,
-        ),
-    )
-    row = conn.execute(
-        """
-        UPDATE script_from_audio_tasks
-        SET status = 'RUNNING', attempt = attempt + 1,
-            locked_by = %s, locked_until = %s,
-            started_at = COALESCE(started_at, %s), updated_at = %s,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0
-        WHERE id = (
-            SELECT id FROM script_from_audio_tasks
-            WHERE status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
-            ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
-        ) AND status = 'PENDING'
-        RETURNING *
-        """,
-        (worker_id, locked_until, now, now, now),
-    ).fetchone()
-    conn.commit()
     if row is None:
         return None
     return ScriptFromAudioTaskLease(

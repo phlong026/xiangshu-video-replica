@@ -23,6 +23,7 @@ from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraint
 from app.external_calls import CallTimer, Outcome, record_external_call
 from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.settings import SettingsRepository, SettingsUnavailableError
+from app.task_lease import TaskLease, claim_script_rewrite_task
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +90,8 @@ class ScriptRewriteResult(BaseModel):
     model: str
 
 
-@dataclass(frozen=True)
-class ScriptRewriteTaskLease:
-    id: str
-    created_by_user_id: str
-    worker_id: str
-    attempt: int
+# 租约凭据统一为共享 TaskLease（T7）；别名保住既有导入面。
+ScriptRewriteTaskLease = TaskLease
 
 
 @dataclass(frozen=True)
@@ -687,62 +684,9 @@ def acquire_script_rewrite_task(
     *,
     worker_id: str,
 ) -> ScriptRewriteTaskLease | None:
-    now = _time_text(datetime.now(UTC))
-    locked_until = _time_text(
-        datetime.now(UTC) + timedelta(minutes=SCRIPT_REWRITE_TASK_LEASE_MINUTES)
-    )
-    conn.execute(
-        """
-        UPDATE script_rewrite_tasks
-        SET status = 'PENDING', locked_by = NULL, locked_until = NULL,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0,
-            updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NULL
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (now, now),
-    )
-    conn.execute(
-        """
-        UPDATE script_rewrite_tasks
-        SET status = 'SUBMISSION_UNCERTAIN', locked_by = NULL, locked_until = NULL,
-            error_code = 'SCRIPT_REWRITE_SUBMISSION_UNCERTAIN',
-            error_message_redacted = %s, retryable = 0,
-            completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (
-            "AI 改写请求可能已经送达服务商，请人工确认后再决定是否重试。",
-            now,
-            now,
-            now,
-        ),
-    )
-    row = conn.execute(
-        """
-        UPDATE script_rewrite_tasks
-        SET status = 'RUNNING', attempt = attempt + 1,
-            locked_by = %s, locked_until = %s,
-            started_at = COALESCE(started_at, %s), updated_at = %s,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0
-        WHERE id = (
-            SELECT id FROM script_rewrite_tasks
-            WHERE status = 'PENDING'
-            ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
-        ) AND status = 'PENDING'
-        RETURNING *
-        """,
-        (worker_id, locked_until, now, now),
-    ).fetchone()
-    conn.commit()
-    if row is None:
-        return None
-    return ScriptRewriteTaskLease(
-        id=str(row["id"]),
-        created_by_user_id=str(row["created_by_user_id"]),
-        worker_id=worker_id,
-        attempt=int(row["attempt"]),
+    """租约 SQL 统一住在 app.task_lease（T7）；本域凭据即标准 TaskLease。"""
+    return claim_script_rewrite_task(
+        conn, worker_id=worker_id, lease_minutes=SCRIPT_REWRITE_TASK_LEASE_MINUTES
     )
 
 

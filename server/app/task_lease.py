@@ -1,20 +1,16 @@
-"""任务租约状态机的共享实现（T7 试点，2026-11-02）。
+"""任务租约状态机的统一家目录（T7，2026-11-02 试点后全量收敛）。
 
-历史上五套近似实现（分析/改写/音频/提示词/抽帧）各自维护「过期回收 +
-认领取件」两段 SQL，其中仅两套用了 FOR UPDATE SKIP LOCKED，其余用 CAS
-子查询——统一的锁语义是 T7 的目标。本模块承载统一后的骨架：
+历史上五套近似实现（分析/改写/音频/提示词/抽帧）散落各域，锁语义分叉
+（仅两套用 FOR UPDATE SKIP LOCKED）。T7 的目标是**一个模块、一次评审面**：
+本文件承载五域的「过期回收 + 认领取件」全部 SQL——每段都是从原实现
+**逐字搬移**的字面量（值一律 %s 绑定，无任何运行时拼接；source_frames
+与 replica_prompt 的认领子查询按统一口径补上 FOR UPDATE SKIP LOCKED，
+与改写/转写域一致），租约凭据统一为 :class:`TaskLease`。
 
-1. 过期回收：``RUNNING`` 且 ``locked_until`` 已过期的行按调用方给定的
-   规格转入失败态（各域的目标状态/错误码/文案不同，参数化传入）；
-2. 认领取件：子查询 ``FOR UPDATE SKIP LOCKED`` 选出最早的就绪行并
-   原子置为 ``RUNNING``（attempt+1、租约字段、错误复位）。
+各域 acquire_* 函数改为对本模块的一行委托；analysis 的认领仍在本域
+（attempt 历史/预取 FOR UPDATE 耦合属域逻辑），仅过期回收段移入。
 
-安全口径：状态字面量、错误码/文案、worker_id、时间戳全部参数绑定；
-仅表名与 WHERE 片段/排序列这类**结构性标识符**由受信模块以编译期常量
-传入，入口用 ``_guard``（字符集白名单 + 危险符拒绝）兜底，杜绝把任何
-外部输入拼进 SQL。
-
-试点迁移：source_frames（低频抽帧任务）。其余四套在试点验证后分批迁移。
+后续新增任务域：在此追加一段字面量 SQL + 委托，不再各写一份。
 """
 
 from __future__ import annotations
@@ -22,11 +18,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 
-# 结构性片段白名单：小写蛇形词与受信 SQL 保留符；显式拒绝引号/分号/注释。
-_SAFE_FRAGMENT = re.compile(r"^[A-Za-z0-9_ ,.'()=<>!]+$")
+_SAFE_TABLE = re.compile(r"^[a-z_][a-z0-9_]*$")  # 供域内自检复用
 
 
 @dataclass(frozen=True)
@@ -43,85 +39,265 @@ def _time_text(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _guard(fragment: str, what: str) -> str:
-    if not fragment or not _SAFE_FRAGMENT.match(fragment):
-        raise ValueError(f"task_lease: 非法 {what} 片段（只接受模块内常量）: {fragment!r}")
-    return fragment
-
-
-def claim_next_task(
-    conn: BusinessConnection,
-    *,
-    table: str,
-    worker_id: str,
-    lease_minutes: int,
-    recover_code: str,
-    recover_message: str,
-    recover_status: str = "FAILED",
-    recover_retryable: int = 1,
-    recover_where: str = "",
-    pending_status: str = "PENDING",
-    candidate_where: str = "",
-    order_by: str = "created_at, id",
-) -> TaskLease | None:
-    """过期回收 + SKIP LOCKED 认领取件，两段在一个事务内提交。
-
-    ``recover_where`` / ``candidate_where`` / ``order_by`` 是调用模块里的
-    字符串常量（如 ``"provider_started_at IS NOT NULL"``），表达各域的
-    回收前置与候选过滤；状态与文案等值参数全程绑定。
-    """
-    _guard(table, "table")
-    _guard(recover_where or "ok", "recover_where")
-    _guard(candidate_where or "ok", "candidate_where")
-    _guard(order_by, "order_by")
-
-    now_text = _time_text(datetime.now(UTC))
-    locked_until_text = _time_text(datetime.now(UTC) + timedelta(minutes=lease_minutes))
-
-    recover_extra = f" AND {recover_where}" if recover_where else ""
-    conn.execute(
-        f"""  -- noqa: S608 -- 结构片段为受信常量并经 _guard；值全部绑定
-        UPDATE {table}
-        SET status = %s, locked_by = NULL, locked_until = NULL,
-            error_code = %s, error_message_redacted = %s,
-            retryable = %s, completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
-        {recover_extra}
-        """,
-        (
-            recover_status,
-            recover_code,
-            recover_message,
-            recover_retryable,
-            now_text,
-            now_text,
-            now_text,
-        ),
+def _lease_from_row(row: object, worker_id: str) -> TaskLease:
+    return TaskLease(
+        id=str(row["id"]),  # type: ignore[index]
+        created_by_user_id=str(row["created_by_user_id"]),  # type: ignore[index]
+        worker_id=worker_id,
+        attempt=int(row["attempt"]),  # type: ignore[index]
     )
 
-    candidate_extra = f" AND {candidate_where}" if candidate_where else ""
+
+# ===========================================================================
+# 抽帧（source_frames）：单段回收（中断→可重试失败）+ 认领
+# ===========================================================================
+
+
+def claim_source_frame_task(
+    conn: BusinessConnection, *, worker_id: str, lease_minutes: int
+) -> TaskLease | None:
+    now = _time_text(datetime.now(UTC))
+    locked_until = _time_text(datetime.now(UTC) + timedelta(minutes=lease_minutes))
+    conn.execute(
+        """
+        UPDATE source_frame_tasks
+        SET status = 'FAILED', locked_by = NULL, locked_until = NULL,
+            error_code = 'SOURCE_FRAME_TASK_RECOVERY_REQUIRED',
+            error_message_redacted = '取帧任务执行中断，请重新开始。',
+            retryable = 1, completed_at = %s, updated_at = %s
+        WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
+        """,
+        (now, now, now),
+    )
     row = conn.execute(
-        f"""  -- noqa: S608 -- 同上；状态与值参数全部绑定
-        UPDATE {table}
+        """
+        UPDATE source_frame_tasks
         SET status = 'RUNNING', attempt = attempt + 1,
             locked_by = %s, locked_until = %s,
             started_at = COALESCE(started_at, %s), updated_at = %s,
             error_code = NULL, error_message_redacted = NULL, retryable = 0
         WHERE id = (
-            SELECT id FROM {table}
-            WHERE status = %s{candidate_extra}
-            ORDER BY {order_by} LIMIT 1 FOR UPDATE SKIP LOCKED
-        ) AND status = %s
+            SELECT id FROM source_frame_tasks
+            WHERE status = 'PENDING'
+            ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+        ) AND status = 'PENDING'
         RETURNING *
         """,
-        (worker_id, locked_until_text, now_text, now_text, pending_status, pending_status),
+        (worker_id, locked_until, now, now),
     ).fetchone()
     conn.commit()
     if row is None:
         return None
-    return TaskLease(
-        id=str(row["id"]),
-        created_by_user_id=str(row["created_by_user_id"]),
-        worker_id=worker_id,
-        attempt=int(row["attempt"]),
+    return _lease_from_row(row, worker_id)
+
+
+# ===========================================================================
+# 改写（script_rewrite）：两段回收（未送达→重排 / 已送达→不确定）+ 认领
+# ===========================================================================
+
+
+def claim_script_rewrite_task(
+    conn: BusinessConnection, *, worker_id: str, lease_minutes: int
+) -> TaskLease | None:
+    now = _time_text(datetime.now(UTC))
+    locked_until = _time_text(datetime.now(UTC) + timedelta(minutes=lease_minutes))
+    conn.execute(
+        """
+        UPDATE script_rewrite_tasks
+        SET status = 'PENDING', locked_by = NULL, locked_until = NULL,
+            error_code = NULL, error_message_redacted = NULL, retryable = 0,
+            updated_at = %s
+        WHERE status = 'RUNNING' AND provider_started_at IS NULL
+          AND locked_until IS NOT NULL AND locked_until <= %s
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        UPDATE script_rewrite_tasks
+        SET status = 'SUBMISSION_UNCERTAIN', locked_by = NULL, locked_until = NULL,
+            error_code = 'SCRIPT_REWRITE_SUBMISSION_UNCERTAIN',
+            error_message_redacted = %s, retryable = 0,
+            completed_at = %s, updated_at = %s
+        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL
+          AND locked_until IS NOT NULL AND locked_until <= %s
+        """,
+        (
+            "AI 改写请求可能已经送达服务商，请人工确认后再决定是否重试。",
+            now,
+            now,
+            now,
+        ),
+    )
+    row = conn.execute(
+        """
+        UPDATE script_rewrite_tasks
+        SET status = 'RUNNING', attempt = attempt + 1,
+            locked_by = %s, locked_until = %s,
+            started_at = COALESCE(started_at, %s), updated_at = %s,
+            error_code = NULL, error_message_redacted = NULL, retryable = 0
+        WHERE id = (
+            SELECT id FROM script_rewrite_tasks
+            WHERE status = 'PENDING'
+            ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+        ) AND status = 'PENDING'
+        RETURNING *
+        """,
+        (worker_id, locked_until, now, now),
+    ).fetchone()
+    conn.commit()
+    if row is None:
+        return None
+    return _lease_from_row(row, worker_id)
+
+
+# ===========================================================================
+# 语音转写（script_from_audio）：两段回收（重排条件含已取供应商号）+ 认领
+# ===========================================================================
+
+
+def claim_script_from_audio_task(
+    conn: BusinessConnection, *, worker_id: str, lease_minutes: int
+) -> BusinessRow | None:
+    """转写域取件；返回原始行（域凭据含 project_id，由调用方构造）。"""
+    now = _time_text(datetime.now(UTC))
+    locked_until = _time_text(datetime.now(UTC) + timedelta(minutes=lease_minutes))
+    conn.execute(
+        """
+        UPDATE script_from_audio_tasks
+        SET status = 'PENDING', locked_by = NULL, locked_until = NULL,
+            error_code = NULL, error_message_redacted = NULL, retryable = 0,
+            updated_at = %s
+        WHERE status = 'RUNNING' AND (provider_started_at IS NULL OR provider_task_id IS NOT NULL)
+          AND locked_until IS NOT NULL AND locked_until <= %s
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        UPDATE script_from_audio_tasks
+        SET status = 'SUBMISSION_UNCERTAIN', locked_by = NULL, locked_until = NULL,
+            error_code = 'SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN',
+            error_message_redacted = %s, retryable = 0,
+            completed_at = %s, updated_at = %s
+        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL AND provider_task_id IS NULL
+          AND locked_until IS NOT NULL AND locked_until <= %s
+        """,
+        (
+            "语音转写请求可能已经送达服务商，请人工确认后再决定是否重试。",
+            now,
+            now,
+            now,
+        ),
+    )
+    row = conn.execute(
+        """
+        UPDATE script_from_audio_tasks
+        SET status = 'RUNNING', attempt = attempt + 1,
+            locked_by = %s, locked_until = %s,
+            started_at = COALESCE(started_at, %s), updated_at = %s,
+            error_code = NULL, error_message_redacted = NULL, retryable = 0
+        WHERE id = (
+            SELECT id FROM script_from_audio_tasks
+            WHERE status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
+            ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+        ) AND status = 'PENDING'
+        RETURNING *
+        """,
+        (worker_id, locked_until, now, now, now),
+    ).fetchone()
+    conn.commit()
+    return cast(BusinessRow | None, row)
+
+
+# ===========================================================================
+# 提示词（replica_prompt）：单段回收 + PENDING 残留清理 + 认领（含复位列）
+# ===========================================================================
+
+
+def claim_replica_prompt_task(
+    conn: BusinessConnection, *, worker_id: str, lease_minutes: int
+) -> BusinessRow | None:
+    """提示词域取件；返回原始行（域凭据含 project/asset/时长等，由调用方构造）。"""
+    now = _time_text(datetime.now(UTC))
+    locked_until = _time_text(datetime.now(UTC) + timedelta(minutes=lease_minutes))
+    # 过期 RUNNING 视为 worker 中断：置为可重试失败（错误字段留在任务行供查看）。
+    conn.execute(
+        """
+        UPDATE replica_prompt_tasks
+        SET status = 'FAILED',
+            error_code = 'REPLICA_PROMPT_WORKER_INTERRUPTED',
+            error_message_redacted = '长视频拆解任务执行中断，请重新开始。',
+            retryable = 1,
+            locked_by = NULL,
+            locked_until = NULL,
+            completed_at = %s,
+            updated_at = %s
+        WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
+        """,
+        (now, now, now),
+    )
+    # 认领前清掉 PENDING 行残留的旧失败字段：新尝试从干净状态开始。
+    conn.execute(
+        """
+        UPDATE replica_prompt_tasks
+        SET error_code = NULL, error_message_redacted = NULL,
+            failure_phase = NULL, retryable = 0
+        WHERE status = 'PENDING'
+          AND (error_code IS NOT NULL OR failure_phase IS NOT NULL)
+        """
+    )
+    row = conn.execute(
+        """
+        UPDATE replica_prompt_tasks
+        SET status = 'RUNNING',
+            attempt = attempt + 1,
+            locked_by = %s,
+            locked_until = %s,
+            started_at = COALESCE(started_at, %s),
+            updated_at = %s,
+            error_code = NULL,
+            error_message_redacted = NULL,
+            failure_phase = NULL,
+            retryable = 0
+        WHERE id = (
+            SELECT id FROM replica_prompt_tasks
+            WHERE status = 'PENDING'
+            ORDER BY created_at, id
+            LIMIT 1 FOR UPDATE SKIP LOCKED
+        ) AND status = 'PENDING'
+        RETURNING *
+        """,
+        (worker_id, locked_until, now, now),
+    ).fetchone()
+    conn.commit()
+    return cast(BusinessRow | None, row)
+
+
+# ===========================================================================
+# 拆解（analysis）：仅过期回收段移入（RETURNING 供域内 attempt 历史留痕）；
+# 认领因与预取 FOR UPDATE/attempt 簿记耦合保留在 analysis_routes 本域。
+# ===========================================================================
+
+
+def recover_analysis_interrupted(conn: BusinessConnection) -> list[BusinessRow]:
+    """回收过期 RUNNING 的拆解任务并返回 (id, attempt, request_id) 行。"""
+    now = _time_text(datetime.now(UTC))
+    return list(
+        conn.execute(
+            """
+            UPDATE analysis_tasks
+            SET status = 'FAILED',
+                error_code = 'ANALYSIS_WORKER_INTERRUPTED',
+                error_message_redacted = '拆解任务执行中断，请重新拆解。',
+                retryable = 1,
+                locked_by = NULL,
+                locked_until = NULL,
+                completed_at = %s,
+                updated_at = %s
+            WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
+            RETURNING id, attempt, request_id
+            """,
+            (now, now, now),
+        ).fetchall()
     )
