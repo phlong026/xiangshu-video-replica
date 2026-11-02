@@ -271,7 +271,6 @@ def create_character_generation_tasks(
     owner_user_id = str(identity["owner_user_id"] or identity["created_by"] or actor.id)
     task_rows: list[BusinessRow]
     try:
-        conn.execute("BEGIN IMMEDIATE")
         latest_version = read_version_row(conn, version_id)
         latest_existing = find_idempotent_character_tasks(
             conn,
@@ -462,7 +461,6 @@ def acquire_character_generation_task(
         datetime.now(UTC) + timedelta(seconds=CHARACTER_GENERATION_LEASE_SECONDS)
     ).isoformat()
     try:
-        conn.execute("BEGIN IMMEDIATE")
         finalize_expired_character_generation_leases(conn)
         row = conn.execute(
             """
@@ -678,7 +676,6 @@ def _run_character_generation_task(
         )
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
         require_character_generation_lease_owned(conn, task=task, worker_id=worker_id)
         require_character_generation_context_active(conn, task=task)
         conn.execute(

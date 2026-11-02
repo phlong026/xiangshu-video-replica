@@ -102,7 +102,6 @@ def review_character_asset(
 
     review_id = str(uuid4())
     try:
-        conn.execute("BEGIN IMMEDIATE")
         asset = read_character_asset_row(conn, character_asset_id)
         version = read_version_row(conn, str(asset["character_version_id"]))
         require_version_review_mutable(version)
@@ -233,7 +232,6 @@ def publish_character_version(
         snapshot = publication_snapshot(prepared, version=version, published_at=published_at)
         snapshot_json = encode_json(snapshot)
         publication_hash = hashlib.sha256(snapshot_json.encode()).hexdigest()
-        conn.execute("BEGIN IMMEDIATE")
         latest_version = read_version_row(conn, version_id)
         if str(latest_version["status"]) == "PUBLISHED":
             require_published_selection_matches(

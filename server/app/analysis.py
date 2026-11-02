@@ -1118,7 +1118,6 @@ def create_or_recover_analysis_version(
 ) -> tuple[BusinessRow, bool]:
     """Create one analysis version, or reuse the winner of a concurrent recovery."""
     try:
-        conn.execute("BEGIN IMMEDIATE")
         existing = find_analysis_version_for_asset(
             conn,
             project_id=project_id,
