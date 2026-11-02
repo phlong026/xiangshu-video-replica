@@ -12,10 +12,11 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import Database
 from app.billing_catalog import SERVICES
 from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
+from app.db_pg import pg_transaction
+from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.usage_billing import finish_source
@@ -53,10 +54,17 @@ class ViralSearchRefreshResponse(BaseModel):
 REFRESH_SERVICE = "viral_search_refresh"
 
 
-def get_viral_search_refresh_source_client(conn: Database) -> ViralSourceClient | None:
-    """数据源客户端依赖入口（测试可通过 dependency_overrides 替换）."""
+def get_viral_search_refresh_source_client() -> ViralSourceClient | None:
+    """数据源客户端依赖入口（测试可通过 dependency_overrides 替换）.
+
+    配置读取**自开短事务**，读毕即提交归还连接。此前依赖声明 ``conn: Database``，
+    请求级事务会横跨随后 ``douyin_refresh`` 外呼（上游慢时单次可达 138s+），连接
+    停在 idle-in-transaction 被 60s 护栏击杀、池被并发借空（2026-11-02 生产池饿死
+    事故的元凶模式之一）。
+    """
     try:
-        return viral_source_client_from_settings(conn)
+        with pg_transaction() as pg_conn:
+            return viral_source_client_from_settings(BusinessConnection.postgres(pg_conn))
     except ViralSourceUnavailable:
         return None
 

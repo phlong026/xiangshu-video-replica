@@ -17,6 +17,7 @@ from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.admin_write_contract import require_write_contract as _require_write_contract
 from app.auth import CurrentUser, Database
 from app.control_auth import ControlUser
+from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.ops_metrics import get_or_create_request_id
 from app.payment_provider import (
@@ -256,7 +257,6 @@ def zpay_return() -> HTMLResponse:
 @router.post("/payments/wechat_native/notify")
 async def wechat_native_notify(
     request: Request,
-    conn: Database,
     provider: WeChatProviderDep,
 ) -> JSONResponse:
     """WeChat Pay V3 Native transaction callback.
@@ -274,7 +274,6 @@ async def wechat_native_notify(
     raw_body = await request.body()
     return await run_in_threadpool(
         _handle_wechat_notification,
-        conn,
         provider,
         raw_body=raw_body,
         timestamp=request.headers.get("Wechatpay-Timestamp"),
@@ -285,7 +284,6 @@ async def wechat_native_notify(
 
 
 def _handle_wechat_notification(
-    conn: BusinessConnection,
     provider: WeChatNativeProvider,
     *,
     raw_body: bytes,
@@ -294,8 +292,12 @@ def _handle_wechat_notification(
     signature: str | None,
     serial: str | None,
 ) -> JSONResponse:
+    # 商户配置读取走**短事务**：verify_notification_raw 可能下载平台证书（外呼），
+    # 请求级事务若横跨它，慢 DNS/出网异常时连接停在 idle-in-transaction 被 60s
+    # 护栏击杀（2026-11-02 生产池饿死事故路径之一）。
     try:
-        merchant = provider.load_merchant_config(conn)
+        with pg_transaction() as pg_conn:
+            merchant = provider.load_merchant_config(BusinessConnection.postgres(pg_conn))
     except ValueError as exc:
         logger.warning("WeChat callback rejected: merchant config invalid: %s", exc)
         return _wechat_fail("WECHAT_CONFIGURATION_INVALID", status_code=503)
@@ -335,17 +337,19 @@ def _handle_wechat_notification(
     try:
         # Runs on the threadpool (see wechat_native_notify): synchronous PG lock
         # waits must not block dependency teardown on the event loop, since another
-        # callback may hold the order lock until commit.
-        confirm_recharge_payment(
-            conn,
-            merchant_order_no=result.merchant_order_no,
-            provider_trade_no=result.provider_trade_no,
-            amount_fen=result.amount_fen,
-            channel=result.channel,
-            source_digest=result.source_digest,
-            allowed_channels=merchant.allowed_channels,
-            provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC,
-        )
+        # callback may hold the order lock until commit. 结算自开短事务：
+        # 与验签窗口解耦，等订单行锁期间不占请求级连接。
+        with pg_transaction() as pg_conn:
+            confirm_recharge_payment(
+                BusinessConnection.postgres(pg_conn),
+                merchant_order_no=result.merchant_order_no,
+                provider_trade_no=result.provider_trade_no,
+                amount_fen=result.amount_fen,
+                channel=result.channel,
+                source_digest=result.source_digest,
+                allowed_channels=merchant.allowed_channels,
+                provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC,
+            )
     except PaymentConfirmationError as exc:
         logger.warning("WeChat callback settlement rejected: %s", exc.code)
         return _wechat_fail(exc.code, status_code=exc.status_code)

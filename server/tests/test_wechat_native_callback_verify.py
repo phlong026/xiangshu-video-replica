@@ -36,7 +36,6 @@ from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.auth import get_database
 from app.payment_provider import MerchantConfig, get_payment_provider
 from app.payment_routes import get_wechat_provider, router
 from app.wechat_native_client import (
@@ -532,14 +531,31 @@ class _CannedMerchantProvider(WeChatNativeProvider):
 
 
 def _notify_client(provider: WeChatNativeProvider) -> Iterator[TestClient]:
+    from contextlib import contextmanager
+
+    from app import payment_routes
+
     application = FastAPI()
     application.include_router(router)
     application.dependency_overrides[get_wechat_provider] = lambda: provider
     # Every branch under test answers before settlement, so the connection is
-    # never used; supplying one keeps the dependency from opening a real pool.
-    application.dependency_overrides[get_database] = lambda: object()
-    with TestClient(application) as client:
-        yield client
+    # never used. The route now opens its own short transaction for the merchant
+    # read; swap it for a dummy connection instead of opening a real pool.
+    original_pg_transaction = payment_routes.pg_transaction
+
+    class _DummyConn:
+        row_factory = None  # BusinessConnection.postgres 会读取该属性
+
+    @contextmanager
+    def _fake_pg_transaction(*, isolation: str | None = None):  # noqa: ANN001
+        yield _DummyConn()
+
+    payment_routes.pg_transaction = _fake_pg_transaction  # type: ignore[assignment]
+    try:
+        with TestClient(application) as client:
+            yield client
+    finally:
+        payment_routes.pg_transaction = original_pg_transaction
 
 
 @pytest.fixture
