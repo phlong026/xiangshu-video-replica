@@ -105,8 +105,10 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261014T1100_customer_ops_params（整改 T29 客户运营参数）与
 # 20261014T1200_admin_role_templates（整改 T41 权限点与角色模板）依次追加其上；
 # 20261016T1000_replica_prompt_tasks（长视频复刻提示词任务族）追加其上；
-# 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上，故链尾为该值。
-HEAD_REVISION = "20261101T1000_video_long_tier"
+# 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
+# 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
+# 列）追加其上，故链尾为该值。
+HEAD_REVISION = "20261102T0900_customer_session_last_seen"
 
 
 @pytest.mark.pg
@@ -427,9 +429,13 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # partial_indexes 各 +1、columns +19、check_constraints +4、foreign_keys +4；
 # 时间戳走 sa.Text()，timestamptz/jsonb/sequences/triggers 不变。digest 在
 # 迁到新 head 的隔离 PG16 探针库重算（与 CW-075/076 先例同法）。
+# 2026-11-02 会话 7 天滑动契约：customer_session_state 追加 last_seen_at 列
+# 与 last_seen_not_before_created CHECK（text 时间戳，timestamptz 计数不变），
+# 故 columns +1、check_constraints +1，表名集与其余计数不变；digest 在空库
+# →新 head 的 PG16 探针库（cw056_probe）重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 397,
-    "columns": 1515,
+    "check_constraints": 398,
+    "columns": 1516,
     "foreign_keys": 221,
     "identity_columns": 0,
     "jsonb_columns": 13,
@@ -698,7 +704,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "655de707901307e1f4daa9dd8d5ba1f0e274b8e961a33593a048ac237a92c7a8"
+HEAD_SCHEMA_DIGEST = "01d54854aa017fae9599b8499b5dcd89b0d22104d5fbc8657da60c20508e5b1a"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

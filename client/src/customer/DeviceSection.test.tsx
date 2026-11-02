@@ -42,8 +42,6 @@ const pendingPairing = {
 };
 
 const liveRuntime = {
-  connectivity: "reachable" as const,
-  lastHeartbeatAt: "2026-09-22T02:00:00Z",
   leaseExpiresAt: "2099-01-01T00:00:00Z",
 };
 
@@ -57,7 +55,6 @@ function fakeHandlers() {
   return {
     onApprovePairing: vi.fn(),
     onDismissPairing: vi.fn(),
-    onManualHeartbeat: vi.fn(),
     onPairDevice: vi.fn(),
     onRecharge: vi.fn(),
     onRefreshDevices: vi.fn().mockResolvedValue(undefined),

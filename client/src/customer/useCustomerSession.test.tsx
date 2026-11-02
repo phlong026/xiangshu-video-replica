@@ -474,9 +474,7 @@ describe("useCustomerSession", () => {
     const store = memoryStore();
     const fetchMock = stubFetch(() => jsonResponse({}));
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
 
     await waitFor(() => expect(result.current.screen).toBe("login"));
     expect(fetchMock).not.toHaveBeenCalled();
@@ -494,9 +492,7 @@ describe("useCustomerSession", () => {
     const store = memoryStore();
     const fetchMock = stubFetch(() => jsonResponse({}, 500));
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
 
     await waitFor(() => expect(result.current.screen).toBe("login"));
     // No unattended POST /api/customer/activate carrying an empty code: the
@@ -521,9 +517,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     act(() => {
@@ -551,9 +545,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
     expect(result.current.expiredNotice).toBeNull();
 
@@ -584,9 +576,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
 
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
     expect(store.snapshot().sessionToken).toBe("session-token-2");
@@ -616,9 +606,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
 
     await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
     expect(result.current.conflict).toEqual({
@@ -658,9 +646,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
 
     await act(async () => {
@@ -697,9 +683,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
 
     await act(async () => {
@@ -736,9 +720,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
     // 冲突屏打开时（尚未点切换）不得出现"切换失败"：409 的 error 属于
     // 进入路径，switchError 只在真正的切换失败后非空（FE-03）。
@@ -765,9 +747,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     act(() => {
@@ -791,9 +771,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     act(() => {
@@ -819,9 +797,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     act(() => {
@@ -857,9 +833,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     await act(async () => {
@@ -886,9 +860,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     // CW-017 DoD: logout must hand back a determinate outcome, not void — the
@@ -923,9 +895,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     // DoD: never call a local-only logout a server release. A 5xx logout still
@@ -966,9 +936,7 @@ describe("useCustomerSession", () => {
       new Error("vault I/O failure"),
     );
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     let outcome: unknown;
@@ -1003,9 +971,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     let firstLogout: Promise<unknown> | undefined;
@@ -1061,9 +1027,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     // Kick off logout; it parks on the gate (slow network) after nulling the
@@ -1104,9 +1068,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
 
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
     expect(result.current.user).toEqual({
@@ -1119,7 +1081,10 @@ describe("useCustomerSession", () => {
     });
   });
 
-  it("renews the lease with a heartbeat while the workspace is live", async () => {
+  it("sends no periodic heartbeat while the workspace is live (7-day contract)", async () => {
+    // 2026-11-02 契约变更的回归锁：续期已移到服务端（每次校验通过的请求滑动
+    // 续期），客户端不再有 30 秒心跳循环、也没有可见性补跳。工作台存续期间
+    // 推进两个旧心跳周期并触发 visibilitychange/focus，必须零 heartbeat 请求。
     vi.useFakeTimers();
     const store = memoryStore({ deviceToken: "device-token-1" });
     const fetchMock = stubFetch((url) => {
@@ -1132,96 +1097,31 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await vi.waitFor(() => expect(result.current.screen).toBe("workspace"));
-    const beatsBefore = fetchMock.mock.calls.filter(([url]) =>
-      String(url).endsWith("/api/customer/sessions/heartbeat"),
-    ).length;
-    expect(beatsBefore).toBe(0);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    });
-
-    const beatsAfter = fetchMock.mock.calls.filter(([url]) =>
-      String(url).endsWith("/api/customer/sessions/heartbeat"),
-    ).length;
-    expect(beatsAfter).toBe(2);
-  });
-
-  it("keeps renewing the lease while the window is hidden (minimized or occluded)", async () => {
-    // 会话租约由服务端计时（90 秒），本地心跳是唯一的续租手段。窗口最小化或
-    // 被遮挡时 WebView 会把页面标记为 hidden；此时若暂停心跳，租约必然到期，
-    // 用户就会在使用中被登出——正是「中途约 90 秒自动退出」的来源。
-    vi.useFakeTimers();
-    const store = memoryStore({ deviceToken: "device-token-1" });
-    const fetchMock = stubFetch((url) => {
-      if (url.endsWith("/api/customer/sessions/login")) {
-        return jsonResponse(loginBody, 201);
-      }
-      if (url.endsWith("/api/customer/sessions/heartbeat")) {
-        return jsonResponse(heartbeatBody, 200);
-      }
-      return jsonResponse({}, 500);
-    });
-    const hiddenSpy = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await vi.waitFor(() => expect(result.current.screen).toBe("workspace"));
-    expect(document.hidden).toBe(true);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    });
-
-    const beats = fetchMock.mock.calls.filter(([url]) =>
-      String(url).endsWith("/api/customer/sessions/heartbeat"),
-    ).length;
-    expect(beats).toBe(2);
-    hiddenSpy.mockRestore();
-  });
-
-  it("sends an immediate catch-up heartbeat when the window becomes visible again", async () => {
-    vi.useFakeTimers();
-    const store = memoryStore({ deviceToken: "device-token-1" });
-    const fetchMock = stubFetch((url) => {
-      if (url.endsWith("/api/customer/sessions/login")) {
-        return jsonResponse(loginBody, 201);
-      }
-      if (url.endsWith("/api/customer/sessions/heartbeat")) {
-        return jsonResponse(heartbeatBody, 200);
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await vi.waitFor(() => expect(result.current.screen).toBe("workspace"));
 
-    // 恢复可见时立刻补一次，不等待下一个 tick——否则回到窗口后仍可能先撞上
-    // 已经过期的租约。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
     await act(async () => {
       document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
     });
 
     const beats = fetchMock.mock.calls.filter(([url]) =>
       String(url).endsWith("/api/customer/sessions/heartbeat"),
     ).length;
-    expect(beats).toBe(1);
+    expect(beats).toBe(0);
+    // 会话有效期展示仍由登录响应驱动。
+    expect(result.current.sessionRuntime?.leaseExpiresAt).toBe(
+      loginBody.session_lease_expires_at,
+    );
   });
 
-  it("exposes the session lease runtime from login and clears it on logout", async () => {
+  it("exposes the session expiry runtime from login and clears it on logout", async () => {
     // B1：不再有激活入口，改用「凭设备凭据重新登录」到达工作台。
     const store = memoryStore({ deviceToken: "device-token-1" });
     stubFetch((url) => {
@@ -1234,223 +1134,17 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
     expect(result.current.sessionRuntime).not.toBeNull();
     expect(result.current.sessionRuntime?.leaseExpiresAt).toBe(
       loginBody.session_lease_expires_at,
     );
-    expect(
-      Number.isNaN(
-        Date.parse(result.current.sessionRuntime?.lastHeartbeatAt ?? ""),
-      ),
-    ).toBe(false);
 
     await act(async () => {
       await result.current.logout();
     });
     expect(result.current.sessionRuntime).toBeNull();
-  });
-
-  it("refreshes the runtime lease on heartbeat ticks and manual renewal", async () => {
-    vi.useFakeTimers();
-    const store = memoryStore({ deviceToken: "device-token-1" });
-    const fetchMock = stubFetch((url) => {
-      if (url.endsWith("/api/customer/sessions/login")) {
-        return jsonResponse(loginBody, 201);
-      }
-      if (url.endsWith("/api/customer/sessions/heartbeat")) {
-        return jsonResponse(heartbeatBody, 200);
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await vi.waitFor(() => expect(result.current.screen).toBe("workspace"));
-    // The restart login carries the login lease until the first beat lands.
-    expect(result.current.sessionRuntime?.leaseExpiresAt).toBe(
-      loginBody.session_lease_expires_at,
-    );
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
-    });
-    expect(result.current.sessionRuntime?.leaseExpiresAt).toBe(
-      heartbeatBody.lease_expires_at,
-    );
-
-    const beatsBefore = fetchMock.mock.calls.filter(([url]) =>
-      String(url).endsWith("/api/customer/sessions/heartbeat"),
-    ).length;
-    await act(async () => {
-      await result.current.sendHeartbeatNow();
-    });
-    expect(
-      fetchMock.mock.calls.filter(([url]) =>
-        String(url).endsWith("/api/customer/sessions/heartbeat"),
-      ).length,
-    ).toBe(beatsBefore + 1);
-  });
-
-  it("keeps the server lease while reporting a transient heartbeat failure separately", async () => {
-    const store = memoryStore({ deviceToken: "device-token-1" });
-    let heartbeatFails = true;
-    stubFetch((url) => {
-      if (url.endsWith("/api/customer/sessions/login")) {
-        return jsonResponse(loginBody, 201);
-      }
-      if (url.endsWith("/api/customer/sessions/heartbeat")) {
-        return heartbeatFails
-          ? jsonResponse({ detail: "network unavailable" }, 503)
-          : jsonResponse(heartbeatBody, 200);
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("workspace"));
-    const originalLease = result.current.sessionRuntime?.leaseExpiresAt;
-
-    await act(async () => result.current.sendHeartbeatNow());
-
-    expect(result.current.sessionRuntime).toEqual(
-      expect.objectContaining({
-        connectivity: "unreachable",
-        leaseExpiresAt: originalLease,
-      }),
-    );
-
-    heartbeatFails = false;
-    await act(async () => result.current.sendHeartbeatNow());
-    expect(result.current.sessionRuntime).toEqual(
-      expect.objectContaining({
-        connectivity: "reachable",
-        leaseExpiresAt: heartbeatBody.lease_expires_at,
-      }),
-    );
-  });
-
-  it("ignores an older heartbeat failure after a newer heartbeat succeeds", async () => {
-    const store = memoryStore({ deviceToken: "device-token-1" });
-    let resolveOlderHeartbeat:
-      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
-      | undefined;
-    const olderHeartbeat = new Promise<
-      Awaited<ReturnType<typeof jsonResponse>>
-    >((resolve) => {
-      resolveOlderHeartbeat = resolve;
-    });
-    let heartbeatCalls = 0;
-    stubFetch((url) => {
-      if (url.endsWith("/api/customer/sessions/login")) {
-        return jsonResponse(loginBody, 201);
-      }
-      if (url.endsWith("/api/customer/sessions/heartbeat")) {
-        heartbeatCalls += 1;
-        return heartbeatCalls === 1
-          ? olderHeartbeat
-          : jsonResponse(heartbeatBody, 200);
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("workspace"));
-
-    let olderRequest: Promise<void> | undefined;
-    act(() => {
-      olderRequest = result.current.sendHeartbeatNow();
-    });
-    await act(async () => result.current.sendHeartbeatNow());
-    expect(result.current.sessionRuntime).toEqual(
-      expect.objectContaining({
-        connectivity: "reachable",
-        leaseExpiresAt: heartbeatBody.lease_expires_at,
-      }),
-    );
-
-    resolveOlderHeartbeat?.(
-      await jsonResponse({ detail: "network unavailable" }, 503),
-    );
-    await act(async () => olderRequest);
-
-    expect(result.current.sessionRuntime).toEqual(
-      expect.objectContaining({
-        connectivity: "reachable",
-        leaseExpiresAt: heartbeatBody.lease_expires_at,
-      }),
-    );
-  });
-
-  it("ignores a heartbeat from the previous session after logout and login", async () => {
-    const store = memoryStore({ deviceToken: "device-token-1" });
-    let resolveOldHeartbeat:
-      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
-      | undefined;
-    const oldHeartbeat = new Promise<Awaited<ReturnType<typeof jsonResponse>>>(
-      (resolve) => {
-        resolveOldHeartbeat = resolve;
-      },
-    );
-    let loginCalls = 0;
-    const secondLoginBody = {
-      ...loginBody,
-      session_lease_expires_at: "2026-08-24T13:00:00Z",
-      request_id: "req-new-login",
-    };
-    stubFetch((url) => {
-      if (url.endsWith("/api/customer/sessions/login")) {
-        loginCalls += 1;
-        return jsonResponse(
-          loginCalls === 1 ? loginBody : secondLoginBody,
-          201,
-        );
-      }
-      if (url.endsWith("/api/customer/sessions/heartbeat")) {
-        return oldHeartbeat;
-      }
-      if (url.endsWith("/api/customer/sessions/logout")) {
-        return jsonResponse(undefined, 204);
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("workspace"));
-    let oldRequest: Promise<void> | undefined;
-    act(() => {
-      oldRequest = result.current.sendHeartbeatNow();
-    });
-    await act(async () => result.current.logout());
-    await act(async () => result.current.retryLogin());
-    expect(result.current.sessionRuntime?.leaseExpiresAt).toBe(
-      secondLoginBody.session_lease_expires_at,
-    );
-
-    resolveOldHeartbeat?.(
-      await jsonResponse(
-        { ...heartbeatBody, lease_expires_at: "2026-08-24T12:03:00Z" },
-        200,
-      ),
-    );
-    await act(async () => oldRequest);
-
-    expect(result.current.sessionRuntime).toEqual(
-      expect.objectContaining({
-        connectivity: "reachable",
-        leaseExpiresAt: secondLoginBody.session_lease_expires_at,
-      }),
-    );
   });
 
   it("never writes a credential into Web Storage (dev doc §7 red line)", async () => {
@@ -1462,9 +1156,7 @@ describe("useCustomerSession", () => {
       return jsonResponse({}, 500);
     });
 
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
+    const { result } = renderHook(() => useCustomerSession(store));
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     // FE-02 / §10.2: no plaintext secret may land in Web Storage — the

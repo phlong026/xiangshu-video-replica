@@ -1,4 +1,8 @@
-"""T19 / SES-01 — login, heartbeat, logout and the 30/90-second DB lease.
+"""T19 / SES-01 — login, heartbeat, logout and the 7-day sliding DB expiry.
+
+（2026-11-02 契约变更：原 30 秒心跳 / 90 秒租约改为 7 天滑动有效期，
+``lease_until`` 语义 = 会话到期时间，续命点在 fence 校验的节流续期；
+heartbeat 端点保留兼容旧客户端。）
 
 Fail-first tests for the frozen files ``server/app/customer_session_service.py``
 and ``server/app/customer_session_routes.py`` (code checklist §3.2 / §3.3):
@@ -14,21 +18,24 @@ acceptance spec §2.3 / §3.4):
   ``customer_session_state``:
 
   * no session row / expired lease -> establish the caller's session
-    (epoch + 1, fresh session token, lease = now + 90 s, ``LOGIN`` event; a
-    lapsed prior lease additionally records the system ``TIMEOUT`` event);
+    (epoch + 1, fresh session token, expiry = now + 7 days, ``LOGIN`` event;
+    a lapsed prior expiry additionally records the system ``TIMEOUT`` event);
   * same device + currently valid session token presented in the body ->
-    renew only: same token, same epoch, lease pushed to now + 90 s;
+    renew only: same token, same epoch, expiry slid to now + 7 days;
   * same device without a usable session token -> epoch + 1 and a fresh
     token (the recovery path — the old token can never heartbeat again);
   * another device online with a live lease -> 409 ``OTHER_DEVICE_ONLINE``
     with the masked device name and the remaining lease (never a silent
     kick, dev doc §3.3);
 
+- ``verify_session_context`` 校验成功后附带节流滑动续期：到期时间落后
+  超过节流窗口才写库（每会话至多每小时一次），失败路径零写；
+
 - ``POST /api/customer/sessions/heartbeat`` authenticates the *session* token
-  (Bearer): a matching token under a live lease renews the lease (epoch
-  untouched — §12.3 same-device lease extension) and appends a ``HEARTBEAT``
-  event; a token that no longer matches the row answers 401
-  ``SESSION_REPLACED``; a matching token under a lapsed lease answers 401
+  (Bearer; 旧客户端兼容端点): a matching token under a live lease renews the
+  expiry (epoch untouched — §12.3 same-device lease extension) and appends a
+  ``HEARTBEAT`` event; a token that no longer matches the row answers 401
+  ``SESSION_REPLACED``; a matching token under a lapsed expiry answers 401
   ``SESSION_EXPIRED`` and must never resurrect the session (acceptance §3.4);
 
 - ``POST /api/customer/sessions/logout`` authenticates the session token,
@@ -139,10 +146,20 @@ def _t19_dsn() -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_lease_seconds_matches_the_frozen_30_90_contract() -> None:
-    from app.customer_session_service import SESSION_LEASE_SECONDS
+def test_validity_seconds_match_the_7_day_sliding_contract() -> None:
+    """2026-11-02 契约变更：90 秒租约 + 30 秒心跳被 7 天滑动有效期取代。
 
-    assert SESSION_LEASE_SECONDS == 90
+    旧契约把任何 ≥90 秒的服务端断供放大成全体用户终态登出；本测试钉住
+    新常量与节流窗口，防止有人无意中把滑动有效期改回秒级。
+    """
+    from app.customer_session_service import (
+        SESSION_RENEWAL_WRITE_INTERVAL_SECONDS,
+        SESSION_VALIDITY_SECONDS,
+    )
+
+    assert SESSION_VALIDITY_SECONDS == 7 * 24 * 3600
+    # 节流窗口必须远小于有效期（续期才值得节流）且为正。
+    assert 0 < SESSION_RENEWAL_WRITE_INTERVAL_SECONDS < SESSION_VALIDITY_SECONDS
 
 
 def test_session_routes_keep_their_response_models_in_the_openapi_contract() -> None:
@@ -587,6 +604,29 @@ def _expire_lease(device_id: str) -> None:
         )
 
 
+def _age_expiry(device_id: str, remaining: timedelta) -> None:
+    """把到期时间改写为 now + remaining（模拟一个「上次活动已过去一段时间」的会话）。
+
+    滑动续期测试的老化旋钮：remaining 小于「7 天 - 节流窗口」即应触发续期。
+    """
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET lease_until = (now() + %s)::text WHERE device_id = %s",
+            (remaining, device_id),
+        )
+
+
+def _session_activity() -> tuple[str, str | None]:
+    """The live session row's timing pair: (lease_until, last_seen_at)."""
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT lease_until, last_seen_at FROM customer_session_state"
+        ).fetchone()
+    assert row is not None, "expected exactly one session row"
+    return str(row[0]), str(row[1]) if row[1] is not None else None
+
+
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -969,6 +1009,81 @@ def test_heartbeat_after_logout_fails_with_session_expired(client: TestClient) -
     stale = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
     assert stale.status_code == 401, stale.text
     assert stale.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+
+# ---------------------------------------------------------------------------
+# Sliding renewal — 7 天滑动有效期的服务端续命点（verify_session_context）
+# ---------------------------------------------------------------------------
+
+
+def test_activation_grants_a_seven_day_expiry_and_records_last_seen(
+    client: TestClient,
+) -> None:
+    from app.customer_session_service import SESSION_VALIDITY_SECONDS
+
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    lease_raw, last_seen_raw = _session_activity()
+    remaining = datetime.fromisoformat(lease_raw) - datetime.now(UTC)
+    # 激活即授予完整 7 天（留 30 秒余量覆盖执行耗时）。
+    assert (
+        timedelta(seconds=SESSION_VALIDITY_SECONDS - 30)
+        < remaining
+        <= timedelta(seconds=SESSION_VALIDITY_SECONDS)
+    ), remaining
+    assert last_seen_raw is not None, "activation must stamp last_seen_at"
+
+
+def test_verify_renews_the_expiry_only_beyond_the_throttle_window(
+    client: TestClient,
+) -> None:
+    """节流续期：新鲜会话零写；落后超过节流窗口才滑回 now + 7 天。"""
+    from app.customer_auth import verify_session_context
+    from app.customer_session_service import SESSION_VALIDITY_SECONDS
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    # 新鲜会话（刚刚 now + 7d）：verify 不写库，lease 原样保留。
+    with pg_transaction() as conn:
+        ctx = verify_session_context(conn, presentation_session_token=customer["session_token"])
+    fresh_lease, _ = _session_activity()
+    assert ctx.lease_until == fresh_lease
+    assert datetime.fromisoformat(fresh_lease) - datetime.now(UTC) > timedelta(
+        seconds=SESSION_VALIDITY_SECONDS - 60
+    )
+
+    # 老化到剩余 6 天（落后超过 7 天 - 1 小时的阈值）：verify 滑回 now + 7 天。
+    _age_expiry(customer["device_id"], remaining=timedelta(days=6))
+    with pg_transaction() as conn:
+        ctx = verify_session_context(conn, presentation_session_token=customer["session_token"])
+    renewed_lease, renewed_seen = _session_activity()
+    assert datetime.fromisoformat(renewed_lease) - datetime.now(UTC) > timedelta(
+        seconds=SESSION_VALIDITY_SECONDS - 60
+    ), renewed_lease
+    # ctx 返回续期后的到期时间，且 last_seen_at 一并刷新。
+    assert ctx.lease_until == renewed_lease
+    assert renewed_seen is not None
+    # 续期不写事件、不动 epoch（区别于 heartbeat 的 HEARTBEAT 事件）。
+    _, _, row_epoch, _, _ = _session_row()
+    assert row_epoch == 1
+    assert [e[0] for e in _session_events()] == ["ACTIVATED"]
+
+
+def test_verify_never_renews_an_expired_session(client: TestClient) -> None:
+    """过期校验在续期之前失败：终态不复活，也不留下任何续期写。"""
+    import pytest
+
+    from app.customer_auth import SessionFencingError, verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _expire_lease(customer["device_id"])
+
+    with pg_transaction() as conn, pytest.raises(SessionFencingError) as caught:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    assert caught.value.code == "SESSION_EXPIRED"
+    lapsed_lease, _ = _session_activity()
+    assert datetime.fromisoformat(lapsed_lease) <= datetime.now(UTC) + timedelta(seconds=1)
 
 
 # ---------------------------------------------------------------------------

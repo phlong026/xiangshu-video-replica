@@ -72,12 +72,11 @@ export type CustomerSessionConflict = {
   leaseExpiresAt: string;
 };
 
-/** Live session health for the workspace UI (A1 wiring of FE-04 / T31):
- * when the last heartbeat succeeded and when the server lease lapses.
- * Client-clock timestamps; `null` while no session is established. */
+/** Live session health for the workspace UI: when the current session expiry
+ * lands (server clock, slid forward by every verified request under the 7-day
+ * contract). `null` while no session is established. The heartbeat-derived
+ * connectivity/lastHeartbeatAt fields were retired with the 90-second lease. */
 export type CustomerSessionRuntime = {
-  connectivity: "reachable" | "unreachable";
-  lastHeartbeatAt: string;
   leaseExpiresAt: string | null;
 };
 
@@ -113,8 +112,6 @@ export type CustomerWorkspaceUser = {
   parentUserId: string | null;
   parentDisplayName: string | null;
 };
-
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 
 function newIdempotencyKey(): string {
   return crypto.randomUUID();
@@ -174,15 +171,14 @@ function logoutFailureError(
 
 /**
  * The customer session orchestrator (FE-02): boots from the credential
- * store, drives login/logout, listens for the three lifecycle
- * events (§10.1), and keeps the lease alive with heartbeats while the
- * workspace is live. Screen transitions all flow through the
- * customer-state reducer — nothing here jumps screens directly.
+ * store, drives login/logout, and listens for the three lifecycle
+ * events (§10.1). The 30-second heartbeat loop was retired with the
+ * 90-second lease (2026-11-02 契约变更): the server now slides a 7-day
+ * expiry on every verified request, so the client no longer renews.
+ * Screen transitions all flow through the customer-state reducer —
+ * nothing here jumps screens directly.
  */
-export function useCustomerSession(
-  store: CustomerCredentialStore,
-  options?: { heartbeatIntervalMs?: number },
-): {
+export function useCustomerSession(store: CustomerCredentialStore): {
   screen: CustomerScreen;
   isBusy: boolean;
   error: CustomerApiError | null;
@@ -203,10 +199,6 @@ export function useCustomerSession(
   /** The user declined the takeover: back to the login screen, the other
    * device keeps the lease. */
   cancelSessionSwitch(): void;
-  /** Manual lease renewal for the HeartbeatStatus / LeaseCountdown refresh
-   * buttons. Failures stay silent — terminal outcomes arrive as the
-   * lifecycle events, transient ones are retried by the next tick. */
-  sendHeartbeatNow(): Promise<void>;
   /** 「登录已过期」终屏的定制说明；null = 显示通用文案（P2-2）。 */
   expiredNotice: string | null;
   logout(): Promise<CustomerLogoutOutcome>;
@@ -236,10 +228,6 @@ export function useCustomerSession(
   // global `error` — entering binding-conflict always leaves a 409 error in
   // `error`, and the dialog must not show "switch failed" before a switch.
   const [switchError, setSwitchError] = useState<string | null>(null);
-  // The in-memory session token powers heartbeat/logout. The persistent
-  // copy lives only in the injected store; this state is intentionally not
-  // persisted anywhere else.
-  const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [user, setUser] = useState<CustomerWorkspaceUser | null>(null);
   const [sessionRuntime, setSessionRuntime] =
     useState<CustomerSessionRuntime | null>(null);
@@ -255,55 +243,20 @@ export function useCustomerSession(
     ((input: AccountAccessInput) => Promise<void>) | undefined
   >(undefined);
   const sessionGenerationRef = useRef(0);
-  const latestHeartbeatRequestIdRef = useRef(0);
   const bootstrappedRef = useRef(false);
 
-  // Every established/renewed lease updates the runtime view: the heartbeat
-  // timestamp is the client clock at success, the lease comes from the
-  // server response.
+  // Every established/renewed session updates the runtime view with the
+  // server-side expiry (the 7-day sliding contract; the client no longer
+  // renews, so there is no heartbeat timestamp to track).
   const noteLease = useCallback((leaseExpiresAt: string | null) => {
     setSessionRuntime({
-      connectivity: "reachable",
-      lastHeartbeatAt: new Date().toISOString(),
       leaseExpiresAt,
     });
   }, []);
 
-  const noteHeartbeatFailure = useCallback(() => {
-    setSessionRuntime((current) =>
-      current ? { ...current, connectivity: "unreachable" } : current,
-    );
-  }, []);
-
-  const sendHeartbeat = useCallback(
-    async (token: string) => {
-      const requestId = ++latestHeartbeatRequestIdRef.current;
-      const sessionGeneration = sessionGenerationRef.current;
-      const belongsToCurrentSession = () =>
-        requestId === latestHeartbeatRequestIdRef.current &&
-        sessionGeneration === sessionGenerationRef.current &&
-        token === sessionTokenRef.current;
-      try {
-        const body = await customerHeartbeat(
-          { kind: "session", token },
-          { shouldDispatchLifecycle: belongsToCurrentSession },
-        );
-        if (belongsToCurrentSession()) {
-          noteLease(body.lease_expires_at);
-        }
-      } catch {
-        if (belongsToCurrentSession()) {
-          noteHeartbeatFailure();
-        }
-      }
-    },
-    [noteHeartbeatFailure, noteLease],
-  );
-
   useEffect(
     () => () => {
       sessionGenerationRef.current += 1;
-      latestHeartbeatRequestIdRef.current += 1;
     },
     [],
   );
@@ -321,13 +274,15 @@ export function useCustomerSession(
           token: previousSessionToken,
         };
         try {
+          // 冷启动有效期探测复用 heartbeat 端点（服务端为 7 天滑动契约保留的
+          // 兼容端点）：它按会话令牌应答并回带最新到期时间，正好兼具「令牌还有
+          // 效吗」与「到期时间是几点」两问，无需为探测新增接口。
           const lease = await customerHeartbeat(sessionCredential, {
             shouldDispatchLifecycle: () => false,
           });
           const profile = await customerGetProfile(sessionCredential);
           sessionTokenRef.current = previousSessionToken;
           sessionGenerationRef.current += 1;
-          setSessionToken(previousSessionToken);
           setUser({
             userId: profile.user_id,
             username: profile.username,
@@ -366,7 +321,6 @@ export function useCustomerSession(
       }
       sessionTokenRef.current = result.session.session_token;
       sessionGenerationRef.current += 1;
-      setSessionToken(result.session.session_token);
       // CW-062：设备凭据恢复不带身份（响应里只有 user_id）；从凭据库缓存读回
       // 子账号身份。旧金库没有缓存时身份未知（null），徽章暂不可见，直到
       // 下一次密码登录刷新。
@@ -504,8 +458,6 @@ export function useCustomerSession(
     const clearSession = () => {
       sessionTokenRef.current = null;
       sessionGenerationRef.current += 1;
-      latestHeartbeatRequestIdRef.current += 1;
-      setSessionToken(null);
       setUser(null);
       setConflict(null);
       setSessionRuntime(null);
@@ -519,10 +471,11 @@ export function useCustomerSession(
       dispatch({ type: "session-expired" });
     };
     const onExpired = () => {
-      // 电脑休眠 / WebView 冻结后租约（90 秒，写入验收合同，不能拉长）必然过期。用户
-      // 若本来就勾选了「记住密码」，凭据已在本机金库里：先静默重登一次，成功则无缝
-      // 接上（FIX-10）；没记住、重登失败（冲突、断网、改过密码）一律回到原有的
-      // 「登录已过期」终屏。只对「过期」重登，「被顶替」绝不重登，否则两台设备会互踢。
+      // 7 天滑动契约下「过期」只剩两种来源：连续 7 天未使用，或服务端显式拉回
+      // 到期时间。用户若本来就勾选了「记住密码」，凭据已在本机金库里：先静默
+      // 重登一次，成功则无缝接上（FIX-10）；没记住、重登失败（冲突、断网、改过
+      // 密码）一律回到原有的「登录已过期」终屏。只对「过期」重登，「被顶替」
+      // 绝不重登，否则两台设备会互踢。
       if (silentReloginRef.current) return;
       if (!rememberedHintRef.current) {
         finishExpired();
@@ -558,8 +511,6 @@ export function useCustomerSession(
     const onRevoked = () => {
       sessionTokenRef.current = null;
       sessionGenerationRef.current += 1;
-      latestHeartbeatRequestIdRef.current += 1;
-      setSessionToken(null);
       setUser(null);
       setConflict(null);
       setSessionRuntime(null);
@@ -575,47 +526,6 @@ export function useCustomerSession(
       window.removeEventListener(CUSTOMER_SESSION_REVOKED_EVENT, onRevoked);
     };
   }, [clearLifecycleCredentials, store.loadRememberedLogin]);
-
-  // Keep the lease alive while the workspace is live. A failing heartbeat
-  // ends through the lifecycle events above (the transport dispatches them
-  // on the terminal 401s), so errors here intentionally do not switch
-  // screens — §4.2: a displaced/expired session must not masquerade as a
-  // generic network/service failure either.
-  const heartbeatIntervalMs =
-    options?.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-  useEffect(() => {
-    if (screen !== "workspace" || sessionToken === null) {
-      return;
-    }
-    const beat = () => {
-      const token = sessionTokenRef.current;
-      if (token === null) {
-        return;
-      }
-      void sendHeartbeat(token);
-    };
-    const timer = window.setInterval(beat, heartbeatIntervalMs);
-    // 租约由服务端计时（SESSION_LEASE_SECONDS = 90 秒），本地心跳是唯一的续租
-    // 手段。窗口最小化或被遮挡时 WebView 会把页面标记为 hidden；此时若照旧暂停
-    // 心跳，租约必然到期，下一次请求就会拿到 401 SESSION_EXPIRED 并把用户弹回
-    // 登录屏——即「使用中约 90 秒自动退出」。因此心跳不再随可见性暂停。
-    // 心跳本身不改变会话归属，只是同一设备续租（会话按设备一行），
-    // 所以不存在「后台标签页维持在线表象」的问题。
-    // 恢复可见时立刻补一次，不等待下一个 tick：否则回到窗口后仍可能先撞上
-    // 已经过期的租约。
-    const beatOnRestore = () => {
-      if (!document.hidden) {
-        beat();
-      }
-    };
-    document.addEventListener("visibilitychange", beatOnRestore);
-    window.addEventListener("focus", beatOnRestore);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", beatOnRestore);
-      window.removeEventListener("focus", beatOnRestore);
-    };
-  }, [heartbeatIntervalMs, screen, sessionToken, sendHeartbeat]);
 
   const passwordAttemptRef = useRef<{
     fingerprint: string;
@@ -678,7 +588,6 @@ export function useCustomerSession(
         rememberedHintRef.current = input.remember;
         sessionTokenRef.current = response.session_token;
         sessionGenerationRef.current += 1;
-        setSessionToken(response.session_token);
         setUser({
           userId: response.user_id,
           username: response.username,
@@ -797,7 +706,6 @@ export function useCustomerSession(
       }
       sessionTokenRef.current = result.session.session_token;
       sessionGenerationRef.current += 1;
-      setSessionToken(result.session.session_token);
       // 显式切换设备仍是同一账号：身份从凭据库缓存延续（无缓存则未知）。
       const storedIdentity = await loadStoredIdentity(store);
       setUser({
@@ -834,14 +742,6 @@ export function useCustomerSession(
     dispatch({ type: "conflict-cancelled" });
   }, []);
 
-  const sendHeartbeatNow = useCallback(async () => {
-    const token = sessionTokenRef.current;
-    if (token === null) {
-      return;
-    }
-    await sendHeartbeat(token);
-  }, [sendHeartbeat]);
-
   const logoutInFlightRef = useRef(false);
   const logout = useCallback(async (): Promise<CustomerLogoutOutcome> => {
     if (logoutInFlightRef.current) {
@@ -859,7 +759,6 @@ export function useCustomerSession(
       const token = sessionTokenRef.current;
       sessionTokenRef.current = null;
       sessionGenerationRef.current = logoutGeneration;
-      latestHeartbeatRequestIdRef.current += 1;
       setError(null);
       setConflict(null);
       // No live session token means there is nothing for the server to release;
@@ -897,7 +796,6 @@ export function useCustomerSession(
           // the stale token stays on disk and the next login overwrites it.
           credentialCleared = false;
         }
-        setSessionToken(null);
         setUser(null);
         setSessionRuntime(null);
         dispatch({ type: "logout" });
@@ -934,8 +832,6 @@ export function useCustomerSession(
     (notice?: string) => {
       sessionTokenRef.current = null;
       sessionGenerationRef.current += 1;
-      latestHeartbeatRequestIdRef.current += 1;
-      setSessionToken(null);
       setUser(null);
       setConflict(null);
       setSessionRuntime(null);
@@ -968,7 +864,6 @@ export function useCustomerSession(
     switchSession,
     switchError,
     cancelSessionSwitch,
-    sendHeartbeatNow,
     logout,
     restartAfterExpiry,
     expireSessionLocally,

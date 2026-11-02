@@ -402,7 +402,7 @@ def test_activate_creates_full_chain_atomically(client: TestClient, clean_state:
         assert code_row[0] == "ACTIVE"
         assert code_row[1] == user_id
 
-        # session state: epoch=1 with a ~90 second lease on the server clock
+        # session state: epoch=1 with the 7-day sliding expiry on the server clock
         session = _row(
             conn,
             "SELECT activation_code_id, device_id, session_epoch, token_digest, lease_until "
@@ -417,7 +417,8 @@ def test_activate_creates_full_chain_atomically(client: TestClient, clean_state:
         assert payload["session_token"] != session[3]
         lease = datetime.fromisoformat(session[4])
         server_now = conn.execute("SELECT now()").fetchone()[0].replace(tzinfo=UTC)
-        assert timedelta(seconds=60) <= (lease - server_now) <= timedelta(seconds=120)
+        # 2026-11-02 契约变更：首授从 90 秒租约改为完整 7 天（留 30 秒余量）。
+        assert timedelta(days=7, seconds=-30) <= (lease - server_now) <= timedelta(days=7)
 
         # audit events recorded
         events = _count(
