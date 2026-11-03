@@ -1012,10 +1012,14 @@ def test_exchange_recovery_sets_password_then_password_login_survives_refresh(
     assert password_session is not None and str(password_session[0]) == "password"
 
 
-def test_password_login_has_unified_failure_and_shared_ip_account_budgets(
+def test_password_login_budget_is_paid_by_failures_only(
     client: TestClient,
     clean_sessions: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """管理端密码登录：成功零扣减，失败才消耗账号预算；IP 维度不再参与
+    登录（只留审计喂告警管线），失败审计仍按摘要落库。"""
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "2")
     exchange = client.post(
         "/api/control/admin/session/exchange",
         json={"credential": _issue("admin_u")},
@@ -1030,7 +1034,20 @@ def test_password_login_has_unified_failure_and_shared_ip_account_budgets(
         == 204
     )
 
+    # 成功登录零扣减：预算只有 2，连续四次成功全部放行。
+    for _ in range(4):
+        ok = client.post(
+            "/api/control/admin/session/password",
+            json={"username": "admin_u", "password": "Another Admin Passphrase 2026!"},
+        )
+        assert ok.status_code == 201, ok.text
+
+    # 两次失败（同账号）把预算打满；随后正确密码也被准入门拒绝。
     wrong = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": "Wrong Admin Passphrase!"},
+    )
+    wrong_again = client.post(
         "/api/control/admin/session/password",
         json={"username": "admin_u", "password": "Wrong Admin Passphrase!"},
     )
@@ -1039,9 +1056,17 @@ def test_password_login_has_unified_failure_and_shared_ip_account_budgets(
         json={"username": "ghost_admin", "password": "Wrong Admin Passphrase!"},
     )
 
-    assert wrong.status_code == unknown.status_code == 401
+    assert wrong.status_code == wrong_again.status_code == unknown.status_code == 401
     assert wrong.json() == unknown.json()
     assert wrong.json()["detail"]["code"] == "ADMIN_LOGIN_INVALID"
+    blocked = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": "Another Admin Passphrase 2026!"},
+    )
+    assert blocked.status_code == 429, blocked.text
+    assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
+    assert int(blocked.headers["Retry-After"]) >= 1
+
     with psycopg.connect(clean_sessions) as conn:
         counters = conn.execute(
             "SELECT bucket_key FROM security_rate_limit_counters "
@@ -1051,11 +1076,9 @@ def test_password_login_has_unified_failure_and_shared_ip_account_budgets(
             "SELECT dimension, identifier FROM security_auth_failures "
             "WHERE dimension IN ('login:ip', 'login:account')"
         ).fetchall()
-    assert {str(row[0]).split("|", 1)[0] for row in counters} == {
-        "login:account",
-        "login:ip",
-    }
-    assert len(failures) == 4
+    # 只剩账号桶参与登录；IP 维度仅保留失败审计（告警管线仍消费它）。
+    assert {str(row[0]).split("|", 1)[0] for row in counters} == {"login:account"}
+    assert len(failures) == 6
     assert all(len(str(row[1])) == 64 for row in failures)
     assert all("admin_u" not in str(row) and "ghost_admin" not in str(row) for row in failures)
 

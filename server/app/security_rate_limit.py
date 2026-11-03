@@ -15,8 +15,15 @@ Dimensions (CHECK-constrained in 032 and extended by 042):
 - ``activate:code``  — keyed digest of the normalized activation code
   (never the plaintext: a hammering attacker must burn the code budget
   without the failure audit ever storing the code itself);
-- ``login:ip`` / ``login:account`` — reserved for the T19 login lane so
-  the same engine, tables and thresholds carry over unchanged;
+- ``login:account`` — the password sign-in budget (customer & administrator),
+  paid ONLY on failed attempts since the 2026-11-02「登录频繁」remediation:
+  successful sign-ins and silent re-logins spend nothing (admission checks
+  use the read-only ``peek_rate_limit``), so brute-force protection never
+  punishes legitimate repeat sign-ins. Sign-in deliberately ignores the IP
+  dimension — behind office NAT one account's failures would lock out every
+  user sharing the address;
+- ``login:ip`` — no longer drawn by sign-in; retained for the registration
+  anti-spam budget and as an audit-only failure signal;
 - ``admin:exchange:ip`` — a digest of the client address presenting the
   one-shot administrator exchange credential (added by revision 042/T37).
 - ``session:fencing`` — durable old-session write rejects (added by
@@ -358,6 +365,57 @@ def consume_rate_limit(
     return RateLimitDecision(
         allowed=allowed,
         retry_after_seconds=retry_after_seconds,
+        hit_count=hit_count,
+    )
+
+
+def peek_rate_limit(
+    conn: psycopg.Connection,
+    *,
+    dimension: str,
+    identifier: str,
+    limit: int,
+    window_seconds: int,
+    now: datetime | None = None,
+) -> RateLimitDecision:
+    """Read-only admission check: is this bucket's live window exhausted?
+
+    The login lanes pay their budget only on failed attempts (成功登录零扣减),
+    so admission needs a check that spends nothing: a successful sign-in, a
+    silent re-login after a lapsed lease or an incident-driven mass re-login
+    must never consume budget — only consecutive failures do. The failure
+    path calls ``consume_rate_limit``; this read decides entry. A lapsed or
+    absent bucket is always admitted.
+    """
+    if dimension not in RATE_LIMIT_DIMENSIONS:
+        raise ValueError(f"unknown rate-limit dimension {dimension!r}")
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+
+    current = now if now is not None else _server_now(conn)
+    current = current.astimezone(UTC).replace(microsecond=0)
+    cutoff = (current - timedelta(seconds=window_seconds)).isoformat()
+    row = conn.execute(
+        f"SELECT hit_count, window_start FROM {COUNTERS_TABLE} WHERE bucket_key = %s",
+        (bucket_key(dimension, identifier),),
+    ).fetchone()
+    if row is None:
+        return RateLimitDecision(allowed=True, retry_after_seconds=0, hit_count=0)
+    hit_count = int(row[0])
+    effective_window_start = datetime.fromisoformat(str(row[1]))
+    if effective_window_start.tzinfo is None:
+        effective_window_start = effective_window_start.replace(tzinfo=UTC)
+    if effective_window_start <= datetime.fromisoformat(cutoff):
+        return RateLimitDecision(allowed=True, retry_after_seconds=0, hit_count=0)
+    if hit_count < limit:
+        return RateLimitDecision(allowed=True, retry_after_seconds=0, hit_count=hit_count)
+    window_end = effective_window_start + timedelta(seconds=window_seconds)
+    remaining = (window_end - current).total_seconds()
+    return RateLimitDecision(
+        allowed=False,
+        retry_after_seconds=max(1, math.ceil(remaining)),
         hit_count=hit_count,
     )
 

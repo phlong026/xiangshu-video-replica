@@ -61,7 +61,7 @@ REGISTER_PATH = "/api/customer/register"
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、20260926T0000
 # 爆款首页策展排行与 20260925T1400 计费触发器追加修复（api_metadata 的 PENDING 期写入）。
-HEAD_REVISION = "20261016T1000_replica_prompt_tasks"
+HEAD_REVISION = "20261102T0900_customer_session_last_seen"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.
@@ -1001,12 +1001,16 @@ def test_password_response_replay_retains_identity_during_key_rotation(
     assert "session_token" not in damaged.text
 
 
-def test_registration_and_failed_login_limits_persist_after_rejection(
+def test_registration_ip_limit_and_password_failure_budget(
     client: TestClient,
     route_state: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """注册通道保留 IP 预算（注册没有账号维度可扣，是防刷注册的唯一闸门）；
+    密码登录通道只在失败时消耗账号预算——预算打满后连正确密码也被拒，
+    但正确密码本身的成功登录永远不会为预算做贡献。IP 维度不参与登录。"""
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP", "1")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "2")
     assert (
         client.post(
             REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}
@@ -1016,12 +1020,34 @@ def test_registration_and_failed_login_limits_persist_after_rejection(
     limited = client.post(REGISTER_PATH, json={"username": "bobby", "password": VALID_PASSWORD})
     assert limited.status_code == 429
     assert int(limited.headers["Retry-After"]) > 0
+    # 两次失败把账号预算（2）打满；第三次——哪怕密码正确——被准入门拒绝。
     assert _password_login(client, password="wrong-6").status_code == 401
-    assert _password_login(client).status_code == 429
+    assert _password_login(client, password="wrong-7").status_code == 401
+    blocked = _password_login(client)
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
     with psycopg.connect(route_state) as conn:
         assert (
             conn.execute("SELECT count(*) FROM users WHERE username = 'bobby'").fetchone()[0] == 0
         )
+
+
+def test_successful_password_logins_never_consume_budget(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成功登录零扣减：静默重登（租约过期自动续登）与日常反复登录永远
+    不会互相挤兑预算——这是「登录频繁」工单的核心根因修复。"""
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "2")
+    assert (
+        client.post(
+            REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}
+        ).status_code
+        == 201
+    )
+    for _ in range(4):
+        response = _password_login(client)
+        assert response.status_code in (200, 201), response.text
 
 
 def test_concurrent_password_retries_create_one_device_and_one_session(

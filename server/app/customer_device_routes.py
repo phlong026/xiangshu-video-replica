@@ -173,7 +173,6 @@ from app.security_rate_limit import (
     DIMENSION_ACTIVATE_IP,
     DIMENSION_ACTIVATION_RESET_DEVICE,
     DIMENSION_ACTIVATION_RESET_IP,
-    DIMENSION_CUSTOMER_PREAUTH_IP,
     RateLimitDecision,
     activation_code_limit,
     activation_ip_limit,
@@ -182,7 +181,6 @@ from app.security_rate_limit import (
     apply_anti_enumeration_delay,
     client_ip_from_request,
     consume_rate_limit,
-    customer_preauth_ip_limit,
     failure_alert_active,
     failure_alert_threshold,
     rate_limit_window_seconds,
@@ -350,21 +348,6 @@ def _request_id(request: Request) -> str:
     return get_or_create_request_id(request)
 
 
-def _consume_customer_preauth(request: Request) -> None:
-    with pg_transaction() as conn:
-        decision = consume_rate_limit(
-            conn,
-            dimension=DIMENSION_CUSTOMER_PREAUTH_IP,
-            identifier=client_ip_from_request(request),
-            limit=customer_preauth_ip_limit(),
-            window_seconds=rate_limit_window_seconds(),
-        )
-    if not decision.allowed:
-        blocked = _http(429, "RATE_LIMITED", "Too many customer device requests.")
-        blocked.headers = {RETRY_AFTER_HEADER: str(decision.retry_after_seconds)}
-        raise blocked
-
-
 def _insert_customer_device_audit(
     conn: psycopg.Connection,
     *,
@@ -422,7 +405,6 @@ def list_devices(request: Request) -> DeviceListResponse:
     """The two-slot status view: current bindings plus unbind history, and
     any PENDING second-device pairing awaiting this account's approval."""
     _require_pg()
-    _consume_customer_preauth(request)
     token = _bearer_token(request)
     with pg_transaction() as conn:
         device = _authenticate(conn, token)
@@ -504,7 +486,6 @@ def _replay_unbind_response(
 def unbind_device_route(device_id: str, request: Request) -> Response:
     """Unbind one of the caller's own devices; the row stays as history."""
     _require_pg()
-    _consume_customer_preauth(request)
     idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
     if not idempotency_key:
         raise _http(
@@ -1006,7 +987,6 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
         )
 
     _require_pg()
-    _consume_customer_preauth(request)
 
     try:
         fingerprint_digests, fingerprint_key_version = fingerprint_digests_for(fingerprint)
@@ -1418,7 +1398,6 @@ def approve_device_pairing(pairing_id: str, request: Request) -> PairingApproveR
     surface, §12.2 step 6).
     """
     _require_pg()
-    _consume_customer_preauth(request)
     token = _bearer_token(request)
     request_id = _request_id(request)
     with pg_transaction() as conn:
@@ -1499,7 +1478,6 @@ def approve_device_pairing(pairing_id: str, request: Request) -> PairingApproveR
 def dismiss_device_pairing(pairing_id: str, request: Request) -> Response:
     """Dismiss an invalid pending/approved pairing without deleting audit lineage."""
     _require_pg()
-    _consume_customer_preauth(request)
     token = _bearer_token(request)
     request_id = _request_id(request)
     with pg_transaction() as conn:
@@ -1610,7 +1588,6 @@ def reset_customer_activation_code(
     Any unconsumed pairing created with the previous code is invalidated.
     """
     _require_pg()
-    _consume_customer_preauth(request)
     idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
     if not idempotency_key:
         raise _http(400, "IDEMPOTENCY_KEY_REQUIRED", "An Idempotency-Key header is required.")

@@ -58,7 +58,7 @@ from app.security_rate_limit import (
     client_ip_from_request,
     consume_rate_limit,
     login_account_limit,
-    login_ip_limit,
+    peek_rate_limit,
     rate_limit_window_seconds,
     record_auth_failure,
 )
@@ -482,28 +482,32 @@ def _admin_login_identifiers(request: Request, username: str) -> tuple[str, str]
     )
 
 
-def _spend_admin_password_budget(
-    request: Request,
-    *,
-    username: str,
-) -> tuple[RateLimitDecision, RateLimitDecision]:
-    ip_identifier, account_identifier = _admin_login_identifiers(request, username)
+def _assert_admin_password_open(request: Request, *, username: str) -> None:
+    """管理端密码登录的准入门：只拒绝失败预算已打满的账号，本身零扣减。
+
+    预算由失败路径（``_record_admin_password_failure``）支付：成功登录、
+    改密后的重新登录都不消耗预算。IP 维度不再参与登录（办公 NAT 会惩罚
+    共享出口的全体管理员），仅保留失败审计喂告警管线。
+    """
+    _, account_identifier = _admin_login_identifiers(request, username)
     with pg_transaction() as conn:
-        ip_decision = consume_rate_limit(
-            conn,
-            dimension=DIMENSION_LOGIN_IP,
-            identifier=ip_identifier,
-            limit=login_ip_limit(),
-            window_seconds=rate_limit_window_seconds(),
-        )
-        account_decision = consume_rate_limit(
+        decision = peek_rate_limit(
             conn,
             dimension=DIMENSION_LOGIN_ACCOUNT,
             identifier=account_identifier,
             limit=login_account_limit(),
             window_seconds=rate_limit_window_seconds(),
         )
-    return ip_decision, account_decision
+    if not decision.allowed:
+        set_current_result_code("RATE_LIMITED")
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "RATE_LIMITED",
+                "message": "Too many administrator sign-in attempts. Try again later.",
+            },
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
 
 
 def _record_admin_password_failure(
@@ -515,6 +519,14 @@ def _record_admin_password_failure(
     ip_identifier, account_identifier = _admin_login_identifiers(request, username)
     try:
         with pg_transaction() as conn:
+            # 失败才扣账号预算（成功零扣减）；login:ip 只留审计不再扣减。
+            consume_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=account_identifier,
+                limit=login_account_limit(),
+                window_seconds=rate_limit_window_seconds(),
+            )
             for dimension, identifier in (
                 (DIMENSION_LOGIN_IP, ip_identifier),
                 (DIMENSION_LOGIN_ACCOUNT, account_identifier),
@@ -674,8 +686,8 @@ def load_admin_session(
     to the browser environment (User-Agent) only. A changed network egress IP
     must no longer revoke an operator mid-session — office NAT rotation used to
     surface as repeated forced logouts. ``created_ip_digest`` is still recorded
-    for audit, and the IP dimension of the *login* rate limiter
-    (``_spend_admin_password_budget``) is unchanged.
+    for audit; the login lanes no longer draw an IP budget at all
+    (2026-11-02「登录频繁」remediation).
     """
     rejection: tuple[str, str] | None = None
     actor: AdminActor | None = None
@@ -1120,30 +1132,13 @@ def login_admin_with_password(
     request_id = get_or_create_request_id(request)
     username = body.username.strip()
     try:
-        ip_decision, account_decision = _spend_admin_password_budget(
-            request,
-            username=username,
-        )
+        _assert_admin_password_open(request, username=username)
     except (RuntimeError, ValueError) as exc:
         raise _http(
             503,
             "ADMIN_SESSIONS_UNAVAILABLE",
             "Admin sessions require the PostgreSQL runtime.",
         ) from exc
-    if not ip_decision.allowed or not account_decision.allowed:
-        retry_after = max(
-            ip_decision.retry_after_seconds,
-            account_decision.retry_after_seconds,
-        )
-        set_current_result_code("RATE_LIMITED")
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "code": "RATE_LIMITED",
-                "message": "Too many administrator sign-in attempts. Try again later.",
-            },
-            headers={"Retry-After": str(retry_after)},
-        )
     try:
         actor_user_id = _authenticate_admin_password(username, body.password)
     except RuntimeError as exc:

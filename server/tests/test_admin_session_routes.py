@@ -690,6 +690,46 @@ def test_list_customer_sessions_filters_out_expired_lease(client: TestClient):
 
 
 @pytest.mark.pg
+def test_list_sessions_requires_recent_activity_under_the_7day_contract(
+    client: TestClient,
+):
+    """2026-11-02 契约变更后 lease_until 长期恒真，「在线」改由 10 分钟活动
+    窗口判定：有效但 30 分钟无活动的会话不出现在在线视图；恢复活动后
+    重新出现。created_at 同步回拨以满足 last_seen_not_before_created 与
+    lease_after_created CHECK（同上上面的回拨模式）。"""
+    _admin_session(client)
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET lease_until = to_char((now() + interval '7 days') AT TIME ZONE 'UTC', "
+            '  \'YYYY-MM-DD"T"HH24:MI:SS"+00:00"\'), '
+            "last_seen_at = to_char((now() - interval '30 minutes') AT TIME ZONE 'UTC', "
+            '  \'YYYY-MM-DD"T"HH24:MI:SS"+00:00"\'), '
+            "created_at = to_char((now() - interval '2 hours') AT TIME ZONE 'UTC', "
+            '  \'YYYY-MM-DD"T"HH24:MI:SS"+00:00"\') '
+            "WHERE user_id = 'customer_u'"
+        )
+    per_customer = client.get(SESSIONS_PATH.format(user_id="customer_u"))
+    live = client.get("/api/control/customer-sessions/live")
+    assert per_customer.status_code == 200, per_customer.text
+    assert per_customer.json()["total"] == 0
+    assert live.status_code == 200, live.text
+    assert live.json()["total"] == 0
+
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET last_seen_at = to_char((now() - interval '5 minutes') AT TIME ZONE 'UTC', "
+            '  \'YYYY-MM-DD"T"HH24:MI:SS"+00:00"\') '
+            "WHERE user_id = 'customer_u'"
+        )
+    per_customer = client.get(SESSIONS_PATH.format(user_id="customer_u"))
+    live = client.get("/api/control/customer-sessions/live")
+    assert per_customer.json()["total"] == 1
+    assert live.json()["total"] == 1
+
+
+@pytest.mark.pg
 def test_list_customer_sessions_filters_out_non_bound_device(
     client: TestClient, route_state: str
 ) -> None:

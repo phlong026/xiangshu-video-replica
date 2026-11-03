@@ -78,6 +78,10 @@ class AdmissionConnection:
                 for row in self.store.rows:
                     if row["status"] == "RUNNING" and row.get("expired"):
                         row["status"] = "SUBMISSION_UNCERTAIN"
+            elif "SET status = 'FAILED'" in sql and "IMAGE_TASK_SUBMISSION_EXPIRED" in sql:
+                # UNCERTAIN 超窗自动转失败：fake 里的行都是「刚落库」（无时间
+                # 流逝），永不命中 5 分钟窗口；窗口语义由 PG matrix 用例覆盖。
+                pass
             elif "SET status = 'RUNNING'" in sql:
                 self.row = next((r for r in self.store.rows if r["status"] == "PENDING"), None)
                 if self.row:

@@ -604,32 +604,39 @@ def normalize_audio_to_mp3(
             source_path.write_bytes(content)
         except OSError as exc:
             raise MediaToolFailed("音频临时文件写入失败") from exc
-        _run(
-            [
-                ffmpeg_path,
-                "-v",
-                "error",
-                "-y",
-                "-xerror",
-                "-nostdin",
-                "-protocol_whitelist",
-                "file,pipe",
-                "-i",
-                str(source_path),
-                "-map",
-                "0:a:0",
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "44100",
-                "-c:a",
-                "mp3",
-                "-b:a",
-                "128k",
-                str(output_path),
-            ]
-        )
+        # 不加 -xerror：手机实录音普遍带少量损坏包，逐包跳过即可产出干净
+        # MP3；-xerror 会把首个解码错误升级成致命退出，把可救的录音判死。
+        # 产物随后仍经完整探测与时长校验兜底，不会静默交付坏文件。
+        try:
+            _run(
+                [
+                    ffmpeg_path,
+                    "-v",
+                    "error",
+                    "-y",
+                    "-nostdin",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-i",
+                    str(source_path),
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "44100",
+                    "-c:a",
+                    "mp3",
+                    "-b:a",
+                    "128k",
+                    str(output_path),
+                ]
+            )
+        except MediaToolFailed as exc:
+            # 走到这里说明源音频连宽容解码都过不了，属文件问题而非工具故障；
+            # 归为校验失败，避免把"换一段录音"误报成"媒体校验服务暂不可用"。
+            raise MediaValidationFailed("音频无法转码，请重新录制或更换文件") from exc
         try:
             normalized = output_path.read_bytes()
         except OSError as exc:

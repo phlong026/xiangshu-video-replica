@@ -222,48 +222,39 @@ def _registration_budget(request: Request) -> None:
         )
 
 
-def _login_budget(request: Request, username: str) -> None:
+def _assert_login_not_exhausted(username: str) -> None:
+    """密码通道的准入门：只拒绝失败预算已打满的账号，本身零扣减。
+
+    预算由失败路径支付（见登录失败分支）：成功登录、租约过期后的静默重登、
+    服务端事故后的集中重登都不消耗预算——只有连续密码失败（真爆破）才会
+    触发 429。IP 维度不再参与登录：办公 NAT 会让全体用户共享同一个地址桶，
+    一个账号的失败惩罚所有人（2026-11-02「登录频繁」工单根因）。
+    """
     from app.customer_device_service import highest_device_domain_key, keyed_digest
     from app.security_rate_limit import (
         DIMENSION_LOGIN_ACCOUNT,
-        DIMENSION_LOGIN_IP,
-        client_ip_from_request,
-        consume_rate_limit,
         login_account_limit,
-        login_ip_limit,
+        peek_rate_limit,
         rate_limit_window_seconds,
     )
 
     _, key = highest_device_domain_key()
-    decisions = []
-    # Commit budgets even when the subsequent password/transaction fails.
     with pg_transaction() as conn:
-        for dimension, identifier, limit in (
-            (DIMENSION_LOGIN_IP, "password:" + client_ip_from_request(request), login_ip_limit()),
-            (
-                DIMENSION_LOGIN_ACCOUNT,
-                keyed_digest(key, "password:" + username),
-                login_account_limit(),
-            ),
-        ):
-            decisions.append(
-                consume_rate_limit(
-                    conn,
-                    dimension=dimension,
-                    identifier=identifier,
-                    limit=limit,
-                    window_seconds=rate_limit_window_seconds(),
-                )
-            )
-    denied = [item for item in decisions if not item.allowed]
-    if denied:
+        decision = peek_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=keyed_digest(key, "password:" + username),
+            limit=login_account_limit(),
+            window_seconds=rate_limit_window_seconds(),
+        )
+    if not decision.allowed:
         raise HTTPException(
             429,
             detail={
                 "code": "RATE_LIMITED",
                 "message": "登录尝试过于频繁，请稍后再试。",
             },
-            headers={"Retry-After": str(max(item.retry_after_seconds for item in denied))},
+            headers={"Retry-After": str(decision.retry_after_seconds)},
         )
 
 
@@ -368,7 +359,13 @@ def password_login(
     )
     from app.customer_session_service import login_session
     from app.ops_metrics import get_or_create_request_id
-    from app.security_rate_limit import DIMENSION_LOGIN_ACCOUNT, record_auth_failure
+    from app.security_rate_limit import (
+        DIMENSION_LOGIN_ACCOUNT,
+        consume_rate_limit,
+        login_account_limit,
+        rate_limit_window_seconds,
+        record_auth_failure,
+    )
 
     username = body.username.strip()
     key_text = request.headers.get("Idempotency-Key", "").strip()
@@ -425,11 +422,19 @@ def password_login(
                     replay_candidate = True
                     break
     if not replay_candidate:
-        _login_budget(request, username)
+        _assert_login_not_exhausted(username)
     encoded = str(row[3]) if row is not None and row[3] else _DUMMY_PASSWORD_HASH
     password_matches = verify_password(body.password, encoded)
     if row is None or not account_usable or not password_matches:
         with pg_transaction() as conn:
+            # 失败才扣预算（成功零扣减）：同一事务补记安全审计，两写同生同灭。
+            consume_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=keyed_digest(device_key, "password:" + username),
+                limit=login_account_limit(),
+                window_seconds=rate_limit_window_seconds(),
+            )
             record_auth_failure(
                 conn,
                 dimension=DIMENSION_LOGIN_ACCOUNT,

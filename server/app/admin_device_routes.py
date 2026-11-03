@@ -60,6 +60,7 @@ from app.customer_device_service import (
     revoke_device_credential,
     server_now_utc,
 )
+from app.customer_session_service import ONLINE_SESSION_PREDICATE
 from app.db_pg import pg_transaction
 from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
@@ -120,8 +121,10 @@ def list_devices(
     # 客户上限是全平台限制，先按客户计算真实占用，再作用于当前检索范围。
     bound_time = utc_text_timestamp("cd.bound_at")
     created_time = utc_text_timestamp("cd.created_at")
-    lease_time = utc_text_timestamp("css.lease_until")
     heartbeat_time = utc_text_timestamp("css.last_heartbeat_at")
+    # 2026-11-02 会话契约变更后「在线」= 会话有效 + 10 分钟内有活动
+    # （ONLINE_SESSION_PREDICATE），裸 lease 判定在 7 天滑动契约下恒真。
+    seen_time = utc_text_timestamp("css.last_seen_at")
     active_time = utc_text_timestamp("cd.last_active_at")
     unbound_time = utc_text_timestamp("cd.unbound_at")
     revoked_time = utc_text_timestamp("cd.revoked_at")
@@ -138,10 +141,11 @@ def list_devices(
         SELECT cd.id,cd.activation_code_id,cd.user_id,cd.slot_no,cd.display_name,
           cd.platform,cd.status,cd.bound_at,cd.unbound_at,cd.revoked_at,
           u.username,ac.masked_code,css.last_heartbeat_at,
-          COALESCE(cd.status='BOUND' AND {lease_time}>now(),false) AS online,
+          COALESCE(cd.status='BOUND' AND {ONLINE_SESSION_PREDICATE},false) AS online,
           u.display_name AS company_name,css.session_id,css.session_epoch,
           LEAST({bound_time},{created_time}) AS first_bound_at,
-          GREATEST({heartbeat_time},{active_time},history.last_active_at) AS last_active_at,
+          GREATEST({seen_time},{heartbeat_time},{active_time},history.last_active_at)
+            AS last_active_at,
           flags.at_slot_limit,flags.frequent_swaps_24h,
           {bound_time} AS bound_time,{revoked_time} AS revoked_time
         FROM customer_devices cd JOIN users u ON u.id=cd.user_id

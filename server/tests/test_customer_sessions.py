@@ -1,4 +1,8 @@
-"""T19 / SES-01 — login, heartbeat, logout and the 30/90-second DB lease.
+"""T19 / SES-01 — login, heartbeat, logout and the 7-day sliding DB expiry.
+
+（2026-11-02 契约变更：原 30 秒心跳 / 90 秒租约改为 7 天滑动有效期，
+``lease_until`` 语义 = 会话到期时间，续命点在 fence 校验的节流续期；
+heartbeat 端点保留兼容旧客户端。）
 
 Fail-first tests for the frozen files ``server/app/customer_session_service.py``
 and ``server/app/customer_session_routes.py`` (code checklist §3.2 / §3.3):
@@ -14,21 +18,24 @@ acceptance spec §2.3 / §3.4):
   ``customer_session_state``:
 
   * no session row / expired lease -> establish the caller's session
-    (epoch + 1, fresh session token, lease = now + 90 s, ``LOGIN`` event; a
-    lapsed prior lease additionally records the system ``TIMEOUT`` event);
+    (epoch + 1, fresh session token, expiry = now + 7 days, ``LOGIN`` event;
+    a lapsed prior expiry additionally records the system ``TIMEOUT`` event);
   * same device + currently valid session token presented in the body ->
-    renew only: same token, same epoch, lease pushed to now + 90 s;
+    renew only: same token, same epoch, expiry slid to now + 7 days;
   * same device without a usable session token -> epoch + 1 and a fresh
     token (the recovery path — the old token can never heartbeat again);
   * another device online with a live lease -> 409 ``OTHER_DEVICE_ONLINE``
     with the masked device name and the remaining lease (never a silent
     kick, dev doc §3.3);
 
+- ``verify_session_context`` 校验成功后附带节流滑动续期：到期时间落后
+  超过节流窗口才写库（每会话至多每小时一次），失败路径零写；
+
 - ``POST /api/customer/sessions/heartbeat`` authenticates the *session* token
-  (Bearer): a matching token under a live lease renews the lease (epoch
-  untouched — §12.3 same-device lease extension) and appends a ``HEARTBEAT``
-  event; a token that no longer matches the row answers 401
-  ``SESSION_REPLACED``; a matching token under a lapsed lease answers 401
+  (Bearer; 旧客户端兼容端点): a matching token under a live lease renews the
+  expiry (epoch untouched — §12.3 same-device lease extension) and appends a
+  ``HEARTBEAT`` event; a token that no longer matches the row answers 401
+  ``SESSION_REPLACED``; a matching token under a lapsed expiry answers 401
   ``SESSION_EXPIRED`` and must never resurrect the session (acceptance §3.4);
 
 - ``POST /api/customer/sessions/logout`` authenticates the session token,
@@ -43,11 +50,14 @@ acceptance spec §2.3 / §3.4):
   no second ``LOGIN`` event, ``X-Idempotent-Replay: true``), while the same
   key against a different request body answers 409 ``IDEMPOTENCY_CONFLICT``;
 
-- login is rate limited per device credential through the T45 account bucket,
-  with the shared IP bucket retained as an auxiliary signal, and answers 429
-  ``RATE_LIMITED`` once the credential budget is spent — while a fully validated
-  idempotent replay short-circuits *before* the limiter and spends no budget
-  (the activation-route T15 review rule);
+- login, switch and heartbeat carry **no rate-limit budget**: the device
+  credential is a 256-bit unguessable token with no guessable keyspace, and
+  cold-start restores, silent re-logins and heartbeats all ride these lanes —
+  charging them locks legitimate users out (the 2026-11-02「登录频繁/自动
+  退出」incident class). A fully validated idempotent replay still
+  short-circuits before any limiter and spends nothing (the activation-route
+  T15 review rule); the brute-force budget lives only in the password lane's
+  failure path;
 
 - A/B concurrent logins from an expired-lease state leave exactly one
   current device (acceptance §3.4) — the row lock serializes the writers.
@@ -139,10 +149,20 @@ def _t19_dsn() -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_lease_seconds_matches_the_frozen_30_90_contract() -> None:
-    from app.customer_session_service import SESSION_LEASE_SECONDS
+def test_validity_seconds_match_the_7_day_sliding_contract() -> None:
+    """2026-11-02 契约变更：90 秒租约 + 30 秒心跳被 7 天滑动有效期取代。
 
-    assert SESSION_LEASE_SECONDS == 90
+    旧契约把任何 ≥90 秒的服务端断供放大成全体用户终态登出；本测试钉住
+    新常量与节流窗口，防止有人无意中把滑动有效期改回秒级。
+    """
+    from app.customer_session_service import (
+        SESSION_RENEWAL_WRITE_INTERVAL_SECONDS,
+        SESSION_VALIDITY_SECONDS,
+    )
+
+    assert SESSION_VALIDITY_SECONDS == 7 * 24 * 3600
+    # 节流窗口必须远小于有效期（续期才值得节流）且为正。
+    assert 0 < SESSION_RENEWAL_WRITE_INTERVAL_SECONDS < SESSION_VALIDITY_SECONDS
 
 
 def test_session_routes_keep_their_response_models_in_the_openapi_contract() -> None:
@@ -587,6 +607,29 @@ def _expire_lease(device_id: str) -> None:
         )
 
 
+def _age_expiry(device_id: str, remaining: timedelta) -> None:
+    """把到期时间改写为 now + remaining（模拟一个「上次活动已过去一段时间」的会话）。
+
+    滑动续期测试的老化旋钮：remaining 小于「7 天 - 节流窗口」即应触发续期。
+    """
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET lease_until = (now() + %s)::text WHERE device_id = %s",
+            (remaining, device_id),
+        )
+
+
+def _session_activity() -> tuple[str, str | None]:
+    """The live session row's timing pair: (lease_until, last_seen_at)."""
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT lease_until, last_seen_at FROM customer_session_state"
+        ).fetchone()
+    assert row is not None, "expected exactly one session row"
+    return str(row[0]), str(row[1]) if row[1] is not None else None
+
+
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -643,9 +686,15 @@ def test_login_requires_idempotency_key(client: TestClient) -> None:
     assert response.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
 
 
-def test_login_is_rate_limited_per_device(
+def test_device_session_login_is_never_rate_limited(
     monkeypatch: pytest.MonkeyPatch, route_state: str
 ) -> None:
+    """设备凭据登录通道不设限流预算——即使把预算拧到最小也不扣减。
+
+    设备凭据是 256-bit 不可猜令牌，没有爆破面；冷启动恢复与静默重登都走
+    这条通道，扣预算只会把正常用户锁在门外（2026-11-02「登录频繁/自动
+    退出」工单根因之一）。防爆破预算只保留在密码通道的失败路径上。
+    """
     from app.activation_code_routes import router as activation_code_router
     from app.customer_session_routes import router as customer_session_router
 
@@ -673,21 +722,16 @@ def test_login_is_rate_limited_per_device(
         )
         headers = {
             **_bearer(customer["device_token"]),
-            IDEMPOTENCY_KEY_HEADER: "idem-budget",
+            IDEMPOTENCY_KEY_HEADER: "idem-nolimit",
         }
-        # Two requests fit the budget of 2; the third is refused.
-        first = tight_client.post(LOGIN_PATH, json={}, headers=headers)
-        second = tight_client.post(
-            LOGIN_PATH, json={}, headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-budget-2"}
-        )
-        third = tight_client.post(
-            LOGIN_PATH, json={}, headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-budget-3"}
-        )
-        assert first.status_code in (200, 201), first.text
-        assert second.status_code in (200, 201), second.text
-        assert third.status_code == 429, third.text
-        assert third.json()["detail"]["code"] == "RATE_LIMITED"
-        assert third.headers.get(RETRY_AFTER_HEADER) is not None
+        # 5 次全新提交（预算只有 2）——通道不再消费任何限流桶，全部放行。
+        for index in range(5):
+            response = tight_client.post(
+                LOGIN_PATH,
+                json={},
+                headers={**headers, IDEMPOTENCY_KEY_HEADER: f"idem-nolimit-{index}"},
+            )
+            assert response.status_code in (200, 201), response.text
 
 
 def test_login_idempotent_replay_spends_no_rate_limit_budget(
@@ -734,22 +778,27 @@ def test_login_idempotent_replay_spends_no_rate_limit_budget(
         assert replay.json() == first.json()
         assert replay.headers.get(REPLAY_HEADER) == "true"
 
-        # A second fresh key spends the remaining hit and replaces the first
-        # sealed session.  The third fresh submission is then refused.
+        # A second fresh key replaces the first sealed session. Fresh
+        # submissions draw no budget (设备通道不设限流)，so the third and
+        # fourth succeed too.
         second = tight_client.post(
             LOGIN_PATH,
             json={},
             headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-replay-budget-2"},
         )
         assert second.status_code in (200, 201), second.text
-
-        # The budget is spent; a fresh key is now refused.
-        blocked = tight_client.post(
+        third = tight_client.post(
             LOGIN_PATH,
             json={},
             headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-replay-budget-3"},
         )
-        assert blocked.status_code == 429, blocked.text
+        fourth = tight_client.post(
+            LOGIN_PATH,
+            json={},
+            headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-replay-budget-4"},
+        )
+        assert third.status_code in (200, 201), third.text
+        assert fourth.status_code in (200, 201), fourth.text
 
         # T45 S-1: once another login replaces the sealed session, the old
         # envelope is no longer replayable even though it was valid above.
@@ -936,6 +985,17 @@ def test_heartbeat_renews_the_lease_without_touching_epoch(client: TestClient) -
     assert [e[0] for e in _session_events()] == ["ACTIVATED", "HEARTBEAT"]
 
 
+def test_heartbeat_is_never_rate_limited(client: TestClient) -> None:
+    """心跳是设计内的 30 秒高频行为，任何 IP 维度预算（preauth 桶默认 60）
+    都会在 NAT 后多设备场景把续租打断——租约 90 秒断 3 次心跳即会话死亡。
+    心跳端点不再消费任何限流桶：默认预算 60 下连打 61 次全部续租成功。"""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    for _ in range(61):
+        response = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+        assert response.status_code == 200, response.text
+
+
 def test_heartbeat_rejects_forged_session_token(client: TestClient) -> None:
     _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
     response = client.post(HEARTBEAT_PATH, headers=_bearer(secrets.token_urlsafe(32)))
@@ -969,6 +1029,81 @@ def test_heartbeat_after_logout_fails_with_session_expired(client: TestClient) -
     stale = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
     assert stale.status_code == 401, stale.text
     assert stale.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+
+# ---------------------------------------------------------------------------
+# Sliding renewal — 7 天滑动有效期的服务端续命点（verify_session_context）
+# ---------------------------------------------------------------------------
+
+
+def test_activation_grants_a_seven_day_expiry_and_records_last_seen(
+    client: TestClient,
+) -> None:
+    from app.customer_session_service import SESSION_VALIDITY_SECONDS
+
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    lease_raw, last_seen_raw = _session_activity()
+    remaining = datetime.fromisoformat(lease_raw) - datetime.now(UTC)
+    # 激活即授予完整 7 天（留 30 秒余量覆盖执行耗时）。
+    assert (
+        timedelta(seconds=SESSION_VALIDITY_SECONDS - 30)
+        < remaining
+        <= timedelta(seconds=SESSION_VALIDITY_SECONDS)
+    ), remaining
+    assert last_seen_raw is not None, "activation must stamp last_seen_at"
+
+
+def test_verify_renews_the_expiry_only_beyond_the_throttle_window(
+    client: TestClient,
+) -> None:
+    """节流续期：新鲜会话零写；落后超过节流窗口才滑回 now + 7 天。"""
+    from app.customer_auth import verify_session_context
+    from app.customer_session_service import SESSION_VALIDITY_SECONDS
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    # 新鲜会话（刚刚 now + 7d）：verify 不写库，lease 原样保留。
+    with pg_transaction() as conn:
+        ctx = verify_session_context(conn, presentation_session_token=customer["session_token"])
+    fresh_lease, _ = _session_activity()
+    assert ctx.lease_until == fresh_lease
+    assert datetime.fromisoformat(fresh_lease) - datetime.now(UTC) > timedelta(
+        seconds=SESSION_VALIDITY_SECONDS - 60
+    )
+
+    # 老化到剩余 6 天（落后超过 7 天 - 1 小时的阈值）：verify 滑回 now + 7 天。
+    _age_expiry(customer["device_id"], remaining=timedelta(days=6))
+    with pg_transaction() as conn:
+        ctx = verify_session_context(conn, presentation_session_token=customer["session_token"])
+    renewed_lease, renewed_seen = _session_activity()
+    assert datetime.fromisoformat(renewed_lease) - datetime.now(UTC) > timedelta(
+        seconds=SESSION_VALIDITY_SECONDS - 60
+    ), renewed_lease
+    # ctx 返回续期后的到期时间，且 last_seen_at 一并刷新。
+    assert ctx.lease_until == renewed_lease
+    assert renewed_seen is not None
+    # 续期不写事件、不动 epoch（区别于 heartbeat 的 HEARTBEAT 事件）。
+    _, _, row_epoch, _, _ = _session_row()
+    assert row_epoch == 1
+    assert [e[0] for e in _session_events()] == ["ACTIVATED"]
+
+
+def test_verify_never_renews_an_expired_session(client: TestClient) -> None:
+    """过期校验在续期之前失败：终态不复活，也不留下任何续期写。"""
+    import pytest
+
+    from app.customer_auth import SessionFencingError, verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _expire_lease(customer["device_id"])
+
+    with pg_transaction() as conn, pytest.raises(SessionFencingError) as caught:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    assert caught.value.code == "SESSION_EXPIRED"
+    lapsed_lease, _ = _session_activity()
+    assert datetime.fromisoformat(lapsed_lease) <= datetime.now(UTC) + timedelta(seconds=1)
 
 
 # ---------------------------------------------------------------------------
@@ -1359,11 +1494,9 @@ def test_login_replay_rechecks_suspended_code(client: TestClient) -> None:
     assert replay.json()["detail"]["code"] == "CODE_SUSPENDED"
 
 
-def test_switch_is_rate_limited_through_the_login_device_budget(
-    monkeypatch: pytest.MonkeyPatch, route_state: str
-) -> None:
-    """The switch route draws the same per-device login budget as login — an
-    attacker must not bypass the login limiter by switching instead."""
+def test_switch_is_never_rate_limited(monkeypatch: pytest.MonkeyPatch, route_state: str) -> None:
+    """切换与会话登录同通道（设备凭据），同样不设限流预算——显式切换是
+    用户在冲突对话框里确认后的动作，扣预算等于惩罚正常的多设备使用。"""
     from app.activation_code_routes import router as activation_code_router
     from app.customer_session_routes import router as customer_session_router
 
@@ -1391,26 +1524,21 @@ def test_switch_is_rate_limited_through_the_login_device_budget(
         )
         headers = {
             **_bearer(customer["device_token"]),
-            IDEMPOTENCY_KEY_HEADER: "idem-switch-budget",
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-nolimit",
         }
-        # Budget of 2: one login, one switch — the third login-shaped request
-        # is refused whichever route it takes.
         login = tight_client.post(LOGIN_PATH, json={}, headers=headers)
-        switch = tight_client.post(
-            SWITCH_PATH,
-            json={},
-            headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-switch-budget-2"},
-        )
-        third = tight_client.post(
-            SWITCH_PATH,
-            json={},
-            headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-switch-budget-3"},
-        )
         assert login.status_code in (200, 201), login.text
-        assert switch.status_code in (200, 201), switch.text
-        assert third.status_code == 429, third.text
-        assert third.json()["detail"]["code"] == "RATE_LIMITED"
-        assert third.headers.get(RETRY_AFTER_HEADER) is not None
+        # 预算只有 2：连续三次切换全部放行。
+        for index in range(3):
+            switch = tight_client.post(
+                SWITCH_PATH,
+                json={},
+                headers={
+                    **headers,
+                    IDEMPOTENCY_KEY_HEADER: f"idem-switch-nolimit-{index}",
+                },
+            )
+            assert switch.status_code in (200, 201), switch.text
 
 
 def test_switch_writes_no_wallet_charge(client: TestClient) -> None:

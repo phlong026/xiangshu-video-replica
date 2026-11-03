@@ -469,6 +469,62 @@ def test_first_frame_quality_has_separate_single_attempt_budget():
     assert original.max_attempts == 2
 
 
+def test_quality_chat_json_coerces_string_notes_into_lists():
+    """网关模型会把 notes 返回成字符串（2026-10-26 生产实测），质检模型要求数组；
+    提交校验前做宽容归一，避免语义质检反复以 response-invalid 告警收场。"""
+    import json as json_module
+
+    from app.first_frames import (
+        ApilioFirstFrameQualityInspector,
+    )
+
+    candidate = {
+        "candidate_index": 0,
+        "person_count": 1,
+        "person_visibility_score": 0.9,
+        "face_clarity_score": 0.8,
+        "unobstructed_score": 0.7,
+        "pose_suitability_score": 0.6,
+        "motion_blur_detected": False,
+        "notes": "人物完整，脸部清晰",
+    }
+    content = json_module.dumps({"candidates": [candidate]}, ensure_ascii=False)
+    envelope = json_module.dumps({"choices": [{"message": {"content": content}}]}).encode()
+    transport = FakeApilioTransport(response_body=envelope)
+    inspector = ApilioFirstFrameQualityInspector(
+        api_key="test-key",
+        model="gemini-3.8-flash",
+        transport=transport,
+        max_attempts=1,
+    )
+
+    result = inspector.inspect_source_frame_candidates(
+        [type("F", (), {"image": b"frame-jpeg-bytes"})()]
+    )
+
+    assert result.provider == "apilio_gemini"
+    assert result.candidates[0].notes == ["人物完整，脸部清晰"]
+
+
+def test_source_frame_quality_budget_covers_real_vision_latency():
+    """源帧语义质检走同一网关，视觉调用实测单张小图就要 7.7~9.1 秒，
+    预算必须与首帧质检通道同级（60s），否则上线以来 100% 超时。"""
+    from app.first_frames import (
+        SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS,
+        ApilioFirstFrameQualityInspector,
+        bounded_source_frame_quality_inspector,
+    )
+
+    original = ApilioFirstFrameQualityInspector(api_key="test-key")
+    bounded = bounded_source_frame_quality_inspector(original)
+    assert SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS == 60.0
+    assert bounded.transport.timeout_seconds == SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS
+    assert bounded.max_attempts == 1
+
+    assert original.transport.timeout_seconds == 240
+    assert original.max_attempts == 2
+
+
 @pytest.mark.parametrize("resuming", [False, True])
 @pytest.mark.parametrize("appearance_source", ["SCENE_LOOK", "VIDEO_ANALYSIS"])
 def test_scene_replacement_has_no_ai_review_or_automatic_regeneration(resuming, appearance_source):

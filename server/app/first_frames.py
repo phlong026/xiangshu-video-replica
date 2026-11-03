@@ -90,7 +90,10 @@ APILIO_OUTPUT_HOSTS = frozenset({"files.closeai.fans"})
 MAX_PROVIDER_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_QUALITY_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_QUALITY_REQUEST_IMAGE_BYTES = 32 * 1024 * 1024
-SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS = 8.0
+# 网关视觉调用实测：单张 6.7KB 候选帧就要 7.7~9.1 秒，生产一次带最多 5 张
+# 真实帧。8 秒预算让语义质检自上线起 100% 超时（external_call_logs 223 次全
+# TIMEOUT），抬到与首帧质检通道同级的 60 秒。
+SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS = 60.0
 # 质检是标注不是闸门：先出图后质检，最多自动补做一轮；未通过的候选照样
 # 发布给用户，由人工确认环节决定是否使用。
 MAX_FIRST_FRAME_QUALITY_ATTEMPTS = 2
@@ -1123,7 +1126,7 @@ class ApilioFirstFrameQualityInspector:
                 payload = json.loads(raw_content)
                 if not isinstance(payload, dict):
                     raise TypeError("quality response must be an object")
-                return cast(dict[str, object], payload)
+                return _coerce_notes_lists(payload)
             except RetryableImageProviderFailed as exc:
                 last_error = exc
                 if attempt + 1 < self.max_attempts:
@@ -1139,6 +1142,25 @@ class ApilioFirstFrameQualityInspector:
                 last_error = exc
             break
         raise FirstFrameQualityInspectorFailed("first-frame quality request failed") from last_error
+
+
+def _coerce_notes_lists(payload: dict[str, object]) -> dict[str, object]:
+    """质检模型偶发把 notes 数组写成单个字符串（2026-10-26 生产实测），
+    递归做 str -> [str] 归一，其余结构原样保留。"""
+
+    def walk(node: object) -> object:
+        if isinstance(node, dict):
+            fixed = {k: walk(v) for k, v in node.items()}
+            notes = fixed.get("notes")
+            if isinstance(notes, str):
+                fixed["notes"] = [notes]
+            return fixed
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    coerced = walk(payload)
+    return coerced if isinstance(coerced, dict) else payload
 
 
 def bounded_first_frame_quality_inspector(

@@ -81,7 +81,7 @@ from app.customer_idempotency import (
 from app.customer_idempotency import (
     request_hash as compute_request_hash,
 )
-from app.customer_session_service import LOGIN_CONFLICT, SESSION_LEASE_SECONDS, login_session
+from app.customer_session_service import LOGIN_CONFLICT, SESSION_VALIDITY_SECONDS, login_session
 from app.db_pg import get_pg_pool, pg_transaction
 from app.ops_metrics import (
     get_or_create_request_id,
@@ -761,17 +761,25 @@ def _run_activation(
         (str(uuid.uuid4()), code_id, user_id, request_id),
     )
 
-    # Epoch-1 session on the server clock with the 90-second lease.
+    # Epoch-1 session on the server clock with the 7-day sliding expiry.
     session_token = secrets.token_urlsafe(32)
     session_token_digest = _keyed_digest(hmac_key, session_token)
     session_id = str(uuid.uuid4())
-    lease_until = (server_now + timedelta(seconds=SESSION_LEASE_SECONDS)).replace(microsecond=0)
+    lease_until = (server_now + timedelta(seconds=SESSION_VALIDITY_SECONDS)).replace(microsecond=0)
     conn.execute(
         "INSERT INTO customer_session_state "
         "(user_id, activation_code_id, device_id, session_id, token_digest, "
-        " session_epoch, lease_until) "
-        "VALUES (%s, %s, %s, %s, %s, 1, %s)",
-        (user_id, code_id, device_id, session_id, session_token_digest, lease_until.isoformat()),
+        " session_epoch, lease_until, last_seen_at) "
+        "VALUES (%s, %s, %s, %s, %s, 1, %s, %s)",
+        (
+            user_id,
+            code_id,
+            device_id,
+            session_id,
+            session_token_digest,
+            lease_until.isoformat(),
+            server_now.isoformat(),
+        ),
     )
     conn.execute(
         "INSERT INTO customer_session_events "

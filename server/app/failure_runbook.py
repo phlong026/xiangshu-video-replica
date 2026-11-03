@@ -120,6 +120,10 @@ FAILURE_RUNBOOK: dict[str, str] = {
         "图像任务提交结果未确认，已停止自动重试。先在生成记录里「重新核对」，确认服务商是否受理，"
         "避免重复扣费。"
     ),
+    "IMAGE_TASK_SUBMISSION_EXPIRED": (
+        "人物五视图生成结果未按时返回，系统已自动转为失败并释放额度（人物五视图上游"
+        "无任务号可查，无法人工核对）。无需处理，等待客户重新生成即可。"
+    ),
     # ---- 人物视图（character_generation_tasks.error_code）----
     "CHARACTER_PROVIDER_TIMEOUT": "人物图片服务超时。系统会自动重试；持续超时检查服务状态与并发。",
     "CHARACTER_PROVIDER_RATE_LIMITED": (
@@ -281,6 +285,7 @@ FAILURE_CLASSIFICATION: dict[str, tuple[FailureCategory, FailureOwner]] = {
     "IMAGE_TASK_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPS"),
     "IMAGE_TASK_STORAGE_UNAVAILABLE": ("DEFECT", "ENGINEERING"),
     "IMAGE_TASK_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPS"),
+    "IMAGE_TASK_SUBMISSION_EXPIRED": ("PROVIDER_FAULT", "SUPPORT"),
     "CHARACTER_PROVIDER_TIMEOUT": ("PROVIDER_BUSY", "OPS"),
     "CHARACTER_PROVIDER_RATE_LIMITED": ("PROVIDER_BUSY", "OPS"),
     "CHARACTER_PROVIDER_UNAVAILABLE": ("PROVIDER_FAULT", "OPS"),
