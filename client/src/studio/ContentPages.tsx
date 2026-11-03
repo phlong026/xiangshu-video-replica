@@ -2329,19 +2329,11 @@ export function ViralDetailPage() {
       returnTo: "viral-detail",
     });
   };
-  // 桌面端：本地抽音轨上传，平台不再需要为文案留存原片。
-  // Web 端（无本地缓存）：claim-first——先取共享文案，命中即秒回并跳过整次导入；
-  // 未命中回落服务端导入 → 转写链路（计费口径与桌面端一致）。
+  // 统一 claim-first（2026-11 爆款链路改造 WP3）：本地抽音轨上传已随
+  // POST /videos/copy 退役，桌面与 Web 同一动作——先取共享文案，命中即秒回并
+  // 跳过整次导入；未命中回落服务端导入 → 转写链路。详情页视频必然来自已发布
+  // 的公开列表，claim 不会因可见性 404。
   const requestExtract = () => {
-    if (cacheAvailable() && video.platformKey && video.nativeId) {
-      patchDraft({ sourceId: video.id });
-      extractViralCopy(video);
-      navigate("copy", {
-        selectedVideoId: video.id,
-        returnTo: "viral-detail",
-      });
-      return;
-    }
     if (video.platformKey && video.nativeId) {
       // 未命中时留在本页等导入进度，不提前跳转：导入完成后由 goExtract 导航。
       extractViralCopy(video, {

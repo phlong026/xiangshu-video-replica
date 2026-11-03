@@ -13,7 +13,7 @@ use std::process::Command;
 
 use tauri::Manager;
 
-use crate::viral_cache::{safe_segment, ViralCache};
+use crate::viral_cache::safe_segment;
 
 /// 在资源目录下按候选相对路径找可执行文件。
 ///
@@ -89,47 +89,6 @@ pub(crate) fn audio_path(root: &Path, platform: &str, video_id: &str) -> PathBuf
     root.join("audio")
         .join(safe_segment(platform))
         .join(format!("{}.m4a", safe_segment(video_id)))
-}
-
-/// 抽出已缓存视频的音轨并直接回传字节。
-///
-/// 回传字节而不是路径：调用方是 WebView，它读不了任意本地路径（本地播放要等
-/// assetProtocol，见 §6.3），而音轨本身只有几百 KB，直接给字节最省事。
-/// 用 `tauri::ipc::Response` 走原始字节通道，避免 `Vec<u8>` 被序列化成
-/// 逐元素的 JSON 数组（那样一个 240KB 的音轨会膨胀到 MB 级）。
-#[tauri::command]
-pub async fn viral_extract_audio(
-    app: tauri::AppHandle,
-    cache: tauri::State<'_, ViralCache>,
-    platform: String,
-    video_id: String,
-) -> Result<tauri::ipc::Response, String> {
-    let video = cache.video_path_for(&platform, &video_id);
-    if !video.is_file() {
-        // 没有本地缓存就没有可抽的音轨——调用方应先 ensure，而不是在这里
-        // 悄悄回服务端取（那会让「服务器不参与」的约束失效）。
-        return Err("该视频尚未缓存到本地，请先缓存后再提取文案。".to_string());
-    }
-    let root = cache.root_dir();
-    let audio = audio_path(&root, &platform, &video_id);
-    if let Some(parent) = audio.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| format!("无法创建音轨目录：{error}"))?;
-    }
-    let (ffmpeg, _ffprobe) = locate_tools(&app)?;
-    let video_for_task = video.clone();
-    let audio_for_task = audio.clone();
-    // ffmpeg 是阻塞进程，放到阻塞线程池，别占住异步运行时的工作线程。
-    tauri::async_runtime::spawn_blocking(move || {
-        extract_audio(&ffmpeg, &video_for_task, &audio_for_task)
-    })
-    .await
-    .map_err(|error| format!("抽取音轨任务异常：{error}"))??;
-    let bytes = tokio::fs::read(&audio)
-        .await
-        .map_err(|error| format!("读取音轨失败：{error}"))?;
-    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// 把用户上传的视频字节经 ffmpeg 抽成音轨字节：写临时文件 → 抽轨 → 读回，

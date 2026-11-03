@@ -8233,9 +8233,6 @@ export async function customerCloseRechargeOrder(
 const VIRAL_LIST_TIMEOUT_MS = 120_000;
 const VIRAL_MEDIA_TIMEOUT_MS = 120_000;
 const VIRAL_STATISTICS_TIMEOUT_MS = 150_000;
-// 本地抽出的音轨只有几百 KB，但桌面端还要在本机跑一次 ffmpeg 抽轨后才上传，
-// 冷启动的 ffmpeg 首帧较慢，给足余量而不是让它撞 10 秒的默认超时。
-const VIRAL_COPY_UPLOAD_TIMEOUT_MS = 180_000;
 // 关键词搜索除上游检索外，还要并发归档命中视频的封面（8 路，单封面上限 10MB），
 // 比纯读列表慢一个量级；给足余量，避免在归档中途被客户端超时中断。
 const VIRAL_SEARCH_TIMEOUT_MS = 240_000;
@@ -8845,55 +8842,6 @@ export function claimViralCopy(
       }),
     },
     VIRAL_LIST_TIMEOUT_MS,
-  );
-}
-
-/** 本地抽音轨上传后的受理回执：命中共享缓存时直接带文案，否则带待轮询的任务号。 */
-export type ViralCopyExtraction = {
-  text: string | null;
-  updatedAt: string | null;
-  /** 命中缓存时的计费回执：这条秒回同样扣过费（未命中时为 null）。 */
-  billing: ViralCopyBilling | null;
-  projectId: string | null;
-  sourceAssetId: string | null;
-  taskId: string | null;
-};
-
-/**
- * 上传客户端本地抽出的音轨，由服务端登记素材并建转写任务。
- *
- * 这是「平台不留存视频」的前提：上传的是客户端自己从**本地缓存的原视频**里抽出的
- * 单声道音轨（`viralCache.extractViralAudio`），平台不再需要为文案留存原片。
- * 幂等键相同的重试复用同一条任务，不会重复预留或重复转写。
- */
-export function createViralCopyExtraction(
-  platform: ViralPlatform,
-  videoId: string,
-  audio: Uint8Array,
-  idempotencyKey: string = createRequestKey("viral-copy"),
-): Promise<ViralCopyExtraction> {
-  const form = new FormData();
-  form.set("platform", platform);
-  form.set("videoId", videoId);
-  // 服务端只认 MP4 容器（抽取端与 provider 都固定 m4a），文件名不参与判定。
-  // 复制进独立的 ArrayBuffer：`Uint8Array<ArrayBufferLike>` 可能是 SharedArrayBuffer，
-  // 不是 BlobPart 接受的 ArrayBufferView<ArrayBuffer>。
-  const audioBuffer = new ArrayBuffer(audio.byteLength);
-  new Uint8Array(audioBuffer).set(audio);
-  form.set(
-    "file",
-    new Blob([audioBuffer], { type: "audio/mp4" }),
-    "copy-audio.m4a",
-  );
-  return requestApiJson<ViralCopyExtraction>(
-    "/api/viral/videos/copy",
-    "提交文案提取失败",
-    {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: form,
-    },
-    VIRAL_COPY_UPLOAD_TIMEOUT_MS,
   );
 }
 

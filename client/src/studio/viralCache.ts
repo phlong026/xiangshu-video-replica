@@ -156,23 +156,6 @@ export async function listenViralCacheProgress(
   return unlisten;
 }
 
-/** 抽出已缓存视频的音轨（m4a 字节），供文案转写上传。 */
-export async function extractViralAudio(
-  platform: string,
-  videoId: string,
-): Promise<Uint8Array> {
-  if (!cacheAvailable()) {
-    throw new Error("提取文案需要桌面端；Web 端暂不支持本地缓存。");
-  }
-  const bytes = await invoke<ArrayBuffer | number[]>("viral_extract_audio", {
-    platform,
-    videoId,
-  });
-  return bytes instanceof ArrayBuffer
-    ? new Uint8Array(bytes)
-    : Uint8Array.from(bytes);
-}
-
 /**
  * 对用户本机选择的视频文件本地抽音轨（>15s 提取文案专用）。
  *
@@ -199,11 +182,11 @@ export async function extractLocalVideoAudio(file: File): Promise<File> {
 }
 
 /**
- * 等到本地缓存就绪，返回后 `extractViralAudio` 才拿得到文件。
+ * 等到本地缓存就绪（下载/播放前的等待原语；本地抽音轨链路已退役）。
  *
  * `viral_cache_ensure` 是**入队即返回**的（真正下载交给后台队列，界面靠事件更新
- * 进度），所以「先 ensure 再抽音轨」之间必须自己等一次；否则未缓存过的视频会在
- * 抽音轨那一步直接报「尚未缓存到本地」。进度角标由 `useViralCacheProgress` 的
+ * 进度），所以消费方（播放、下载保存）必须自己等一次；否则未缓存过的视频会在
+ * 读文件那一步直接报「尚未缓存到本地」。进度角标由 `useViralCacheProgress` 的
  * 事件照常渲染，这里只负责不抢跑。
  */
 export async function awaitViralCacheReady(
