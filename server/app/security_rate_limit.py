@@ -147,11 +147,17 @@ _ANTI_ENUMERATION_PAD = b"video-replica:constant-cost"
 
 @dataclass(frozen=True)
 class RateLimitDecision:
-    """The verdict for one consumption attempt on one bucket."""
+    """The verdict for one consumption attempt on one bucket.
+
+    ``window_start`` 是本次扣减所属窗口的标识：占位-返还语义（登录原子准入）
+    的返还方必须携带同一标识，跨窗口的旧占位不得扣减新窗口的计数
+    （2026-11-03 A2 评审 P2：否则旧窗口末尾的占位会串扰新窗口的失败计数）。
+    """
 
     allowed: bool
     retry_after_seconds: int
     hit_count: int
+    window_start: str
 
 
 def client_ip_from_request(request: Request) -> str:
@@ -359,7 +365,38 @@ def consume_rate_limit(
         allowed=allowed,
         retry_after_seconds=retry_after_seconds,
         hit_count=hit_count,
+        window_start=effective_window_start.isoformat(),
     )
+
+
+def refund_rate_limit(
+    conn: psycopg.Connection,
+    *,
+    dimension: str,
+    identifier: str,
+    window_start: str,
+    now: datetime | None = None,
+) -> bool:
+    """Return one previously-consumed hit of ``dimension``/``identifier``.
+
+    占位-返还语义的另一半（登录限流原子准入，2026-11-03 会话 P1 批 S3）：
+    验密前 ``consume_rate_limit`` 先扣一个占位挡住并发绕过，登录成功后在此
+    返还——净效果是成功零消耗、失败保留累计（真爆破才烧预算）。
+
+    返还必须携带占位所属的 ``window_start``（``RateLimitDecision`` 原样
+    回传）：只回退同一窗口内的桶，杜绝旧窗口末尾的占位串扰新窗口的失败
+    计数（A2 评审 P2）。窗口已翻篇时那次占位本就不再约束任何人，无写。
+    同桶每笔返还一一对应一笔先行扣减，减法不会落到 0 以下。
+    """
+    if dimension not in RATE_LIMIT_DIMENSIONS:
+        raise ValueError(f"unknown rate-limit dimension {dimension!r}")
+    current = (now if now is not None else _server_now(conn)).astimezone(UTC).replace(microsecond=0)
+    cursor = conn.execute(
+        f"UPDATE {COUNTERS_TABLE} SET hit_count = hit_count - 1, updated_at = %s "
+        "WHERE bucket_key = %s AND window_start = %s AND hit_count > 0",
+        (current.isoformat(), bucket_key(dimension, identifier), window_start),
+    )
+    return cursor.rowcount == 1
 
 
 # ---------------------------------------------------------------------------
