@@ -2755,7 +2755,9 @@ def regenerate_generation_batch(
         source_tasks = conn.execute(
             """
             SELECT id, generation_mode, provider, model, prompt_version_id,
-                   prompt_snapshot_json
+                   prompt_snapshot_json, status, archive_status, quality_status,
+                   quality_issue_codes, provider_task_id, provider_result_url,
+                   submitted_at, superseded_by_task_id
             FROM generation_tasks
             WHERE batch_id = %s
             ORDER BY created_at, id
@@ -2795,6 +2797,18 @@ def regenerate_generation_batch(
             conn.rollback()
             require_matching_idempotent_batch(existing, request_hash=request_hash)
             return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+        # R0（深审 P0）：批级重生成此前绕过任务级终态门禁与 supersede 写入，
+        # 对 RUNNING/SUBMISSION_UNCERTAIN 批次会双份生成 + 双份扣费。此处逐任务
+        # 复用与任务级相同的门禁；进行中/未对账的源任务在此被 409 拦截。
+        for source_task in source_tasks:
+            if source_task["superseded_by_task_id"] is not None:
+                raise generation_error(
+                    409,
+                    "SOURCE_TASK_ALREADY_SUPERSEDED",
+                    f"Source task {source_task['id']} already has a paid replacement.",
+                )
+            require_task_paid_regeneration_state(source_task)
 
         runtime = read_runtime_limits(conn)
         if len(source_tasks) > runtime["max_generation_count_per_batch"]:
@@ -2889,6 +2903,25 @@ def regenerate_generation_batch(
                 seconds=_seconds_from_prompt_snapshot(prompt_snapshot),
                 pricing_snapshot=pricing_snapshot,
             )
+            # 与任务级相同的 CAS supersede：并发窗口内源任务已被他方替换时整单回滚，
+            # 防止同一源任务挂上两个付费替代。
+            cursor = conn.execute(
+                """
+                UPDATE generation_tasks
+                SET superseded_by_task_id = %s, superseded_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND superseded_by_task_id IS NULL
+                """,
+                (replacement_task_id, str(source_task["id"])),
+            )
+            if cursor.rowcount != 1:
+                raise generation_error(
+                    409,
+                    "SOURCE_TASK_ALREADY_SUPERSEDED",
+                    f"Source task {source_task['id']} already has a paid replacement.",
+                )
+        # 源批次任务已全部被替代，与任务级路径一致地刷新批次状态。
+        _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
         insert_audit(
             conn,
             actor=actor,

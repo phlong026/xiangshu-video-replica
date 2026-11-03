@@ -1209,3 +1209,126 @@ def test_regeneration_quote_never_guesses_or_disagrees_with_worker_specs(
             request_snapshot=json.dumps(request_payload),
             prompt_snapshots=[json.dumps(prompt_payload)],
         )
+
+
+# ---------------------------------------------------------------------------
+# R0（深审 2026-10-31 唯一 P0）：批级付费重生成的终态门禁与逐任务 CAS supersede。
+# 批级入口此前绕过任务级门禁，对进行中批次会双份生成 + 双份扣费。
+# 注：CAS 冲突（rowcount≠1→409）分支与任务级实现逐字同构，未建假连接用例——
+# Mimosa 候选扫描对测试替身的 execute 重载误报 SQL 注入（两次拦截），
+# 冲突路径由任务级既有实现背书 + 集成门禁兜底。
+# ---------------------------------------------------------------------------
+
+
+def _paid_regenerable_task(**overrides: Any) -> dict[str, Any]:
+    """满足真实终态门禁的源任务行（SUCCEEDED + DIRECT 归档 + 已提交）。"""
+    row: dict[str, Any] = {
+        "id": "source-task",
+        "batch_id": "source-batch",
+        "generation_mode": "I2V",
+        "provider": "fake_h3",
+        "model": "test-model",
+        "prompt_version_id": "prompt",
+        "prompt_snapshot_json": json.dumps({"resolution": "768P", "output_duration_seconds": 8}),
+        "status": "SUCCEEDED",
+        "archive_status": "DIRECT",
+        "quality_status": "NOT_REQUIRED",
+        "quality_issue_codes": "[]",
+        "provider_task_id": "prov-1",
+        "provider_result_url": "https://example.test/video",
+        "submitted_at": "2026-11-01 00:00:00",
+        "superseded_by_task_id": None,
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.fixture
+def batch_gate_scene(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """与 regeneration 夹具同构，但保留真实的任务级终态门禁不被打桩。"""
+    from app import generation
+
+    for name in (
+        "require_not_auditor",
+        "require_batch_access",
+        "_refresh_batch_status_in_transaction",
+    ):
+        monkeypatch.setattr(generation, name, lambda *a, **k: None)
+    monkeypatch.setattr(generation, "_find_idempotent_batch", lambda *a, **k: None)
+    conn = RegenerationConnection()
+    conn.tasks = [_paid_regenerable_task()]
+    return {"conn": conn, "actor": SimpleNamespace(id="child", role="customer")}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"status": "RUNNING"}, "PAID_REGENERATION_NOT_ALLOWED"),
+        ({"status": "SUBMISSION_UNCERTAIN"}, "MUST_RECONCILE_SUBMISSION"),
+        ({"archive_status": "ARCHIVE_FAILED"}, "ARCHIVE_RETRY_ONLY"),
+    ],
+)
+def test_batch_regeneration_enforces_task_level_terminal_gate(
+    overrides: dict[str, Any], code: str, batch_gate_scene: dict[str, Any]
+) -> None:
+    from app.generation import PaidRegenerationRequest
+
+    batch_gate_scene["conn"].tasks = [
+        _paid_regenerable_task(),
+        _paid_regenerable_task(id="second-task", **overrides),
+    ]
+    request = PaidRegenerationRequest(idempotency_key="gated-batch", generation_reason="重新生成")
+    with pytest.raises(HTTPException) as error:
+        regenerate("batch", batch_gate_scene, request)
+    assert error.value.detail["code"] == code
+    # 门禁必须在任何写入/预扣之前拦截，异常路径整单回滚。
+    assert batch_gate_scene["conn"].writes == []
+    assert batch_gate_scene["conn"].commits == 0
+
+
+def test_batch_regeneration_rejects_superseded_source_before_any_write(
+    batch_gate_scene: dict[str, Any],
+) -> None:
+    from app.generation import PaidRegenerationRequest
+
+    batch_gate_scene["conn"].tasks[0]["superseded_by_task_id"] = "prior-replacement"
+    request = PaidRegenerationRequest(
+        idempotency_key="superseded-batch", generation_reason="重新生成"
+    )
+    with pytest.raises(HTTPException) as error:
+        regenerate("batch", batch_gate_scene, request)
+    assert error.value.detail["code"] == "SOURCE_TASK_ALREADY_SUPERSEDED"
+    assert batch_gate_scene["conn"].writes == []
+    assert batch_gate_scene["conn"].commits == 0
+
+
+def test_batch_regeneration_supersedes_every_source_task(
+    pricing: dict[str, Any],
+    regeneration: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import generation
+    from app.generation import PaidRegenerationRequest
+
+    regeneration["conn"].tasks.append({**regeneration["conn"].tasks[0], "id": "second-task"})
+    refresh_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generation,
+        "_refresh_batch_status_in_transaction",
+        lambda *a, **k: refresh_calls.append(k),
+    )
+    quote = regeneration_quote("batch", regeneration)
+    request = PaidRegenerationRequest(
+        idempotency_key="supersede-batch",
+        generation_reason="重新生成",
+        quote_token=quote.quote_token,
+        max_credits=quote.max_credits,
+    )
+    result = regenerate("batch", regeneration, request)
+    assert result["id"] != "source-batch"
+    # 写入构成：批次 INSERT ×1 + 任务 INSERT ×2 + 逐任务 CAS supersede ×2。
+    assert len(regeneration["conn"].writes) == 5
+    # 源批次与任务级路径一致地刷新状态。
+    assert refresh_calls == [{"batch_id": "source-batch"}]
+    assert regeneration["conn"].commits == 1
+    assert len(regeneration["reservations"]) == 2
