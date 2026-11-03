@@ -17,7 +17,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 import psycopg
 
@@ -279,7 +279,7 @@ def login_session(
         ).fetchone()
         if stored is None:
             raise RuntimeError("unreachable: locked session row vanished during renewal")
-        lease_until_iso = cast(datetime, stored[0]).isoformat()
+        lease_until_iso = _as_utc(str(stored[0])).isoformat()
         _write_event(
             conn,
             event="LOGIN",
@@ -504,7 +504,9 @@ def heartbeat_session(
     ).fetchone()
     if stored is None:
         raise RuntimeError("unreachable: locked session row vanished during heartbeat")
-    lease_until_iso = cast(datetime, stored[0]).isoformat()
+    # 会话表时间列是 TEXT：RETURNING 取回真实存值，统一以本服务的
+    # isoformat 线格式返回（既有 API 契约；解析-重渲染不做精度截断）。
+    lease_until_iso = _as_utc(str(stored[0])).isoformat()
     _write_event(
         conn,
         event="HEARTBEAT",
@@ -582,7 +584,7 @@ def renew_session_expiry(
         ).fetchone()
         if stored is None:
             raise RuntimeError("unreachable: locked session row vanished during renewal")
-        return cast(datetime, stored[0]).isoformat()
+        return _as_utc(str(stored[0])).isoformat()
     conn.execute(
         "UPDATE customer_session_state "
         "SET last_seen_at = GREATEST(%s::timestamptz, "

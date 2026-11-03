@@ -618,13 +618,21 @@ def _age_expiry(device_id: str, remaining: timedelta) -> None:
 
 
 def _session_activity() -> tuple[str, str | None]:
-    """The live session row's timing pair: (lease_until, last_seen_at)."""
+    """The live session row's timing pair: (lease_until, last_seen_at).
+
+    时间列是 TEXT 但 GREATEST 写入路径会做 timestamptz 往返（PG 渲染格式），
+    这里统一归一为本服务的 isoformat 线格式，供与 API 返回值直接比较。
+    """
     with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
         row = conn.execute(
             "SELECT lease_until, last_seen_at FROM customer_session_state"
         ).fetchone()
     assert row is not None, "expected exactly one session row"
-    return str(row[0]), str(row[1]) if row[1] is not None else None
+
+    def _normalize(value: object) -> str:
+        return datetime.fromisoformat(str(value)).astimezone(UTC).isoformat()
+
+    return _normalize(row[0]), _normalize(row[1]) if row[1] is not None else None
 
 
 def _sha256(value: str) -> str:
@@ -1985,8 +1993,8 @@ def _age_activity(device_id: str, age: timedelta) -> None:
     with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
         conn.execute(
             "UPDATE customer_session_state "
-            "SET last_seen_at = (now() - %s), "
-            "created_at = least(created_at, (now() - %s - interval '1 minute')) "
+            "SET last_seen_at = (now() - %s::interval), "
+            "created_at = least(created_at::timestamptz, (now() - %s::interval - interval '1 minute'))::text "
             "WHERE device_id = %s",
             (age, age, device_id),
         )
@@ -2164,7 +2172,8 @@ def test_login_admission_bounds_concurrent_verification(
     def attempt(n: int) -> None:
         barrier.wait()
         try:
-            _reserve_login_admission(f"race-user-{n}")
+            # 同一账号：六个线程争抢同一个预算桶，才能证明原子占位拦并发。
+            _reserve_login_admission("race-user")
             with lock:
                 outcomes.append("admitted")
         except HTTPException as exc:
