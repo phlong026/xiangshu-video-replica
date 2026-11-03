@@ -1994,7 +1994,8 @@ def _age_activity(device_id: str, age: timedelta) -> None:
         conn.execute(
             "UPDATE customer_session_state "
             "SET last_seen_at = (now() - %s::interval), "
-            "created_at = least(created_at::timestamptz, (now() - %s::interval - interval '1 minute'))::text "
+            "created_at = least(created_at::timestamptz, "
+            "(now() - %s::interval - interval '1 minute'))::text "
             "WHERE device_id = %s",
             (age, age, device_id),
         )
