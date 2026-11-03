@@ -75,7 +75,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pg_test_kit import password_admin_session, require_pg_or_explicit_skip
 
@@ -618,13 +618,21 @@ def _age_expiry(device_id: str, remaining: timedelta) -> None:
 
 
 def _session_activity() -> tuple[str, str | None]:
-    """The live session row's timing pair: (lease_until, last_seen_at)."""
+    """The live session row's timing pair: (lease_until, last_seen_at).
+
+    时间列是 TEXT 但 GREATEST 写入路径会做 timestamptz 往返（PG 渲染格式），
+    这里统一归一为本服务的 isoformat 线格式，供与 API 返回值直接比较。
+    """
     with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
         row = conn.execute(
             "SELECT lease_until, last_seen_at FROM customer_session_state"
         ).fetchone()
     assert row is not None, "expected exactly one session row"
-    return str(row[0]), str(row[1]) if row[1] is not None else None
+
+    def _normalize(value: object) -> str:
+        return datetime.fromisoformat(str(value)).astimezone(UTC).isoformat()
+
+    return _normalize(row[0]), _normalize(row[1]) if row[1] is not None else None
 
 
 def _sha256(value: str) -> str:
@@ -1969,3 +1977,251 @@ def test_hundred_concurrent_logins_keep_device_epochs_independent(
             client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"])).status_code
             == 200
         )
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-03 会话 P1 批：S1 活动节流分离 / S2 租约防回缩（真库行为面）
+# ---------------------------------------------------------------------------
+
+
+def _age_activity(device_id: str, age: timedelta) -> None:
+    """把 last_seen_at 改写为 now - age（模拟「上次活动已过去一段时间」）。
+
+    created_at 同步前移：刚建立的会话裸写过去的活动时间会落在 created_at
+    之前，触发 last_seen_not_before_created CHECK（A2 评审指出）。
+    """
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET last_seen_at = (now() - %s::interval), "
+            "created_at = least(created_at::timestamptz, "
+            "(now() - %s::interval - interval '1 minute'))::text "
+            "WHERE device_id = %s",
+            (age, age, device_id),
+        )
+
+
+def _session_timing_triple() -> tuple[str, str | None, str]:
+    """(lease_until, last_seen_at, updated_at) 三元组：字段级不写断言用。"""
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT lease_until, last_seen_at, updated_at FROM customer_session_state"
+        ).fetchone()
+    assert row is not None, "expected exactly one session row"
+    return str(row[0]), str(row[1]) if row[1] is not None else None, str(row[2])
+
+
+def test_verify_updates_activity_without_renewal(client: TestClient) -> None:
+    """S1：未到续期阈值但活动超过 5 分钟 → 只写活动时间，租约原样。"""
+    from app.customer_auth import verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    # 租约新鲜（不触发续期）；活动时间老化 6 分钟（超出 5 分钟活动窗口）。
+    _age_expiry(customer["device_id"], remaining=timedelta(days=7))
+    _age_activity(customer["device_id"], age=timedelta(minutes=6))
+    lease_before, _ = _session_activity()
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    lease_after, seen_after = _session_activity()
+    assert seen_after is not None
+    assert datetime.fromisoformat(seen_after).astimezone(UTC) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+    assert lease_after == lease_before
+
+
+def test_verify_writes_nothing_within_activity_window(client: TestClient) -> None:
+    """S1/r6：5 分钟窗口内的连续请求第二次 verify 零写入（字段级断言）。"""
+    from app.customer_auth import verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _age_expiry(customer["device_id"], remaining=timedelta(days=7))
+    _age_activity(customer["device_id"], age=timedelta(minutes=6))
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    first = _session_timing_triple()
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    second = _session_timing_triple()
+    assert second == first
+
+
+def test_online_predicate_follows_activity_window(client: TestClient) -> None:
+    """S1 联动：活跃会话（活动 1 分钟前）在线；11 分钟前离线（10 分钟窗口）。"""
+    from app.customer_session_service import ONLINE_SESSION_PREDICATE
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    device = customer["device_id"]
+
+    def _online() -> bool:
+        with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT (" + ONLINE_SESSION_PREDICATE + ") "
+                "FROM customer_session_state css WHERE css.device_id = %s",
+                (device,),
+            ).fetchone()
+        assert row is not None
+        return bool(row[0])
+
+    _age_activity(device, age=timedelta(minutes=1))
+    assert _online() is True
+    _age_activity(device, age=timedelta(minutes=11))
+    assert _online() is False
+
+
+def test_heartbeat_never_shortens_a_longer_lease(client: TestClient) -> None:
+    """S2：现值租约长于 now+7d（时钟回拨场景）时心跳不得缩短它。"""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _age_expiry(customer["device_id"], remaining=timedelta(days=30))
+    _age_activity(customer["device_id"], age=timedelta(minutes=1))
+    response = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert response.status_code == 200, response.text
+    lease_after, _ = _session_activity()
+    remaining = datetime.fromisoformat(lease_after).astimezone(UTC) - datetime.now(UTC)
+    assert remaining > timedelta(days=29), lease_after
+
+
+def test_login_reservation_refund_is_window_scoped(client: TestClient) -> None:
+    """S3/A2 评审：返还精确匹配占位窗口——旧窗口占位不串扰新窗口计数。"""
+    from app.customer_device_service import highest_device_domain_key, keyed_digest
+    from app.db_pg import pg_transaction
+    from app.security_rate_limit import (
+        DIMENSION_LOGIN_ACCOUNT,
+        consume_rate_limit,
+        refund_rate_limit,
+    )
+
+    _, key = highest_device_domain_key()
+    identifier = keyed_digest(key, "password:refund-window-fixture")
+    old_window = datetime(2026, 11, 3, 8, 0, 0, tzinfo=UTC)
+    late_window = datetime(2026, 11, 3, 9, 0, 0, tzinfo=UTC)
+    with pg_transaction() as conn:
+        first = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=old_window,
+        )
+        assert first.allowed and first.hit_count == 1
+        # 窗口翻篇后另一笔真实失败落账（新窗口计数 1）。
+        second = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=late_window,
+        )
+        assert second.allowed and second.hit_count == 1
+        assert second.window_start != first.window_start
+        # 旧窗口占位返还：只匹配旧窗口 → 无行更新，新窗口计数不受串扰。
+        assert (
+            refund_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=identifier,
+                window_start=first.window_start,
+                now=late_window,
+            )
+            is False
+        )
+        with_memory = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=late_window,
+        )
+        assert with_memory.hit_count == 2
+        # 新窗口的真实计数可正常返还。
+        assert (
+            refund_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=identifier,
+                window_start=second.window_start,
+                now=late_window,
+            )
+            is True
+        )
+
+
+def test_login_admission_bounds_concurrent_verification(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 行为面：并发请求超过额度时，实际进入验密的数量被原子占位拦住。
+
+    直接驱动路由的准入门（_reserve_login_admission）：6 个并发线程在限额
+    2 下竞争，只有 2 个拿到占位，其余 429——v2 peek+失败扣减设计的窗口
+    在真库上闭合。
+    """
+    import threading
+
+    from app.customer_auth_routes import _reserve_login_admission
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "2")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+    barrier = threading.Barrier(6)
+    outcomes: list[object] = []
+    lock = threading.Lock()
+
+    def attempt(n: int) -> None:
+        barrier.wait()
+        try:
+            # 同一账号：六个线程争抢同一个预算桶，才能证明原子占位拦并发。
+            _reserve_login_admission("race-user")
+            with lock:
+                outcomes.append("admitted")
+        except HTTPException as exc:
+            with lock:
+                outcomes.append(exc.status_code)
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert outcomes.count("admitted") == 2
+    assert outcomes.count(429) == 4
+
+
+def test_login_reservation_refund_rolls_back_with_minting(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 行为面：占位与返还同事务——铸造失败一起回滚，占位保留。"""
+    from app.customer_auth_routes import (
+        _login_account_identifier,
+        _refund_login_reservation,
+        _reserve_login_admission,
+    )
+    from app.db_pg import pg_transaction
+    from app.security_rate_limit import DIMENSION_LOGIN_ACCOUNT
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "5")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+
+    username = "rollback-mint-fixture"
+    admission_window = _reserve_login_admission(username)
+
+    def _counter() -> int:
+        with pg_transaction() as conn:
+            row = conn.execute(
+                "SELECT hit_count FROM security_rate_limit_counters WHERE bucket_key = %s",
+                (DIMENSION_LOGIN_ACCOUNT + "|" + _login_account_identifier(username),),
+            ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    assert _counter() == 1
+    # 铸造事务在返还后失败：返还与铸造同事务，回滚后占位保留为已消耗。
+    with pytest.raises(RuntimeError):
+        with pg_transaction() as conn:
+            _refund_login_reservation(conn, username, window_start=admission_window)
+            raise RuntimeError("mint failed after refund")
+    assert _counter() == 1
