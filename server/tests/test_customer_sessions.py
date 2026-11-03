@@ -75,7 +75,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pg_test_kit import password_admin_session, require_pg_or_explicit_skip
 
@@ -2140,3 +2140,78 @@ def test_login_reservation_refund_is_window_scoped(client: TestClient) -> None:
             )
             is True
         )
+
+
+def test_login_admission_bounds_concurrent_verification(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 行为面：并发请求超过额度时，实际进入验密的数量被原子占位拦住。
+
+    直接驱动路由的准入门（_reserve_login_admission）：6 个并发线程在限额
+    2 下竞争，只有 2 个拿到占位，其余 429——v2 peek+失败扣减设计的窗口
+    在真库上闭合。
+    """
+    import threading
+
+    from app.customer_auth_routes import _reserve_login_admission
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "2")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+    barrier = threading.Barrier(6)
+    outcomes: list[object] = []
+    lock = threading.Lock()
+
+    def attempt(n: int) -> None:
+        barrier.wait()
+        try:
+            _reserve_login_admission(f"race-user-{n}")
+            with lock:
+                outcomes.append("admitted")
+        except HTTPException as exc:
+            with lock:
+                outcomes.append(exc.status_code)
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert outcomes.count("admitted") == 2
+    assert outcomes.count(429) == 4
+
+
+def test_login_reservation_refund_rolls_back_with_minting(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 行为面：占位与返还同事务——铸造失败一起回滚，占位保留。"""
+    from app.customer_auth_routes import (
+        _login_account_identifier,
+        _refund_login_reservation,
+        _reserve_login_admission,
+    )
+    from app.db_pg import pg_transaction
+    from app.security_rate_limit import DIMENSION_LOGIN_ACCOUNT
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "5")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+
+    username = "rollback-mint-fixture"
+    admission_window = _reserve_login_admission(username)
+
+    def _counter() -> int:
+        with pg_transaction() as conn:
+            row = conn.execute(
+                "SELECT hit_count FROM security_rate_limit_counters WHERE bucket_key = %s",
+                (DIMENSION_LOGIN_ACCOUNT + "|" + _login_account_identifier(username),),
+            ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    assert _counter() == 1
+    # 铸造事务在返还后失败：返还与铸造同事务，回滚后占位保留为已消耗。
+    with pytest.raises(RuntimeError):
+        with pg_transaction() as conn:
+            _refund_login_reservation(conn, username, window_start=admission_window)
+            raise RuntimeError("mint failed after refund")
+    assert _counter() == 1
