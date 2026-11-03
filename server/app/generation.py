@@ -32,7 +32,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.analysis import get_version, insert_version, next_version_number
 from app.auth import CurrentUser, Role
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.external_calls import (
     endpoint_from_url,
     external_call_context,
@@ -2663,8 +2668,13 @@ def create_generation_batch(
         # row is upserted in the same transaction so rotation can serve them.
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
-    except IntegrityConstraintError:
+    except IntegrityConstraintError as exc:
         conn.rollback()
+        # 鉴别闸（r3 P1）：只有批次幂等键唯一约束的冲突才按竞争处理——
+        # 同 try 块内其他 235xx（CHECK/外键/其他唯一约束）是真实数据错误，
+        # 必须原样冒出，不得误报成「幂等冲突」。
+        if not is_unique_conflict_on(exc, "uq_generation_batches_user_project_key"):
+            raise
         # 同幂等键的并发提交者后到（事务已中止，无法在同事务内回放）：查既有
         # 批次回放而非误报。T2a 2026-11-01 按翻译层真实类型恢复兜底——
         # 此前 sqlite3/UniqueViolation 两个名字在 PG lane 都接不住翻译异常。
@@ -5119,6 +5129,10 @@ def reconcile_generation_task(
         conn.commit()
     except IntegrityConstraintError as exc:
         conn.rollback()
+        # 鉴别闸（r3 P1）：只有对账互斥唯一索引的冲突才是「已有对账在跑」；
+        # 其他 235xx 是真实数据错误，必须原样冒出。
+        if not is_unique_conflict_on(exc, "billing_reconciliation_open_key"):
+            raise
         raise generation_error(
             409,
             "RECONCILE_IN_PROGRESS",

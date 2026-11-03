@@ -699,6 +699,16 @@ def test_concurrent_task_reservations_cannot_overspend(wallet_db: str) -> None:
         thread.join()
 
     assert sorted(results) == ["insufficient", "reserved"]
+    # T2a 曾把以下两段钱包验证截进后一个测试（r3 评审 C2）：归还本测试——
+    # 双连接竞争后恰一次预留，钱包 (0, 1)。
+    assert wallet_state() == (0, 1)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        reserve_rows = conn.execute(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'RESERVE'"
+        ).fetchone()
+    assert reserve_rows is not None
+    assert int(reserve_rows[0]) == 1
 
 
 def test_portable_layer_maps_unique_violation_for_race_backstops(wallet_db: str) -> None:
@@ -725,11 +735,125 @@ def test_portable_layer_maps_unique_violation_for_race_backstops(wallet_db: str)
     assert not isinstance(exc_info.value, psycopg.errors.UniqueViolation)
     assert exc_info.value.sqlstate == "23505"
     assert "billing_tariffs_pkey" in str(exc_info.value.constraint_name)
-    assert wallet_state() == (0, 1)
+
+
+def test_unique_conflict_discriminator_gates_non_target_constraints() -> None:
+    """C1 鉴别闸（r3 评审）：非 23505 / 非目标约束 / 缺约束名都不按竞争处理。"""
+    from app.db_portable import is_unique_conflict_on
+
+    def make(sqlstate: str | None, name: str | None) -> IntegrityConstraintError:
+        return IntegrityConstraintError("boom", sqlstate=sqlstate, constraint_name=name)
+
+    target = "uq_generation_batches_user_project_key"
+    assert is_unique_conflict_on(make("23505", target), target)
+    # CHECK 违反（23514）、其他唯一约束、缺约束名：一律不按竞争映射。
+    assert not is_unique_conflict_on(make("23514", "ck_something"), target)
+    assert not is_unique_conflict_on(make("23505", "some_other_unique"), target)
+    assert not is_unique_conflict_on(make("23505", None), target)
+
+
+# ---------------------------------------------------------------------------
+# C3：真库双连接竞争——鉴别闸与账务原子性
+# ---------------------------------------------------------------------------
+
+
+def test_race_backstop_constraint_names_exist_in_schema(wallet_db: str) -> None:
+    """C1 应用点（r3 复审）：五个兜底约束名绑表核实且确为唯一约束。
+
+    约束名写错（拼写/漂移）会让鉴别闸永远不命中——兜底退化为「非目标异常
+    原样冒出」，并发竞争从 409/回放/重试退化为 500。本测试按「表 + 名 +
+    唯一性」三重绑定查询；recharge_orders 的真实约束名
+    recharge_orders_merchant_order_no_key 即由本测试首次核实（旧注释里的
+    ..._order_key 是错的，str(exc) 文本匹配侥幸生效）。
+    """
+    from app.db_pg import pg_transaction
+
+    expected = (
+        ("generation_batches", "uq_generation_batches_user_project_key"),
+        ("generation_batches", "uq_generation_batches_independent_idempotency"),
+        ("script_rewrite_tasks", "uq_script_rewrite_tasks_active_project"),
+        ("billing_reconciliation_items", "billing_reconciliation_open_key"),
+        ("recharge_orders", "recharge_orders_merchant_order_no_key"),
+    )
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
+        for table, name in expected:
+            # 唯一性必须经 pg_index 验证（r3 评审：pg_indexes 分支 + OR 约束
+            # 分支，普通同名索引也能混过）。
+            as_unique_index = conn.execute(
+                "SELECT 1 FROM pg_index ix "
+                "JOIN pg_class ic ON ic.oid = ix.indexrelid "
+                "WHERE ix.indrelid = %s::regclass AND ic.relname = %s "
+                "AND ix.indisunique AND ix.indisvalid",
+                (table, name),
+            ).fetchone()
+            as_constraint = conn.execute(
+                "SELECT 1 FROM pg_constraint WHERE conrelid = %s::regclass "
+                "AND conname = %s AND contype = 'u'",
+                (table, name),
+            ).fetchone()
+            assert as_unique_index is not None or as_constraint is not None, (
+                f"race backstop unique constraint missing on {table}: {name}"
+            )
+
+
+def test_idempotency_race_loser_rolls_back_without_poisoning_winner(wallet_db: str) -> None:
+    """C3（r3 复审要求）：双连接同幂等键真并发——恰一个赢家提交，输家
+    目标约束拒绝，账务恰好一次预留、零双扣。两笔写都不预提交，靠屏障
+    同时进场争抢同一唯一索引。"""
+    seed_task(wallet_db, available_credits=2)
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def contender(batch_id: str, request_hash: str) -> None:
+        barrier.wait()
+        try:
+            with pg_transaction() as raw:
+                conn = BusinessConnection.postgres(raw)
+                conn.execute(
+                    "INSERT INTO generation_batches "
+                    "(id, project_id, created_by_user_id, idempotency_key, "
+                    " request_hash, request_snapshot_json, creation_kind, status) "
+                    "VALUES (%s, NULL, 'user_1', 'race-key', %s, '{}', 'independent', 'QUEUED')",
+                    (batch_id, request_hash),
+                )
+                # 与批次写同事务的账务操作：赢家应完整提交，输家整体回滚。
+                reserve_internal_billing(
+                    conn,
+                    user_id="user_1",
+                    task_id="task_1",
+                    billing_round=1,
+                )
+            with lock:
+                outcomes.append("committed:" + batch_id)
+        except IntegrityConstraintError as exc:
+            with lock:
+                outcomes.append("rejected:" + str(exc.constraint_name))
+
+    threads = [
+        threading.Thread(target=contender, args=("race-a", "hash-a")),
+        threading.Thread(target=contender, args=("race-b", "hash-b")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    winners = [item for item in outcomes if item.startswith("committed:")]
+    rejected = [item for item in outcomes if item.startswith("rejected:")]
+    assert len(winners) == 1 and len(rejected) == 1
+    # NULL project 场景命中的是 075 部分唯一索引。
+    assert rejected[0] == "rejected:uq_generation_batches_independent_idempotency"
+    # 赢家事务完整提交：批次恰 1 行、恰一次预留、钱包 (1, 1)；输家零残留。
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        batch_rows = conn.execute(
+            "SELECT COUNT(*) FROM generation_batches WHERE idempotency_key = 'race-key'"
+        ).fetchone()
         reserve_rows = conn.execute(
             "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'RESERVE'"
         ).fetchone()
-    assert reserve_rows is not None
-    assert int(reserve_rows[0]) == 1
+    assert batch_rows is not None and int(batch_rows[0]) == 1
+    assert reserve_rows is not None and int(reserve_rows[0]) == 1
+    assert wallet_state() == (1, 1)
