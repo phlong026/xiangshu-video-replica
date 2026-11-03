@@ -629,6 +629,8 @@ class RegenerationConnection:
         self.admission_locks: list[str] = []
         self.rollbacks = 0
         self.commits = 0
+        # 写入返回的 rowcount 可在用例中改写为 0，模拟 CAS 命中并发冲突。
+        self.write_rowcount = 1
         self.billing_operation: dict[str, Any] | None = None
 
     def execute(self, sql: str, params: Any = None) -> Any:
@@ -644,7 +646,7 @@ class RegenerationConnection:
             row = self.tasks[0] if "FROM generation_tasks" in statement else self.batch
             return SimpleNamespace(fetchone=lambda: row, fetchall=lambda: self.tasks)
         self.writes.append(statement)
-        return SimpleNamespace(rowcount=1)
+        return SimpleNamespace(rowcount=self.write_rowcount)
 
     def rollback(self) -> None:
         self.rollbacks += 1
@@ -1332,3 +1334,25 @@ def test_batch_regeneration_supersedes_every_source_task(
     assert refresh_calls == [{"batch_id": "source-batch"}]
     assert regeneration["conn"].commits == 1
     assert len(regeneration["reservations"]) == 2
+
+
+def test_batch_regeneration_cas_conflict_rolls_back_whole_order(
+    pricing: dict[str, Any],
+    regeneration: dict[str, Any],
+) -> None:
+    """CAS 写返回 rowcount=0（源任务已被并发请求替换）→ 409、不提交、回滚。"""
+    from app.generation import PaidRegenerationRequest
+
+    regeneration["conn"].write_rowcount = 0
+    quote = regeneration_quote("batch", regeneration)
+    request = PaidRegenerationRequest(
+        idempotency_key="racing-batch",
+        generation_reason="重新生成",
+        quote_token=quote.quote_token,
+        max_credits=quote.max_credits,
+    )
+    with pytest.raises(HTTPException) as error:
+        regenerate("batch", regeneration, request)
+    assert error.value.detail["code"] == "SOURCE_TASK_ALREADY_SUPERSEDED"
+    assert regeneration["conn"].commits == 0
+    assert regeneration["conn"].rollbacks >= 1
