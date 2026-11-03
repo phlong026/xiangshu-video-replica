@@ -778,8 +778,14 @@ def test_race_backstop_constraint_names_exist_in_schema(wallet_db: str) -> None:
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         for table, name in expected:
-            as_index = conn.execute(
-                "SELECT 1 FROM pg_indexes WHERE tablename = %s AND indexname = %s",
+            # 唯一性必须经 pg_index 验证（r3 评审：pg_indexes 分支 + OR 约束
+            # 分支，普通同名索引也能混过）。
+            as_unique_index = conn.execute(
+                "SELECT 1 FROM pg_index ix "
+                "JOIN pg_class ic ON ic.oid = ix.indexrelid "
+                "JOIN pg_class tc ON tc.oid = ix.indrelid "
+                "WHERE tc.relname = %s AND ic.relname = %s "
+                "AND ix.indisunique AND ix.indisvalid",
                 (table, name),
             ).fetchone()
             as_constraint = conn.execute(
@@ -787,8 +793,8 @@ def test_race_backstop_constraint_names_exist_in_schema(wallet_db: str) -> None:
                 "AND conname = %s AND contype = 'u'",
                 (table, name),
             ).fetchone()
-            assert as_index is not None or as_constraint is not None, (
-                f"race backstop constraint missing on {table}: {name}"
+            assert as_unique_index is not None or as_constraint is not None, (
+                f"race backstop unique constraint missing on {table}: {name}"
             )
 
 
