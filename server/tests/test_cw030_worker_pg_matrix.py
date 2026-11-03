@@ -4046,25 +4046,6 @@ def _handler_db(dsn: str, user: str = "u1") -> Any:
     return Db()
 
 
-async def _call_copy_handler(dsn: str, *, key: str) -> tuple[Any, Any]:
-    import io
-
-    from fastapi import Response, UploadFile
-
-    from app.viral_import_routes import extract_viral_video_copy
-
-    response = Response()
-    payload = await extract_viral_video_copy(
-        response=response,
-        db=_handler_db(dsn),
-        platform="douyin",
-        video_id="123",
-        file=UploadFile(file=io.BytesIO(b"unused"), size=6),
-        idempotency_key=key,
-    )
-    return response, payload
-
-
 def _copy_upload(*, size: int = 4096, sha256: str = "c" * 64) -> Any:
     from datetime import UTC, datetime
 
@@ -4271,104 +4252,26 @@ def test_viral_copy_upload_private_task_does_not_use_unrelated_shared_cache(
     assert "viral_source" not in json.loads(task["request_json"])
 
 
-async def test_viral_copy_handler_serves_shared_cache_and_bills_the_delivery(
+def test_retired_copy_upload_endpoint_returns_410_for_any_request(
     pg_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """命中共享缓存：不建任务、不落素材，但这次交付照样扣一次「获取文案」.
+    """受理端点退役（2026-11 WP2）：任何请求一律 410，不触库、不建任务、不计费.
 
-    秒回省下的是平台的转写成本，不是用户手里的内容价值——谁拿到文案谁付这笔交付费，
-    同一条视频对同一个付费账号只扣一次（台账去重）。
+    旧桌面客户端调用时得到明确引导（VIRAL_COPY_UPLOAD_RETIRED）而不是裸 404；
+    文案交付与计费的唯一口径是 POST /videos/copy/claim 与服务端导入转写。
     """
+    from app.viral_import_routes import extract_viral_video_copy
+
     _seed_copy_fixture(pg_state)
-    _exec(
-        pg_state,
-        "INSERT INTO viral_script_cache(platform,video_id,result_json,updated_at) "
-        "VALUES ('douyin','123',%s,now())",
-        (_COPY_RESULT_JSON,),
-    )
     _no_provider(monkeypatch)
-    response, payload = await _call_copy_handler(pg_state, key="cache-hit")
-    assert response.status_code == 200
-    assert payload.text == "服务器共享的原视频文案"
-    assert payload.task_id is None
-    assert payload.billing is not None
-    assert payload.billing.charged == 5
-    assert payload.billing.deduped is False
-    assert (
-        _one(
-            pg_state,
-            "SELECT count(*) FROM viral_content_usage_events WHERE video_id='123' AND kind='copy'",
-        )
-        == 1
-    )
+    with pytest.raises(HTTPException) as retired:
+        extract_viral_video_copy()
+    assert retired.value.status_code == 410
+    assert retired.value.detail["code"] == "VIRAL_COPY_UPLOAD_RETIRED"
+    # 退役壳不触达任何数据：没有任务、凭据或计费单产生。
     assert _one(pg_state, "SELECT count(*) FROM script_from_audio_tasks") == 0
-    assert _one(pg_state, "SELECT count(*) FROM viral_import_tasks") == 0
-    assert _rows(pg_state, "SELECT service, state, charged_credits FROM billing_operations") == [
-        {"service": "viral_copy", "state": "SUCCEEDED", "charged_credits": 5}
-    ]
-
-
-async def test_viral_copy_handler_respects_the_shared_import_pause(pg_state: str) -> None:
-    """管理端「暂停导入」对新端点同样生效：对用户而言仍是同一个动作."""
-    _seed_copy_fixture(pg_state)
-    _exec(pg_state, "UPDATE viral_runtime_controls SET import_enabled=0 WHERE id=1")
-    with pytest.raises(HTTPException) as paused:
-        await _call_copy_handler(pg_state, key="paused")
-    assert paused.value.status_code == 503
-    assert paused.value.detail["code"] == "VIRAL_IMPORT_DISABLED"
-
-
-def test_viral_copy_upload_duration_limits() -> None:
-    """时长门槛：与内容池时长对齐（带容差），以及本地直传时长上限."""
-    from app.viral_import_routes import _validate_viral_copy_duration
-
-    video = _copy_video(duration_ms=12000)
-    long_video = _copy_video(duration_ms=310000)
-    _validate_viral_copy_duration(duration=12.0, video=video, inline_max_seconds=300.0)
-    # 容差之内（±25% ±3s）仍然放行，避免平台时长抖动误伤真实提取。
-    _validate_viral_copy_duration(duration=14.5, video=video, inline_max_seconds=300.0)
-    with pytest.raises(HTTPException) as mismatch:
-        _validate_viral_copy_duration(duration=90.0, video=video, inline_max_seconds=None)
-    assert mismatch.value.detail["code"] == "VIRAL_COPY_AUDIO_DURATION_MISMATCH"
-    with pytest.raises(HTTPException) as too_long:
-        _validate_viral_copy_duration(duration=301.0, video=long_video, inline_max_seconds=300.0)
-    assert too_long.value.detail["code"] == "VIRAL_COPY_AUDIO_TOO_LONG"
-    # 云存储走签名 URL，不受 base64 直传上限约束：上限为 None 即不检查。
-    _validate_viral_copy_duration(duration=301.0, video=long_video, inline_max_seconds=None)
-
-
-async def test_viral_copy_upload_accepts_only_m4a_containers() -> None:
-    """抽取端固定产出 M4A，provider 的 Flash 请求也写死 format=m4a，故只认 MP4 容器."""
-    import io
-
-    from fastapi import UploadFile
-
-    from app.viral_import_routes import _read_viral_copy_audio
-
-    m4a = b"\x00\x00\x00 ftypM4A " + b"\x00" * 32
-    assert (
-        await _read_viral_copy_audio(
-            UploadFile(file=io.BytesIO(m4a), size=len(m4a)), inline_max_bytes=None
-        )
-        == m4a
-    )
-    with pytest.raises(HTTPException) as empty:
-        await _read_viral_copy_audio(
-            UploadFile(file=io.BytesIO(b""), size=0), inline_max_bytes=None
-        )
-    assert empty.value.detail["code"] == "VIRAL_COPY_AUDIO_EMPTY"
-    with pytest.raises(HTTPException) as bad_container:
-        await _read_viral_copy_audio(
-            UploadFile(file=io.BytesIO(b"ID3\x04\x00\x00\x00\x00\x00\x00mp3"), size=13),
-            inline_max_bytes=None,
-        )
-    assert bad_container.value.detail["code"] == "VIRAL_COPY_AUDIO_INVALID"
-    with pytest.raises(HTTPException) as too_large:
-        await _read_viral_copy_audio(
-            UploadFile(file=io.BytesIO(m4a), size=len(m4a)), inline_max_bytes=16
-        )
-    assert too_large.value.detail["code"] == "VIRAL_COPY_AUDIO_TOO_LARGE"
-    assert too_large.value.status_code == 413
+    assert _one(pg_state, "SELECT count(*) FROM viral_copy_upload_receipts") == 0
+    assert _one(pg_state, "SELECT count(*) FROM billing_operations") == 0
 
 
 def test_viral_copy_cache_hit_survives_zero_balance_but_wrong_owner_cannot_read(
@@ -4445,22 +4348,6 @@ def test_confirmed_asr_failure_allows_one_new_producer_and_fences_old_lease(
     assert _one(pg_state, "SELECT producer_task_id FROM viral_script_cache") == second["id"]
 
 
-def test_upload_content_addressing_cannot_overwrite_original_on_conflict_or_db_failure():
-    from app.viral_import_routes import _store_viral_copy_audio, _viral_copy_object_key
-
-    storage = FakeStorageAdapter(provider="fake", bucket="copies")
-    original = b"original audio"
-    conflict = b"different audio"
-    original_key = _viral_copy_object_key("u1", "same-key", original)
-    other_key = _viral_copy_object_key("u1", "same-key", conflict)
-    assert original_key != other_key
-    _store_viral_copy_audio(storage, key=original_key, content=original)
-    _store_viral_copy_audio(storage, key=other_key, content=conflict)
-    # 后续数据库冲突或失败不会回写原对象；同字节重放也不得截断正在被读取的对象。
-    assert storage.get_object(original_key) == original
-    assert _viral_copy_object_key("u1", "same-key", original) != original_key
-
-
 @pytest.mark.parametrize("replacement", [b"wrong", b"wrong larger bytes"])
 def test_asr_worker_checks_digest_and_size_before_any_provider_call(
     pg_state, monkeypatch, replacement
@@ -4487,57 +4374,6 @@ def test_different_archive_version_cannot_reuse_or_replace_valid_shared_text(pg_
     assert task["status"] == "PENDING"
     assert "viral_source" not in json.loads(task["request_json"])
     assert _one(pg_state, "SELECT result_json FROM viral_script_cache") == before
-
-
-async def test_copy_handler_conflicting_retry_keeps_winning_object_and_private_task(
-    pg_state, monkeypatch
-):
-    import io
-
-    from fastapi import Response, UploadFile
-
-    from app import script_from_audio as pipeline
-    from app import viral_import_routes as routes
-    from app.viral_import import ViralImportError
-
-    _seed_copy_fixture(pg_state)
-    storage = FakeStorageAdapter(provider="fake", bucket="copies")
-    monkeypatch.setattr(routes, "get_media_storage", lambda conn: storage)
-    monkeypatch.setattr(routes, "_inline_audio_limits", lambda conn, storage: (None, None))
-    monkeypatch.setattr(routes, "_probe_viral_copy_duration", lambda content: 12.0)
-    monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: object())
-
-    async def submit(content):
-        return await routes.extract_viral_video_copy(
-            response=Response(),
-            db=_handler_db(pg_state),
-            platform="douyin",
-            video_id="123",
-            file=UploadFile(file=io.BytesIO(content)),
-            idempotency_key="one-logical-request",
-        )
-
-    original = b"0000ftypM4A original voice"
-    result = await submit(original)
-    again = await submit(original)
-    assert again.task_id == result.task_id
-    # 即使其他来源的共享正文后来就绪，也不能跳过已有幂等请求的字节比较。
-    _exec(
-        pg_state,
-        "INSERT INTO viral_script_cache(platform,video_id,result_json) VALUES('douyin','123',%s)",
-        (_COPY_RESULT_JSON,),
-    )
-    with pytest.raises(ViralImportError) as conflict:
-        await submit(b"0000ftypM4A unrelated voice")
-    assert conflict.value.status_code == 409
-    row = _rows(pg_state, "SELECT storage_uri FROM assets WHERE id=%s", (result.source_asset_id,))[
-        0
-    ]
-    key = str(row["storage_uri"]).split("fake://copies/", 1)[1]
-    assert storage.get_object(key) == original
-    assert _one(pg_state, "SELECT count(*) FROM script_from_audio_tasks") == 1
-    request = _one(pg_state, "SELECT request_json FROM script_from_audio_tasks")
-    assert "viral_source" not in json.loads(request)
 
 
 @pytest.mark.parametrize(
@@ -4813,169 +4649,54 @@ def test_followup_private_unknown_source_cannot_reserve_again_with_new_key(pg_st
     assert _task_status(pg_state, "script_from_audio_tasks", first["id"]) == "SUBMISSION_UNCERTAIN"
 
 
-@pytest.mark.parametrize("failure", [False, True])
-async def test_followup_upload_replay_conflict_or_db_failure_does_not_leak_objects(
-    pg_state, monkeypatch, failure
-):
-    import io
+def test_followup_cleanup_failure_is_durable_and_retries_late_objects(pg_state, monkeypatch):
+    """回收耐久性（服务存量凭据）：CLEANUP 凭据删除失败可重试，迟到 PUT 被墓碑复查回收.
 
-    from fastapi import Response, UploadFile
+    受理端点退役（WP2 410）后不再产生新凭据；本用例改用 stage_upload 直调构造
+    同形状的历史凭据，验证 worker 回收扫掠对存量凭据仍然耐久。
+    """
+    from app.viral_copy_uploads import reclaim_staged_uploads, stage_upload
 
-    from app import script_from_audio as pipeline
-    from app import viral_import_routes as routes
-    from app.viral_import import ViralImportError
-
-    _seed_copy_fixture(pg_state)
+    _seed_base(pg_state)
     storage = FakeStorageAdapter(provider="fake", bucket="copies")
-    monkeypatch.setattr(routes, "get_media_storage", lambda conn: storage)
-    monkeypatch.setattr(routes, "_inline_audio_limits", lambda conn, storage: (None, None))
-    monkeypatch.setattr(routes, "_probe_viral_copy_duration", lambda content: 12.0)
-    monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: object())
-    keys = []
-    original_put = storage.put_object
-
-    def put(key, content, *, content_type):
-        keys.append(key)
-        return original_put(key, content, content_type=content_type)
-
-    monkeypatch.setattr(storage, "put_object", put)
-
-    async def submit(content):
-        return await routes.extract_viral_video_copy(
-            response=Response(),
-            db=_handler_db(pg_state),
-            platform="douyin",
-            video_id="123",
-            file=UploadFile(file=io.BytesIO(content)),
-            idempotency_key="same-upload",
+    key = "viral/copy/rollback/object.m4a"
+    with psycopg.connect(pg_state) as raw:
+        receipt_id = stage_upload(
+            BusinessConnection.postgres(raw),
+            owner="u1",
+            key="rollback",
+            request_hash="known",
+            storage=storage,
+            object_key=key,
         )
-
-    if failure:
-
-        def broken(*args, **kwargs):
-            raise RuntimeError("DB fixture failure after storage")
-
-        monkeypatch.setattr(routes, "register_viral_copy_source", broken)
-        with pytest.raises(RuntimeError):
-            await submit(b"0000ftypM4A original")
-        assert sum(storage.head_object(key) is not None for key in keys) == 0
-    else:
-        first = await submit(b"0000ftypM4A original")
-        again = await submit(b"0000ftypM4A original")
-        assert first.task_id == again.task_id
-        with pytest.raises(ViralImportError):
-            await submit(b"0000ftypM4A different")
-        assert len(keys) == 1
-
-
-@pytest.mark.parametrize("different", [False, True])
-def test_followup_parallel_uploads_put_only_the_winning_content(pg_state, monkeypatch, different):
-    import asyncio
-    import io
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-
-    from fastapi import Response, UploadFile
-
-    from app import script_from_audio as pipeline
-    from app import viral_import_routes as routes
-    from app.viral_copy_uploads import reclaim_staged_uploads
-    from app.viral_import import ViralImportError
-
-    _seed_copy_fixture(pg_state)
-    storage = FakeStorageAdapter(provider="fake", bucket="copies")
-    monkeypatch.setattr(routes, "get_media_storage", lambda conn: storage)
-    monkeypatch.setattr(routes, "_inline_audio_limits", lambda conn, storage: (None, None))
-    monkeypatch.setattr(routes, "_probe_viral_copy_duration", lambda content: 12.0)
-    monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: object())
-    entered, release = Event(), Event()
-    puts = []
-    original_put = storage.put_object
-
-    def put(key, content, *, content_type):
-        puts.append(key)
-        entered.set()
-        assert release.wait(10)
-        return original_put(key, content, content_type=content_type)
-
-    monkeypatch.setattr(storage, "put_object", put)
-
-    async def submit(content):
-        return await routes.extract_viral_video_copy(
-            response=Response(),
-            db=_handler_db(pg_state),
-            platform="douyin",
-            video_id="123",
-            file=UploadFile(file=io.BytesIO(content)),
-            idempotency_key="parallel-upload",
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(asyncio.run, submit(b"0000ftypM4A original"))
-        assert entered.wait(10)
-        receipt = _one(pg_state, "SELECT id FROM viral_copy_upload_receipts")
-        with psycopg.connect(pg_state) as raw:
-            assert reclaim_staged_uploads(
-                BusinessConnection.postgres(raw), storage, receipt_id=receipt
-            ) == {"deleted": 0, "failed": 0, "skipped": 0}
-        second = pool.submit(
-            asyncio.run, submit(b"0000ftypM4A different" if different else b"0000ftypM4A original")
-        )
-        release.set()
-        winner = first.result(timeout=15)
-        if different:
-            with pytest.raises(ViralImportError):
-                second.result(timeout=15)
-        else:
-            assert second.result(timeout=15).task_id == winner.task_id
-    assert len(puts) == 1
-    assert storage.get_object(puts[0]) == b"0000ftypM4A original"
-    assert _one(pg_state, "SELECT count(*) FROM assets") == 1
-
-
-async def test_followup_cleanup_failure_is_durable_and_retries_late_objects(pg_state, monkeypatch):
-    import io
-
-    from fastapi import Response, UploadFile
-
-    from app import script_from_audio as pipeline
-    from app import viral_import_routes as routes
-    from app.viral_copy_uploads import reclaim_staged_uploads
-
-    _seed_copy_fixture(pg_state)
-    storage = FakeStorageAdapter(provider="fake", bucket="copies")
-    monkeypatch.setattr(routes, "get_media_storage", lambda conn: storage)
-    monkeypatch.setattr(routes, "_inline_audio_limits", lambda conn, storage: (None, None))
-    monkeypatch.setattr(routes, "_probe_viral_copy_duration", lambda content: 12.0)
-    monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: object())
-
-    def failed_db(*args, **kwargs):
-        raise RuntimeError("fixture DB rollback")
+    storage.put_object(key, b"0000ftypM4A rollback", content_type="audio/mp4")
+    # 模拟受理事务失败后的凭据状态：进入 CLEANUP 且首次删除尝试失败。
+    _exec(
+        pg_state,
+        "UPDATE viral_copy_upload_receipts SET state='CLEANUP', cleanup_attempts=1 WHERE id=%s",
+        (receipt_id,),
+    )
 
     def failed_delete(*args, **kwargs):
         raise RuntimeError("fixture storage temporarily unavailable")
 
-    monkeypatch.setattr(routes, "register_viral_copy_source", failed_db)
     delete = storage.delete_object
     monkeypatch.setattr(storage, "delete_object", failed_delete)
-    with pytest.raises(RuntimeError, match="fixture DB rollback"):
-        await routes.extract_viral_video_copy(
-            response=Response(),
-            db=_handler_db(pg_state),
-            platform="douyin",
-            video_id="123",
-            file=UploadFile(file=io.BytesIO(b"0000ftypM4A rollback")),
-            idempotency_key="rollback",
-        )
+    with psycopg.connect(pg_state) as raw:
+        assert reclaim_staged_uploads(
+            BusinessConnection.postgres(raw), storage, receipt_id=receipt_id
+        ) == {"deleted": 0, "failed": 1, "skipped": 0}
     receipt = _rows(pg_state, "SELECT * FROM viral_copy_upload_receipts")[0]
-    assert receipt["state"] == "CLEANUP" and receipt["cleanup_attempts"] == 1
+    assert receipt["state"] == "CLEANUP" and int(receipt["cleanup_attempts"]) >= 1
     assert storage.head_object(receipt["object_key"]) is not None
-    assert _one(pg_state, "SELECT count(*) FROM assets") == 0
     monkeypatch.setattr(storage, "delete_object", delete)
+    _exec(
+        pg_state, "UPDATE viral_copy_upload_receipts SET next_cleanup_at=now()-interval '1 second'"
+    )
     with psycopg.connect(pg_state) as raw:
         assert (
             reclaim_staged_uploads(
-                BusinessConnection.postgres(raw), storage, receipt_id=receipt["id"]
+                BusinessConnection.postgres(raw), storage, receipt_id=receipt_id
             )["deleted"]
             == 1
         )
@@ -5107,50 +4828,3 @@ def test_followup_concurrent_private_sources_have_one_reserved_task_and_reuse_re
     resumed = _enqueue_registered_copy(pg_state, sources[1], key="new-key-with-receipt")
     assert resumed["id"] == tasks[0]["id"] and resumed["provider_task_id"] == "known-receipt"
     assert _one(pg_state, "SELECT count(*) FROM billing_operations WHERE service='asr'") == 1
-
-
-async def test_followup_withdrawal_during_put_prevents_publication_and_cleans_object(
-    pg_state, monkeypatch
-):
-    import io
-
-    from fastapi import Response, UploadFile
-
-    from app import script_from_audio as pipeline
-    from app import viral_import_routes as routes
-
-    _seed_copy_fixture(pg_state)
-    storage = FakeStorageAdapter(provider="fake", bucket="copies")
-    monkeypatch.setattr(routes, "get_media_storage", lambda conn: storage)
-    monkeypatch.setattr(routes, "_inline_audio_limits", lambda conn, storage: (None, None))
-    monkeypatch.setattr(routes, "_probe_viral_copy_duration", lambda content: 12.0)
-    monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: object())
-    original_put = storage.put_object
-    uploaded = []
-
-    def put(key, content, *, content_type):
-        uploaded.append(key)
-        result = original_put(key, content, content_type=content_type)
-        _exec(
-            pg_state,
-            "UPDATE viral_videos SET collection_published=0 "
-            "WHERE platform='douyin' AND video_id='123'",
-        )
-        return result
-
-    monkeypatch.setattr(storage, "put_object", put)
-    with pytest.raises(HTTPException) as withdrawn:
-        await routes.extract_viral_video_copy(
-            response=Response(),
-            db=_handler_db(pg_state),
-            platform="douyin",
-            video_id="123",
-            file=UploadFile(file=io.BytesIO(b"0000ftypM4A withdrew")),
-            idempotency_key="withdrawn",
-        )
-    assert withdrawn.value.status_code == 404
-    assert len(uploaded) == 1 and storage.head_object(uploaded[0]) is None
-    assert _one(pg_state, "SELECT count(*) FROM assets") == 0
-    assert _one(pg_state, "SELECT count(*) FROM script_from_audio_tasks") == 0
-    assert _one(pg_state, "SELECT count(*) FROM billing_operations") == 0
-    assert _one(pg_state, "SELECT state FROM viral_copy_upload_receipts") == "REAPED"
