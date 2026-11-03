@@ -446,6 +446,7 @@ def password_login(
                 if envelope is not None and envelope.request_hash == digest:
                     replay_candidate = True
                     break
+    admission_window: str | None = None
     if not replay_candidate:
         admission_window = _reserve_login_admission(username)
     encoded = str(row[3]) if row is not None and row[3] else _DUMMY_PASSWORD_HASH
@@ -519,6 +520,11 @@ def password_login(
                 verify_session_context(conn, presentation_session_token=restored.session_token)
             except SessionFencingError as exc:
                 raise _http(401, exc.code, "登录已失效，请重新登录。") from exc
+            # 并发首提交的慢者在这里命中 replay（预检时对方信封尚未提交）：
+            # 本请求已扣的准入占位必须随 replay 一并返还（A2 第三轮评审 P2），
+            # 否则重复成功登录会漏返还、逐步耗尽账号预算。
+            if admission_window is not None:
+                _refund_login_reservation(conn, username, window_start=admission_window)
             response.headers["X-Idempotent-Replay"] = "true"
             return restored
 
@@ -544,7 +550,8 @@ def password_login(
             takeover=body.takeover,
         )
         # 登录成功：返还准入占位（与铸造同事务，回滚时一并回滚）。
-        _refund_login_reservation(conn, username, window_start=admission_window)
+        if admission_window is not None:
+            _refund_login_reservation(conn, username, window_start=admission_window)
         answer = CustomerPasswordLoginResponse(
             user_id=user_id,
             username=str(row[1]),
