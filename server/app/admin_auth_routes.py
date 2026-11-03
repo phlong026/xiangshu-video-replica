@@ -59,9 +59,9 @@ from app.security_rate_limit import (
     client_ip_from_request,
     consume_rate_limit,
     login_account_limit,
-    login_ip_limit,
     rate_limit_window_seconds,
     record_auth_failure,
+    refund_rate_limit,
 )
 
 logger = logging.getLogger(__name__)
@@ -491,28 +491,48 @@ def _admin_login_identifiers(request: Request, username: str) -> tuple[str, str]
     )
 
 
-def _spend_admin_password_budget(
-    request: Request,
-    *,
-    username: str,
-) -> tuple[RateLimitDecision, RateLimitDecision]:
-    ip_identifier, account_identifier = _admin_login_identifiers(request, username)
+def _admin_login_account_identifier(username: str) -> str:
+    """管理端密码通道的账号维度标识；IP 维度已退役（NAT 共桶，见准入门注释）。"""
+    return _sha256_hex(username.strip())
+
+
+def _reserve_admin_password_admission(*, username: str) -> RateLimitDecision:
+    """管理端密码通道的原子准入门：验密前先扣一个占位，挡住并发绕过。
+
+    2026-11-03 会话 P1 批 S3：占位先于验密原子落库，并发请求无法同时通过
+    只读预检后集中验密（v2 发布线 peek+失败扣减设计的窗口在此闭合）。
+    只保留账号维度——IP 维度退役：办公 NAT 会让全体管理员共享同一地址桶，
+    一个账号的失败惩罚所有人（2026-11-02「登录频繁」工单根因）。成功登录
+    由 :func:`_refund_admin_password_reservation` 返还占位，失败保留累计
+    ——净效果成功零消耗、真爆破才烧预算。
+    """
     with pg_transaction() as conn:
-        ip_decision = consume_rate_limit(
-            conn,
-            dimension=DIMENSION_LOGIN_IP,
-            identifier=ip_identifier,
-            limit=login_ip_limit(),
-            window_seconds=rate_limit_window_seconds(),
-        )
-        account_decision = consume_rate_limit(
+        return consume_rate_limit(
             conn,
             dimension=DIMENSION_LOGIN_ACCOUNT,
-            identifier=account_identifier,
+            identifier=_admin_login_account_identifier(username),
             limit=login_account_limit(),
             window_seconds=rate_limit_window_seconds(),
         )
-    return ip_decision, account_decision
+
+
+def _refund_admin_password_reservation(*, username: str) -> None:
+    """登录成功路径的占位返还：独立事务，失败只告警不打断已成功的登录。"""
+    try:
+        with pg_transaction() as conn:
+            refund_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=_admin_login_account_identifier(username),
+                window_seconds=rate_limit_window_seconds(),
+            )
+    except Exception as refund_error:
+        # 返还丢失只意味着成功登录多消耗一次预算，绝不能把已建立的
+        # 会话变成 500（与 _record_admin_password_failure 同因）。
+        logger.warning(
+            "admin login reservation refund unavailable (%s)",
+            type(refund_error).__name__,
+        )
 
 
 def _record_admin_password_failure(
@@ -1129,21 +1149,14 @@ def login_admin_with_password(
     request_id = get_or_create_request_id(request)
     username = body.username.strip()
     try:
-        ip_decision, account_decision = _spend_admin_password_budget(
-            request,
-            username=username,
-        )
+        admission = _reserve_admin_password_admission(username=username)
     except (RuntimeError, ValueError) as exc:
         raise _http(
             503,
             "ADMIN_SESSIONS_UNAVAILABLE",
             "Admin sessions require the PostgreSQL runtime.",
         ) from exc
-    if not ip_decision.allowed or not account_decision.allowed:
-        retry_after = max(
-            ip_decision.retry_after_seconds,
-            account_decision.retry_after_seconds,
-        )
+    if not admission.allowed:
         set_current_result_code("RATE_LIMITED")
         raise HTTPException(
             status_code=429,
@@ -1151,7 +1164,7 @@ def login_admin_with_password(
                 "code": "RATE_LIMITED",
                 "message": "Too many administrator sign-in attempts. Try again later.",
             },
-            headers={"Retry-After": str(retry_after)},
+            headers={"Retry-After": str(admission.retry_after_seconds)},
         )
     try:
         actor_user_id = _authenticate_admin_password(username, body.password)
@@ -1183,6 +1196,7 @@ def login_admin_with_password(
             "ADMIN_SESSIONS_UNAVAILABLE",
             "Admin sessions require the PostgreSQL runtime.",
         ) from exc
+    _refund_admin_password_reservation(username=username)
     set_current_trace_fields(
         actor_id=actor.user_id,
         user_id=actor.user_id,

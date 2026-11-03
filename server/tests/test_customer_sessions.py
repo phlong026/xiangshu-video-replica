@@ -1969,3 +1969,99 @@ def test_hundred_concurrent_logins_keep_device_epochs_independent(
             client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"])).status_code
             == 200
         )
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-03 会话 P1 批：S1 活动节流分离 / S2 租约防回缩（真库行为面）
+# ---------------------------------------------------------------------------
+
+
+def _age_activity(device_id: str, age: timedelta) -> None:
+    """把 last_seen_at 改写为 now - age（模拟「上次活动已过去一段时间」）。"""
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state SET last_seen_at = (now() - %s) WHERE device_id = %s",
+            (age, device_id),
+        )
+
+
+def _session_timing_triple() -> tuple[str, str | None, str]:
+    """(lease_until, last_seen_at, updated_at) 三元组：字段级不写断言用。"""
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT lease_until, last_seen_at, updated_at FROM customer_session_state"
+        ).fetchone()
+    assert row is not None, "expected exactly one session row"
+    return str(row[0]), str(row[1]) if row[1] is not None else None, str(row[2])
+
+
+def test_verify_updates_activity_without_renewal(client: TestClient) -> None:
+    """S1：未到续期阈值但活动超过 5 分钟 → 只写活动时间，租约原样。"""
+    from app.customer_auth import verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    # 租约新鲜（不触发续期）；活动时间老化 6 分钟（超出 5 分钟活动窗口）。
+    _age_expiry(customer["device_id"], remaining=timedelta(days=7))
+    _age_activity(customer["device_id"], age=timedelta(minutes=6))
+    lease_before, _ = _session_activity()
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    lease_after, seen_after = _session_activity()
+    assert seen_after is not None
+    assert datetime.fromisoformat(seen_after).astimezone(UTC) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+    assert lease_after == lease_before
+
+
+def test_verify_writes_nothing_within_activity_window(client: TestClient) -> None:
+    """S1/r6：5 分钟窗口内的连续请求第二次 verify 零写入（字段级断言）。"""
+    from app.customer_auth import verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _age_expiry(customer["device_id"], remaining=timedelta(days=7))
+    _age_activity(customer["device_id"], age=timedelta(minutes=6))
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    first = _session_timing_triple()
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    second = _session_timing_triple()
+    assert second == first
+
+
+def test_online_predicate_follows_activity_window(client: TestClient) -> None:
+    """S1 联动：活跃会话（活动 1 分钟前）在线；11 分钟前离线（10 分钟窗口）。"""
+    from app.customer_session_service import ONLINE_SESSION_PREDICATE
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    device = customer["device_id"]
+
+    def _online() -> bool:
+        with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT (" + ONLINE_SESSION_PREDICATE + ") "
+                "FROM customer_session_state css WHERE css.device_id = %s",
+                (device,),
+            ).fetchone()
+        assert row is not None
+        return bool(row[0])
+
+    _age_activity(device, age=timedelta(minutes=1))
+    assert _online() is True
+    _age_activity(device, age=timedelta(minutes=11))
+    assert _online() is False
+
+
+def test_heartbeat_never_shortens_a_longer_lease(client: TestClient) -> None:
+    """S2：现值租约长于 now+7d（时钟回拨场景）时心跳不得缩短它。"""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _age_expiry(customer["device_id"], remaining=timedelta(days=30))
+    _age_activity(customer["device_id"], age=timedelta(minutes=1))
+    response = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert response.status_code == 200, response.text
+    lease_after, _ = _session_activity()
+    remaining = datetime.fromisoformat(lease_after).astimezone(UTC) - datetime.now(UTC)
+    assert remaining > timedelta(days=29), lease_after

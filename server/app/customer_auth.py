@@ -85,10 +85,13 @@ class CustomerSessionContext:
 
 
 # SELECT column order: (user_id, activation_code_id, device_id, session_id,
-# session_epoch, lease_until) — mirrors the session-service row probe.
+# session_epoch, lease_until, token_digest, last_seen_at) — mirrors the
+# session-service row probe. last_seen_at 只服务续期的活动节流判定，追加在
+# 尾部以保持既有下标稳定（新列允许 NULL，见 20261102T0900 迁移）。
 _ROW_SQL = (
     "SELECT user_id, activation_code_id, device_id, session_id, "
-    "session_epoch, lease_until FROM customer_session_state"
+    "session_epoch, lease_until, token_digest, last_seen_at "
+    "FROM customer_session_state"
 )
 
 
@@ -230,6 +233,7 @@ def verify_session_context(
         conn,
         session_id=session_id,
         lease_until=_as_utc(lease_until_raw),
+        last_seen_at=_as_utc(str(row[7])) if row[7] is not None else None,
         now=now,
     )
     return CustomerSessionContext(

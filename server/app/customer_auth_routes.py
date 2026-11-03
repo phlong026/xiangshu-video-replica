@@ -222,49 +222,66 @@ def _registration_budget(request: Request) -> None:
         )
 
 
-def _login_budget(request: Request, username: str) -> None:
+def _login_account_identifier(username: str) -> str:
     from app.customer_device_service import highest_device_domain_key, keyed_digest
+
+    _, key = highest_device_domain_key()
+    return keyed_digest(key, "password:" + username)
+
+
+def _reserve_login_admission(username: str) -> None:
+    """密码通道的原子准入门：验密前先扣一个占位，挡住并发绕过。
+
+    2026-11-03 会话 P1 批 S3：占位先于验密原子落库，并发请求无法同时通过
+    只读预检后集中验密（v2 发布线 peek+失败扣减设计的窗口在此闭合）。
+    只保留账号维度——IP 维度退役：办公 NAT 会让全体用户共享同一地址桶，
+    一个账号的失败惩罚所有人（2026-11-02「登录频繁」工单根因）。成功登录
+    在会话铸造事务内由 :func:`_refund_login_reservation` 返还占位，失败
+    保留累计——净效果成功零消耗、真爆破才烧预算。
+    """
     from app.security_rate_limit import (
         DIMENSION_LOGIN_ACCOUNT,
-        DIMENSION_LOGIN_IP,
-        client_ip_from_request,
         consume_rate_limit,
         login_account_limit,
-        login_ip_limit,
         rate_limit_window_seconds,
     )
 
-    _, key = highest_device_domain_key()
-    decisions = []
-    # Commit budgets even when the subsequent password/transaction fails.
     with pg_transaction() as conn:
-        for dimension, identifier, limit in (
-            (DIMENSION_LOGIN_IP, "password:" + client_ip_from_request(request), login_ip_limit()),
-            (
-                DIMENSION_LOGIN_ACCOUNT,
-                keyed_digest(key, "password:" + username),
-                login_account_limit(),
-            ),
-        ):
-            decisions.append(
-                consume_rate_limit(
-                    conn,
-                    dimension=dimension,
-                    identifier=identifier,
-                    limit=limit,
-                    window_seconds=rate_limit_window_seconds(),
-                )
-            )
-    denied = [item for item in decisions if not item.allowed]
-    if denied:
+        decision = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=_login_account_identifier(username),
+            limit=login_account_limit(),
+            window_seconds=rate_limit_window_seconds(),
+        )
+    if not decision.allowed:
         raise HTTPException(
             429,
             detail={
                 "code": "RATE_LIMITED",
                 "message": "登录尝试过于频繁，请稍后再试。",
             },
-            headers={"Retry-After": str(max(item.retry_after_seconds for item in denied))},
+            headers={"Retry-After": str(decision.retry_after_seconds)},
         )
+
+
+def _refund_login_reservation(conn: psycopg.Connection, username: str) -> None:
+    """登录成功路径的占位返还：与准入门同键，调用方事务内执行。
+
+    铸造事务回滚时返还一并回滚，占位与登录成功严格同生同灭。
+    """
+    from app.security_rate_limit import (
+        DIMENSION_LOGIN_ACCOUNT,
+        rate_limit_window_seconds,
+        refund_rate_limit,
+    )
+
+    refund_rate_limit(
+        conn,
+        dimension=DIMENSION_LOGIN_ACCOUNT,
+        identifier=_login_account_identifier(username),
+        window_seconds=rate_limit_window_seconds(),
+    )
 
 
 def _password_device(
@@ -425,7 +442,7 @@ def password_login(
                     replay_candidate = True
                     break
     if not replay_candidate:
-        _login_budget(request, username)
+        _reserve_login_admission(username)
     encoded = str(row[3]) if row is not None and row[3] else _DUMMY_PASSWORD_HASH
     password_matches = verify_password(body.password, encoded)
     if row is None or not account_usable or not password_matches:
@@ -521,6 +538,8 @@ def password_login(
             now=now,
             takeover=body.takeover,
         )
+        # 登录成功：返还准入占位（与铸造同事务，回滚时一并回滚）。
+        _refund_login_reservation(conn, username)
         answer = CustomerPasswordLoginResponse(
             user_id=user_id,
             username=str(row[1]),

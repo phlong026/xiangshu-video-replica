@@ -362,6 +362,35 @@ def consume_rate_limit(
     )
 
 
+def refund_rate_limit(
+    conn: psycopg.Connection,
+    *,
+    dimension: str,
+    identifier: str,
+    window_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    """Return one previously-consumed hit of ``dimension``/``identifier``.
+
+    占位-返还语义的另一半（登录限流原子准入，2026-11-03 会话 P1 批 S3）：
+    验密前 ``consume_rate_limit`` 先扣一个占位挡住并发绕过，登录成功后在此
+    返还——净效果是成功零消耗、失败保留累计（真爆破才烧预算）。只回退
+    仍然活跃窗口内的桶；窗口已翻篇时那次占位本就不再约束任何人，无需写。
+    窗口内并发由主键行锁串行化，减法不会把 ``hit_count`` 减成负数之外
+    的口径（同桶每笔返还一一对应一笔先行扣减）。
+    """
+    if dimension not in RATE_LIMIT_DIMENSIONS:
+        raise ValueError(f"unknown rate-limit dimension {dimension!r}")
+    current = (now if now is not None else _server_now(conn)).astimezone(UTC).replace(microsecond=0)
+    cutoff = (current - timedelta(seconds=window_seconds)).isoformat()
+    cursor = conn.execute(
+        f"UPDATE {COUNTERS_TABLE} SET hit_count = hit_count - 1, updated_at = %s "
+        "WHERE bucket_key = %s AND window_start > %s AND hit_count > 0",
+        (current.isoformat(), bucket_key(dimension, identifier), cutoff),
+    )
+    return cursor.rowcount == 1
+
+
 # ---------------------------------------------------------------------------
 # Failure auditing (append-only events, metrics, alert threshold)
 # ---------------------------------------------------------------------------
