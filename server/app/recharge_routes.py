@@ -415,13 +415,14 @@ def _retryable_merchant_order_collision(exc: Exception) -> bool:
     """True when the integrity failure is the retryable order-number draw.
 
     严格约束鉴别（r3 P1）：只认 PG 的订单号唯一约束（sqlstate=23505 +
-    ``recharge_orders_merchant_order_key``），其余完整性错误一律不可重试、
-    原样冒出。旧的 ``str(exc)`` 文本匹配会随方言/消息格式漂移（其注释里
-    的 SQLite 分支已随 lane 退役），且对消息里碰巧含 ``merchant_order_no``
-    的其他约束错误有误重试风险。
+    ``recharge_orders_merchant_order_no_key``——SQLAlchemy 列级 unique 的
+    自动命名，schema 钉住测试用真实迁移库核实过），其余完整性错误一律
+    不可重试、原样冒出。旧的 ``str(exc)`` 文本匹配会随方言/消息格式漂移
+    （其注释里的 SQLite 分支已随 lane 退役），且对消息里碰巧含
+    ``merchant_order_no`` 的其他约束错误有误重试风险。
     """
     return isinstance(exc, IntegrityConstraintError) and is_unique_conflict_on(
-        exc, "recharge_orders_merchant_order_key"
+        exc, "recharge_orders_merchant_order_no_key"
     )
 
 

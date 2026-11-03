@@ -758,29 +758,38 @@ def test_unique_conflict_discriminator_gates_non_target_constraints() -> None:
 
 
 def test_race_backstop_constraint_names_exist_in_schema(wallet_db: str) -> None:
-    """C1 应用点（r3 复审）：五个兜底约束名与真实 schema 一一存在。
+    """C1 应用点（r3 复审）：五个兜底约束名绑表核实且确为唯一约束。
 
     约束名写错（拼写/漂移）会让鉴别闸永远不命中——兜底退化为「非目标异常
-    原样冒出」，并发竞争从 409/回放退化为 500。本测试钉住名字在库内可查。
+    原样冒出」，并发竞争从 409/回放/重试退化为 500。本测试按「表 + 名 +
+    唯一性」三重绑定查询；recharge_orders 的真实约束名
+    recharge_orders_merchant_order_no_key 即由本测试首次核实（旧注释里的
+    ..._order_key 是错的，str(exc) 文本匹配侥幸生效）。
     """
     from app.db_pg import pg_transaction
 
     expected = (
-        "uq_generation_batches_user_project_key",
-        "uq_generation_batches_independent_idempotency",
-        "uq_script_rewrite_tasks_active_project",
-        "billing_reconciliation_open_key",
-        "recharge_orders_merchant_order_key",
+        ("generation_batches", "uq_generation_batches_user_project_key"),
+        ("generation_batches", "uq_generation_batches_independent_idempotency"),
+        ("script_rewrite_tasks", "uq_script_rewrite_tasks_active_project"),
+        ("billing_reconciliation_items", "billing_reconciliation_open_key"),
+        ("recharge_orders", "recharge_orders_merchant_order_no_key"),
     )
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
-        for name in expected:
-            row = conn.execute(
-                "SELECT 1 FROM pg_indexes WHERE indexname = %s "
-                "UNION ALL SELECT 1 FROM pg_constraint WHERE conname = %s",
-                (name, name),
+        for table, name in expected:
+            as_index = conn.execute(
+                "SELECT 1 FROM pg_indexes WHERE tablename = %s AND indexname = %s",
+                (table, name),
             ).fetchone()
-            assert row is not None, f"race backstop constraint missing: {name}"
+            as_constraint = conn.execute(
+                "SELECT 1 FROM pg_constraint WHERE conrelid = %s::regclass "
+                "AND conname = %s AND contype = 'u'",
+                (table, name),
+            ).fetchone()
+            assert as_index is not None or as_constraint is not None, (
+                f"race backstop constraint missing on {table}: {name}"
+            )
 
 
 def test_idempotency_race_loser_rolls_back_without_poisoning_winner(wallet_db: str) -> None:
