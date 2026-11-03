@@ -67,7 +67,12 @@ from app.customer_ledger import (
     read_ledger_page,
 )
 from app.customer_pricing import read_pricing
-from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.ops_metrics import set_current_trace_fields
 from app.payment_provider import (
     DeploymentConfig,
@@ -409,13 +414,15 @@ def _insert_recharge_order(
 def _retryable_merchant_order_collision(exc: Exception) -> bool:
     """True when the integrity failure is the retryable order-number draw.
 
-    Matches both dialect messages: SQLite spells it
-    ``UNIQUE constraint failed: recharge_orders.merchant_order_no`` while
-    PostgreSQL reports the constraint name
-    (``recharge_orders_merchant_order_key``) - the dotted form only exists on
-    SQLite, so the narrower match silently broke the PG retry (review P1).
+    严格约束鉴别（r3 P1）：只认 PG 的订单号唯一约束（sqlstate=23505 +
+    ``recharge_orders_merchant_order_key``），其余完整性错误一律不可重试、
+    原样冒出。旧的 ``str(exc)`` 文本匹配会随方言/消息格式漂移（其注释里
+    的 SQLite 分支已随 lane 退役），且对消息里碰巧含 ``merchant_order_no``
+    的其他约束错误有误重试风险。
     """
-    return "merchant_order_no" in str(exc)
+    return isinstance(exc, IntegrityConstraintError) and is_unique_conflict_on(
+        exc, "recharge_orders_merchant_order_key"
+    )
 
 
 @router.post(

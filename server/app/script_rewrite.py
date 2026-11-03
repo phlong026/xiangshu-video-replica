@@ -19,7 +19,12 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.external_calls import CallTimer, Outcome, record_external_call
 from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.settings import SettingsRepository, SettingsUnavailableError
@@ -525,6 +530,10 @@ def enqueue_script_rewrite_task(
                     (_time_text(datetime.now(UTC)), replay["id"]),
                 ).fetchone()
             except IntegrityConstraintError as exc:
+                # 鉴别闸（r3 P1）：只有「每项目一个进行中改写」部分唯一索引的
+                # 冲突才是并发互斥；其他 235xx 是真实数据错误，必须原样冒出。
+                if not is_unique_conflict_on(exc, "uq_script_rewrite_tasks_active_project"):
+                    raise
                 conn.rollback()
                 raise _script_rewrite_error(
                     409,

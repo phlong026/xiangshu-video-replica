@@ -92,6 +92,20 @@ def _map_integrity_error(exc: psycopg.Error) -> IntegrityConstraintError:
     )
 
 
+def is_unique_conflict_on(exc: IntegrityConstraintError, *constraint_names: str) -> bool:
+    """竞争兜底的鉴别闸：目标唯一约束的冲突才允许转 409/回放/重试。
+
+    兜底处理器假定捕获的就是「目标互斥约束的冲突」，但
+    ``IntegrityConstraintError`` 覆盖全部 235xx 完整性错误（CHECK / NOT NULL /
+    外键 / 其他唯一约束）——不鉴别就映射会把真实数据错误误报成
+    「处理中/冲突」，掩盖故障（2026-11-03 回评 r3 P1）。约束名缺失
+    （异常未携带诊断载荷）时从严拒绝，交回通用异常路径，宁可 500 不可误报。
+    """
+    if exc.sqlstate != "23505":
+        return False
+    return exc.constraint_name is not None and exc.constraint_name in constraint_names
+
+
 class PostgresBackend:
     """Wraps a psycopg connection; execute runs the native ``%s`` SQL.
 

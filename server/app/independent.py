@@ -22,7 +22,12 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db_pg import is_customer_production
-from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.generation import (
     H3_MODEL,
     BatchResult,
@@ -621,7 +626,11 @@ def create_independent_batch(
             )
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
-    except IntegrityConstraintError:
+    except IntegrityConstraintError as exc:
+        # 鉴别闸（r3 P1）：只有 075 独立批次幂等键部分唯一索引的冲突才按
+        # 并发竞争处理；其他 235xx 是真实数据错误，必须原样冒出。
+        if not is_unique_conflict_on(exc, "uq_generation_batches_independent_idempotency"):
+            raise
         # 并发同键提交者后到（075 部分唯一索引兜底 NULL project 场景）；
         # 翻译层把唯一冲突统一抛 IntegrityConstraintError（T2a 2026-11-01
         # 修正捕获类型），fenced 事务已中止无法回放——409 让客户端重试，

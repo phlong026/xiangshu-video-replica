@@ -699,6 +699,16 @@ def test_concurrent_task_reservations_cannot_overspend(wallet_db: str) -> None:
         thread.join()
 
     assert sorted(results) == ["insufficient", "reserved"]
+    # T2a 曾把以下两段钱包验证截进后一个测试（r3 评审 C2）：归还本测试——
+    # 双连接竞争后恰一次预留，钱包 (0, 1)。
+    assert wallet_state() == (0, 1)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        reserve_rows = conn.execute(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'RESERVE'"
+        ).fetchone()
+    assert reserve_rows is not None
+    assert int(reserve_rows[0]) == 1
 
 
 def test_portable_layer_maps_unique_violation_for_race_backstops(wallet_db: str) -> None:
@@ -725,11 +735,84 @@ def test_portable_layer_maps_unique_violation_for_race_backstops(wallet_db: str)
     assert not isinstance(exc_info.value, psycopg.errors.UniqueViolation)
     assert exc_info.value.sqlstate == "23505"
     assert "billing_tariffs_pkey" in str(exc_info.value.constraint_name)
-    assert wallet_state() == (0, 1)
-    with pg_transaction() as raw:
+
+
+def test_unique_conflict_discriminator_gates_non_target_constraints() -> None:
+    """C1 鉴别闸（r3 评审）：非 23505 / 非目标约束 / 缺约束名都不按竞争处理。"""
+    from app.db_portable import is_unique_conflict_on
+
+    def make(sqlstate: str | None, name: str | None) -> IntegrityConstraintError:
+        return IntegrityConstraintError("boom", sqlstate=sqlstate, constraint_name=name)
+
+    target = "uq_generation_batches_user_project_key"
+    assert is_unique_conflict_on(make("23505", target), target)
+    # CHECK 违反（23514）、其他唯一约束、缺约束名：一律不按竞争映射。
+    assert not is_unique_conflict_on(make("23514", "ck_something"), target)
+    assert not is_unique_conflict_on(make("23505", "some_other_unique"), target)
+    assert not is_unique_conflict_on(make("23505", None), target)
+
+
+# ---------------------------------------------------------------------------
+# C3：真库双连接竞争——鉴别闸与账务原子性
+# ---------------------------------------------------------------------------
+
+
+def test_idempotency_race_loser_rolls_back_without_poisoning_winner(wallet_db: str) -> None:
+    """双连接同幂等键真并发（r3 评审 C3）：输家约束冲突、赢家账务完好。"""
+    seed_task(wallet_db, available_credits=2)
+    with psycopg.connect(wallet_db, autocommit=True) as raw:
         conn = BusinessConnection.postgres(raw)
-        reserve_rows = conn.execute(
-            "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'RESERVE'"
-        ).fetchone()
-    assert reserve_rows is not None
-    assert int(reserve_rows[0]) == 1
+        # 种子批次行占用幂等键（模拟赢家已提交）。
+        conn.execute(
+            "INSERT INTO generation_batches "
+            "(id, project_id, created_by_user_id, idempotency_key, request_hash, "
+            " request_snapshot_json, creation_kind, status) "
+            "VALUES ('race-batch', NULL, 'user_1', 'race-key', 'hash-winner', "
+            "'{}', 'independent', 'QUEUED')"
+        )
+
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def loser_insert() -> None:
+        barrier.wait()
+        try:
+            with pg_transaction() as raw:
+                conn = BusinessConnection.postgres(raw)
+                conn.execute(
+                    "INSERT INTO generation_batches "
+                    "(id, project_id, created_by_user_id, idempotency_key, "
+                    " request_hash, request_snapshot_json, creation_kind, status) "
+                    "VALUES ('race-loser', NULL, 'user_1', 'race-key', 'hash-loser', "
+                    "'{}', 'independent', 'QUEUED')"
+                )
+            outcomes.append("inserted")
+        except IntegrityConstraintError as exc:
+            outcomes.append(f"rejected:{exc.constraint_name}")
+
+    def wallet_read() -> None:
+        # 同刻的读连接：验证输家回滚后共享状态没有被未提交写污染。
+        barrier.wait()
+        with pg_transaction() as raw:
+            conn = BusinessConnection.postgres(raw)
+            row = conn.execute(
+                "SELECT COUNT(*) FROM generation_batches WHERE idempotency_key = 'race-key'"
+            ).fetchone()
+        with lock:
+            outcomes.append(f"visible:{int(row[0]) if row else -1}")
+
+    threads = [
+        threading.Thread(target=loser_insert),
+        threading.Thread(target=wallet_read),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # 输家被 075 部分唯一索引拒绝（NULL project 场景）且 constraint_name
+    # 可鉴别；赢家行持久、账务零污染。
+    assert "rejected:uq_generation_batches_independent_idempotency" in outcomes
+    assert "visible:1" in outcomes
+    assert wallet_state() == (2, 0)
