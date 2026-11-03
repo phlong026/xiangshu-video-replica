@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -30,6 +31,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DRILL_SCRIPT = REPO_ROOT / "deploy" / "postgres" / "pitr-restore-drill.sh"
+
+# 整个文件通过 /usr/bin/env bash 演练 POSIX 恢复脚本，Windows 原生 Python
+# 结构性无法执行（CreateProcess 找不到 /usr/bin/env，WinError 2）；由 CI
+# Linux 门禁真实执行，Windows 本地跳过以免假失败堵死合并门禁。
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only：演练脚本依赖 /usr/bin/env bash 与 POSIX 工具链",
+)
 
 
 def _drill_env(**overrides: str) -> dict[str, str]:
