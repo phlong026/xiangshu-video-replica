@@ -24,10 +24,12 @@ class RecordingConn:
 
     def __init__(self) -> None:
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
+        # RETURNING 路径取回的行；默认 7 天候选值，供续期用例断言。
+        self.returned_row: tuple[Any, ...] = (_now() + timedelta(seconds=SESSION_VALIDITY_SECONDS),)
 
     def execute(self, sql: str, params: Any = None) -> Any:
         self.statements.append((" ".join(sql.split()), tuple(params or ())))
-        return SimpleNamespace(rowcount=1)
+        return SimpleNamespace(rowcount=1, fetchone=lambda: self.returned_row)
 
 
 def _now() -> datetime:
@@ -166,14 +168,16 @@ def test_refund_decrements_only_live_windows() -> None:
         conn,
         dimension="login:account",
         identifier="acct-1",
-        window_seconds=3600,
+        window_start="2026-11-03T12:00:00+00:00",
         now=_now(),
     )
     statement, params = conn.statements[0]
     assert "hit_count - 1" in statement
-    assert "window_start >" in statement and "hit_count > 0" in statement
-    # 参数序：(updated_at, bucket_key, cutoff)。
+    # 返还精确匹配占位所属窗口（window_start =），跨窗口不串扰。
+    assert "window_start = %s" in statement and "hit_count > 0" in statement
+    # 参数序：(updated_at, bucket_key, window_start)。
     assert len(params) == 3
+    assert params[2] == "2026-11-03T12:00:00+00:00"
 
 
 def test_refund_rejects_unknown_dimension() -> None:
@@ -187,6 +191,6 @@ def test_refund_rejects_unknown_dimension() -> None:
             conn,
             dimension="bogus:dimension",
             identifier="x",
-            window_seconds=3600,
+            window_start="2026-11-03T12:00:00+00:00",
             now=_now(),
         )

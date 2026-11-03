@@ -17,7 +17,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 
@@ -256,25 +256,30 @@ def login_session(
 
     if token_matches and not lapsed:
         # Renewal only: same token, same epoch, expiry slid out to now + 7 days.
-        # 租约防回缩（2026-11-03 回评 r1 P1）：取现值与新值较大者——时钟回拨或
-        # 异常路径写入更短有效期时不得缩短已授予的会话；logout/吊销走独立
-        # 语句保持缩短语义。
-        lease_until_iso = (
-            max(lease_until, now_full + timedelta(seconds=SESSION_VALIDITY_SECONDS))
+        # 租约防回缩（2026-11-03 回评 r1 P1）：SQL GREATEST 取现值与新值较大
+        # 者——时钟回拨或异常路径写入更短有效期时不得缩短已授予的会话；
+        # logout/吊销走独立语句保持缩短语义。RETURNING 取回真实落库值作为
+        # 快照（A2 评审 P2：Python 侧整秒截断会与存值的微秒产生偏差）。
+        lease_candidate = (
+            (now_full + timedelta(seconds=SESSION_VALIDITY_SECONDS))
             .replace(microsecond=0)
             .isoformat()
         )
         # last_seen_at 的 GREATEST 兜底沿袭 logout 的 lease 写法：now() 是事务
         # 起点时钟，一个早于行创建才开始的事务在行锁等待后拿到锁时，其
         # now() 可能早于 created_at，裸写会触发 last_seen_not_before_created。
-        conn.execute(
+        stored = conn.execute(
             "UPDATE customer_session_state "
             "SET lease_until = GREATEST(lease_until::timestamptz, %s::timestamptz), "
             "last_seen_at = GREATEST(%s::timestamptz, "
             "created_at::timestamptz + interval '1 microsecond'), "
-            "updated_at = %s WHERE session_id = %s",
-            (lease_until_iso, now_full.isoformat(), now_iso, session_id),
-        )
+            "updated_at = %s WHERE session_id = %s "
+            "RETURNING lease_until",
+            (lease_candidate, now_full.isoformat(), now_iso, session_id),
+        ).fetchone()
+        if stored is None:
+            raise RuntimeError("unreachable: locked session row vanished during renewal")
+        lease_until_iso = cast(datetime, stored[0]).isoformat()
         _write_event(
             conn,
             event="LOGIN",
@@ -476,30 +481,30 @@ def heartbeat_session(
             session_epoch=session_epoch,
         )
 
-    lease_until_iso = (
-        max(
-            _as_utc(lease_until_raw),
-            now_full + timedelta(seconds=SESSION_VALIDITY_SECONDS),
-        )
-        .replace(microsecond=0)
-        .isoformat()
+    # 租约防回缩与 login 续租同款：SQL GREATEST 取较大者，RETURNING 取回
+    # 真实落库值作为快照（A2 评审 P2：整秒截断快照会与存值微秒偏差）。
+    lease_candidate = (
+        (now_full + timedelta(seconds=SESSION_VALIDITY_SECONDS)).replace(microsecond=0).isoformat()
     )
     # PR #47 Codex review P2 (the unbind lesson): keep the PostgreSQL
     # microsecond precision — a whole-second trim lands a same-second
     # heartbeat before created_at and trips the heartbeat_not_before_created
     # CHECK. last_seen_at 同理保留微秒，并叠 GREATEST 兜底（事务起点时钟在
     # 行锁等待后可能早于 created_at，见 login_session 续租处的同款注释）。
-    # 租约防回缩与 login 续租同款：max(现值, 新值) + SQL GREATEST 双保险。
     now_full_iso = now_full.isoformat()
-    conn.execute(
+    stored = conn.execute(
         "UPDATE customer_session_state "
         "SET lease_until = GREATEST(lease_until::timestamptz, %s::timestamptz), "
         "last_heartbeat_at = %s, "
         "last_seen_at = GREATEST(%s::timestamptz, "
         "created_at::timestamptz + interval '1 microsecond'), "
-        "updated_at = %s WHERE session_id = %s",
-        (lease_until_iso, now_full_iso, now_full_iso, now_full_iso, session_id),
-    )
+        "updated_at = %s WHERE session_id = %s "
+        "RETURNING lease_until",
+        (lease_candidate, now_full_iso, now_full_iso, now_full_iso, session_id),
+    ).fetchone()
+    if stored is None:
+        raise RuntimeError("unreachable: locked session row vanished during heartbeat")
+    lease_until_iso = cast(datetime, stored[0]).isoformat()
     _write_event(
         conn,
         event="HEARTBEAT",
@@ -563,17 +568,21 @@ def renew_session_expiry(
     now_seen_iso = now.isoformat()
     now_second_iso = now.replace(microsecond=0).isoformat()
     if renewal_needed:
-        new_expiry = max(lease_until, now + timedelta(seconds=SESSION_VALIDITY_SECONDS))
-        new_expiry_iso = new_expiry.replace(microsecond=0).isoformat()
-        conn.execute(
+        new_expiry_iso = (
+            (now + timedelta(seconds=SESSION_VALIDITY_SECONDS)).replace(microsecond=0).isoformat()
+        )
+        stored = conn.execute(
             "UPDATE customer_session_state "
             "SET lease_until = GREATEST(lease_until::timestamptz, %s::timestamptz), "
             "last_seen_at = GREATEST(%s::timestamptz, "
             "created_at::timestamptz + interval '1 microsecond'), "
-            "updated_at = %s WHERE session_id = %s",
+            "updated_at = %s WHERE session_id = %s "
+            "RETURNING lease_until",
             (new_expiry_iso, now_seen_iso, now_second_iso, session_id),
-        )
-        return new_expiry_iso
+        ).fetchone()
+        if stored is None:
+            raise RuntimeError("unreachable: locked session row vanished during renewal")
+        return cast(datetime, stored[0]).isoformat()
     conn.execute(
         "UPDATE customer_session_state "
         "SET last_seen_at = GREATEST(%s::timestamptz, "

@@ -229,7 +229,7 @@ def _login_account_identifier(username: str) -> str:
     return keyed_digest(key, "password:" + username)
 
 
-def _reserve_login_admission(username: str) -> None:
+def _reserve_login_admission(username: str) -> str:
     """密码通道的原子准入门：验密前先扣一个占位，挡住并发绕过。
 
     2026-11-03 会话 P1 批 S3：占位先于验密原子落库，并发请求无法同时通过
@@ -238,6 +238,9 @@ def _reserve_login_admission(username: str) -> None:
     一个账号的失败惩罚所有人（2026-11-02「登录频繁」工单根因）。成功登录
     在会话铸造事务内由 :func:`_refund_login_reservation` 返还占位，失败
     保留累计——净效果成功零消耗、真爆破才烧预算。
+
+    返回本次占位所属的窗口标识（``RateLimitDecision.window_start``），
+    供返还精确匹配同一窗口——跨窗口的旧占位不得串扰新窗口的失败计数。
     """
     from app.security_rate_limit import (
         DIMENSION_LOGIN_ACCOUNT,
@@ -263,16 +266,18 @@ def _reserve_login_admission(username: str) -> None:
             },
             headers={"Retry-After": str(decision.retry_after_seconds)},
         )
+    return decision.window_start
 
 
-def _refund_login_reservation(conn: psycopg.Connection, username: str) -> None:
-    """登录成功路径的占位返还：与准入门同键，调用方事务内执行。
+def _refund_login_reservation(
+    conn: psycopg.Connection, username: str, *, window_start: str
+) -> None:
+    """登录成功路径的占位返还：与准入门同键同窗口，调用方事务内执行。
 
     铸造事务回滚时返还一并回滚，占位与登录成功严格同生同灭。
     """
     from app.security_rate_limit import (
         DIMENSION_LOGIN_ACCOUNT,
-        rate_limit_window_seconds,
         refund_rate_limit,
     )
 
@@ -280,7 +285,7 @@ def _refund_login_reservation(conn: psycopg.Connection, username: str) -> None:
         conn,
         dimension=DIMENSION_LOGIN_ACCOUNT,
         identifier=_login_account_identifier(username),
-        window_seconds=rate_limit_window_seconds(),
+        window_start=window_start,
     )
 
 
@@ -442,7 +447,7 @@ def password_login(
                     replay_candidate = True
                     break
     if not replay_candidate:
-        _reserve_login_admission(username)
+        admission_window = _reserve_login_admission(username)
     encoded = str(row[3]) if row is not None and row[3] else _DUMMY_PASSWORD_HASH
     password_matches = verify_password(body.password, encoded)
     if row is None or not account_usable or not password_matches:
@@ -539,7 +544,7 @@ def password_login(
             takeover=body.takeover,
         )
         # 登录成功：返还准入占位（与铸造同事务，回滚时一并回滚）。
-        _refund_login_reservation(conn, username)
+        _refund_login_reservation(conn, username, window_start=admission_window)
         answer = CustomerPasswordLoginResponse(
             user_id=user_id,
             username=str(row[1]),

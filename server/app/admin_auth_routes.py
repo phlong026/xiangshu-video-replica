@@ -516,15 +516,19 @@ def _reserve_admin_password_admission(*, username: str) -> RateLimitDecision:
         )
 
 
-def _refund_admin_password_reservation(*, username: str) -> None:
-    """登录成功路径的占位返还：独立事务，失败只告警不打断已成功的登录。"""
+def _refund_admin_password_reservation(*, username: str, window_start: str) -> None:
+    """登录成功路径的占位返还：独立事务，失败只告警不打断已成功的登录。
+
+    ``window_start`` 必须来自准入决策（占位所属窗口）——跨窗口返还不得
+    串扰新窗口的失败计数（A2 评审 P2）。
+    """
     try:
         with pg_transaction() as conn:
             refund_rate_limit(
                 conn,
                 dimension=DIMENSION_LOGIN_ACCOUNT,
                 identifier=_admin_login_account_identifier(username),
-                window_seconds=rate_limit_window_seconds(),
+                window_start=window_start,
             )
     except Exception as refund_error:
         # 返还丢失只意味着成功登录多消耗一次预算，绝不能把已建立的
@@ -1196,7 +1200,7 @@ def login_admin_with_password(
             "ADMIN_SESSIONS_UNAVAILABLE",
             "Admin sessions require the PostgreSQL runtime.",
         ) from exc
-    _refund_admin_password_reservation(username=username)
+    _refund_admin_password_reservation(username=username, window_start=admission.window_start)
     set_current_trace_fields(
         actor_id=actor.user_id,
         user_id=actor.user_id,

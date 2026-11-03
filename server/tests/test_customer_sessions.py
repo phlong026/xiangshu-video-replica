@@ -1977,11 +1977,18 @@ def test_hundred_concurrent_logins_keep_device_epochs_independent(
 
 
 def _age_activity(device_id: str, age: timedelta) -> None:
-    """把 last_seen_at 改写为 now - age（模拟「上次活动已过去一段时间」）。"""
+    """把 last_seen_at 改写为 now - age（模拟「上次活动已过去一段时间」）。
+
+    created_at 同步前移：刚建立的会话裸写过去的活动时间会落在 created_at
+    之前，触发 last_seen_not_before_created CHECK（A2 评审指出）。
+    """
     with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
         conn.execute(
-            "UPDATE customer_session_state SET last_seen_at = (now() - %s) WHERE device_id = %s",
-            (age, device_id),
+            "UPDATE customer_session_state "
+            "SET last_seen_at = (now() - %s), "
+            "created_at = least(created_at, (now() - %s - interval '1 minute')) "
+            "WHERE device_id = %s",
+            (age, age, device_id),
         )
 
 
@@ -2065,3 +2072,71 @@ def test_heartbeat_never_shortens_a_longer_lease(client: TestClient) -> None:
     lease_after, _ = _session_activity()
     remaining = datetime.fromisoformat(lease_after).astimezone(UTC) - datetime.now(UTC)
     assert remaining > timedelta(days=29), lease_after
+
+
+def test_login_reservation_refund_is_window_scoped(client: TestClient) -> None:
+    """S3/A2 评审：返还精确匹配占位窗口——旧窗口占位不串扰新窗口计数。"""
+    from app.customer_device_service import highest_device_domain_key, keyed_digest
+    from app.db_pg import pg_transaction
+    from app.security_rate_limit import (
+        DIMENSION_LOGIN_ACCOUNT,
+        consume_rate_limit,
+        refund_rate_limit,
+    )
+
+    _, key = highest_device_domain_key()
+    identifier = keyed_digest(key, "password:refund-window-fixture")
+    old_window = datetime(2026, 11, 3, 8, 0, 0, tzinfo=UTC)
+    late_window = datetime(2026, 11, 3, 9, 0, 0, tzinfo=UTC)
+    with pg_transaction() as conn:
+        first = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=old_window,
+        )
+        assert first.allowed and first.hit_count == 1
+        # 窗口翻篇后另一笔真实失败落账（新窗口计数 1）。
+        second = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=late_window,
+        )
+        assert second.allowed and second.hit_count == 1
+        assert second.window_start != first.window_start
+        # 旧窗口占位返还：只匹配旧窗口 → 无行更新，新窗口计数不受串扰。
+        assert (
+            refund_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=identifier,
+                window_start=first.window_start,
+                now=late_window,
+            )
+            is False
+        )
+        with_memory = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=late_window,
+        )
+        assert with_memory.hit_count == 2
+        # 新窗口的真实计数可正常返还。
+        assert (
+            refund_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=identifier,
+                window_start=second.window_start,
+                now=late_window,
+            )
+            is True
+        )
