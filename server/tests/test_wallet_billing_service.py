@@ -783,8 +783,7 @@ def test_race_backstop_constraint_names_exist_in_schema(wallet_db: str) -> None:
             as_unique_index = conn.execute(
                 "SELECT 1 FROM pg_index ix "
                 "JOIN pg_class ic ON ic.oid = ix.indexrelid "
-                "JOIN pg_class tc ON tc.oid = ix.indrelid "
-                "WHERE tc.relname = %s AND ic.relname = %s "
+                "WHERE ix.indrelid = %s::regclass AND ic.relname = %s "
                 "AND ix.indisunique AND ix.indisvalid",
                 (table, name),
             ).fetchone()
