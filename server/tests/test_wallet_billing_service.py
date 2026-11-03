@@ -757,25 +757,42 @@ def test_unique_conflict_discriminator_gates_non_target_constraints() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_idempotency_race_loser_rolls_back_without_poisoning_winner(wallet_db: str) -> None:
-    """双连接同幂等键真并发（r3 评审 C3）：输家约束冲突、赢家账务完好。"""
-    seed_task(wallet_db, available_credits=2)
-    with psycopg.connect(wallet_db, autocommit=True) as raw:
-        conn = BusinessConnection.postgres(raw)
-        # 种子批次行占用幂等键（模拟赢家已提交）。
-        conn.execute(
-            "INSERT INTO generation_batches "
-            "(id, project_id, created_by_user_id, idempotency_key, request_hash, "
-            " request_snapshot_json, creation_kind, status) "
-            "VALUES ('race-batch', NULL, 'user_1', 'race-key', 'hash-winner', "
-            "'{}', 'independent', 'QUEUED')"
-        )
+def test_race_backstop_constraint_names_exist_in_schema(wallet_db: str) -> None:
+    """C1 应用点（r3 复审）：五个兜底约束名与真实 schema 一一存在。
 
+    约束名写错（拼写/漂移）会让鉴别闸永远不命中——兜底退化为「非目标异常
+    原样冒出」，并发竞争从 409/回放退化为 500。本测试钉住名字在库内可查。
+    """
+    from app.db_pg import pg_transaction
+
+    expected = (
+        "uq_generation_batches_user_project_key",
+        "uq_generation_batches_independent_idempotency",
+        "uq_script_rewrite_tasks_active_project",
+        "billing_reconciliation_open_key",
+        "recharge_orders_merchant_order_key",
+    )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        for name in expected:
+            row = conn.execute(
+                "SELECT 1 FROM pg_indexes WHERE indexname = %s "
+                "UNION ALL SELECT 1 FROM pg_constraint WHERE conname = %s",
+                (name, name),
+            ).fetchone()
+            assert row is not None, f"race backstop constraint missing: {name}"
+
+
+def test_idempotency_race_loser_rolls_back_without_poisoning_winner(wallet_db: str) -> None:
+    """C3（r3 复审要求）：双连接同幂等键真并发——恰一个赢家提交，输家
+    目标约束拒绝，账务恰好一次预留、零双扣。两笔写都不预提交，靠屏障
+    同时进场争抢同一唯一索引。"""
+    seed_task(wallet_db, available_credits=2)
     barrier = threading.Barrier(2)
     outcomes: list[str] = []
     lock = threading.Lock()
 
-    def loser_insert() -> None:
+    def contender(batch_id: str, request_hash: str) -> None:
         barrier.wait()
         try:
             with pg_transaction() as raw:
@@ -784,35 +801,45 @@ def test_idempotency_race_loser_rolls_back_without_poisoning_winner(wallet_db: s
                     "INSERT INTO generation_batches "
                     "(id, project_id, created_by_user_id, idempotency_key, "
                     " request_hash, request_snapshot_json, creation_kind, status) "
-                    "VALUES ('race-loser', NULL, 'user_1', 'race-key', 'hash-loser', "
-                    "'{}', 'independent', 'QUEUED')"
+                    "VALUES (%s, NULL, 'user_1', 'race-key', %s, '{}', 'independent', 'QUEUED')",
+                    (batch_id, request_hash),
                 )
-            outcomes.append("inserted")
+                # 与批次写同事务的账务操作：赢家应完整提交，输家整体回滚。
+                reserve_internal_billing(
+                    conn,
+                    user_id="user_1",
+                    task_id="task_1",
+                    billing_round=1,
+                )
+            with lock:
+                outcomes.append("committed:" + batch_id)
         except IntegrityConstraintError as exc:
-            outcomes.append(f"rejected:{exc.constraint_name}")
-
-    def wallet_read() -> None:
-        # 同刻的读连接：验证输家回滚后共享状态没有被未提交写污染。
-        barrier.wait()
-        with pg_transaction() as raw:
-            conn = BusinessConnection.postgres(raw)
-            row = conn.execute(
-                "SELECT COUNT(*) FROM generation_batches WHERE idempotency_key = 'race-key'"
-            ).fetchone()
-        with lock:
-            outcomes.append(f"visible:{int(row[0]) if row else -1}")
+            with lock:
+                outcomes.append("rejected:" + str(exc.constraint_name))
 
     threads = [
-        threading.Thread(target=loser_insert),
-        threading.Thread(target=wallet_read),
+        threading.Thread(target=contender, args=("race-a", "hash-a")),
+        threading.Thread(target=contender, args=("race-b", "hash-b")),
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    # 输家被 075 部分唯一索引拒绝（NULL project 场景）且 constraint_name
-    # 可鉴别；赢家行持久、账务零污染。
-    assert "rejected:uq_generation_batches_independent_idempotency" in outcomes
-    assert "visible:1" in outcomes
-    assert wallet_state() == (2, 0)
+    winners = [item for item in outcomes if item.startswith("committed:")]
+    rejected = [item for item in outcomes if item.startswith("rejected:")]
+    assert len(winners) == 1 and len(rejected) == 1
+    # NULL project 场景命中的是 075 部分唯一索引。
+    assert rejected[0] == "rejected:uq_generation_batches_independent_idempotency"
+    # 赢家事务完整提交：批次恰 1 行、恰一次预留、钱包 (1, 1)；输家零残留。
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        batch_rows = conn.execute(
+            "SELECT COUNT(*) FROM generation_batches WHERE idempotency_key = 'race-key'"
+        ).fetchone()
+        reserve_rows = conn.execute(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'RESERVE'"
+        ).fetchone()
+    assert batch_rows is not None and int(batch_rows[0]) == 1
+    assert reserve_rows is not None and int(reserve_rows[0]) == 1
+    assert wallet_state() == (1, 1)
