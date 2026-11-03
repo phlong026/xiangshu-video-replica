@@ -4610,9 +4610,20 @@ describe("视频生成（C2 独立创作）", () => {
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      updatedAt: "2026-10-12T00:00:00Z",
+      // 恢复提示走 7 天 TTL 窗口，硬编码日期会随日历跌出窗口（2026-11-03 实锤）：
+      // 用相对时间把夹具钉在窗口内，别追调 TTL。
+      updatedAt: freshUpdatedAt(),
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
+    // 途经 #studio/materials 的 popstate 会挂载素材库列表（非 review 分支）；
+    // 本 describe 的基座未 mock listMaterials，缺省 vi.fn() 返回 undefined
+    // 会在 .then 上炸掉——补一个默认空页。
+    api.listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 12,
+      total: 0,
+    });
     render(
       <StudioWorkspace
         currentUser={reviewUser}
