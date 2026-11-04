@@ -1310,27 +1310,22 @@ button.table-action-button--danger {
 .lease-countdown .status-text.normal {
   color: #4ade80;
 }
-.heartbeat-status .status-text.warning,
-.lease-countdown .status-text.warning {
+.heartbeat-status .status-text.warning {
   color: var(--accent-strong);
 }
-.heartbeat-status .status-text.expired,
-.lease-countdown .status-text.expired {
+.heartbeat-status .status-text.expired {
   color: #f87171;
 }
 .heartbeat-status.healthy {
   border-color: rgba(74, 222, 128, 0.35);
 }
-.heartbeat-status.warning,
-.lease-countdown.warning {
+.heartbeat-status.warning {
   border-color: rgba(240, 188, 94, 0.4);
 }
-.heartbeat-status.expired,
-.lease-countdown.expired {
+.heartbeat-status.expired {
   border-color: rgba(248, 113, 113, 0.4);
 }
-.heartbeat-status .btn-refresh,
-.lease-countdown .btn-renew {
+.heartbeat-status .btn-refresh {
   margin-top: 4px;
   padding: 7px 14px;
   font-size: var(--font-label);
