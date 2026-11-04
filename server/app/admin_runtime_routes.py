@@ -52,6 +52,7 @@ from app.admin_viral_keywords import router as keyword_router
 from app.admin_viral_metrics import usage_count_sql, video_business_metrics
 from app.admin_viral_platform_probe import router as platform_probe_router
 from app.admin_viral_resources import router as resource_router
+from app.admin_viral_upload import router as upload_router
 from app.admin_write_contract import (
     AdminWriteContract,
     http_error,
@@ -77,6 +78,7 @@ from app.viral_homepage import live_homepage_sql, pending_homepage_sql
 from app.viral_keywords import ViralKeywordConfig
 
 router = APIRouter(prefix="/api/control", tags=["admin-runtime"])
+router.include_router(upload_router)
 
 router.include_router(keyword_router)
 router.include_router(operation_cost_router)
@@ -1640,6 +1642,8 @@ def import_viral_link_for_admin(
             raise http_error(422, "VIRAL_LINK_INVALID", "请粘贴视频分享链接。")
         try:
             normalized_url = normalize_supported_link(raw_url)
+            if supported_link_platform(normalized_url) not in ("douyin", "wechat_channels"):
+                raise http_error(422, "VIRAL_PLATFORM_INVALID", "暂时只支持抖音和视频号采集。")
             # 限时外呼与管理端搜索同一纪律：解析通道各有传输超时，不能让
             # 外呼挂在写事务里无限等待。
             resolver: DouyidouLinkClient | WechatLinkClient

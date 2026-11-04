@@ -122,6 +122,7 @@ def normalize_generated_video(
     target_height: int,
     max_bytes: int = GENERATED_VIDEO_MAX_BYTES,
     max_duration_seconds: float | None = GENERATED_VIDEO_MAX_SECONDS,
+    allow_mov: bool = False,
 ) -> NormalizedGeneratedVideo:
     """Fit existing MP4 display pixels into a square-pixel canvas without cropping.
 
@@ -147,7 +148,9 @@ def normalize_generated_video(
             f"成片超过大小上限 {_size_limit_label(max_bytes)}"
             f"（可用 {GENERATED_VIDEO_MAX_MB_ENV} 调整归档上限）"
         )
-    if content[4:8] != b"ftyp":
+    is_mp4 = content[4:8] == b"ftyp"
+    # 仅管理员上传放行 QuickTime 原片；成片入口仍按原有 MP4 边界校验。
+    if not is_mp4 and not (allow_mov and content[4:8] in {b"moov", b"wide", b"mdat", b"free"}):
         raise MediaValidationFailed("成片不是可识别的 MP4 容器")
     ffprobe = resolve_media_binary("ffprobe")
     ffmpeg = resolve_media_binary("ffmpeg")
@@ -172,7 +175,8 @@ def normalize_generated_video(
             ):
                 display_target_width, display_target_height = target_height, target_width
             transformed = (
-                source.width != display_target_width
+                (allow_mov and (not is_mp4 or content[8:12] == b"qt  "))
+                or source.width != display_target_width
                 or source.height != display_target_height
                 or source.sar != 1
                 or source.rotation != 0

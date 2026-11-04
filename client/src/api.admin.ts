@@ -4157,7 +4157,7 @@ export async function adminSearchViralVideos(
 }
 
 /**
- * 管理端粘贴链接采集：解析（抖音 / 小红书 / 视频号）→ 入内容池 → 入队媒体
+ * 管理端粘贴链接采集：解析（抖音 / 视频号）→ 入内容池 → 入队媒体
  * 转存主存储，加盟商播放与复刻都走自有签名链接。不计客户积分；
  * archiveQueued=false 表示平台转存槽位被占用，条目已入库、需稍后手动转存。
  */
@@ -4177,6 +4177,28 @@ export async function adminImportViralLink(
     240_000,
   );
   return { ...result, items: result.items.map(withManagedCover) };
+}
+
+export async function adminUploadViralVideo(
+  data: FormData,
+  idempotencyKey: string,
+): Promise<{ platform: "douyin" | "wechat_channels"; videoId: string }> {
+  data.set("confirm", "true");
+  data.set("reason", "上传爆款视频");
+  const response = await requestControl(
+    "/api/control/viral/uploads",
+    {
+      method: "POST",
+      headers: {
+        [CSRF_HEADER]: requireCsrfToken(),
+        [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
+      },
+      body: data,
+    },
+    900_000,
+  );
+  if (!response.ok) throw await parseActivationError(response, "视频上传失败");
+  return response.json();
 }
 
 // ---------------------------------------------------------------------------
