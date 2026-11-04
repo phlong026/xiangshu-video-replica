@@ -121,9 +121,53 @@ def main() -> int:
             return 0
 
         applied = 0
+        skipped_on_recheck = 0
         for row in actionable:
-            # 回置前在同一语句里复查全部证据：查询与更新之间可能新增运营来源、
-            # 策展审计或在途任务，复查不过即放弃该行（Codex 评审建议）。
+            # 先锁目标行（Codex 收尾评审 P2）：并发策展是「先更新本行、后插审计」，
+            # READ COMMITTED 下语句内子查询用的是语句开始时的快照，看不见锁等待
+            # 期间提交的审计记录——直接 UPDATE 会误撤刚完成的策展。先 FOR UPDATE
+            # 等并发事务落地，随后的复查语句按新快照取证，再决定是否回置。
+            locked = conn.execute(
+                "SELECT video_id FROM viral_videos WHERE platform=%s AND video_id=%s FOR UPDATE",
+                (row["platform"], row["video_id"]),
+            ).fetchone()
+            if locked is None:
+                continue
+            evidence = conn.execute(
+                """
+                SELECT
+                   EXISTS(SELECT 1 FROM viral_content_sources s
+                          WHERE s.platform=%s AND s.video_id=%s
+                            AND s.source_kind = ANY(%s)) AS has_ops_source,
+                   EXISTS(SELECT 1 FROM audit_logs a
+                          WHERE a.entity_type='viral_video' AND a.entity_id=%s
+                            AND a.action = ANY(%s)) AS has_curation_audit,
+                   EXISTS(SELECT 1 FROM viral_refresh_tasks t
+                          WHERE t.platform=%s AND t.status IN ('PENDING','RUNNING')
+                            AND t.collection_config_json LIKE '%%'||%s||'%%')
+                       AS has_pending_task
+                """,
+                (
+                    row["platform"],
+                    row["video_id"],
+                    _OPS_SOURCE_KINDS,
+                    f"{row['platform']}:{row['video_id']}",
+                    _CURATION_ACTIONS,
+                    row["platform"],
+                    row["video_id"],
+                ),
+            ).fetchone()
+            if (
+                evidence["has_ops_source"]
+                or evidence["has_curation_audit"]
+                or evidence["has_pending_task"]
+            ):
+                skipped_on_recheck += 1
+                print(
+                    f"    [复查翻案·跳过] {row['platform']}/{row['video_id']} "
+                    "锁等期间出现了运营证据或在途任务"
+                )
+                continue
             updated = conn.execute(
                 """
                 UPDATE viral_videos
@@ -133,30 +177,15 @@ def main() -> int:
                   AND category='链接导入'
                   AND (collection_published=1 OR homepage_featured=1
                        OR pushed_at IS NOT NULL)
-                  AND NOT EXISTS(SELECT 1 FROM viral_content_sources s
-                        WHERE s.platform=viral_videos.platform
-                          AND s.video_id=viral_videos.video_id
-                          AND s.source_kind = ANY(%s))
-                  AND NOT EXISTS(SELECT 1 FROM audit_logs a
-                        WHERE a.entity_type='viral_video'
-                          AND a.entity_id=viral_videos.platform||':'||viral_videos.video_id
-                          AND a.action = ANY(%s))
-                  AND NOT EXISTS(SELECT 1 FROM viral_refresh_tasks t
-                        WHERE t.platform=viral_videos.platform
-                          AND t.status IN ('PENDING','RUNNING')
-                          AND t.collection_config_json
-                              LIKE '%%'||viral_videos.video_id||'%%')
                 """,
-                (
-                    row["platform"],
-                    row["video_id"],
-                    _OPS_SOURCE_KINDS,
-                    _CURATION_ACTIONS,
-                ),
+                (row["platform"], row["video_id"]),
             )
             applied += updated.rowcount
         conn.commit()
-        print(f"已回置 {applied} 行（SUSPECT 且复查通过）；LEGITIMATE/UNVERIFIED/在途任务行未动。")
+        print(
+            f"已回置 {applied} 行（SUSPECT 且锁后复查通过）；复查翻案 {skipped_on_recheck} 行；"
+            "LEGITIMATE/UNVERIFIED/在途任务行未动。"
+        )
     return 0
 
 
