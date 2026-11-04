@@ -1007,6 +1007,9 @@ def test_registration_and_failed_login_limits_persist_after_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP", "1")
+    # 登录准入已退役 IP 维度（账号维度预算）：注册限流与登录限流各自独立，
+    # 错误密码后的正确登录由账号预算拦截。
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "1")
     assert (
         client.post(
             REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}
