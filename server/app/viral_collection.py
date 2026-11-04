@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -309,6 +310,21 @@ def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video
             wechat_link_client=wechat_link_client,
         )
         pipeline.fetch(video, prefer="video")
+        check()
+        # 顺带归档音频形态（2026-11 改造 backlog）：抖音/小红书的文案导入优先
+        # 消费音频归档，转存时提前备好可省去转写链路的整片下载与服务端抽音轨；
+        # 视频号恒视频形态（_resolve_kind 恒 video）与缺 audio_url 的条目自然
+        # 落回刚归档的视频对象，等价缓存命中。失败只记日志不阻塞转存主流程
+        # ——视频形态已就绪，音频可由首次文案导入按需准备。
+        try:
+            pipeline.fetch(video, prefer="audio")
+        except ViralSourceError as exc:
+            logging.getLogger(__name__).warning(
+                "单条转存顺带归档音频失败（视频形态已就绪）%s/%s: %s",
+                lease.platform,
+                video_id,
+                exc,
+            )
         check()
         cover = CoverEnricher(
             storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024), metered=True

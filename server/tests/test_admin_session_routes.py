@@ -172,7 +172,8 @@ def test_single_archive_is_durable_idempotent_and_does_not_recollect(
     monkeypatch.setattr("app.viral_collection.CoverEnricher.enrich", lambda self, video: video)
     monkeypatch.setattr(
         "app.viral_collection.ViralMediaPipeline.fetch",
-        lambda self, video, **kwargs: calls.append(video.video_id),
+        # 2026-11 改造：单条转存先视频后顺带音频——记录 (video_id, prefer) 二元组。
+        lambda self, video, **kwargs: calls.append((video.video_id, kwargs.get("prefer"))),
     )
     with psycopg.connect(route_state) as raw:
         lease = acquire_viral_refresh_task(
@@ -190,7 +191,8 @@ def test_single_archive_is_durable_idempotent_and_does_not_recollect(
             ).fetchone()[0]
             == 1
         )
-    assert calls == ["admin-video/opaque=id"]
+    # 视频形态先行、音频形态顺带（backlog：省转写链路的整片下载+抽音轨）。
+    assert calls == [("admin-video/opaque=id", "video"), ("admin-video/opaque=id", "audio")]
 
 
 @pytest.mark.pg
