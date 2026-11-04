@@ -1479,7 +1479,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.notify).toHaveBeenCalledWith("积分不足，本次需要 6 积分。");
   });
 
-  it("桌面端爆款详情提取文案改走本地抽音轨上传，不再导入参考素材", () => {
+  it("爆款详情提取文案统一 claim-first：桌面与 Web 同一动作（WP3）", () => {
     viralCacheBridge.cacheAvailable.mockReturnValue(true);
     const value = studio({
       review: false,
@@ -1494,16 +1494,13 @@ describe("V1.4 内容与运营页面", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
 
+    // 本地抽音轨上传已退役：桌面与 Web 都是 claim-first，未命中回落服务端导入。
     expect(value.extractViralCopy).toHaveBeenCalledWith(
       expect.objectContaining({
         platformKey: "douyin",
         nativeId: "native-dy-1",
       }),
-    );
-    expect(createViralImportTask).not.toHaveBeenCalled();
-    expect(value.navigate).toHaveBeenCalledWith(
-      "copy",
-      expect.objectContaining({ returnTo: "viral-detail" }),
+      expect.objectContaining({ onCacheMiss: expect.any(Function) }),
     );
   });
 

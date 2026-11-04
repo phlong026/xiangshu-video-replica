@@ -286,6 +286,10 @@ def register_viral_copy_source(
 ) -> ViralCopySource:
     """登记客户端上传的文案音轨：占位项目 + ``reference_audio`` 资产 + 导入任务.
 
+    2026-11 爆款链路改造（WP2）：``POST /videos/copy`` 受理端点已退役为 410，
+    本函数不再有生产调用方；保留是为服务 ``viral_copy_uploads`` 回收引用与
+    历史任务夹具（既有客户端上传的存量行仍按私有成果交付）。
+
     爆款文案没有真实项目，而 ``script_from_audio_tasks`` 的 ``project_id`` 既非空
     又带外键，所以与既有 copy 导入一样现造一个占位项目；差别是**每个幂等键一个**
     ——``uq_script_from_audio_tasks_active_project`` 允许一个项目至多一条在制任务，

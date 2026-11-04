@@ -190,15 +190,51 @@ class ScriptCachePending(Exception):
     """Another durable task owns this video's one upstream transcription."""
 
 
+def _viral_media_kind(asset_kind: str) -> str:
+    """资产 kind → 共享归档形态：reference_audio 对应 audio 归档，其余按视频."""
+    return "audio" if asset_kind == "reference_audio" else "video"
+
+
+def _credential_archive_kind(value: object) -> str:
+    """凭据形态：新凭据带 kind；旧凭据只有视频资产能写入共享缓存，回溯按 video."""
+    if isinstance(value, str) and value in ("audio", "video"):
+        return value
+    return "video"
+
+
+def _credential_archive_is_current(
+    conn: BusinessConnection,
+    source: tuple[str, str],
+    kind: str,
+    storage_uri: object,
+) -> bool:
+    """给定形态的当前归档与给定 URI 是否同一版本；该形态归档缺失时不判过期.
+
+    音频与视频是同一条视频的两个独立归档形态：音频凭据只对 audio 归档负责，
+    不会被并存的视频重归档误伤，反之亦然。任一形态被重新归档（换源/换版本）
+    时，指向旧对象的凭据即过期。
+    """
+    current = conn.execute(
+        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
+        "AND media_kind=%s AND status='SUCCEEDED'",
+        (*source, kind),
+    ).fetchone()
+    if current is None:
+        return True
+    return bool(storage_uri) and str(storage_uri) == str(current["storage_uri"])
+
+
 def _viral_source(conn: BusinessConnection, asset: BusinessRow) -> tuple[str, str] | None:
-    # 客户端音轨与独立解析音频都不能证明原视频口播身份；只有服务端归档
-    # 的原视频及其不可变内容对象可以成为跨用户共享的生产者。
+    # 客户端上传音轨与独立解析音频不能证明原视频口播身份；服务端归档的原视频
+    # 与上游音频（链接解析直下的音轨，经全局内容对象背书）都可以成为跨用户
+    # 共享的生产者——正文属于视频本身，不绑定音频/视频形态。
     row = conn.execute(
         "SELECT i.platform,i.video_id FROM viral_import_tasks i "
         "JOIN content_objects c ON c.id=%s AND c.sha256=%s AND c.size_bytes=%s "
         "AND c.scope='global' "
         "WHERE i.source_asset_id=%s AND i.project_id=%s AND i.status='SUCCEEDED' "
-        "AND %s='reference_video' ORDER BY i.created_at,i.id LIMIT 1",
+        "AND %s IN ('reference_video','reference_audio') "
+        "ORDER BY i.created_at,i.id LIMIT 1",
         (
             asset["content_object_id"],
             asset["sha256"],
@@ -211,7 +247,7 @@ def _viral_source(conn: BusinessConnection, asset: BusinessRow) -> tuple[str, st
     if row is None:
         return None
     source = (str(row["platform"]), str(row["video_id"]))
-    # 同视频重归档不是同一版本；已有正文不覆盖，新版本先按私有成果交付。
+    asset_media_kind = _viral_media_kind(str(asset["kind"]))
     cached = conn.execute(
         "SELECT t.request_json,c.result_json FROM viral_script_cache c "
         "LEFT JOIN script_from_audio_tasks t "
@@ -220,23 +256,29 @@ def _viral_source(conn: BusinessConnection, asset: BusinessRow) -> tuple[str, st
     ).fetchone()
     if cached is not None:
         try:
-            fingerprint = json.loads(str(cached["request_json"] or "{}")).get(
-                "viral_archive_sha256"
-            )
-            if fingerprint is None and cached["result_json"] is not None:
-                fingerprint = (
-                    json.loads(str(cached["result_json"])).get("archive", {}).get("sha256")
-                )
+            request_json = json.loads(str(cached["request_json"] or "{}"))
+            archive = json.loads(str(cached["result_json"] or "{}")).get("archive", {})
         except (ValueError, TypeError, AttributeError):
             return None
-        if fingerprint is not None and fingerprint != asset["sha256"]:
-            return None
-    current = conn.execute(
-        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
-        "AND media_kind='video' AND status='SUCCEEDED'",
-        source,
-    ).fetchone()
-    if current is not None and current["storage_uri"] != asset["storage_uri"]:
+        credential_kind = _credential_archive_kind(
+            request_json.get("viral_archive_kind", archive.get("kind"))
+        )
+        fingerprint = request_json.get("viral_archive_sha256")
+        if fingerprint is None:
+            fingerprint = archive.get("sha256")
+        credential_uri = request_json.get("viral_archive_uri") or archive.get("storage_uri")
+        # 同形态重归档不是同一版本：凭据与资产同为音频（或同为视频）时字节指纹
+        # 必须一致，新版本先按私有成果交付；跨形态不比指纹（音频↔视频是同一视频
+        # 的两个载体）。已有凭据时还要求凭据所指的归档仍是当前版本——缓存行刚
+        # 创建（尚无凭据）时没有可比对的凭据，只做下方资产自身的新鲜度校验。
+        if fingerprint is not None:
+            if credential_kind == asset_media_kind and str(fingerprint) != str(asset["sha256"]):
+                return None
+            if not _credential_archive_is_current(conn, source, credential_kind, credential_uri):
+                return None
+    if not _credential_archive_is_current(
+        conn, source, asset_media_kind, str(asset["storage_uri"])
+    ):
         return None
     return source
 
@@ -282,6 +324,8 @@ def _verified_cache_result(raw: object, source: tuple[str, str]) -> TranscriptRe
         digest = archive.get("sha256", "")
         if (archive.get("platform"), archive.get("video_id")) != source:
             return None
+        if archive.get("kind") is not None and archive.get("kind") not in ("audio", "video"):
+            return None
         if (
             not isinstance(digest, str)
             or len(digest) != 64
@@ -297,18 +341,14 @@ def _cache_archive_is_current(
     conn: BusinessConnection, raw: object, source: tuple[str, str]
 ) -> bool:
     # 同一平台 ID 重新归档后不能交付旧版本的正文；归档缺失不会撤销个人已受理成果。
-    current = conn.execute(
-        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
-        "AND media_kind='video' AND status='SUCCEEDED'",
-        source,
-    ).fetchone()
-    if current is None:
-        return True
+    # 凭据只对它自己形态的归档负责：音频正文不被并存的视频重归档误伤，反之亦然。
     try:
         archive = json.loads(str(raw)).get("archive", {})
-        return bool(archive.get("storage_uri")) and archive["storage_uri"] == current["storage_uri"]
     except (ValueError, TypeError, AttributeError):
         return False
+    return _credential_archive_is_current(
+        conn, source, _credential_archive_kind(archive.get("kind")), archive.get("storage_uri")
+    )
 
 
 def cached_transcript(
@@ -373,7 +413,8 @@ def _historical_transcripts(
             "JOIN viral_import_tasks i ON i.source_asset_id=t.source_asset_id "
             "AND i.project_id=t.project_id JOIN assets a ON a.id=t.source_asset_id "
             "WHERE i.platform=%s AND i.video_id=%s AND i.status='SUCCEEDED' "
-            "AND a.kind='reference_video' AND a.content_object_id IS NOT NULL "
+            "AND a.kind IN ('reference_video','reference_audio') "
+            "AND a.content_object_id IS NOT NULL "
             "AND COALESCE(t.error_code,'')<>'SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED' "
             "AND (t.status IN "
             "('PENDING','RUNNING','SUBMISSION_UNCERTAIN','SUCCEEDED') "
@@ -460,13 +501,13 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> Bus
         and _verified_cache_result(cache["result_json"], source) is None
     ):
         proof = conn.execute(
-            "SELECT a.sha256,a.storage_uri FROM script_from_audio_tasks t "
+            "SELECT a.kind,a.sha256,a.storage_uri FROM script_from_audio_tasks t "
             "JOIN assets a ON a.id=t.source_asset_id AND a.project_id=t.project_id "
             "JOIN content_objects c ON c.id=a.content_object_id AND c.sha256=a.sha256 "
             "AND c.size_bytes=a.size_bytes AND c.scope='global' "
             "JOIN viral_import_tasks i ON i.source_asset_id=a.id AND i.project_id=a.project_id "
-            "WHERE t.id=%s AND a.kind='reference_video' AND i.platform=%s AND i.video_id=%s "
-            "AND i.status='SUCCEEDED'",
+            "WHERE t.id=%s AND a.kind IN ('reference_video','reference_audio') "
+            "AND i.platform=%s AND i.video_id=%s AND i.status='SUCCEEDED'",
             (cache["producer_task_id"], *source),
         ).fetchone()
         if proof is not None:
@@ -476,6 +517,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> Bus
                 value["archive"] = {
                     "platform": source[0],
                     "video_id": source[1],
+                    "kind": _viral_media_kind(str(proof["kind"])),
                     "sha256": str(proof["sha256"]),
                     "storage_uri": str(proof["storage_uri"]),
                 }
@@ -660,6 +702,18 @@ def enqueue_script_from_audio_task(
     if cache is not None and _viral_source(conn, asset) != viral_source:
         cache = None
         viral_source = None
+        # 共享资格在锁内被历史回溯改判为私有时（如凭据指向旧版本资产），必须
+        # 补跑与首次私有路径相同的内容指纹门禁：跳过它会让同一音轨绕开
+        # 「未知提交禁止重发」的保护，对 SUBMISSION_UNCERTAIN 重复预留并
+        # 提交 ASR（Codex S 级评审 P1）。
+        demoted_task = private_source_task(
+            conn,
+            owner_user_id=str(getattr(actor, "id")),
+            sha256=str(asset["sha256"]),
+            size_bytes=int(asset["size_bytes"]),
+        )
+        if demoted_task is not None:
+            return demoted_task
     cached = (
         _verified_cache_result(cache["result_json"], viral_source)
         if cache is not None and viral_source is not None
@@ -671,6 +725,7 @@ def enqueue_script_from_audio_task(
         request_payload["viral_source"] = [cache["platform"], cache["video_id"]]
         request_payload["viral_archive_sha256"] = str(asset["sha256"])
         request_payload["viral_archive_uri"] = str(asset["storage_uri"])
+        request_payload["viral_archive_kind"] = _viral_media_kind(str(asset["kind"]))
     if cached is None and (cache is None or _cache_producer_state(conn, cache) == "AVAILABLE"):
         _configured_asr(conn)
 
@@ -848,6 +903,7 @@ def _verified_task_payload(conn: BusinessConnection, row: BusinessRow) -> dict[s
     if trusted == (str(source[0]), str(source[1])) and asset is not None:
         payload["viral_archive_sha256"] = str(asset["sha256"])
         payload["viral_archive_uri"] = str(asset["storage_uri"])
+        payload["viral_archive_kind"] = _viral_media_kind(str(asset["kind"]))
     else:
         del payload["viral_source"]
         conn.execute(
@@ -1131,6 +1187,9 @@ def complete_script_from_audio_task(
         result_payload["archive"] = {
             "platform": str(source[0]),
             "video_id": str(source[1]),
+            # 凭据形态随来源资产：音频/视频是同一视频的两个归档载体，
+            # 交付侧按 kind 对应校验，跨形态正文不再被误判过期。
+            "kind": _credential_archive_kind(request_payload.get("viral_archive_kind")),
             "sha256": str(archive_digest),
             "storage_uri": request_payload.get("viral_archive_uri"),
         }

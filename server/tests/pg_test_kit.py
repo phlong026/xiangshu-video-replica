@@ -281,6 +281,9 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         "billing_reconcile_test",
         "character_delete_guard_test",
         "studio_draft_tombstone_test",
+        # 2026-11 爆款链路改造 WP1：服务端归档音频的跨形态共享文案缓存矩阵
+        # (test_viral_audio_shared_cache_pg.py)，migrated to head。
+        "viral_audio_shared_cache_test",
     }
 )
 

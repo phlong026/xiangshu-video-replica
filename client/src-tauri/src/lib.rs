@@ -51,7 +51,6 @@ pub fn run() {
             viral_cache::viral_cache_open_folder,
             viral_cache::viral_cache_local_path,
             viral_cache::viral_cache_enforce_limit,
-            viral_audio::viral_extract_audio,
             viral_audio::local_video_extract_audio,
         ])
         .setup(|app| {

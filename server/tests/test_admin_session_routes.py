@@ -172,7 +172,8 @@ def test_single_archive_is_durable_idempotent_and_does_not_recollect(
     monkeypatch.setattr("app.viral_collection.CoverEnricher.enrich", lambda self, video: video)
     monkeypatch.setattr(
         "app.viral_collection.ViralMediaPipeline.fetch",
-        lambda self, video, **kwargs: calls.append(video.video_id),
+        # 2026-11 改造：单条转存先视频后顺带音频——记录 (video_id, prefer) 二元组。
+        lambda self, video, **kwargs: calls.append((video.video_id, kwargs.get("prefer"))),
     )
     with psycopg.connect(route_state) as raw:
         lease = acquire_viral_refresh_task(
@@ -190,7 +191,68 @@ def test_single_archive_is_durable_idempotent_and_does_not_recollect(
             ).fetchone()[0]
             == 1
         )
-    assert calls == ["admin-video/opaque=id"]
+    # 视频形态先行、音频形态顺带（backlog：省转写链路的整片下载+抽音轨）。
+    assert calls == [("admin-video/opaque=id", "video"), ("admin-video/opaque=id", "audio")]
+
+
+@pytest.mark.pg
+def test_single_archive_audio_refetch_preserves_media_detail(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """音频回访不得抹掉首次下载带回的媒体详情（Codex 收尾评审 P2 回归）.
+
+    真实管线每次 ``fetch`` 入口都会把 ``pipeline.detail`` 清空：视频号冷缓存
+    归档时，视频形态下载设置了 detail，紧随其后的音频回访（等价命中同一视频
+    缓存）若不保留，统计回写会被跳过。用假 fetch 复刻该行为，断言回写仍发生。
+    """
+    from app.db_portable import BusinessConnection
+    from app.storage import FakeStorageAdapter
+    from app.viral_collection import run_viral_collection
+    from app.viral_refresh import acquire_viral_refresh_task, complete_viral_refresh_task
+
+    headers = _admin_session(client)
+    path = "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/archive"
+    with psycopg.connect(route_state) as conn:
+        conn.execute("DELETE FROM viral_refresh_tasks")
+        conn.execute("UPDATE viral_runtime_controls SET collection_enabled=1,keywords_json='[]'")
+        conn.execute("UPDATE viral_videos SET collection_published=1")
+    first = client.post(
+        path,
+        headers={**headers, "Idempotency-Key": "archive-detail"},
+        json={"confirm": True, "reason": "详情保留回归"},
+    )
+    assert first.status_code == 202, first.text
+    calls = []
+    detail_sentinel = object()
+    stats_calls = []
+    monkeypatch.setattr(
+        "app.viral_collection.viral_source_client_from_settings", lambda conn: object()
+    )
+    monkeypatch.setattr("app.viral_collection.CoverEnricher.enrich", lambda self, video: video)
+
+    def fake_fetch(self, video, *, prefer=None):
+        # 复刻真实管线语义：每次 fetch 入口先清 detail；视频形态下载带回详情。
+        self.detail = None
+        if prefer == "video":
+            self.detail = detail_sentinel
+        calls.append((video.video_id, prefer))
+
+    monkeypatch.setattr("app.viral_collection.ViralMediaPipeline.fetch", fake_fetch)
+
+    def fake_stats(conn, *, platform, video_id, detail):
+        stats_calls.append((platform, video_id, detail))
+
+    monkeypatch.setattr("app.viral_collection.update_viral_statistics", fake_stats)
+    with psycopg.connect(route_state) as raw:
+        lease = acquire_viral_refresh_task(
+            BusinessConnection.postgres(raw), worker_id="archive-detail-test"
+        )
+    assert lease is not None
+    run_viral_collection(lease, FakeStorageAdapter(provider="cos", bucket="test"))
+    with psycopg.connect(route_state) as raw:
+        complete_viral_refresh_task(BusinessConnection.postgres(raw), lease=lease)
+    assert calls == [("admin-video/opaque=id", "video"), ("admin-video/opaque=id", "audio")]
+    assert stats_calls == [("douyin", "admin-video/opaque=id", detail_sentinel)]
 
 
 @pytest.mark.pg

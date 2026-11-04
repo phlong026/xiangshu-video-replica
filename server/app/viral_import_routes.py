@@ -3,27 +3,20 @@
 import hashlib
 import json
 import logging
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import (
     APIRouter,
-    File,
-    Form,
     Header,
     HTTPException,
-    Response,
-    UploadFile,
     status,
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.asr import AsrProviderError, max_inline_audio_bytes, max_inline_audio_seconds
 from app.auth import AuthenticatedUser, Database
-from app.billing_catalog import SERVICES
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.media import (
@@ -35,30 +28,14 @@ from app.media import (
     VideoProbeUnavailable,
 )
 from app.media_routes import get_media_storage
-from app.media_tools import (
-    MediaToolUnavailable,
-    probe_duration_seconds,
-    resolve_media_binary,
-)
 from app.permissions import require_not_auditor
-from app.script_from_audio import (
-    SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES,
-    cached_transcript,
-    enqueue_script_from_audio_task,
-    private_source_task,
-)
-from app.storage import StorageAdapter, StorageBackendUnavailable, StoredObject
+from app.storage import StorageAdapter, StorageBackendUnavailable
 from app.viral_content_observations import record_content_source
 from app.viral_import import (
-    VIRAL_COPY_CONTENT_TYPE,
-    ViralCopyUpload,
     ViralImportRequest,
     ViralImportTaskResponse,
     enqueue_viral_import_task,
     load_viral_import_task,
-    register_viral_copy_source,
-    require_viral_import_enabled,
-    viral_copy_request_hash,
     viral_import_task_response,
 )
 from app.viral_link import (
@@ -78,18 +55,12 @@ from app.viral_media import (
 )
 from app.viral_media_preparation import ViralMediaBusy
 from app.viral_routes import (
-    VIRAL_COPY_SERVICE,
-    ViralCopyBilling,
     ViralVideoItem,
-    charge_viral_copy,
-    require_customer_viral_access,
 )
 from app.viral_store import (
     LINK_IMPORT_CATEGORY,
-    get_viral_video,
     update_viral_cover,
     upsert_viral_videos,
-    viral_video_availability,
 )
 from app.viral_tikhub import ViralSourceError, ViralVideo
 from app.viral_wechat_link import WechatLinkClient, wechat_link_client_from_settings
@@ -657,386 +628,27 @@ def read_viral_import_task(
     return viral_import_task_response(row)
 
 
-# ---------------------------------------------------------------- 文案（本地抽音轨）
-
-_COPY_PLATFORMS = ("douyin", "wechat_channels", "xiaohongshu")
-_VIRAL_COPY_OBJECT_PREFIX = "viral/copy"
-# 与工作台上传链路同一科目：ASR 按秒计价（billing_catalog.SERVICES）。
-_COPY_ASR_SERVICE = "asr"
-
-
-class ViralCopyExtractionResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    # 共享缓存命中：直接带文案，不必让用户白等一次上传；交付按生产者判定收费
-    # （自己的文案免费/已购复用，别人的文案首提扣一次，见 charge_viral_copy）。
-    text: str | None = None
-    updated_at: str | None = Field(default=None, alias="updatedAt")
-    billing: ViralCopyBilling | None = None
-    # 未命中：客户端按 taskId 轮询转写；projectId/sourceAssetId 供文案工坊续接草稿。
-    project_id: str | None = Field(default=None, alias="projectId")
-    source_asset_id: str | None = Field(default=None, alias="sourceAssetId")
-    task_id: str | None = Field(default=None, alias="taskId")
-
-
-def _require_available_viral_video(
-    conn: BusinessConnection, *, platform: str, video_id: str
-) -> ViralVideo:
-    video = get_viral_video(conn, platform=platform, video_id=video_id)
-    if video is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "VIRAL_VIDEO_NOT_FOUND", "message": "该爆款视频不存在。"},
-        )
-    if viral_video_availability(conn, platform=platform, video_id=video_id) != "available":
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "VIRAL_VIDEO_UNAVAILABLE", "message": "该爆款视频当前不可用于创作。"},
-        )
-    return video
-
-
-def _viral_copy_object_key(owner_user_id: str, idempotency_key: str, content: bytes = b"") -> str:
-    """每次写入独立对象：冲突请求及同字节重放都不能截断已受理任务的音轨。"""
-    digest = hashlib.sha256(f"{owner_user_id}:{idempotency_key}".encode()).hexdigest()
-    content_digest = hashlib.sha256(content).hexdigest()
-    return f"{_VIRAL_COPY_OBJECT_PREFIX}/{digest}/{content_digest}/{uuid4().hex}.m4a"
-
-
-async def _read_viral_copy_audio(file: UploadFile, *, inline_max_bytes: int | None) -> bytes:
-    if file.size is not None and file.size > SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES:
-        raise _viral_copy_too_large()
-    content = await file.read()
-    if not content:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "VIRAL_COPY_AUDIO_EMPTY",
-                "message": "上传的音轨为空，请在客户端重新提取后再试。",
-            },
-        )
-    if len(content) > SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES:
-        raise _viral_copy_too_large()
-    # 抽取端固定产出 M4A（单声道 16kHz AAC，见 client/src-tauri/src/viral_audio.rs），
-    # provider 的 Flash 请求也写死 format=m4a，所以这里只认 MP4 容器。
-    if len(content) < 12 or content[4:8] != b"ftyp":
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "VIRAL_COPY_AUDIO_INVALID",
-                "message": "音轨格式无效，请在客户端重新提取后再试。",
-            },
-        )
-    if inline_max_bytes is not None and len(content) > inline_max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "code": "VIRAL_COPY_AUDIO_TOO_LARGE",
-                "message": (
-                    f"音轨超过本地直传上限（{inline_max_bytes // (1024 * 1024)} MB），"
-                    "请截取更短的片段后重试。"
-                ),
-            },
-        )
-    return content
-
-
-def _viral_copy_too_large() -> HTTPException:
-    return HTTPException(
-        status_code=413,
-        detail={"code": "VIRAL_COPY_AUDIO_TOO_LARGE", "message": "音轨文件过大，请压缩后重试。"},
-    )
-
-
-def _probe_viral_copy_duration(content: bytes) -> float:
-    try:
-        ffprobe_path = resolve_media_binary("ffprobe")
-    except MediaToolUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "VIRAL_COPY_MEDIA_TOOL_MISSING", "message": str(exc)},
-        ) from exc
-    with tempfile.TemporaryDirectory(prefix="viral-copy-") as tmp_dir:
-        media_path = Path(tmp_dir) / "copy-audio.m4a"
-        media_path.write_bytes(content)
-        duration = probe_duration_seconds(ffprobe_path, media_path)
-    if duration is None or duration <= 0:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "VIRAL_COPY_AUDIO_INVALID",
-                "message": "音轨无法解析，请在客户端重新提取后再试。",
-            },
-        )
-    return duration
-
-
-def _validate_viral_copy_duration(
-    *, duration: float, video: ViralVideo, inline_max_seconds: float | None
-) -> None:
-    """时长仅作上传错误预检，不能证明音轨属于原视频或授权写入共享缓存。"""
-    expected = video.duration_ms / 1000 if video.duration_ms > 0 else None
-    if expected is not None and not (expected * 0.75 - 3 <= duration <= expected * 1.25 + 3):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "VIRAL_COPY_AUDIO_DURATION_MISMATCH",
-                "message": "音轨时长与该视频不符，请重新缓存该视频后再提取文案。",
-            },
-        )
-    if inline_max_seconds is not None and duration > inline_max_seconds:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "VIRAL_COPY_AUDIO_TOO_LONG",
-                "message": (
-                    f"音轨时长约 {round(duration)} 秒，超过本地直传上限 "
-                    f"{round(inline_max_seconds)} 秒，无法转写。"
-                ),
-            },
-        )
-
-
-def _inline_audio_limits(
-    conn: BusinessConnection, storage: StorageAdapter
-) -> tuple[int | None, float | None]:
-    """本地盘走 base64 直传时才有大小/时长上限；云存储走签名 URL，不受其约束."""
-    if storage.provider != "local":
-        return None, None
-    try:
-        return max_inline_audio_bytes(), max_inline_audio_seconds(conn)
-    except AsrProviderError as exc:
-        logger.warning("viral copy ASR limits unavailable: %s", type(exc).__name__)
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "VIRAL_COPY_SERVICE_UNAVAILABLE",
-                "message": "语音转写服务暂不可用，请联系管理员检查配置。",
-            },
-        ) from exc
-
-
-def _store_viral_copy_audio(storage: StorageAdapter, *, key: str, content: bytes) -> StoredObject:
-    try:
-        return storage.put_object(key, content, content_type=VIRAL_COPY_CONTENT_TYPE)
-    except StorageBackendUnavailable as exc:
-        logger.warning("viral copy upload failed: %s", type(exc).__name__)
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "VIRAL_COPY_STORAGE_UNAVAILABLE",
-                "message": "素材存储暂不可用，请稍后重试。",
-            },
-        ) from exc
+# ------------------------------------------------- 文案（本地抽音轨上传已退役）
 
 
 @router.post(
     "/videos/copy",
-    response_model=ViralCopyExtractionResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    status_code=status.HTTP_410_GONE,
+    include_in_schema=False,
+    response_model=None,
 )
-async def extract_viral_video_copy(
-    response: Response,
-    db: BusinessDbDep,
-    platform: Annotated[str, Form()],
-    video_id: Annotated[str, Form(alias="videoId")],
-    file: Annotated[UploadFile, File()],
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-) -> ViralCopyExtractionResponse:
-    """客户端本地抽出的音轨 → 上传 → ASR 转写 → 回填（决策 #15 / #18）.
+def extract_viral_video_copy() -> NoReturn:
+    """客户端音轨上传已退役（2026-11 爆款链路改造 WP2）：提取文案统一走服务端导入转写.
 
-    这是「停用采集」的前提：文案链路不再需要平台留存的媒体归档。客户端上传的是它
-    自己从**本地缓存的原视频**里抽出的单声道 m4a，服务端只做校验、登记与转写编排。
-
-    计费与工作台上传链路同一科目（``asr`` 按秒）：预留写在任务入队事务里，结算与
-    清理都交给既有 Worker——只对真实转写收（2026-10-08 拍板），入队时缓存已被别人
-    命中的秒回任务不产生转写费。共享文案缓存命中时直接返回文案——不建任务、不动
-    转写费，交付按生产者判定（``viral_copy``：自己的文案/已购免费，别人的文案
-    首提扣一次），否则走上传转写。
-
-    入库走既有 ``script_from_audio_tasks`` 租约体系（用户 2026-09-23 拍板方案 a）：
-    断点续跑、``SUBMISSION_UNCERTAIN`` 不确定态、按秒预留结算与 ``viral_script_cache``
-    的历史回溯都由该链路原样提供，这里不另开一条轻量写入路径。
+    保留路由壳返回 410 引导旧桌面客户端升级，而不是裸 404；文案与交付计费的
+    唯一口径仍是 ``POST /videos/copy/claim``。上传受理原语（register_viral_copy_source
+    与 viral_copy_uploads）保留在原模块，服务存量凭据回收与历史任务夹具，生产
+    代码不再触达。
     """
-    key = (idempotency_key or "").strip()
-    if not key or len(key) > 128:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "VIRAL_COPY_IDEMPOTENCY_KEY_REQUIRED",
-                "message": "Idempotency-Key 请求头无效。",
-            },
-        )
-    if platform not in _COPY_PLATFORMS:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
-        )
-    with db.write() as (conn, actor):
-        require_not_auditor(
-            conn,
-            actor=actor,
-            action="viral.copy",
-            entity_type="viral_video",
-            entity_id=f"{platform}:{video_id}",
-        )
-        # 与既有导入共用管理端的「暂停导入」开关：对用户而言这是同一个动作
-        # （提取文案原本就走导入链路），暂停时不该只剩这条路还能用。
-        require_viral_import_enabled(conn)
-        video = require_customer_viral_access(
-            conn, actor=actor, platform=platform, video_id=video_id
-        )
-        # 共享缓存命中：不必让用户白等一次上传，交付按生产者判定收费——自己的
-        # 文案（或已购买过）免费，别人的文案首提扣一次「获取文案」费。未命中才走
-        # 上传转写。
-        pending_upload_row = conn.execute(
-            "SELECT id FROM viral_import_tasks WHERE owner_user_id=%s AND idempotency_key=%s "
-            "UNION ALL SELECT id FROM viral_copy_upload_receipts "
-            "WHERE owner_user_id=%s AND idempotency_key=%s LIMIT 1",
-            (actor.id, key, actor.id, key),
-        ).fetchone()
-        # 已有请求必须校验原指纹，不能被后来出现的共享命中绕过同键冲突检查。
-        hit = (
-            None
-            if pending_upload_row is not None
-            else cached_transcript(conn, platform=platform, video_id=video_id)
-        )
-        if hit is not None:
-            charged, deduped = charge_viral_copy(
-                conn, actor=actor, platform=platform, video_id=video_id
-            )
-            from app.viral_content_observations import record_customer_read
-
-            record_customer_read(
-                conn, platform=platform, video_id=video_id, user_id=actor.id, kind="copy"
-            )
-            response.status_code = status.HTTP_200_OK
-            return ViralCopyExtractionResponse(
-                text=hit.result.text,
-                updatedAt=hit.updated_at,
-                billing=ViralCopyBilling(
-                    charged=charged,
-                    unit=SERVICES[VIRAL_COPY_SERVICE].unit,
-                    deduped=deduped,
-                ),
-            )
-        storage = get_media_storage(conn)
-        inline_max_bytes, inline_max_seconds = _inline_audio_limits(conn, storage)
-        owner_user_id = actor.id
-    content = await _read_viral_copy_audio(file, inline_max_bytes=inline_max_bytes)
-    duration = _probe_viral_copy_duration(content)
-    _validate_viral_copy_duration(
-        duration=duration, video=video, inline_max_seconds=inline_max_seconds
-    )
-    from app.viral_copy_uploads import (
-        existing_upload,
-        lock_staged_upload,
-        lock_upload_request,
-        publish_upload,
-        reclaim_staged_uploads,
-        stage_upload,
-    )
-
-    request_hash = viral_copy_request_hash(
-        platform=platform,
-        video_id=video_id,
-        size_bytes=len(content),
-        sha256=hashlib.sha256(content).hexdigest(),
-    )
-    object_key = _viral_copy_object_key(owner_user_id, key, content)
-    with db.write() as (conn, actor):
-        if actor.id != owner_user_id:
-            raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
-        require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
-        replay = existing_upload(conn, owner=actor.id, key=key, request_hash=request_hash)
-        if replay is not None:
-            row = enqueue_script_from_audio_task(
-                conn,
-                actor=actor,
-                project_id=replay.project_id,
-                source_asset_id=replay.asset_id,
-                idempotency_key=key,
-            )
-            return ViralCopyExtractionResponse(
-                projectId=str(row["project_id"]),
-                sourceAssetId=str(row["source_asset_id"]),
-                taskId=str(row["id"]),
-            )
-        active = private_source_task(
-            conn,
-            owner_user_id=actor.id,
-            sha256=hashlib.sha256(content).hexdigest(),
-            size_bytes=len(content),
-        )
-        if active is not None:
-            return ViralCopyExtractionResponse(
-                projectId=str(active["project_id"]),
-                sourceAssetId=str(active["source_asset_id"]),
-                taskId=str(active["id"]),
-            )
-        receipt_id = stage_upload(
-            conn,
-            owner=actor.id,
-            key=key,
-            request_hash=request_hash,
-            storage=storage,
-            object_key=object_key,
-        )
-    # 暂存凭据已由上个事务提交。行锁覆盖实际 PUT 与资产发布；进程退出后 GC
-    # 仍能定位对象，普通异常则立即尝试清理，失败留给持久重试队列。
-    try:
-        with db.write() as (conn, actor):
-            if actor.id != owner_user_id:
-                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
-            lock_upload_request(conn, actor.id, key)
-            lock_staged_upload(conn, receipt_id)
-            require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
-            active = private_source_task(
-                conn,
-                owner_user_id=actor.id,
-                sha256=hashlib.sha256(content).hexdigest(),
-                size_bytes=len(content),
-            )
-            if active is not None:
-                conn.execute(
-                    "UPDATE viral_copy_upload_receipts SET state='CLEANUP',next_cleanup_at=now() "
-                    "WHERE id=%s",
-                    (receipt_id,),
-                )
-                return ViralCopyExtractionResponse(
-                    projectId=str(active["project_id"]),
-                    sourceAssetId=str(active["source_asset_id"]),
-                    taskId=str(active["id"]),
-                )
-            from app.viral_search_routes import require_priced_viral_service
-
-            require_priced_viral_service(conn, _COPY_ASR_SERVICE, error_code="VIRAL_COPY_UNPRICED")
-            stored = _store_viral_copy_audio(storage, key=object_key, content=content)
-            require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
-            source = register_viral_copy_source(
-                conn,
-                actor=actor,
-                video=video,
-                upload=ViralCopyUpload(stored=stored, duration_seconds=duration),
-                idempotency_key=key,
-            )
-            row = enqueue_script_from_audio_task(
-                conn,
-                actor=actor,
-                project_id=source.project_id,
-                source_asset_id=source.asset_id,
-                idempotency_key=key,
-            )
-            publish_upload(conn, receipt_id, source.asset_id)
-    except Exception:
-        try:
-            with db.write() as (cleanup_conn, _actor):
-                reclaim_staged_uploads(cleanup_conn, storage, receipt_id=receipt_id)
-        except Exception:
-            logger.warning("音轨暂存清理已延后，等待持久凭据重试。")
-        raise
-    return ViralCopyExtractionResponse(
-        projectId=str(row["project_id"]),
-        sourceAssetId=str(row["source_asset_id"]),
-        taskId=str(row["id"]),
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "VIRAL_COPY_UPLOAD_RETIRED",
+            "message": "该提取方式已下线，请升级客户端后使用新版提取文案。",
+        },
     )

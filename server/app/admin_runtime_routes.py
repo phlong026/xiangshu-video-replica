@@ -1653,6 +1653,14 @@ def import_viral_link_for_admin(
         video = dataclass_replace(_resolved_video(resolved), category="")
         storage = get_media_storage(business_conn)
         inserted = upsert_viral_videos(business_conn, [video], commit=False)
+        # 管理端接管同链接时清掉客户导入残留的「链接导入」分类：通用 upsert 对
+        # 空分类是「保留旧值」，客户先导入过的条目会永久带着该分类、被
+        # push/feature 的 VIRAL_LINK_IMPORT_NOT_CURATABLE 拦住（2026-11 WP4）。
+        business_conn.execute(
+            "UPDATE viral_videos SET category='' "
+            "WHERE platform=%s AND video_id=%s AND category='链接导入'",
+            (video.platform, video.video_id),
+        )
         record_content_source(
             business_conn,
             batch_id=f"link-import:{request_id}",
