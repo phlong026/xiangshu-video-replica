@@ -1,46 +1,37 @@
 import { render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { LeaseCountdown } from "./LeaseCountdown";
 
 describe("LeaseCountdown（7 天滑动会话有效期展示）", () => {
-  // A fixed clock keeps the warning/expired boundaries deterministic — the
-  // expiry math is relative to Date.now(), and a drifting wall clock (or a
-  // shared fake-timer pool) would otherwise flake at the <1h edge.
-  const FIXED_NOW = new Date("2026-08-24T12:00:00Z").getTime();
-  const mockExpiresAt = new Date(FIXED_NOW + 6 * 24 * 3600_000).toISOString(); // 6 天后过期
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(FIXED_NOW);
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
+  const mockExpiresAt = new Date(
+    Date.parse("2026-08-24T12:00:00Z") + 6 * 24 * 3600_000,
+  ).toISOString(); // 登录快照：6 天后到期
 
   it("displays formatted expiration timestamp", () => {
     render(<LeaseCountdown expiresAt={mockExpiresAt} />);
-    expect(screen.getByText(/本次会话有效至/)).toBeInTheDocument();
+    expect(screen.getByText(/会话有效期至/)).toBeInTheDocument();
   });
 
-  it("shows the day-scale remaining window with auto-renewal hint", () => {
+  it("explains server-side sliding renewal instead of a ticking countdown", () => {
     render(<LeaseCountdown expiresAt={mockExpiresAt} />);
-    // 6 天剩余：天级文案 + 「使用中自动续期」说明（7 天滑动契约无手动续约）。
+    // r4 评审 P2：快照跨过自身后 UI 不得断言「已过期」——服务端持续滑动
+    // 续期，展示改为静态说明（剩余时长/告警/过期三态全部移除）。
     expect(
-      screen.getByText(/剩余 6 天 \d+ 小时，使用中自动续期/),
+      screen.getByText(/持续使用自动续期；连续 7 天不使用后才需要重新登录/),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/已过期/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/即将过期/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/剩余 \d+ 天/)).not.toBeInTheDocument();
   });
 
-  it("changes to warning state when expiry < 1 hour", () => {
-    const mockNearExpiry = new Date(FIXED_NOW + 59 * 60_000).toISOString(); // 59 分钟 — 严格小于 1 小时边界
-    render(<LeaseCountdown expiresAt={mockNearExpiry} />);
-    expect(screen.getByText(/即将过期/)).toBeInTheDocument();
-  });
-
-  it("changes to expired state when expiry <= 0", () => {
-    const mockExpired = new Date(FIXED_NOW - 1000).toISOString(); // 已过期
-    render(<LeaseCountdown expiresAt={mockExpired} />);
-    expect(screen.getByText(/已过期/)).toBeInTheDocument();
+  it("stays a plain info card even when the login snapshot has passed", () => {
+    // 快照已跨过：这正是 r4 发现的误导场景——组件必须保持说明形态。
+    const staleSnapshot = new Date(
+      Date.parse("2026-08-24T12:00:00Z") - 1000,
+    ).toISOString();
+    render(<LeaseCountdown expiresAt={staleSnapshot} />);
+    expect(screen.queryByText(/已过期/)).not.toBeInTheDocument();
+    expect(screen.getByText(/会话有效期至/)).toBeInTheDocument();
   });
 
   it("renders no manual renewal button (renewal is server-side)", () => {
