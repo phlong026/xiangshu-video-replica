@@ -10,9 +10,12 @@
 
 判定口径：
 - ``LEGITIMATE``：有运营来源记录（admin_link_import / admin_search / collection）
-  或有策展审计动作——运营确实发布过，**不得回置**；
-- ``SUSPECT``：只有 customer_import 来源且无策展审计——旁路候选，``--apply``
-  时回置发布位（collection_published=0, homepage_featured=0, pushed_at=NULL）；
+  或有策展审计动作（viral_video.push / viral_video.curation）——运营确实发布
+  过，**不得回置**；
+- ``SUSPECT``：明确只有 customer_import 来源且无任何运营证据——旁路候选，
+  ``--apply`` 时回置发布位（且回置语句内复查全部证据，复查不过即放弃）；
+- ``UNVERIFIED``：连来源记录都没有——证据缺失不等于仅客户导入，只列出供
+  人工复核，``--apply`` 一律不动；
 - 在途任务提醒：``viral_refresh_tasks`` 里还有该视频的 publish/feature 待执行
   任务时，回置会被再次发布——即使 ``--apply`` 也跳过并逐条列出，先撤任务再跑。
 
@@ -29,13 +32,14 @@ from __future__ import annotations
 import argparse
 
 import psycopg
+from psycopg.rows import dict_row
 
 from app.db_pg import resolve_cli_pg_dsn
 
 # 运营侧来源：管理端粘贴导入、管理端实时搜索采集、关键词采集（含回填）。
-_OPS_SOURCE_KINDS = ("admin_link_import", "admin_search", "collection", "backfill")
-# 策展审计动作：push 即「推送到前端」；feature 走 prepare+push 组合，push 必留痕。
-_CURATION_ACTIONS = ("viral_video.push",)
+_OPS_SOURCE_KINDS = ["admin_link_import", "admin_search", "collection", "backfill"]
+# 策展审计动作：push（推送到前端）与 curation（单条/批量首页展示）都算运营发布。
+_CURATION_ACTIONS = ["viral_video.push", "viral_video.curation"]
 
 
 def _fetch_candidates(conn: psycopg.Connection) -> list[dict[str, object]]:
@@ -47,6 +51,9 @@ def _fetch_candidates(conn: psycopg.Connection) -> list[dict[str, object]]:
                EXISTS(SELECT 1 FROM viral_content_sources s
                       WHERE s.platform=v.platform AND s.video_id=v.video_id
                         AND s.source_kind = ANY(%s)) AS has_ops_source,
+               EXISTS(SELECT 1 FROM viral_content_sources s
+                      WHERE s.platform=v.platform AND s.video_id=v.video_id
+                        AND s.source_kind='customer_import') AS has_customer_source,
                EXISTS(SELECT 1 FROM audit_logs a
                       WHERE a.entity_type='viral_video'
                         AND a.entity_id=v.platform||':'||v.video_id
@@ -54,7 +61,8 @@ def _fetch_candidates(conn: psycopg.Connection) -> list[dict[str, object]]:
                EXISTS(SELECT 1 FROM viral_refresh_tasks t
                       WHERE t.platform=v.platform
                         AND t.status IN ('PENDING','RUNNING')
-                        AND t.collection_config_json LIKE '%'||v.video_id||'%') AS has_pending_task
+                        AND t.collection_config_json
+                            LIKE '%%'||v.video_id||'%%') AS has_pending_task
         FROM viral_videos v
         WHERE v.deleted_at IS NULL AND v.category='链接导入'
           AND (v.collection_published=1 OR v.homepage_featured=1
@@ -63,7 +71,7 @@ def _fetch_candidates(conn: psycopg.Connection) -> list[dict[str, object]]:
         """,
         (_OPS_SOURCE_KINDS, _CURATION_ACTIONS),
     ).fetchall()
-    return [dict(row._asdict()) for row in rows]  # noqa: SL001 - psycopg 行转字典
+    return [dict(row) for row in rows]
 
 
 def main() -> int:
@@ -74,20 +82,28 @@ def main() -> int:
     args = parser.parse_args()
     dsn = resolve_cli_pg_dsn()
 
-    with psycopg.connect(dsn) as conn:
+    with psycopg.connect(dsn, row_factory=dict_row) as conn:
         candidates = _fetch_candidates(conn)
 
         def is_legitimate(row: dict[str, object]) -> bool:
             return bool(row["has_ops_source"] or row["has_curation_audit"])
 
         legitimate = [row for row in candidates if is_legitimate(row)]
-        suspects = [row for row in candidates if not is_legitimate(row)]
+        # 证据缺失不等于仅客户导入：只有明确存在 customer_import 来源且无任何
+        # 运营证据的行才是旁路候选；连来源记录都没有的行留待人工复核。
+        suspects = [
+            row for row in candidates if not is_legitimate(row) and row["has_customer_source"]
+        ]
+        unverified = [
+            row for row in candidates if not is_legitimate(row) and not row["has_customer_source"]
+        ]
         blocked = [row for row in suspects if row["has_pending_task"]]
         actionable = [row for row in suspects if not row["has_pending_task"]]
 
         print(f"候选（链接导入 + 发布位开启）：{len(candidates)} 行")
         print(f"  LEGITIMATE（运营发布过的合法碰撞，不动）：{len(legitimate)} 行")
-        print(f"  SUSPECT（旁路候选）：{len(suspects)} 行")
+        print(f"  SUSPECT（仅客户导入来源的旁路候选）：{len(suspects)} 行")
+        print(f"  UNVERIFIED（无来源记录，人工复核，--apply 不动）：{len(unverified)} 行")
         for row in legitimate:
             print(f"    [LEGITIMATE] {row['platform']}/{row['video_id']} {row['title']!r}")
         for row in blocked:
@@ -97,6 +113,8 @@ def main() -> int:
             )
         for row in actionable:
             print(f"    [SUSPECT] {row['platform']}/{row['video_id']} {row['title']!r}")
+        for row in unverified:
+            print(f"    [UNVERIFIED] {row['platform']}/{row['video_id']} {row['title']!r}")
 
         if not args.apply:
             print("预览模式：未写库。加 --apply 回置 SUSPECT 行的发布位。")
@@ -104,6 +122,8 @@ def main() -> int:
 
         applied = 0
         for row in actionable:
+            # 回置前在同一语句里复查全部证据：查询与更新之间可能新增运营来源、
+            # 策展审计或在途任务，复查不过即放弃该行（Codex 评审建议）。
             updated = conn.execute(
                 """
                 UPDATE viral_videos
@@ -113,12 +133,30 @@ def main() -> int:
                   AND category='链接导入'
                   AND (collection_published=1 OR homepage_featured=1
                        OR pushed_at IS NOT NULL)
+                  AND NOT EXISTS(SELECT 1 FROM viral_content_sources s
+                        WHERE s.platform=viral_videos.platform
+                          AND s.video_id=viral_videos.video_id
+                          AND s.source_kind = ANY(%s))
+                  AND NOT EXISTS(SELECT 1 FROM audit_logs a
+                        WHERE a.entity_type='viral_video'
+                          AND a.entity_id=viral_videos.platform||':'||viral_videos.video_id
+                          AND a.action = ANY(%s))
+                  AND NOT EXISTS(SELECT 1 FROM viral_refresh_tasks t
+                        WHERE t.platform=viral_videos.platform
+                          AND t.status IN ('PENDING','RUNNING')
+                          AND t.collection_config_json
+                              LIKE '%%'||viral_videos.video_id||'%%')
                 """,
-                (row["platform"], row["video_id"]),
+                (
+                    row["platform"],
+                    row["video_id"],
+                    _OPS_SOURCE_KINDS,
+                    _CURATION_ACTIONS,
+                ),
             )
             applied += updated.rowcount
         conn.commit()
-        print(f"已回置 {applied} 行（SUSPECT 且无在途任务）；LEGITIMATE 与在途任务行未动。")
+        print(f"已回置 {applied} 行（SUSPECT 且复查通过）；LEGITIMATE/UNVERIFIED/在途任务行未动。")
     return 0
 
 

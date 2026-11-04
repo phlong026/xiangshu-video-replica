@@ -370,8 +370,9 @@ export function WorkbenchPage() {
     }
     // 工作台粘贴链接两端统一直接服务端导入（2026-11 爆款链路改造 WP3）：
     // 新粘贴的链接尚无本人的成功导入行，claim 的 owner 旁路不成立、视频也未
-    // 上架发布，claim-first 只会 404 断链；导入入队时共享缓存命中本就秒回，
-    // 无需前置 claim。公开爆款卡片的 claim-first 在 ContentPages 侧执行。
+    // 上架发布，claim-first 只会 404 断链。共享缓存的秒回发生在导入完成后的
+    // 转写任务入队（script-from-audio），不在导入入队本身；交付计费走转写
+    // 完成后的 claim。公开爆款卡片的 claim-first 在 ContentPages 侧执行。
     await beginViralImport(
       video,
       purpose,

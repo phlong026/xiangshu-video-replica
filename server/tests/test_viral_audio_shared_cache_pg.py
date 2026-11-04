@@ -450,3 +450,85 @@ def test_video_rearchive_does_not_invalidate_audio_credential(
     delivered = _claim(pg_state, "reader-b3", video_id)
     assert delivered.text == "音频形态写入的共享文案"
     assert delivered.billing.charged == 2
+
+
+def test_demotion_to_private_reruns_unknown_submission_fence(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """共享资格在锁内降级为私有时必须补跑内容指纹门禁（Codex S 级评审 P1）.
+
+    升级组合：旧音频版本已有 SUCCEEDED 历史任务（凭据指向旧字节），当前版本
+    存在 SUBMISSION_UNCERTAIN 提交，共享缓存尚未建立。新请求先通过音频共享
+    资格，锁内历史回溯选中旧任务后二次校验降级私有——此时若跳过
+    private_source_task，会对同一音轨绕开「未知提交禁止重发」重复预留 ASR。
+    """
+    storage, _calls = _audio_fixture(pg_state, monkeypatch, ("uncertain-owner", "old-owner"))
+    video_id = "demotion-fence-1"
+    _seed_viral_video(pg_state, video_id)
+    # 当前音频归档是 v2；重提者持有 v2 资产，且已有一次未确认提交。
+    _seed_preparation(
+        pg_state, video_id=video_id, media_kind="audio", uri="fake://shared/audio-v2.m4a"
+    )
+    _seed_shared_import(
+        pg_state,
+        "uncertain-owner",
+        video_id=video_id,
+        kind="reference_audio",
+        uri="fake://shared/audio-v2.m4a",
+        sha=hashlib.sha256(b"audio-v2").hexdigest(),
+        content_type="audio/mp4",
+        object_key="audio-source.m4a",
+    )
+    storage.put_object("audio-v2.m4a", b"audio-v2", content_type="audio/mp4")
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "INSERT INTO script_from_audio_tasks ("
+            "id, project_id, source_asset_id, created_by_user_id, idempotency_key,"
+            " request_hash, request_json, status, provider_started_at, attempt)"
+            " VALUES ('uncertain-task', 'proj-uncertain-owner-" + video_id + "', "
+            "'asset-uncertain-owner-" + video_id + "-reference_audio', 'uncertain-owner',"
+            " 'ik-uncertain', 'rh-uncertain', '{}', 'SUBMISSION_UNCERTAIN',"
+            " CURRENT_TIMESTAMP, 1)"
+        )
+    # 旧版本音频资产 + SUCCEEDED 历史任务：锁内历史回溯会选中它重绑生产者，
+    # 随后二次 _viral_source 因新旧字节指纹不同把本次请求降级为私有。
+    _seed_shared_import(
+        pg_state,
+        "old-owner",
+        video_id=video_id,
+        kind="reference_audio",
+        uri="fake://shared/audio-source.m4a",
+        sha=hashlib.sha256(b"audio").hexdigest(),
+        content_type="audio/mp4",
+        object_key="audio-source.m4a",
+    )
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "INSERT INTO script_from_audio_tasks ("
+            "id, project_id, source_asset_id, created_by_user_id, idempotency_key,"
+            " request_hash, request_json, status, result_json, completed_at, attempt)"
+            " VALUES ('old-success', 'proj-old-owner-" + video_id + "', "
+            "'asset-old-owner-" + video_id + "-reference_audio', 'old-owner',"
+            " 'ik-old', 'rh-old', '{}', 'SUCCEEDED',"
+            " %s, CURRENT_TIMESTAMP, 1)",
+            (json.dumps({"text": "旧版本的文案", "duration_sec": 12.0, "language": "zh"}),),
+        )
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as fenced:
+        _enqueue(pg_state, "uncertain-owner", video_id, "after-demotion")
+    assert fenced.value.status_code == 409
+    assert fenced.value.detail["code"] == "SCRIPT_FROM_AUDIO_SOURCE_UNCERTAIN"
+    # 门禁生效：没有新任务、没有新的 ASR 预留。
+    with _pg(pg_state) as pg:
+        task_count = pg.execute(
+            "SELECT count(*) FROM script_from_audio_tasks WHERE created_by_user_id=%s",
+            ("uncertain-owner",),
+        ).fetchone()
+        asr_count = pg.execute(
+            "SELECT count(*) FROM billing_operations WHERE service='asr' AND user_id=%s",
+            ("uncertain-owner",),
+        ).fetchone()
+    assert int(task_count[0]) == 1
+    assert int(asr_count[0]) == 0

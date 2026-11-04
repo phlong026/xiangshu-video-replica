@@ -702,6 +702,18 @@ def enqueue_script_from_audio_task(
     if cache is not None and _viral_source(conn, asset) != viral_source:
         cache = None
         viral_source = None
+        # 共享资格在锁内被历史回溯改判为私有时（如凭据指向旧版本资产），必须
+        # 补跑与首次私有路径相同的内容指纹门禁：跳过它会让同一音轨绕开
+        # 「未知提交禁止重发」的保护，对 SUBMISSION_UNCERTAIN 重复预留并
+        # 提交 ASR（Codex S 级评审 P1）。
+        demoted_task = private_source_task(
+            conn,
+            owner_user_id=str(getattr(actor, "id")),
+            sha256=str(asset["sha256"]),
+            size_bytes=int(asset["size_bytes"]),
+        )
+        if demoted_task is not None:
+            return demoted_task
     cached = (
         _verified_cache_result(cache["result_json"], viral_source)
         if cache is not None and viral_source is not None
