@@ -212,6 +212,16 @@ HISTORICAL_CLI_ROWS: tuple[CommandRow, ...] = tuple(
             "dry-run by default; writes asset metadata + derives thumbnails "
             "only with --apply; idempotent; COS-only, skips local storage",
         ),
+        (
+            "python -m scripts.audit_customer_import_visibility",
+            "scripts/audit_customer_import_visibility.py",
+            "current-pg",
+            "PostgreSQL (business)",
+            "audit (one-shot)",
+            "dry-run by default; resets publish flags only with --apply; "
+            "per-row FOR UPDATE lock + fresh-snapshot evidence recheck; "
+            "idempotent; 2026-11 爆款链路改造 WP4",
+        ),
     )
 )
 
