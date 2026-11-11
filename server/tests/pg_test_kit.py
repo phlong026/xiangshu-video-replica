@@ -84,6 +84,9 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
     {
         "t13_customer_activation_test",
         "customer_v3_test",
+        # 全自动复刻编排器（replica_pipeline_tasks）数据层验证专用迁移库
+        # （test_replica_pipeline_model.py）：表结构/CHECK/三个调度集合谓词。
+        "rplc_pipeline_model_test",
         # Existing business fixtures using W13 routine admin sessions.
         "t09_admin_session_test",
         "t12_admin_activation_test",
