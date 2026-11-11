@@ -1753,7 +1753,12 @@ export async function deleteTrainingMaterial(input: {
 /** 管理端复制用直链（30 分钟时效）：分享给客户前复制，到期后重取即可。 */
 export async function fetchTrainingMaterialDirectLink(
   materialId: string,
-): Promise<{ url: string; expires_at: string; title: string; file_suffix: string }> {
+): Promise<{
+  url: string;
+  expires_at: string;
+  title: string;
+  file_suffix: string;
+}> {
   return adminRead(
     `/api/control/training-materials/${encodeURIComponent(materialId)}/direct-link`,
     "获取直链失败",

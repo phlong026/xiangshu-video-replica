@@ -1756,9 +1756,7 @@ export function TaskDetailPage() {
     refresh,
     user,
   } = useStudio();
-  const [actionBusy, setActionBusy] = useState<
-    "download" | "retry"
-  >();
+  const [actionBusy, setActionBusy] = useState<"download" | "retry">();
   const [previewLoad, setPreviewLoad] = useState<{
     key?: string;
     asset?: StudioAsset;

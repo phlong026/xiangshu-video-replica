@@ -97,6 +97,9 @@ import {
 } from "./viralImport";
 import "./content.css";
 
+// biome-ignore lint/correctness/noUnusedVariables: review 模式的精选分类列表在用
+const categoryTabs = ["全部", "建房预算", "户型设计", "施工避坑", "庭院案例"];
+
 /** MATERIAL-PERF-A（P0-1）：分页按钮窗口化——始终含首末页与当前页 ±1，
  * 其余以「…」折叠，页数多时不再渲染整排页码按钮。 */
 export function visiblePageButtons(
@@ -1608,8 +1611,10 @@ export function ViralPage() {
         "全部",
         ...new Set(
           curated
-            .filter((video) => video.platform === platform && video.category)
-            .map((video) => video.category),
+            .filter((video: { platform: string; category?: string }) =>
+              video.platform === platform && Boolean(video.category)
+            )
+            .map((video: { category?: string }) => video.category as string),
         ),
       ];
 
