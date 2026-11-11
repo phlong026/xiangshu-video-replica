@@ -126,11 +126,21 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
       {
         name: "analysis_model",
         label: "视频分析模型（可选）",
-        placeholder: "gemini-4-carbon",
+        placeholder: "gemini-3.8-flash",
       },
       {
         name: "analysis_model_fallbacks",
         label: "备选视频分析模型（可选，最多一个）",
+        placeholder: "gemini-4-carbon",
+      },
+      {
+        name: "replica_prompt_model",
+        label: "长视频拆解模型（可选）",
+        placeholder: "gemini-4-carbon",
+      },
+      {
+        name: "replica_prompt_model_fallbacks",
+        label: "长视频备选模型（可选，最多一个）",
         placeholder: "gemini-3.8-flash",
       },
     ],

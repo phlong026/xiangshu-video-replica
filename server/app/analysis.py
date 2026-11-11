@@ -42,18 +42,23 @@ APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 # 图像语义检查（人物识别源图、首帧复核）2026-09-26 起与视频拆解统一用
 # gemini-3.8-flash：业务确认两链路同用正式版 flash。此前单独留在 preview 名
 # 上是因为 2026-09-20 故障无证据指向模型名；现在任何默认槽位都不再使用
-# preview 名（曾发生过无预警下线）。2026-11-11 起该常量只服务图像链路：
-# 拆解才需要旗舰推理力，图像检查控成本，两者刻意分开（方案决策 D2）。
+# preview 名（曾发生过无预警下线）。该常量只服务图像链路（决策 D2）。
 APILIO_GEMINI_MODEL = "gemini-3.8-flash"
-# 视频拆解模型：2026-11-11 起主用新一代 gemini-4-carbon（决策 D1，见
-# docs/视频拆解稳定性与准确率改造方案-2026-11-11.md），备选退回正式版 flash。
-# 生产切换以设置页 analysis_model 为第一手段（零发版可回滚），代码默认值随
-# 正式发版；上游再次调整时，设置页可直接覆盖，不必等下一次发版。
-APILIO_ANALYSIS_MODEL = "gemini-4-carbon"
-# 主模型限流/下线时的默认替补：gemini-3.8-flash，与图像链路同款正式版
-# （避开 2026-09-20 出过事的 preview 名）。可用设置项
-# analysis_model_fallbacks 覆盖；换过默认主模型后请核对名单。
-APILIO_ANALYSIS_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.8-flash",)
+# 分镜主链路模型（决策 D9 按链路路由，2026-11-12 Phase 0 分段实测后由
+# gemini-4-carbon 改回正式版 flash）：快切素材上 4-carbon 在默认候选密度下
+# 严重欠分割（6 段 vs 真值 13–14，方案附录 C），分段质量是分镜链路的产品
+# 核心；3.8-flash 全程命中真值且短素材零失败。限流时切 4-carbon 兜底可用性
+# （其换行注入由 T15 兜底）。生产可经设置页 analysis_model 覆盖。
+APILIO_ANALYSIS_MODEL = "gemini-3.8-flash"
+# 分镜主链路备选：gemini-4-carbon（Phase 0 实测最稳的可用性备胎；换道后
+# 分段质量下降属可接受的降级）。可用设置项 analysis_model_fallbacks 覆盖。
+APILIO_ANALYSIS_FALLBACK_MODELS: tuple[str, ...] = ("gemini-4-carbon",)
+# 长视频复刻提示词链路（决策 D9）：一段式提示词无分段需求，4-carbon 的
+# 15–58s + 零断连优势真实成立（3.8-flash 在 180s 素材上两次网关断连）；
+# 备选退回正式版 flash。可用可选设置键 replica_prompt_model /
+# replica_prompt_model_fallbacks 覆盖（留空走出厂值）。
+APILIO_REPLICA_PROMPT_MODEL = "gemini-4-carbon"
+APILIO_REPLICA_PROMPT_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.8-flash",)
 MAX_ANALYSIS_FALLBACK_MODELS = 1
 # 限流切换前只留礼貌性停顿；是否有独立配额仍需真实账户验证。
 # 租约 10 分钟、单次调用上限 240s，因此最多只尝试一个备选。

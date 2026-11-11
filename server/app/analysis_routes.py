@@ -15,6 +15,8 @@ from app.analysis import (
     ANALYSIS_KIND,
     APILIO_ANALYSIS_MODEL,
     APILIO_DEFAULT_BASE_URL,
+    APILIO_REPLICA_PROMPT_FALLBACK_MODELS,
+    APILIO_REPLICA_PROMPT_MODEL,
     NETWORK_FAILURE_PHASE,
     SHOT_CARD_KIND,
     AnalysisProviderFailed,
@@ -97,6 +99,7 @@ def get_video_analysis_provider(
     *,
     transport: ApilioChatTransport | None = None,
     video_call_budget: VideoCallBudget | None = None,
+    lane: str = "analysis",
 ) -> VideoAnalysisProvider:
     """构建视频分析 provider。
 
@@ -104,6 +107,12 @@ def get_video_analysis_provider(
     十分钟以上）；拆解链路不传，维持 240 秒默认。``video_call_budget`` 启用
     截止预算与有界重试，仅视频任务工厂传入；提示词优化器等文本入口不传，
     保持一次请求、按既有语义换道的历史行为（方案 T14）。
+
+    ``lane`` 决定模型路由（决策 D9 按链路分工，Phase 0 分段实测驱动）：
+    ``analysis``（分镜主链路，默认）走 analysis_model 设置、出厂
+    gemini-3.8-flash；``replica_prompt``（长视频一段式）走可选设置键
+    replica_prompt_model / replica_prompt_model_fallbacks、出厂
+    gemini-4-carbon——长视频无分段需求，4-carbon 的速度与零断连优势真实。
     """
     has_saved_apilio_config = (
         conn.execute(
@@ -140,6 +149,17 @@ def get_video_analysis_provider(
                 },
             )
         return FakeGemini()
+    if lane == "replica_prompt":
+        model = (config.get("replica_prompt_model") or "").strip() or APILIO_REPLICA_PROMPT_MODEL
+        raw_replica_fallbacks = (config.get("replica_prompt_model_fallbacks") or "").strip()
+        fallback_models = (
+            parse_analysis_fallback_models(raw_replica_fallbacks)
+            if raw_replica_fallbacks
+            else APILIO_REPLICA_PROMPT_FALLBACK_MODELS
+        )
+    else:
+        model = (config.get("analysis_model") or "").strip() or APILIO_ANALYSIS_MODEL
+        fallback_models = parse_analysis_fallback_models(config.get("analysis_model_fallbacks"))
     return ApilioGemini(
         api_key=api_key,
         # The desktop settings page does not expose a custom Apilio endpoint.
@@ -150,10 +170,9 @@ def get_video_analysis_provider(
         # receives the token, so it is safe to configure.  It needs to be:
         # upstream retires preview models without notice and every analysis
         # then fails with HTTP 400 until a new build ships.
-        model=(config.get("analysis_model") or "").strip() or APILIO_ANALYSIS_MODEL,
-        # 主模型限流/下线时自动换道；出厂名单见
-        # APILIO_ANALYSIS_FALLBACK_MODELS，设置项可整组覆盖。
-        fallback_models=parse_analysis_fallback_models(config.get("analysis_model_fallbacks")),
+        model=model,
+        # 主模型限流/下线时自动换道；出厂名单见各链路常量，设置项可整组覆盖。
+        fallback_models=fallback_models,
         transport=transport,
         video_call_budget=video_call_budget,
     )

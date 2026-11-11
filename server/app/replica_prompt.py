@@ -92,13 +92,18 @@ def provider_timeout_seconds() -> float:
 
 
 def build_long_video_provider(conn: Database) -> VideoAnalysisProvider:
-    """与拆解同一套 apilio 配置，注入更长的调用超时与长视频调用预算."""
+    """长视频专用路由（方案 D9）：出厂 4-carbon（快且零断连），备选退 flash.
+
+    与分镜主链路共享 apilio 凭据与切镜候选线索，但模型独立——可用可选设置
+    键 replica_prompt_model / replica_prompt_model_fallbacks 覆盖（留空走出厂值）。
+    """
     return get_video_analysis_provider(
         conn,
         transport=UrllibApilioChatTransport(timeout_seconds=provider_timeout_seconds()),
         video_call_budget=VideoCallBudget(
             attempt_budget_seconds=REPLICA_PROMPT_CALL_BUDGET_SECONDS,
         ),
+        lane="replica_prompt",
     )
 
 
