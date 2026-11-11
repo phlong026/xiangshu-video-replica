@@ -2593,6 +2593,9 @@ export function ViralDetailPage() {
     typeof video.durationMs === "number" &&
     video.durationMs >= 4_000 &&
     video.durationMs <= 30_000;
+  // 全自动复刻单独门禁 4–15 秒（评审 M8-r2#2）：自动生成批次上限 15 秒，
+  // 16–30 秒走手动复刻分段，避免先收费拆解/首帧再必然失败。
+  const canReplicaAuto = canReplicate && (video.durationMs ?? 0) <= 15_000;
   const goReplica = (task: ViralImportTask) => {
     if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
       notify("该来源暂不支持视频复刻");
@@ -2786,7 +2789,7 @@ export function ViralDetailPage() {
                 </Button>
               </div>
             )}
-            {canReplicate && !review && (
+            {canReplicaAuto && !review && (
               <div className="content-detail-action">
                 <ReplicaPipelineControl video={video} />
               </div>

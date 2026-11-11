@@ -816,6 +816,18 @@ def drive_pipeline_once(conn: BusinessConnection, lease: rp.ReplicaPipelineLease
     if result.retryable and retry_no < rp.MAX_STAGE_RETRIES:
         sets = ["stage_retry_no = %s", "updated_at = now()"]
         params: list[object] = [retry_no + 1]
+        # 清引用前把旧子任务 id 记入 stage_detail.history（评审 M8-r2#4）：
+        # 确认卡的费用汇总按全部尝试的 source 聚合，丢失旧 id 会漏计已结算费用。
+        history_ids = [str(row[column]) for column in clear_columns if row[column] is not None]
+        if history_ids:
+            sets.append(
+                "stage_detail = jsonb_set(COALESCE(stage_detail, '{}'::jsonb), "
+                "'{history}', COALESCE(stage_detail, '{}'::jsonb) -> 'history' "
+                "|| %s::jsonb, true)"
+            )
+            import json as _json
+
+            params.append(_json.dumps(history_ids))
         for column in clear_columns:
             sets.append(f"{column} = NULL")
         if status == rp.STATUS_FIRST_FRAMING:

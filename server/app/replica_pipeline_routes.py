@@ -85,6 +85,21 @@ def initiate_replica_pipeline(
             rp.require_pipeline_enabled(conn)
         except rp.ReplicaPipelineError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code, "message": exc.message})
+        # 自动生成只支持 4–15 秒输出（批次请求硬约束）：超长源片在此拒绝，
+        # 避免先收费拆解/首帧、再在 COMPOSING 必然失败（评审 M8-r2#2）。
+        video_row = conn.execute(
+            "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
+            (request.platform, request.video_id),
+        ).fetchone()
+        if video_row is not None and video_row["duration_ms"] is not None:
+            if int(video_row["duration_ms"]) > 15_000:
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "SOURCE_TOO_LONG_FOR_GENERATION",
+                        "message": "该视频超过 15 秒，暂不支持全自动生成，请转手动复刻。",
+                    },
+                )
         request_hash = hashlib.sha256(
             f"{request.platform}|{request.video_id}|{request.character_version_id}".encode()
         ).hexdigest()
@@ -144,7 +159,7 @@ def list_pipeline_characters(conn: Database, actor: AuthenticatedUser) -> dict[s
         WHERE pi.owner_user_id = %s AND pi.status = 'ACTIVE'
             AND pi.authorization_status = 'AUTHORIZED'
             AND (pi.authorization_expires_at IS NULL
-                 OR pi.authorization_expires_at > now())
+                 OR pi.authorization_expires_at::timestamptz > now())
             AND cv.status = 'PUBLISHED'
             AND cv.published_at IS NOT NULL
             AND cv.publication_hash IS NOT NULL
@@ -174,6 +189,7 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
     """
     from fastapi import HTTPException
 
+    expired_now = False
     with db.write() as (conn, actor):
         row = conn.execute(
             "SELECT * FROM replica_pipeline_tasks WHERE id = %s AND owner_user_id = %s",
@@ -202,15 +218,14 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
                 (awaiting_since,),
             ).fetchone()
             if elapsed is not None and float(elapsed["seconds"]) > rp.CONFIRM_WINDOW_SECONDS:
+                # 先落 EXPIRED 并提交（评审 M8-r2#5：异常回滚会撤销状态迁移），
+                # 退出事务后再返回 410。
                 conn.execute(
                     "UPDATE replica_pipeline_tasks SET status = %s, finished_at = now(), "
                     "updated_at = now() WHERE id = %s AND status = %s",
                     (rp.STATUS_EXPIRED, pipeline_id, rp.STATUS_AWAIT_CONFIRM),
                 )
-                raise HTTPException(
-                    410,
-                    detail={"code": "REPLICA_PIPELINE_EXPIRED", "message": "确认窗口已过期。"},
-                )
+                expired_now = True
         from app.generation import generation_price_quote
 
         resolution = str(snapshot.get("resolution") or "768P")
@@ -223,14 +238,31 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
             quantity=int(snapshot.get("quantity") or 1),
             user_id=actor.id,
         )
-        return {
+        frozen_max = int(snapshot.get("maxCredits") or 0)
+        if frozen_max > 0 and quote.estimated_credits > frozen_max:
+            # 冻结上限是用户在确认页授权过的金额（评审 M8-r2#3）：现价上涨
+            # 不能静默扩大授权——返回专用错误，用户可放弃后重新发起（新报价
+            # 会重新冻结上限）。不提供「原地涨价确认」通道。
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "REPLICA_PIPELINE_PRICE_CHANGED",
+                    "message": "价格已变化，请放弃后重新发起以重新确认费用。",
+                },
+            )
+        quote_response = {
             "quoteToken": quote.quote_token,
-            "maxCredits": quote.estimated_credits,
+            "maxCredits": min(quote.estimated_credits, frozen_max or quote.estimated_credits),
             "estimatedCredits": quote.estimated_credits,
             "priceTier": quote.price_tier,
             "durationSeconds": quote.duration_seconds,
             "fingerprint": str(snapshot.get("fingerprint") or ""),
         }
+    if expired_now:
+        raise HTTPException(
+            410, detail={"code": "REPLICA_PIPELINE_EXPIRED", "message": "确认窗口已过期。"}
+        )
+    return quote_response
 
 
 @router.get("/replica-pipelines/{pipeline_id}")
@@ -332,6 +364,12 @@ def _attach_review_material(
         )
         if value
     ]
+    # 重试替换掉的旧尝试也计入（评审 M8-r2#4）：费用汇总必须覆盖全部已收费
+    # 尝试，否则「旧尝试已结算、新尝试成功」时确认卡会丢失已结算金额。
+    history = detail.get("history")
+    if isinstance(history, list):
+        source_ids.extend(str(value) for value in history if value)
+    source_ids = list(dict.fromkeys(source_ids))
     settled = 0
     reserved = 0
     if source_ids:
