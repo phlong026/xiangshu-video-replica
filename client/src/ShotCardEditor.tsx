@@ -100,6 +100,16 @@ function motionClipboardText(motion: ShotMotion | null | undefined): string {
   ].join("；");
 }
 
+/** 旧版拆解（2026-10 之前）没有 motion 字段：这些镜头编译后只会得到
+ * action 文本拼接，成片人物容易僵立原地。编辑器据此显式提示（方案 T11）。 */
+export function missingMotionShotIds(shots: ShotCard[]): string[] {
+  return shots
+    .filter((shot) => shot.motion == null)
+    .map((shot, index) =>
+      shot.shot_id?.trim() ? shot.shot_id : `第 ${index + 1} 镜`,
+    );
+}
+
 /** 制表符格式可直接粘贴到 Excel、飞书表格和常见文档表格。 */
 export function formatShotCardsForClipboard(shots: ShotCard[]): string {
   const rows = shots.map((shot) => [
@@ -189,8 +199,18 @@ export function ShotCardEditor({
     });
   };
 
+  // 旧拆解结果没有 motion，编译只能退回 action 文本——整条成片会偏静止且
+  // 用户毫不知情（服务端只记日志）。在这里把缺运动的镜头显式摆出来（T11）。
+  const missingMotionIds = missingMotionShotIds(shots);
+
   return (
     <div className="shot-table-wrap">
+      {missingMotionIds.length ? (
+        <p className="shot-table__motion-missing" role="status">
+          {missingMotionIds.join("、")}{" "}
+          缺运动信息（旧版拆解），成片可能偏静止；建议重新拆解，或直接在「运动」列补标注。
+        </p>
+      ) : null}
       <table className="shot-table">
         <thead>
           <tr>

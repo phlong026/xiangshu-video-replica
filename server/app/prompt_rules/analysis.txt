@@ -114,6 +114,10 @@ camera_motion 文本说明“画面逐渐放大，推近或变焦无法区分”
 relative_motion：描述人物与摄影机的相对变化，如“人物靠近，画面占比增大”
 “人物前进，摄影机后退，主体画面占比基本不变”；不确定则明确说明。
 
+选枚举前先在 action、subject_displacement、hand_action 与段落级
+camera_motion 文本中写清可观察依据；枚举取值必须与这些字段的描述一致，
+不要求另行输出推理过程。
+
 六、台词和声音
 spoken_text 只填写本段实际说出的可辨识内容，不润色、不补开场钩子、不翻译。
 无说话内容填写空字符串。听不清的必要位置标记“[听不清]”，禁止猜台词或数字。
@@ -137,3 +141,96 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
 台词去重、所有必需字段与枚举。不要为填满字段而制造事实。
 检查原片台词完整性，不应用目标生成参数。
 不要输出包装 schema 以外的字段，不另附一份中文生成稿或 Markdown 解释。
+
+九、输出示例（形态参照，数值一律不得照抄）
+示例中的媒体事实（总时长 12 秒、9:16、30fps）与全部时间、文案都是示例专用。
+真实输出必须以服务端 MEDIA_INFO_JSON 为准：时间轴从 0 覆盖到真实总时长，
+末段结束时间等于真实 duration_seconds，台词只取视频中实际说出的内容。
+示例开始
+{
+  "schema_version": "analysis-h3.v1",
+  "analysis": {
+    "summary": "讲解者开场走向石桌并做近景介绍",
+    "duration_seconds": 12,
+    "aspect_ratio": "9:16",
+    "resolution": "1080x1920",
+    "fps": 30,
+    "theme": "庭院讲解",
+    "visual_style": "写实实拍",
+    "pace": "中速",
+    "camera_language": "两个镜头，先全景后近景",
+    "color_tone": "自然暖色，光照柔和",
+    "original_script": "大家好，今天带大家看这个院子。这个石桌是整院的中心。",
+    "shots": [
+      {
+        "shot_id": "s1",
+        "start_time": 0,
+        "end_time": 7.5,
+        "shot_type": "全景",
+        "composition": "人物居中偏右，保留庭院纵深",
+        "camera_motion": "固定机位",
+        "subject": "画面中间穿浅色上衣的讲解者",
+        "person_count": 1,
+        "action": "讲解者从画面左侧起步，边走边抬起右手示意，走到石桌前停下面向镜头",
+        "scene": "庭院",
+        "scene_dressing": "石桌与两把木椅，背景为院墙",
+        "scene_lighting": "午后自然光，柔和顺光",
+        "wardrobe_pose_detail": "浅色上衣，深色长裤，行走时手臂自然摆动",
+        "ambient_sound": "鸟鸣与远处车流",
+        "music_style_hint": "无可辨识配乐",
+        "spoken_text": "大家好，今天带大家看这个院子。",
+        "transition": "硬切",
+        "segment_kind": "ACTION_BEAT",
+        "boundary_reason": "视频开始",
+        "motion": {
+          "subject_motion_state": "WALKING+GESTURING_ONLY",
+          "subject_direction": "lateral",
+          "subject_displacement": "从画面左侧走向石桌，约四五步后停住",
+          "hand_action": "行走时抬起右手示意，停下后双手自然垂下",
+          "camera_motion": "STATIC",
+          "relative_motion": "人物横向移动，画面占比基本不变"
+        }
+      },
+      {
+        "shot_id": "s2",
+        "start_time": 7.5,
+        "end_time": 12,
+        "shot_type": "近景",
+        "composition": "石桌居中，人物手部入画",
+        "camera_motion": "缓慢推近",
+        "subject": "画面中间穿浅色上衣的讲解者",
+        "person_count": 1,
+        "action": "讲解者站在石桌旁，抬左手指向桌面并做讲解手势，镜头缓慢推近",
+        "scene": "庭院石桌前",
+        "scene_dressing": "石桌桌面摆放茶具",
+        "scene_lighting": "午后自然光，侧光增强立体感",
+        "wardrobe_pose_detail": "浅色上衣，站立讲解姿态",
+        "ambient_sound": "鸟鸣延续",
+        "music_style_hint": "无可辨识配乐",
+        "spoken_text": "这个石桌是整院的中心。",
+        "transition": "同镜头连续，无切镜",
+        "segment_kind": "SHOT_CUT",
+        "boundary_reason": "硬切到石桌近景",
+        "motion": {
+          "subject_motion_state": "GESTURING_ONLY",
+          "subject_direction": "in_place",
+          "subject_displacement": "无位移，原地讲解",
+          "hand_action": "抬起左手指向桌面，随后做开合讲解手势",
+          "camera_motion": "PUSH_IN",
+          "relative_motion": "镜头缓慢推近，人物画面占比逐渐增大"
+        }
+      }
+    ]
+  },
+  "generation_prompt": {
+    "mode": null,
+    "prompt_text": null,
+    "issues": [
+      {
+        "code": "FINAL_COMPOSITION_REQUIRED",
+        "message": "分析已完成；确认文案和新首帧后合成最终提示词。"
+      }
+    ]
+  }
+}
+示例结束

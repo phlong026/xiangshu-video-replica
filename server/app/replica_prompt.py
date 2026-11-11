@@ -348,7 +348,9 @@ def perform_replica_prompt_task(
             )
         if on_provider_result is not None:
             on_provider_result()
-        return parse_replica_prompt_payload(response.text)
+        # 透传服务端已验证的媒体信息：禁词硬拒绝与画幅/时长软警告都以它为准
+        # （方案 T10），不让模型自报的媒体事实参与校验。
+        return parse_replica_prompt_payload(response.text, media_info=work.media_info)
 
 
 def complete_replica_prompt_task(

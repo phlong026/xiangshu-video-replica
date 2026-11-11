@@ -980,7 +980,11 @@ _REPLICA_PROMPT_SUMMARY_FIELDS = (
 
 
 def default_replica_prompt_payload(duration_seconds: float) -> dict[str, Any]:
-    """FakeGemini 的默认出参：结构与真实链路一致，供本地/测试全链路走通."""
+    """FakeGemini 的默认出参：结构与真实链路一致，供本地/测试全链路走通.
+
+    文案不得含禁词表字样（「复刻」「原片」「源视频」），否则会被 T10 lint
+    拒绝，Fake 全链路反而走不通。
+    """
     return {
         "schema_version": REPLICA_PROMPT_SCHEMA_VERSION,
         "summary": {field: "测试摘要" for field in _REPLICA_PROMPT_SUMMARY_FIELDS},
@@ -988,18 +992,31 @@ def default_replica_prompt_payload(duration_seconds: float) -> dict[str, Any]:
             {"start_time": 0.0, "end_time": min(4.0, duration_seconds), "text": "测试口播一句。"}
         ],
         "replica_prompt": (
-            "测试用复刻提示词：室内场景，一位讲解者面向镜头缓步介绍，"
-            f"镜头跟随，整体时长约 {round(duration_seconds)} 秒。"
+            "室内场景，一位讲解者面向镜头缓步介绍，镜头跟随，"
+            f"整体时长约 {round(duration_seconds)} 秒。"
         ),
     }
 
 
-def parse_replica_prompt_payload(text: str) -> dict[str, Any]:
+# 长视频提示词的禁词表（方案 T10）：产出物是「可直接投喂生成模型的指令」，
+# 出现这些字样说明模型把元任务写进了指令本身。
+_REPLICA_FORBIDDEN_WORDS = ("复刻", "原片", "源视频")
+# 软警告阈值：超出只记 warnings 不拒绝——唯一必须可靠的是那段提示词本身，
+# 次要要素缺失不丢整次付费调用（与既有宽松校验取舍一致）。
+_REPLICA_PROMPT_MAX_CHARS = 8000
+
+
+def parse_replica_prompt_payload(
+    text: str,
+    *,
+    media_info: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """宽松校验长视频拆解出参：键与类型正确即可，多余的键不拒绝.
 
     与分镜链路的严格 ProviderShotCard 校验刻意不同：本链路没有逐段时间轴
     合同，唯一必须可靠的是「一段完整提示词」本身；摘要与口播缺字段时按
-    空值落库，不因次要字段失败丢掉整次付费调用。
+    空值落库，不因次要字段失败丢掉整次付费调用。禁词命中是唯一的硬拒绝；
+    画幅/时长要素缺失与超长记入 warnings 随 payload 落库（方案 T10）。
     """
     try:
         payload = json.loads(text)
@@ -1015,6 +1032,44 @@ def parse_replica_prompt_payload(text: str) -> dict[str, Any]:
         raise AnalysisProviderFailed(
             "长视频拆解没有产出复刻提示词，请重新拆解。",
             retryable=False,
+        )
+    warnings: list[dict[str, str]] = []
+    for word in _REPLICA_FORBIDDEN_WORDS:
+        if word in prompt_text:
+            raise AnalysisProviderFailed(
+                "长视频拆解结果包含内部任务表述，不符合可直用提示词的要求，请重新拆解。",
+                retryable=False,
+                upstream_diagnostic={
+                    "http_status": None,
+                    "failure_phase": RESPONSE_FAILURE_PHASE,
+                    "reason": "replica_prompt_forbidden_word",
+                },
+            )
+    info = media_info or {}
+    duration_seconds = info.get("duration_seconds")
+    if isinstance(duration_seconds, int | float) and not isinstance(duration_seconds, bool):
+        whole_seconds = int(duration_seconds)
+        if not re.search(rf"(?<!\d){whole_seconds}(?:\.\d+)?(?!\d)", prompt_text):
+            warnings.append(
+                {
+                    "code": "REPLICA_DURATION_MISSING",
+                    "message": f"提示词未写明视频时长（约 {whole_seconds} 秒）。",
+                }
+            )
+    aspect_ratio = info.get("aspect_ratio")
+    if isinstance(aspect_ratio, str) and aspect_ratio and aspect_ratio not in prompt_text:
+        warnings.append(
+            {
+                "code": "REPLICA_ASPECT_RATIO_MISSING",
+                "message": f"提示词未写明画幅（{aspect_ratio}），生成端可能按默认画幅出片。",
+            }
+        )
+    if len(prompt_text) > _REPLICA_PROMPT_MAX_CHARS:
+        warnings.append(
+            {
+                "code": "REPLICA_PROMPT_TOO_LONG",
+                "message": "提示词超出建议长度，生成端可能截断或稀释画面细节。",
+            }
         )
     summary_raw = payload.get("summary")
     summary = {
@@ -1042,6 +1097,7 @@ def parse_replica_prompt_payload(text: str) -> dict[str, Any]:
         "summary": summary,
         "spoken_script": spoken_script,
         "replica_prompt": prompt_text,
+        "warnings": warnings,
     }
 
 

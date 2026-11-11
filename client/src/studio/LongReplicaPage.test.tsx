@@ -252,6 +252,44 @@ describe("LongReplicaPage 拆解链路", () => {
     expect(screen.getAllByText("已复制").length).toBeGreaterThan(0);
   });
 
+  it("结果带软警告时在结果区展示警告列表", async () => {
+    readVideoDuration.mockResolvedValue(120);
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "proj-1",
+      assetId: "asset-1",
+    });
+    startReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      id: "task-1",
+      status: "PENDING",
+    });
+    waitForReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      id: "task-1",
+      status: "SUCCEEDED",
+    });
+    getLatestReplicaPromptResult.mockResolvedValue({
+      ...resultPayload(),
+      payload: {
+        ...RESULT_PAYLOAD,
+        warnings: [
+          {
+            code: "REPLICA_ASPECT_RATIO_MISSING",
+            message: "提示词未写明画幅（9:16），生成端可能按默认画幅出片。",
+          },
+        ],
+      },
+    });
+    render(<LongReplicaPage />);
+    await pickFile(makeFile());
+
+    await waitFor(() => {
+      expect(screen.getByText(/未写明画幅/)).toBeTruthy();
+    });
+    // 警告是软提示：提示词本体照常展示。
+    expect(screen.getByText(/庭院施工讲解视频/)).toBeTruthy();
+  });
+
   it("余额不足时展示错误并打开钱包", async () => {
     const { openLive } = setupContext();
     readVideoDuration.mockResolvedValue(60);

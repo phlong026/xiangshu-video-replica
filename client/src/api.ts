@@ -3551,6 +3551,11 @@ export type ReplicaPromptSpokenLine = {
   text: string;
 };
 
+export type ReplicaPromptWarning = {
+  code: string;
+  message: string;
+};
+
 export type ReplicaPromptResult = {
   schema_version: string;
   summary: {
@@ -3562,6 +3567,8 @@ export type ReplicaPromptResult = {
   };
   spoken_script: ReplicaPromptSpokenLine[];
   replica_prompt: string;
+  /** 服务端软警告（画幅/时长要素缺失、超长）；禁词是硬拒绝，不会出现在这里。 */
+  warnings?: ReplicaPromptWarning[];
 };
 
 export type ReplicaPromptVersion = {
