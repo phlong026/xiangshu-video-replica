@@ -547,7 +547,7 @@ class Pan123Client:
             endpoint="api/v1/direct-link/enable",
         )
 
-    def delete_object(self, file_id: int) -> None:
+    def delete_remote_file(self, file_id: int) -> None:
         self._authorized_request(
             f"{PAN123_BASE_URL}/api/v1/file/delete",
             method="POST",
@@ -584,7 +584,7 @@ class Pan123Client:
         finally:
             if file_id is not None:
                 try:
-                    self.delete_object(file_id)
+                    self.delete_remote_file(file_id)
                 except (Pan123Unavailable, Pan123AuthError):
                     # 探针清理失败不影响结论，残留由运维按调用日志人工清理（§7.5）。
                     pass
@@ -627,8 +627,8 @@ class Pan123Storage:
     def resolve_direct_link(self, file_id: int, *, ttl_seconds: int = 1800) -> tuple[str, int]:
         return self._client.resolve_direct_link(file_id, ttl_seconds=ttl_seconds)
 
-    def delete_object(self, file_id: int) -> None:
-        self._client.delete_object(file_id)
+    def delete_remote_file(self, file_id: int) -> None:
+        self._client.delete_remote_file(file_id)
 
     def probe(self) -> None:
         self._client.probe()
