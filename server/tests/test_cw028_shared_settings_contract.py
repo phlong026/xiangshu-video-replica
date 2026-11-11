@@ -134,9 +134,7 @@ def test_get_provider_tester_composes_storage_hifly_metaso_email_noop() -> None:
     assert isinstance(tester.fallback.fallback, HiflyProviderTester)
     assert isinstance(tester.fallback.fallback.fallback, MetasoProviderTester)
     assert isinstance(tester.fallback.fallback.fallback.fallback, YuanbaoProviderTester)
-    assert isinstance(
-        tester.fallback.fallback.fallback.fallback.fallback, EmailProviderTester
-    )
+    assert isinstance(tester.fallback.fallback.fallback.fallback.fallback, EmailProviderTester)
     assert isinstance(
         tester.fallback.fallback.fallback.fallback.fallback.fallback, NoopProviderTester
     )
