@@ -4,34 +4,45 @@
 替换，2026-11-01）。用户自传链路（参考视频 / 人物图 / 发布封面）不走
 本表，仍由 ``materials``/``media`` 域承载。
 
+2026-11-12 网盘改造（docs/培训素材123网盘存储方案-2026-11-12.md）：存储
+车道整体切换为 123 网盘（``Pan123Storage``），格式白名单扩为视频/音频/图片/
+文档四组，新增必填标签与按标签筛选；本地车道签名下载端点随车道删除，
+客户与管理的取链统一为服务端签名的防盗链直链。
+
 两组端点、同一张表（与公告同构的「admin 管理 + 客户只读」范式）：
 
-- **管理端** ``/api/control/training-materials``：multipart 上传（视频/
-  文档白名单）、改标题/说明/排序/上下架、软删。写走四段契约（真实
-  管理员会话、Idempotency-Key、confirm、reason），审计 ``training_material.*``。
-- **客户侧** ``/api/training-materials``：上架素材分页列表（kind 筛选
-  视频/培训文档）；``POST /{id}/download-url`` 签发短时效下载链接——
-  云端存储返回预签名 URL，本地车道返回 HMAC 签名（绑定 user/session
-  epoch）的站内 URL，由 ``GET /{id}/file`` 逐次复验会话与可见性后放行，
-  踢线（epoch 递增）后旧链接立即失效。
+- **管理端** ``/api/control/training-materials``：multipart 上传（四组白名单）、
+  改标题/说明/排序/标签/上下架、软删；另有 ``POST /{id}/direct-link`` 取复制
+  用直链（不递增下载计数）。写走四段契约（真实管理员会话、Idempotency-Key、
+  confirm、reason），审计 ``training_material.*``。
+- **客户侧** ``/api/training-materials``：上架素材分页列表（kind/tag 筛选，
+  响应带分页前聚合的标签面）；``POST /{id}/download-url`` 签发短时效防盗链
+  直链（30 分钟）并递增下载计数。
+
+并发与账号边界（方案 §3.4，评审 r2/r3 闭环）：
+
+- 上传先传网盘、后写业务行——业务提交事务持统一互斥锁
+  ``audit:provider:pan123`` 并**重读配置指纹**，与上传时记录的版本比对，
+  配置已变化（换号/换密钥）则拒绝入库并按孤儿对象口径记日志；
+- ``enforce_pan123_config_guard``（settings.py）在配置保存侧持同一把锁：
+  有素材行禁换账号、放行时同事务清除共享 token。两个提交顺序都不会留下
+  绑定旧账号的素材行。
 
 ``kind`` 由上传白名单从文件类型推导，不接受手填，避免「视频栏目里出现
-PDF」这类栏目错位。
+PDF」这类栏目错位。标签服务端规范化（1-5 个、单个 ≤20 字、保序去重），
+规范化结果进入写契约 → 经幂等指纹参与重放判定。
 """
 
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import logging
+import re
 import tempfile
-import time
 import uuid
-from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import quote, urlencode
 
 import psycopg
 from fastapi import (
@@ -53,49 +64,111 @@ from app.admin_write_contract import http_error as _http
 from app.auth import AuthenticatedUser, Database
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.db_portable import BusinessConnection
-from app.media_routes import (
-    api_base_url,
-    get_media_storage,
-    read_stored_object,
-    signed_asset_session_epoch,
+from app.pan123_client import (
+    Pan123Client,
+    Pan123FileMissing,
+    Pan123Storage,
 )
-from app.settings import settings_encryption_key
+from app.settings import PAN123_PROVIDER_NAME, SettingsRepository
 from app.sql_pagination import page_bounds
-from app.storage import StorageBackendUnavailable, local_download_signature
 
 router = APIRouter(prefix="/api", tags=["training-materials"])
 logger = logging.getLogger(__name__)
 
-KINDS = ("video", "training")
-_KIND_LABELS = {"video": "视频", "training": "培训文档"}
+KINDS = ("video", "audio", "image", "doc")
+_KIND_LABELS = {"video": "视频", "audio": "音频", "image": "图片", "doc": "文档"}
 MAX_TITLE_CHARS = 120
 MAX_DESCRIPTION_CHARS = 1000
+MAX_TAGS = 5
+MAX_TAG_CHARS = 20
 
 # 「后缀 + content-type 成对登记」防混搭（与 materials.ALLOWED_UPLOADS 同一纪律）。
-# 值为 (kind, 归一化后缀)：kind 由文件类型推导，不接受管理员手填。
+# kind 由文件类型推导四组，不接受管理员手填；白名单只收录浏览器可直接消费的
+# 格式——上传后在软件内尽力预览，失败可下载（方案 §4）。
 TRAINING_UPLOADS: dict[tuple[str, str], tuple[str, str]] = {
     (".mp4", "video/mp4"): ("video", ".mp4"),
     (".mov", "video/quicktime"): ("video", ".mov"),
-    (".pdf", "application/pdf"): ("training", ".pdf"),
+    (".webm", "video/webm"): ("video", ".webm"),
+    (".mp3", "audio/mpeg"): ("audio", ".mp3"),
+    (".m4a", "audio/mp4"): ("audio", ".m4a"),
+    (".wav", "audio/wav"): ("audio", ".wav"),
+    (".jpg", "image/jpeg"): ("image", ".jpg"),
+    (".jpeg", "image/jpeg"): ("image", ".jpeg"),
+    (".png", "image/png"): ("image", ".png"),
+    (".gif", "image/gif"): ("image", ".gif"),
+    (".webp", "image/webp"): ("image", ".webp"),
+    (".pdf", "application/pdf"): ("doc", ".pdf"),
     (
         ".docx",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ): ("training", ".docx"),
-    (
-        ".pptx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ): ("training", ".pptx"),
+    ): ("doc", ".docx"),
+    (".doc", "application/msword"): ("doc", ".doc"),
     (
         ".xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ): ("training", ".xlsx"),
+    ): ("doc", ".xlsx"),
+    (".xls", "application/vnd.ms-excel"): ("doc", ".xls"),
+    (
+        ".pptx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ): ("doc", ".pptx"),
+    (".ppt", "application/vnd.ms-powerpoint"): ("doc", ".ppt"),
 }
 TRAINING_MATERIAL_MAX_BYTES = 200 * 1024 * 1024  # 与媒体车道 MAX_UPLOAD_BYTES 对齐
-DOWNLOAD_URL_EXPIRES_IN = timedelta(minutes=15)
+DOWNLOAD_URL_TTL_SECONDS = 30 * 60  # 防盗链直链有效期（方案 §7.2 短时效兜底）
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+# 统一互斥锁：配置保存（护栏）与上传业务提交共用，见方案 §3.4。
+PAN123_CONFIG_LOCK_KEY = "audit:provider:pan123"
 
 _UNAVAILABLE_CODE = "TRAINING_MATERIAL_SERVICE_UNAVAILABLE"
 _UNAVAILABLE_MESSAGE = "培训素材库需要 PostgreSQL 运行时。"
+_STORAGE_UNAVAILABLE_CODE = "TRAINING_MATERIAL_STORAGE_UNAVAILABLE"
+_STORAGE_UNAVAILABLE_MESSAGE = "培训素材存储通道未配置，请联系管理员。"
+_TAG_CHARS = re.compile(r"^[\w\u4e00-\u9fa5 \-]+$", re.UNICODE)
+
+
+def _normalize_tags(raw: list[str] | None) -> list[str]:
+    """标签规范化：strip → 折叠空白 → 去空 → 保序去重；数量与单长超限 422。
+
+    必填：空列表同样拒绝（上传必填；编辑传 tags = 修改，不传 = 不动）。
+    """
+    seen: list[str] = []
+    for item in raw or []:
+        tag = re.sub(r"\s+", " ", str(item)).strip()
+        if not tag or tag in seen:
+            continue
+        if len(tag) > MAX_TAG_CHARS:
+            raise _http(
+                422,
+                "TRAINING_MATERIAL_VALIDATION_FAILED",
+                f"单个标签不超过 {MAX_TAG_CHARS} 字。",
+            )
+        if not _TAG_CHARS.match(tag):
+            raise _http(422, "TRAINING_MATERIAL_VALIDATION_FAILED", "标签含不支持的字符。")
+        seen.append(tag)
+    if not (1 <= len(seen) <= MAX_TAGS):
+        raise _http(
+            422,
+            "TRAINING_MATERIAL_VALIDATION_FAILED",
+            f"请填写 1-{MAX_TAGS} 个标签（用于分类筛选）。",
+        )
+    return seen
+
+
+def get_training_material_storage() -> tuple[Pan123Storage, str]:
+    """解析培训域唯一存储车道（123网盘）及其配置指纹（方案 §3.4）。
+
+    返回 (storage, config_version)；配置缺失/不完整 → 503 中性文案（不暴露
+    供应商名）。指纹供上传提交时的复核（换号/换密钥即拒绝入库）。
+    """
+    with pg_transaction() as pg:
+        repo = SettingsRepository(BusinessConnection.postgres(pg))
+        config = repo.load_provider_config(PAN123_PROVIDER_NAME)
+        version = repo.provider_config_version(PAN123_PROVIDER_NAME)
+    required = ("client_id", "client_secret", "uid", "sign_secret", "folder_id")
+    if any(not str(config.get(field, "")).strip() for field in required):
+        raise _http(503, _STORAGE_UNAVAILABLE_CODE, _STORAGE_UNAVAILABLE_MESSAGE)
+    return Pan123Storage(Pan123Client(config, config_version=version)), version
 
 
 def _ts(value: object) -> str:
@@ -105,6 +178,8 @@ def _ts(value: object) -> str:
 
 
 def _material_row(row: Any) -> dict[str, object]:
+    raw_tags = row["tags"]
+    tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
     return {
         "id": str(row["id"]),
         "title": str(row["title"]),
@@ -114,6 +189,7 @@ def _material_row(row: Any) -> dict[str, object]:
         "content_type": str(row["content_type"]),
         "file_suffix": str(row["file_suffix"]),
         "size_bytes": int(row["size_bytes"]),
+        "tags": tags,
         "sort_order": int(row["sort_order"]),
         "visible": bool(row["visible"]),
         "download_count": int(row["download_count"]),
@@ -124,6 +200,18 @@ def _material_row(row: Any) -> dict[str, object]:
     }
 
 
+def _visible_filters(kind: str, tag: str) -> tuple[str, tuple[object, ...]]:
+    clauses = ["deleted_at IS NULL", "visible = 1"]
+    params: list[object] = []
+    if kind:
+        clauses.append("kind = %s")
+        params.append(kind)
+    if tag:
+        clauses.append("tags @> %s::jsonb")
+        params.append(json.dumps([tag], ensure_ascii=False))
+    return " AND ".join(clauses), tuple(params)
+
+
 # --- 客户侧 -------------------------------------------------------------------
 
 
@@ -132,38 +220,46 @@ def list_training_materials(
     conn: Database,
     actor: AuthenticatedUser,
     kind: str = "",
+    tag: str = "",
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 24,
 ) -> dict[str, object]:
-    """上架素材（置顶序优先，新→旧次之）。只读，客户无任何写入口。"""
+    """上架素材（置顶序优先，新→旧次之）。只读，客户无任何写入口。
+
+    标签面（tag_facet）按**分页前的全量可见集合**聚合（评审 r1-P1-5）：
+    翻页之外的标签同样可选，筛选 chips 不随分页缩水。
+    """
     del conn, actor  # 鉴权由依赖完成；列表查询只依赖数据库时钟
     if kind and kind not in KINDS:
         raise _http(422, "TRAINING_MATERIAL_INVALID_KIND", "素材类型无效。")
-    kind_clause = "AND kind = %s" if kind else ""
-    kind_params: tuple[object, ...] = (kind,) if kind else ()
+    where, params = _visible_filters(kind, tag)
     offset = (page - 1) * page_size
     try:
         with pg_transaction() as pg:
-            # 命名行访问统一经 BusinessConnection（裸 psycopg 连接是 tuple 行）。
             business = BusinessConnection.postgres(pg)
             rows = business.execute(
                 f"""
                 SELECT * FROM training_materials
-                WHERE deleted_at IS NULL AND visible = 1 {kind_clause}
+                WHERE {where}
                 ORDER BY sort_order DESC, created_at DESC
                 LIMIT %s OFFSET %s
                 """,
-                kind_params + (page_size, offset),
+                params + (page_size, offset),
             ).fetchall()
             total_row = business.execute(
-                f"SELECT count(*) FROM training_materials "
-                f"WHERE deleted_at IS NULL AND visible = 1 {kind_clause}",
-                kind_params,
+                f"SELECT count(*) FROM training_materials WHERE {where}", params
             ).fetchone()
+            facet_rows = business.execute(
+                "SELECT DISTINCT jsonb_array_elements_text(tags) AS tag "
+                "FROM training_materials WHERE deleted_at IS NULL AND visible = 1 "
+                "ORDER BY tag",
+                (),
+            ).fetchall()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
     return {
         "items": [_material_row(row) for row in rows],
+        "tag_facet": [str(row["tag"]) for row in facet_rows],
         "page": page,
         "page_size": page_size,
         "total": int(total_row[0]) if total_row else 0,
@@ -174,12 +270,17 @@ def list_training_materials(
 def create_training_material_download_url(
     material_id: str, conn: Database, actor: AuthenticatedUser
 ) -> dict[str, object]:
-    """签发短时效下载链接；云端为预签名 URL，本地车道为 HMAC 签名站内 URL。"""
+    """签发短时效防盗链直链（30 分钟），并原子递增下载计数。
+
+    直链为「持有即访问」的公开 URL——过期自动失效；界面在媒体 error 时
+    重签一次（方案 §5.2）。签发需登录会话。
+    """
+    del conn, actor  # 鉴权由依赖完成
     try:
         with pg_transaction() as pg:
             business = BusinessConnection.postgres(pg)
             row = business.execute(
-                "SELECT * FROM training_materials "
+                "SELECT remote_file_id FROM training_materials "
                 "WHERE id = %s AND deleted_at IS NULL AND visible = 1",
                 (material_id,),
             ).fetchone()
@@ -189,107 +290,22 @@ def create_training_material_download_url(
                 "UPDATE training_materials SET download_count = download_count + 1 WHERE id = %s",
                 (material_id,),
             )
-            storage = get_media_storage(business)
-            object_key = str(row["object_key"])
-            provider = storage.provider
-            epoch = signed_asset_session_epoch(business, actor)
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
-    except StorageBackendUnavailable as exc:
-        raise _http(503, "STORAGE_PROVIDER_UNAVAILABLE", "对象存储暂不可用。") from exc
-
-    expires_at = str(int(time.time()) + int(DOWNLOAD_URL_EXPIRES_IN.total_seconds()))
-    if provider != "local":
-        # 云端车道：预签名 URL 即最终地址（<video>/<a> 无法附带鉴权头）。
-        intent = storage.create_download_intent(
-            object_key, expires_in=DOWNLOAD_URL_EXPIRES_IN, can_read=True
-        )
-        return {"url": intent.url, "expires_at": intent.expires_at}
-    query = {
-        "expires": expires_at,
-        "user_id": actor.id,
-        "session_epoch": epoch,
-    }
-    query["sig"] = local_download_signature(
-        object_key,
-        expires_at,
-        user_id=actor.id,
-        asset_id=material_id,
-        session_epoch=epoch,
-        secret=settings_encryption_key(),
-    )
-    url = (
-        f"{api_base_url()}/api/training-materials/{quote(material_id, safe='')}"
-        f"/file?{urlencode(query)}"
-    )
-    return {"url": url, "expires_at": expires_at}
-
-
-@router.get("/training-materials/{material_id}/file")
-def get_training_material_file(
-    material_id: str,
-    request: Request,
-    expires: str = "",
-    user_id: str = "",
-    session_epoch: str = "",
-    sig: str = "",
-) -> Response:
-    """本地车道签名下载（带 Range，供页内播放拖动）。
-
-    与资产签名通道同纪律：签名短时效且绑定 user/session epoch，读取时
-    逐次复验（素材仍上架、会话未被踢线），踢线后旧链接立即失效。
-    """
+    storage, _version = get_training_material_storage()
     try:
-        with pg_transaction() as pg:
-            business = BusinessConnection.postgres(pg)
-            row = business.execute(
-                "SELECT object_key FROM training_materials "
-                "WHERE id = %s AND deleted_at IS NULL AND visible = 1",
-                (material_id,),
-            ).fetchone()
-            if row is None:
-                raise _http(404, "TRAINING_MATERIAL_NOT_FOUND", "素材不存在或已下架。")
-            object_key = str(row["object_key"])
-            # epoch=0 表示内部身份签发；客户链接必须核验会话仍在租约内。
-            if session_epoch != "0":
-                session_id, _, epoch_value = session_epoch.partition(":")
-                alive = business.execute(
-                    "SELECT 1 FROM customer_session_state "
-                    "WHERE session_id = %s AND session_epoch = %s "
-                    "AND lease_until::timestamptz > clock_timestamp()",
-                    (session_id, epoch_value),
-                ).fetchone()
-                if alive is None:
-                    raise _http(
-                        401, "TRAINING_MATERIAL_SESSION_EXPIRED", "登录状态已变化，请刷新后重试。"
-                    )
-            storage = get_media_storage(BusinessConnection.postgres(pg))
-    except (RuntimeError, MissingDatabaseConfigError) as exc:
-        raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
-    except StorageBackendUnavailable as exc:
-        raise _http(503, "STORAGE_PROVIDER_UNAVAILABLE", "对象存储暂不可用。") from exc
-
-    if not expires.isdigit() or int(expires) < int(time.time()):
-        raise _http(410, "TRAINING_MATERIAL_URL_EXPIRED", "下载链接已过期，请重新获取。")
-    expected = local_download_signature(
-        object_key,
-        expires,
-        user_id=user_id,
-        asset_id=material_id,
-        session_epoch=session_epoch,
-        secret=settings_encryption_key(),
-    )
-    if not hmac.compare_digest(expected, sig):
-        raise _http(403, "TRAINING_MATERIAL_SIGNATURE_INVALID", "下载链接无效。")
-    if storage.provider != "local":
-        # 云端车道的下载走预签名 URL；此端点只服务本地车道。
-        raise _http(404, "TRAINING_MATERIAL_LOCAL_UNAVAILABLE", "该素材不通过本端点下载。")
-    return read_stored_object(
-        storage,
-        object_key=object_key,
-        range_header=request.headers.get("range"),
-        disposition="inline",
-    )
+        url, expire = storage.resolve_direct_link(
+            int(row["remote_file_id"]), ttl_seconds=DOWNLOAD_URL_TTL_SECONDS
+        )
+    except Pan123FileMissing as exc:
+        raise _http(
+            404, "TRAINING_MATERIAL_REMOTE_MISSING", "素材文件已不存在，请联系管理员。"
+        ) from exc
+    except RuntimeError as exc:
+        raise _http(
+            503, "TRAINING_MATERIAL_STORAGE_FAILED", "素材存储通道暂不可用，请稍后重试。"
+        ) from exc
+    return {"url": url, "expires_at": str(expire)}
 
 
 # --- 管理端 -------------------------------------------------------------------
@@ -300,6 +316,7 @@ def list_training_materials_admin(
     actor: AdminReader,
     include_hidden: bool = True,
     kind: str = "",
+    tag: str = "",
     limit: int = 20,
     offset: int = 0,
 ) -> dict[str, object]:
@@ -307,9 +324,17 @@ def list_training_materials_admin(
     if kind and kind not in KINDS:
         raise _http(422, "TRAINING_MATERIAL_INVALID_KIND", "素材类型无效。")
     bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=100)
-    kind_clause = "AND kind = %s" if kind else ""
-    kind_params: tuple[object, ...] = (kind,) if kind else ()
-    hidden_clause = "" if include_hidden else "AND visible = 1"
+    clauses = ["m.deleted_at IS NULL"]
+    params: list[object] = []
+    if not include_hidden:
+        clauses.append("m.visible = 1")
+    if kind:
+        clauses.append("m.kind = %s")
+        params.append(kind)
+    if tag:
+        clauses.append("m.tags @> %s::jsonb")
+        params.append(json.dumps([tag], ensure_ascii=False))
+    where = " AND ".join(clauses)
     try:
         with pg_transaction() as pg:
             business = BusinessConnection.postgres(pg)
@@ -318,44 +343,90 @@ def list_training_materials_admin(
                 SELECT m.*, creator.username AS created_by
                 FROM training_materials m
                 JOIN users creator ON creator.id = m.created_by_user_id
-                WHERE m.deleted_at IS NULL {hidden_clause} {kind_clause}
+                WHERE {where}
                 ORDER BY m.sort_order DESC, m.created_at DESC
                 LIMIT %s OFFSET %s
                 """,
-                kind_params + (bounded_limit, bounded_offset),
+                tuple(params) + (bounded_limit, bounded_offset),
             ).fetchall()
             total_row = business.execute(
-                f"SELECT count(*) FROM training_materials m "
-                f"WHERE m.deleted_at IS NULL {hidden_clause} {kind_clause}",
-                kind_params,
+                f"SELECT count(*) FROM training_materials m WHERE {where}", tuple(params)
             ).fetchone()
+            facet_rows = business.execute(
+                "SELECT DISTINCT jsonb_array_elements_text(tags) AS tag "
+                "FROM training_materials WHERE deleted_at IS NULL ORDER BY tag",
+                (),
+            ).fetchall()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
     return {
         "items": [_material_row(row) for row in rows],
+        "tag_facet": [str(row["tag"]) for row in facet_rows],
         "total": int(total_row[0]) if total_row else 0,
         "limit": bounded_limit,
         "offset": bounded_offset,
     }
 
 
+@router.post("/control/training-materials/{material_id}/direct-link")
+def create_training_material_direct_link(
+    material_id: str, conn: Database, actor: AdminReader
+) -> dict[str, object]:
+    """管理端复制用直链：不递增下载计数；软删拒绝签发（下架仍可签，便于预演）。"""
+    del conn, actor
+    try:
+        with pg_transaction() as pg:
+            business = BusinessConnection.postgres(pg)
+            row = business.execute(
+                "SELECT remote_file_id, title, file_suffix FROM training_materials "
+                "WHERE id = %s AND deleted_at IS NULL",
+                (material_id,),
+            ).fetchone()
+            if row is None:
+                raise _http(404, "TRAINING_MATERIAL_NOT_FOUND", "素材不存在或已删除。")
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
+    storage, _version = get_training_material_storage()
+    try:
+        url, expire = storage.resolve_direct_link(
+            int(row["remote_file_id"]), ttl_seconds=DOWNLOAD_URL_TTL_SECONDS
+        )
+    except Pan123FileMissing as exc:
+        raise _http(404, "TRAINING_MATERIAL_REMOTE_MISSING", "素材文件已不存在。") from exc
+    except RuntimeError as exc:
+        raise _http(
+            503, "TRAINING_MATERIAL_STORAGE_FAILED", "素材存储通道暂不可用，请稍后重试。"
+        ) from exc
+    return {
+        "url": url,
+        "expires_at": str(expire),
+        "title": str(row["title"]),
+        "file_suffix": str(row["file_suffix"]),
+    }
+
+
 class TrainingMaterialCreateContract(AdminWriteRequest):
-    """multipart 上传的契约体由服务端在读文件后组装（含内容指纹），
-    使同键不同文件的重放撞 IDEMPOTENCY_CONFLICT 而不是静默覆盖。"""
+    """multipart 上传的契约体由服务端在读文件后组装（含内容指纹、规范化标签
+    与网盘 fileID），使同键不同文件/不同标签的重放撞 IDEMPOTENCY_CONFLICT，
+    而不是静默覆盖或重复上传。"""
 
     title: str = ""
     description: str = ""
+    tags: list[str] = []
     sort_order: int = 0
     visible: bool = True
     sha256: str = ""
     size_bytes: int = 0
     file_suffix: str = ""
     content_type: str = ""
+    remote_file_id: str = ""
+    config_version: str = ""
 
 
 class TrainingMaterialUpdateRequest(AdminWriteRequest):
     title: str = ""
     description: str = ""
+    tags: list[str] | None = None
     sort_order: int | None = None
     visible: bool | None = None
 
@@ -368,18 +439,30 @@ async def create_training_material(
     file: Annotated[UploadFile, File()],
     title: Annotated[str, Form()] = "",
     description: Annotated[str, Form()] = "",
+    tags: Annotated[str, Form()] = "",
     sort_order: Annotated[int, Form()] = 0,
     visible: Annotated[bool, Form()] = True,
     confirm: Annotated[bool, Form()] = False,
     reason: Annotated[str, Form()] = "",
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, object]:
+    """上传：标签必填（JSON 数组）；远端名含 material_id 前缀全局唯一。"""
     del idempotency_key  # 由 write 契约从请求头读取，这里显式声明只为 OpenAPI 文档
     clean_title = title.strip()
     if not (1 <= len(clean_title) <= MAX_TITLE_CHARS):
         raise _http(422, "TRAINING_MATERIAL_VALIDATION_FAILED", "标题必填且不超过 120 字。")
     if len(description.strip()) > MAX_DESCRIPTION_CHARS:
         raise _http(422, "TRAINING_MATERIAL_VALIDATION_FAILED", "说明不超过 1000 字。")
+    try:
+        raw_tags = json.loads(tags) if tags.strip() else []
+        if not isinstance(raw_tags, list):
+            raise ValueError
+    except ValueError as exc:
+        raise _http(
+            422, "TRAINING_MATERIAL_VALIDATION_FAILED", "标签格式无效，请按要求填写。"
+        ) from exc
+    normalized_tags = _normalize_tags([str(item) for item in raw_tags])
+
     suffix = Path(file.filename or "").suffix.lower()
     content_type = (file.content_type or "").lower()
     entry = TRAINING_UPLOADS.get((suffix, content_type))
@@ -387,7 +470,8 @@ async def create_training_material(
         raise _http(
             415,
             "TRAINING_MATERIAL_TYPE_UNSUPPORTED",
-            "仅支持 mp4/mov 视频与 pdf/docx/pptx/xlsx 文档。",
+            "仅支持视频（mp4/mov/webm）、音频（mp3/m4a/wav）、图片"
+            "（jpg/png/gif/webp）与文档（pdf/docx/doc/xlsx/xls/pptx/ppt）。",
         )
     kind, normalized_suffix = entry
 
@@ -412,25 +496,52 @@ async def create_training_material(
             raise
     sha256 = digest.hexdigest()
     material_id = str(uuid.uuid4())
+    # 远端名含 material_id 前缀 → 全局唯一（官方上传禁同名；唯一名天然规避
+    # duplicate 覆盖/重名歧义）。object_key 保留为逻辑键（展示/日志引用）。
     safe_name = Path(file.filename or "").name or f"material{normalized_suffix}"
-    # 内容寻址键：同内容重传复用同一对象，孤儿对象也无害（无行引用）。
-    object_key = f"training-materials/{material_id}/{sha256}/{safe_name}"
+    object_key = f"training-materials/{material_id}/{safe_name}"
+    remote_name = f"{material_id}-{safe_name}"
+
+    # 事务 A：解析存储车道并记录配置指纹（业务提交时复核，方案 §3.4）。
+    storage, config_version = get_training_material_storage()
+    try:
+        uploaded = await run_in_threadpool(
+            storage.put_file, remote_name, tmp_path, content_type=content_type
+        )
+    except RuntimeError as exc:
+        raise _http(
+            503, "TRAINING_MATERIAL_STORAGE_FAILED", "素材上传通道暂不可用，请稍后重试。"
+        ) from exc
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        # 统一互斥锁 + 配置指纹复核（方案 §3.4，评审 r3-P1-1）：上传期间配置被
+        # 换（换号/换密钥）则拒绝入库，避免留下绑定旧账号的素材行。
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (PAN123_CONFIG_LOCK_KEY,))
+        repo = SettingsRepository(BusinessConnection.postgres(conn))
+        current_version = repo.provider_config_version(PAN123_PROVIDER_NAME)
+        if current_version != config_version:
+            raise _http(
+                503,
+                "TRAINING_MATERIAL_CONFIG_CHANGED",
+                "存储配置在本次上传期间发生变化，素材未入库；请重新上传。",
+            )
         conn.execute(
             "INSERT INTO training_materials (id, title, description, kind, object_key, "
-            "content_type, file_suffix, size_bytes, sha256, sort_order, visible, "
-            "created_by_user_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "remote_file_id, content_type, file_suffix, size_bytes, sha256, tags, "
+            "sort_order, visible, created_by_user_id) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",
             (
                 material_id,
                 clean_title,
                 description.strip(),
                 kind,
                 object_key,
+                str(uploaded.file_id),
                 content_type,
                 normalized_suffix,
                 total,
                 sha256,
+                json.dumps(normalized_tags, ensure_ascii=False),
                 sort_order,
                 1 if visible else 0,
                 actor.user_id,
@@ -448,8 +559,10 @@ async def create_training_material(
                     {
                         "title": clean_title,
                         "kind": kind,
+                        "tags": normalized_tags,
                         "size_bytes": total,
                         "sha256": sha256,
+                        "remote_file_id": str(uploaded.file_id),
                         "reason": reason.strip(),
                         "request_id": request_id,
                     },
@@ -461,28 +574,18 @@ async def create_training_material(
         return {"id": material_id, "request_id": request_id}
 
     try:
-        try:
-            # 存储解析与对象写入在短作用域内完成，不与业务事务互相持有连接。
-            with pg_transaction() as pg:
-                storage = get_media_storage(BusinessConnection.postgres(pg))
-        except (RuntimeError, MissingDatabaseConfigError) as exc:
-            raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
-        try:
-            await run_in_threadpool(
-                storage.put_file, object_key, tmp_path, content_type=content_type
-            )
-        except StorageBackendUnavailable as exc:
-            raise _http(503, "STORAGE_PROVIDER_UNAVAILABLE", "对象存储暂不可用。") from exc
-        # 契约体带内容指纹：重放校验把「同键不同文件」拦成 409。
         contract = TrainingMaterialCreateContract(
             title=clean_title,
             description=description.strip(),
+            tags=normalized_tags,
             sort_order=sort_order,
             visible=visible,
             sha256=sha256,
             size_bytes=total,
             file_suffix=normalized_suffix,
             content_type=content_type,
+            remote_file_id=str(uploaded.file_id),
+            config_version=config_version,
             confirm=confirm,
             reason=reason,
         )
@@ -496,12 +599,17 @@ async def create_training_material(
             unavailable_code=_UNAVAILABLE_CODE,
             unavailable_message=_UNAVAILABLE_MESSAGE,
         )
+    except Exception:
+        # 业务失败（含指纹复核拒绝）：网盘侧留下无引用文件（唯一远端名，无污染），
+        # 按运维口径记日志人工清理，本期不做自动 GC（方案 §7.5）。
+        logger.warning(
+            "training material upload not persisted; orphan remote file file_id=%s material_id=%s",
+            uploaded.file_id,
+            material_id,
+        )
+        raise
     finally:
-        # 业务失败会留下无行引用的孤儿对象（内容寻址键，无污染）；临时文件必清。
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("training material temp file cleanup failed: %s", tmp_path)
+        tmp_path.unlink(missing_ok=True)
 
 
 @router.patch("/control/training-materials/{material_id}")
@@ -512,7 +620,7 @@ def update_training_material(
     response: Response,
     actor: ContentWriter,
 ) -> dict[str, object]:
-    """部分更新：非空字段覆盖；sort_order/visible 用 None 表示不修改。"""
+    """部分更新：非空字段覆盖；tags/sort_order/visible 用 None 表示不修改。"""
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         row = conn.execute(
@@ -535,6 +643,10 @@ def update_training_material(
                 raise _http(422, "TRAINING_MATERIAL_VALIDATION_FAILED", "说明不超过 1000 字。")
             sets.append("description=%s")
             params.append(description)
+        if body.tags is not None:
+            normalized = _normalize_tags(body.tags)
+            sets.append("tags=%s::jsonb")
+            params.append(json.dumps(normalized, ensure_ascii=False))
         if body.sort_order is not None:
             sets.append("sort_order=%s")
             params.append(body.sort_order)
@@ -586,7 +698,7 @@ def delete_training_material(
     actor: ContentWriter,
     body: AdminWriteRequest,
 ) -> dict[str, object]:
-    """软删：客户立即不可见；对象留在存储中，误删可通过追加恢复行挽回。"""
+    """软删：客户立即不可见且无法重签直链；网盘文件保留（误删可恢复）。"""
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         result = conn.execute(
