@@ -226,38 +226,40 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
                     (rp.STATUS_EXPIRED, pipeline_id, rp.STATUS_AWAIT_CONFIRM),
                 )
                 expired_now = True
-        from app.generation import generation_price_quote
+        quote_response: dict[str, object] = {}
+        if not expired_now:
+            from app.generation import generation_price_quote
 
-        resolution = str(snapshot.get("resolution") or "768P")
-        if resolution not in ("768P", "2K"):
-            resolution = "768P"
-        quote = generation_price_quote(
-            conn,
-            resolution=resolution,  # type: ignore[arg-type]
-            duration_seconds=int(snapshot.get("durationSeconds") or 0),
-            quantity=int(snapshot.get("quantity") or 1),
-            user_id=actor.id,
-        )
-        frozen_max = int(snapshot.get("maxCredits") or 0)
-        if frozen_max > 0 and quote.estimated_credits > frozen_max:
-            # 冻结上限是用户在确认页授权过的金额（评审 M8-r2#3）：现价上涨
-            # 不能静默扩大授权——返回专用错误，用户可放弃后重新发起（新报价
-            # 会重新冻结上限）。不提供「原地涨价确认」通道。
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "REPLICA_PIPELINE_PRICE_CHANGED",
-                    "message": "价格已变化，请放弃后重新发起以重新确认费用。",
-                },
+            resolution = str(snapshot.get("resolution") or "768P")
+            if resolution not in ("768P", "2K"):
+                resolution = "768P"
+            quote = generation_price_quote(
+                conn,
+                resolution=resolution,  # type: ignore[arg-type]
+                duration_seconds=int(snapshot.get("durationSeconds") or 0),
+                quantity=int(snapshot.get("quantity") or 1),
+                user_id=actor.id,
             )
-        quote_response = {
-            "quoteToken": quote.quote_token,
-            "maxCredits": min(quote.estimated_credits, frozen_max or quote.estimated_credits),
-            "estimatedCredits": quote.estimated_credits,
-            "priceTier": quote.price_tier,
-            "durationSeconds": quote.duration_seconds,
-            "fingerprint": str(snapshot.get("fingerprint") or ""),
-        }
+            frozen_max = int(snapshot.get("maxCredits") or 0)
+            if frozen_max > 0 and quote.estimated_credits > frozen_max:
+                # 冻结上限是用户在确认页授权过的金额（评审 M8-r2#3）：现价上涨
+                # 不能静默扩大授权——返回专用错误，用户可放弃后重新发起（新报价
+                # 会重新冻结上限）。不提供「原地涨价确认」通道。
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "REPLICA_PIPELINE_PRICE_CHANGED",
+                        "message": "价格已变化，请放弃后重新发起以重新确认费用。",
+                    },
+                )
+            quote_response = {
+                "quoteToken": quote.quote_token,
+                "maxCredits": min(quote.estimated_credits, frozen_max or quote.estimated_credits),
+                "estimatedCredits": quote.estimated_credits,
+                "priceTier": quote.price_tier,
+                "durationSeconds": quote.duration_seconds,
+                "fingerprint": str(snapshot.get("fingerprint") or ""),
+            }
     if expired_now:
         raise HTTPException(
             410, detail={"code": "REPLICA_PIPELINE_EXPIRED", "message": "确认窗口已过期。"}

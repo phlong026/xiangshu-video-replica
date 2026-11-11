@@ -814,31 +814,39 @@ def drive_pipeline_once(conn: BusinessConnection, lease: rp.ReplicaPipelineLease
     retry_no = int(row["stage_retry_no"] or 0)
     clear_columns = _STAGE_CLEAR_COLUMNS.get(status, ())
     if result.retryable and retry_no < rp.MAX_STAGE_RETRIES:
+        import json as _json
+
         sets = ["stage_retry_no = %s", "updated_at = now()"]
         params: list[object] = [retry_no + 1]
+        # stage_detail 只允许在一条 UPDATE 里赋值一次（评审 M8-r3#2：同列重复
+        # 赋值 PG 拒绝）——先拼一个复合 jsonb 表达式，最后统一追加。
+        detail_expr: str | None = None
+        detail_params: list[object] = []
         # 清引用前把旧子任务 id 记入 stage_detail.history（评审 M8-r2#4）：
         # 确认卡的费用汇总按全部尝试的 source 聚合，丢失旧 id 会漏计已结算费用。
+        # 首次重试没有 history 键——必须 COALESCE(…->'history', '[]')，否则
+        # 拼接结果为 NULL 会把整个 stage_detail 写成 NULL（评审 M8-r3#1）。
         history_ids = [str(row[column]) for column in clear_columns if row[column] is not None]
         if history_ids:
-            sets.append(
-                "stage_detail = jsonb_set(COALESCE(stage_detail, '{}'::jsonb), "
-                "'{history}', COALESCE(stage_detail, '{}'::jsonb) -> 'history' "
-                "|| %s::jsonb, true)"
+            detail_expr = (
+                "jsonb_set(COALESCE(stage_detail, '{}'::jsonb), '{history}', "
+                "COALESCE(stage_detail -> 'history', '[]'::jsonb) || %s::jsonb, true)"
             )
-            import json as _json
-
-            params.append(_json.dumps(history_ids))
-        for column in clear_columns:
-            sets.append(f"{column} = NULL")
+            detail_params.append(_json.dumps(history_ids))
         if status == rp.STATUS_FIRST_FRAMING:
             # 首帧重试按子步骤回退 JSON 断点（评审 A-r2#6）：不清候选任务
-            # 引用会让 handler 永远观察旧失败任务直至预算耗尽。
-            sets.append(
-                "stage_detail = jsonb_set(COALESCE(stage_detail, '{}'::jsonb), "
-                "'{firstFrame}', "
-                "(COALESCE(stage_detail, '{}'::jsonb) #> '{firstFrame}') "
-                "- 'candidateTaskId' - 'sourceFrameTaskId', true)"
+            # 引用会让 handler 永远观察旧失败任务直至预算耗尽。与 history
+            # 追加合成为一次表达式（外层再包一层 jsonb_set）。
+            inner = detail_expr or "COALESCE(stage_detail, '{}'::jsonb)"
+            detail_expr = (
+                f"jsonb_set({inner}, '{{firstFrame}}', "
+                f"({inner} #> '{{firstFrame}}') - 'candidateTaskId' - 'sourceFrameTaskId', true)"
             )
+        for column in clear_columns:
+            sets.append(f"{column} = NULL")
+        if detail_expr is not None:
+            sets.append(f"stage_detail = {detail_expr}")
+            params.extend(detail_params)
         params.extend([lease.id, lease.attempt, lease.worker_id])
         moved = conn.execute(
             f"UPDATE replica_pipeline_tasks SET {', '.join(sets)} "

@@ -844,6 +844,7 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [status, setStatus] = useState<ReplicaPipelineStatus | null>(null);
   const [quote, setQuote] = useState<ReplicaPipelineQuote | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteAgeMs, setQuoteAgeMs] = useState(0);
   const [busy, setBusy] = useState(false);
   // 幂等键按「尝试」生成（评审 M8-r1#6）：同一 busy 周期内网络重试复用，
@@ -861,10 +862,21 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
         // 报价不随轮询自动续发（评审 M8-r1#3）：进入待确认时取一次，
         // 用户核对的是这一份；过期后由「重新核价」显式刷新。
         if (next.status === "AWAIT_CONFIRM" && !quote) {
-          const fresh = await quoteReplicaPipeline(pipelineId);
-          if (!cancelled) {
-            setQuote(fresh);
-            setQuoteAgeMs(0);
+          try {
+            const fresh = await quoteReplicaPipeline(pipelineId);
+            if (!cancelled) {
+              setQuote(fresh);
+              setQuoteError(null);
+              setQuoteAgeMs(0);
+            }
+          } catch (cause) {
+            // 报价失败不能静默（评审 M8-r3#4）：价格变化等错误要显式展示，
+            // 且「放弃」操作不依赖报价成功。
+            if (!cancelled) {
+              setQuoteError(
+                cause instanceof Error ? cause.message : "报价获取失败",
+              );
+            }
           }
         }
       } catch {
@@ -993,7 +1005,7 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
   return (
     <div className="replica-pipeline-panel">
       <p role="status">全自动复刻：{label}</p>
-      {quote && status?.status === "AWAIT_CONFIRM" ? (
+      {status?.status === "AWAIT_CONFIRM" ? (
         <div className="replica-pipeline-review">
           {status.promptText ? (
             <details>
@@ -1010,21 +1022,30 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
           {status.firstFrameAssetId ? (
             <p className="admin-hint">首帧已选定（可在复刻页预览）</p>
           ) : null}
-          <p className="admin-hint">
-            费用：已结算 {fees?.settledCredits ?? 0} 积分 · 仍预占{" "}
-            {fees?.reservedCredits ?? 0} 积分 · 本次新增{" "}
-            {quote.estimatedCredits} 积分 （{quote.priceTier}，
-            {quote.durationSeconds} 秒）
-          </p>
+          {quote ? (
+            <p className="admin-hint">
+              费用：已结算 {fees?.settledCredits ?? 0} 积分 · 仍预占{" "}
+              {fees?.reservedCredits ?? 0} 积分 · 本次新增{" "}
+              {quote.estimatedCredits} 积分 （{quote.priceTier}，
+              {quote.durationSeconds} 秒）
+            </p>
+          ) : null}
+          {quoteError ? (
+            <p className="admin-hint" role="alert">
+              {quoteError}
+            </p>
+          ) : null}
           <div className="replica-pipeline-actions">
             <Button
-              disabled={busy || quoteStale}
+              disabled={busy || quoteStale || !quote}
               variant="primary"
               onClick={confirmGeneration}
             >
-              {quoteStale
-                ? "报价已过期"
-                : `确认并生成（预估 ${quote.estimatedCredits} 积分）`}
+              {!quote
+                ? "正在获取报价…"
+                : quoteStale
+                  ? "报价已过期"
+                  : `确认并生成（预估 ${quote.estimatedCredits} 积分）`}
             </Button>
             <Button disabled={busy} variant="outline" onClick={requote}>
               重新核价
@@ -1036,7 +1057,25 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
         </div>
       ) : null}
       {status && ["FAILED", "CANCELLED", "EXPIRED"].includes(status.status) ? (
-        <p className="admin-hint">任务已结束，可在项目里转手动继续处理</p>
+        <div className="replica-pipeline-actions">
+          <p className="admin-hint">任务已结束，可在项目里转手动继续处理</p>
+          <Button
+            disabled={busy}
+            variant="outline"
+            onClick={() => {
+              // 重新发起 = 新尝试（评审 M8-r2#6/M8-r3#5）：换幂等键并清空
+              // 状态与报价，回到入口按钮；网络结果不确定时用户可先留在
+              // 本页重试原键（放弃路径亦会清键）。
+              attemptKeyRef.current = null;
+              setPipelineId(null);
+              setStatus(null);
+              setQuote(null);
+              setQuoteError(null);
+            }}
+          >
+            重新发起
+          </Button>
+        </div>
       ) : null}
       {status && ["DELIVERED", "DELIVERED_PARTIAL"].includes(status.status) ? (
         <p className="admin-hint">成片已生成，可在任务中心查看与下载</p>
