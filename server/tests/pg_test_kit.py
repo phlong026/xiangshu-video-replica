@@ -87,6 +87,9 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 全自动复刻编排器（replica_pipeline_tasks）数据层验证专用迁移库
         # （test_replica_pipeline_model.py）：表结构/CHECK/三个调度集合谓词。
         "rplc_pipeline_model_test",
+        # 编排驱动核心专用库（test_replica_pipeline_driver.py）：幂等受理/租约/
+        # 转换表/期限/挂起恢复的真库验证。
+        "rplc_pipeline_driver_test",
         # Existing business fixtures using W13 routine admin sessions.
         "t09_admin_session_test",
         "t12_admin_activation_test",
