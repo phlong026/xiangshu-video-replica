@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 
-from app.auth import AuthenticatedUser, CurrentUser, Database, authenticate_user
+from app.auth import CurrentUser, Database, ShortAuthUser, authenticate_user
 from app.customer_fence import BusinessDbDep, BusinessReadConn
 from app.db_pg import DATABASE_URL_ENV, pg_transaction
 from app.db_portable import BusinessConnection
@@ -722,8 +722,7 @@ def complete_asset_upload(
 async def put_local_object(
     object_key: str,
     request: Request,
-    conn: Database,
-    actor: AuthenticatedUser,
+    actor: ShortAuthUser,
     storage: MediaStorage,
 ) -> Response:
     """Receive a raw PUT body and write it to the local storage adapter.
@@ -732,82 +731,94 @@ async def put_local_object(
     client uploads the reference video here instead of a `local://` scheme URL.
     Keeps the same role/project gates as the cloud intent flow: auditors are
     read-only and only the project owner/admin may write objects.
+
+    事务边界（2026-11-02 池饿死事故改造）：认证走 ShortAuthUser；意图预读与
+    权限门禁在一个前置短事务完成，随后**整段上传体接收与落盘不持任何事务**——
+    桌面端大文件上传以分钟计，请求级事务必然被 60s 护栏击杀。
     """
     if storage.provider != "local":
         raise HTTPException(status_code=404, detail={"code": "LOCAL_UPLOAD_UNAVAILABLE"})
     prefix = "projects/"
     expected_content_type: str | None = None
     expected_size: int | None = None
-    if object_key.startswith(prefix) and "/" in object_key[len(prefix) :]:
-        require_not_auditor(
-            conn,
-            actor=actor,
-            action="asset.object.put",
-            entity_type="asset",
-            entity_id=object_key,
-        )
-        project_id = object_key[len(prefix) :].split("/", 1)[0]
-        require_project_access(
-            conn,
-            actor=actor,
-            project_id=project_id,
-            action="asset.object.put",
-        )
-        pending = conn.execute(
-            "SELECT content_type, metadata_json FROM assets WHERE project_id = %s "
-            "AND storage_uri = %s AND sha256 = '' AND size_bytes = 0",
-            (project_id, f"{storage.provider}://{storage.bucket}/{object_key}"),
-        ).fetchone()
-        if pending is None:
-            raise HTTPException(409, detail={"code": "UPLOAD_INTENT_REQUIRED"})
-        expected_content_type = str(pending["content_type"])
-        metadata = json.loads(str(pending["metadata_json"]))
-        if metadata.get("upload_status") == "EXPIRED":
-            raise HTTPException(409, detail={"code": "UPLOAD_EXPIRED"})
-        requested_size = metadata.get("requested_size_bytes")
-        if isinstance(requested_size, int):
-            expected_size = requested_size
-    else:
-        require_role(
-            conn,
-            actor=actor,
-            allowed_roles={"admin"},
-            action="asset.object.put",
-            entity_type="asset",
-            entity_id=object_key,
-        )
-        storage_uri = f"{storage.provider}://{storage.bucket}/{object_key}"
-        pending = conn.execute(
-            """
-            SELECT id, kind, content_type, metadata_json
-            FROM assets
-            WHERE project_id IS NULL AND storage_uri = %s AND sha256 = '' AND size_bytes = 0
-            """,
-            (storage_uri,),
-        ).fetchone()
-        if pending is None:
-            raise HTTPException(status_code=400, detail={"code": "INVALID_OBJECT_KEY"})
-        try:
-            metadata = json.loads(str(pending["metadata_json"]))
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "IDENTITY_UPLOAD_INTENT_INVALID"},
-            ) from exc
-        if (
-            str(pending["kind"]) not in {"character_authorization", "character_source_image"}
-            or not isinstance(metadata, dict)
-            or metadata.get("upload_status") != "PENDING"
-            or metadata.get("object_key") != object_key
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "IDENTITY_UPLOAD_INTENT_INVALID"},
-            )
-        expected_content_type = str(pending["content_type"])
-        requested_size = metadata.get("requested_size_bytes")
-        if isinstance(requested_size, int):
-            expected_size = requested_size
+    try:
+        with pg_transaction() as pg_conn:
+            conn = BusinessConnection.postgres(pg_conn)
+            if object_key.startswith(prefix) and "/" in object_key[len(prefix) :]:
+                require_not_auditor(
+                    conn,
+                    actor=actor,
+                    action="asset.object.put",
+                    entity_type="asset",
+                    entity_id=object_key,
+                )
+                project_id = object_key[len(prefix) :].split("/", 1)[0]
+                require_project_access(
+                    conn,
+                    actor=actor,
+                    project_id=project_id,
+                    action="asset.object.put",
+                )
+                pending = conn.execute(
+                    "SELECT content_type, metadata_json FROM assets WHERE project_id = %s "
+                    "AND storage_uri = %s AND sha256 = '' AND size_bytes = 0",
+                    (project_id, f"{storage.provider}://{storage.bucket}/{object_key}"),
+                ).fetchone()
+                if pending is None:
+                    raise HTTPException(409, detail={"code": "UPLOAD_INTENT_REQUIRED"})
+                expected_content_type = str(pending["content_type"])
+                metadata = json.loads(str(pending["metadata_json"]))
+                if metadata.get("upload_status") == "EXPIRED":
+                    raise HTTPException(409, detail={"code": "UPLOAD_EXPIRED"})
+                requested_size = metadata.get("requested_size_bytes")
+                if isinstance(requested_size, int):
+                    expected_size = requested_size
+            else:
+                require_role(
+                    conn,
+                    actor=actor,
+                    allowed_roles={"admin"},
+                    action="asset.object.put",
+                    entity_type="asset",
+                    entity_id=object_key,
+                )
+                storage_uri = f"{storage.provider}://{storage.bucket}/{object_key}"
+                pending = conn.execute(
+                    """
+                    SELECT id, kind, content_type, metadata_json
+                    FROM assets
+                    WHERE project_id IS NULL AND storage_uri = %s AND sha256 = '' AND size_bytes = 0
+                    """,
+                    (storage_uri,),
+                ).fetchone()
+                if pending is None:
+                    raise HTTPException(status_code=400, detail={"code": "INVALID_OBJECT_KEY"})
+                try:
+                    metadata = json.loads(str(pending["metadata_json"]))
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "IDENTITY_UPLOAD_INTENT_INVALID"},
+                    ) from exc
+                if (
+                    str(pending["kind"])
+                    not in {"character_authorization", "character_source_image"}
+                    or not isinstance(metadata, dict)
+                    or metadata.get("upload_status") != "PENDING"
+                    or metadata.get("object_key") != object_key
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "IDENTITY_UPLOAD_INTENT_INVALID"},
+                    )
+                expected_content_type = str(pending["content_type"])
+                requested_size = metadata.get("requested_size_bytes")
+                if isinstance(requested_size, int):
+                    expected_size = requested_size
+    except AuditedSecurityDenial as exc:
+        # 门禁拒绝随短事务回滚后，独立落一条审计事实（get_database 原承担的职责）
+        persist_security_denial(exc)
+        raise
     content_length = request.headers.get("content-length")
     if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail={"code": "PAYLOAD_TOO_LARGE"})
