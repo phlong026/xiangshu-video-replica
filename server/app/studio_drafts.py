@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -22,7 +21,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.permissions import require_not_auditor
 
 DraftKind = Literal["copy", "oral", "replica", "publishing"]
@@ -145,7 +144,7 @@ def _draft_tombstoned(revision: int) -> HTTPException:
     )
 
 
-def _draft_conflict(row: sqlite3.Row | None) -> HTTPException:
+def _draft_conflict(row: BusinessRow | None) -> HTTPException:
     revision = 0 if row is None else int(row["revision"])
     return HTTPException(
         409,
@@ -467,7 +466,7 @@ def delete_saved_script(
     conn.commit()
 
 
-def _draft_response(row: sqlite3.Row) -> StudioDraftResponse:
+def _draft_response(row: BusinessRow) -> StudioDraftResponse:
     return StudioDraftResponse(
         draft_kind=str(row["draft_kind"]),
         payload=cast(dict[str, object], json.loads(str(row["payload"]))),
@@ -477,7 +476,7 @@ def _draft_response(row: sqlite3.Row) -> StudioDraftResponse:
     )
 
 
-def _saved_script_response(row: sqlite3.Row) -> SavedScriptResponse:
+def _saved_script_response(row: BusinessRow) -> SavedScriptResponse:
     return SavedScriptResponse(
         script_id=str(row["script_id"]),
         title=str(row["title"]),

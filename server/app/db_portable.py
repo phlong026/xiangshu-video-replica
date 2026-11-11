@@ -92,6 +92,20 @@ def _map_integrity_error(exc: psycopg.Error) -> IntegrityConstraintError:
     )
 
 
+def is_unique_conflict_on(exc: IntegrityConstraintError, *constraint_names: str) -> bool:
+    """竞争兜底的鉴别闸：目标唯一约束的冲突才允许转 409/回放/重试。
+
+    兜底处理器假定捕获的就是「目标互斥约束的冲突」，但
+    ``IntegrityConstraintError`` 覆盖全部 235xx 完整性错误（CHECK / NOT NULL /
+    外键 / 其他唯一约束）——不鉴别就映射会把真实数据错误误报成
+    「处理中/冲突」，掩盖故障（2026-11-03 回评 r3 P1）。约束名缺失
+    （异常未携带诊断载荷）时从严拒绝，交回通用异常路径，宁可 500 不可误报。
+    """
+    if exc.sqlstate != "23505":
+        return False
+    return exc.constraint_name is not None and exc.constraint_name in constraint_names
+
+
 class PostgresBackend:
     """Wraps a psycopg connection; execute runs the native ``%s`` SQL.
 
@@ -172,7 +186,7 @@ class _NamedRow:
         self._values = values
         self._names = names
 
-    def __getitem__(self, key: object) -> object:
+    def __getitem__(self, key: object) -> Any:  # Any：行载荷无类型，与 sqlite3.Row typeshed 同语义
         if isinstance(key, str):
             # A linear scan, not a dict lookup and not an exact-match-first
             # shortcut: sqlite3.Row answers ``row["OWNER"]`` with the *first*
@@ -205,6 +219,11 @@ class _NamedRow:
         return list(self._names)
 
 
+# 业务层类型提示使用的公共行类型（psycopg 行 + 按列名取值，
+# 历史 sqlite3.Row 形状的镜像）；2026-11-01 起业务模块不再直接引用 sqlite3。
+BusinessRow = _NamedRow
+
+
 def _named_row_factory(cursor: psycopg.Cursor) -> Callable[[Sequence[object]], _NamedRow]:
     """psycopg3 row factory: called once with the cursor, returns the per-row
     maker bound to that query's column names."""
@@ -219,14 +238,6 @@ def _named_row_factory(cursor: psycopg.Cursor) -> Callable[[Sequence[object]], _
 # ---------------------------------------------------------------------------
 # The business facade
 # ---------------------------------------------------------------------------
-
-
-def _is_begin_immediate(sql: str) -> bool:
-    return sql.strip().upper() == "BEGIN IMMEDIATE"
-
-
-def _is_sqlite_pragma(sql: str) -> bool:
-    return sql.strip().upper().startswith("PRAGMA")
 
 
 class _NoopCursor:
@@ -310,16 +321,6 @@ class BusinessConnection:
     # --- sqlite3-shaped surface ---
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> _BusinessCursor:
-        if isinstance(self._backend, PostgresBackend) and _is_begin_immediate(sql):
-            # Migrated write services still spell their write lock as
-            # ``BEGIN IMMEDIATE`` (the SQLite idiom). On the customer lane the
-            # fenced transaction is already open, so the statement must be a
-            # no-op — forwarding it to psycopg is a syntax error (PR #56 P1).
-            return _NOOP_CURSOR
-        if isinstance(self._backend, PostgresBackend) and _is_sqlite_pragma(sql):
-            # SQLite tuning statements (busy_timeout & friends) carry no
-            # meaning on the PG lane — pool timeouts own that concern.
-            return _NOOP_CURSOR
         if self._trace_callback is not None and isinstance(self._backend, PostgresBackend):
             # CW-054: sqlite3's trace hook only ever sees a statement that is
             # actually sent to the engine, so the swallowed BEGIN IMMEDIATE /

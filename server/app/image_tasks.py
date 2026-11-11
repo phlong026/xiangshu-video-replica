@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 import random
-import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -23,7 +22,7 @@ from fastapi import HTTPException
 from app import content_store
 from app.auth import CurrentUser, Role
 from app.character_asset_review import cleanup_publication_objects
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.first_frames import (
     FIRST_FRAME_IMAGE_CONTENT_TYPES,
     MAX_FIRST_FRAME_QUALITY_ATTEMPTS,
@@ -149,7 +148,7 @@ def canonical_request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _first_frame_checkpoint_candidates(row: sqlite3.Row) -> list[dict[str, object]]:
+def _first_frame_checkpoint_candidates(row: BusinessRow) -> list[dict[str, object]]:
     raw = row["result_json"]
     if raw is None:
         return []
@@ -324,7 +323,7 @@ def enqueue_first_frame_task(
     idempotency_key: str,
     aspect_ratio: str | None = None,
     replace_scene: bool = False,
-) -> sqlite3.Row:
+) -> BusinessRow:
     # Authorization must precede the idempotent replay lookup. Otherwise an
     # unrelated user who guesses a project/key pair can observe another
     # account's durable task without entering the normal preparation path.
@@ -373,7 +372,7 @@ def enqueue_first_frame_task(
                 "FIRST_FRAME_TASK_IDEMPOTENCY_CONFLICT",
                 "生成参数已经变化，请重新提交。",
             )
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
 
     # Preparation is read-only and gives the request hash the exact upstream
     # versions/assets the provider will consume.
@@ -408,7 +407,7 @@ def enqueue_first_frame_task(
         (project_id, request_hash),
     ).fetchone()
     if active is not None:
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
     checkpoint_json: str | None = None
     previous = conn.execute(
         """
@@ -488,7 +487,7 @@ def enqueue_first_frame_task(
         conn, user_id=actor.id, service="first_frame", source_id=str(row["id"]), units=quantity
     )
     conn.commit()
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def _bind_character_sheet_request(
@@ -539,7 +538,7 @@ def enqueue_character_sheet_task(
     scene_description: str | None = None,
     costume_description: str | None = None,
     image_consent_version: str | None = None,
-) -> sqlite3.Row:
+) -> BusinessRow:
     request_payload: dict[str, object] = {
         "operation": operation,
         "project_id": project_id,
@@ -592,7 +591,7 @@ def enqueue_character_sheet_task(
                 "人物生成参数已经变化，请重新提交。",
             )
         conn.commit()
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
     active = conn.execute(
         """
         SELECT * FROM character_sheet_tasks
@@ -611,7 +610,7 @@ def enqueue_character_sheet_task(
             task_id=str(active["id"]),
         )
         conn.commit()
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
     task_id = str(uuid4())
     conn.execute(
         """
@@ -676,7 +675,7 @@ def enqueue_character_sheet_task(
         )
     accept_operation(conn, user_id=actor.id, service="character", source_id=str(row["id"]), units=1)
     conn.commit()
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def acquire_first_frame_task(conn: BusinessConnection, *, worker_id: str) -> ImageTaskLease | None:
@@ -1135,7 +1134,7 @@ def complete_first_frame_task(
 ) -> None:
     _require_owned_task(conn, "first_frame_tasks", prepared.lease)
 
-    def mark_task_succeeded(version: sqlite3.Row) -> None:
+    def mark_task_succeeded(version: BusinessRow) -> None:
         now = _now_text()
         current = _require_owned_task(conn, "first_frame_tasks", prepared.lease)
         result: dict[str, object] = {"version_id": str(version["id"])}
@@ -1252,13 +1251,13 @@ def latest_scene_look_task(
     *,
     actor: CurrentUser,
     identity_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     owner_filter = "" if actor.role == "admin" else "AND created_by_user_id = %s"
     params: tuple[object, ...] = (
         (identity_id,) if actor.role == "admin" else (identity_id, actor.id)
     )
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             f"""
             SELECT * FROM character_sheet_tasks
@@ -1547,11 +1546,11 @@ def load_image_task(
     *,
     table: Literal["first_frame_tasks", "character_sheet_tasks"],
     task_id: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(f"SELECT * FROM {table} WHERE id = %s", (task_id,)).fetchone()
     if row is None:
         raise _task_error(404, "IMAGE_TASK_NOT_FOUND", "生成任务不存在。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def latest_image_task(
@@ -1560,9 +1559,9 @@ def latest_image_task(
     table: Literal["first_frame_tasks", "character_sheet_tasks"],
     owner_column: Literal["project_id", "created_by_user_id"],
     owner_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             f"""
             SELECT * FROM {table} WHERE {owner_column} = %s
@@ -1578,9 +1577,9 @@ def latest_base_character_sheet_task(
     conn: BusinessConnection,
     *,
     owner_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             """
             SELECT * FROM character_sheet_tasks
@@ -1609,7 +1608,7 @@ def load_image_task_actor(conn: BusinessConnection, user_id: str) -> CurrentUser
 
 
 def require_first_frame_task_access(
-    conn: BusinessConnection, *, actor: CurrentUser, row: sqlite3.Row
+    conn: BusinessConnection, *, actor: CurrentUser, row: BusinessRow
 ) -> None:
     require_project_access(
         conn,
@@ -1619,7 +1618,7 @@ def require_first_frame_task_access(
     )
 
 
-def require_character_sheet_task_access(*, actor: CurrentUser, row: sqlite3.Row) -> None:
+def require_character_sheet_task_access(*, actor: CurrentUser, row: BusinessRow) -> None:
     if actor.role != "admin" and str(row["created_by_user_id"]) != actor.id:
         raise _task_error(404, "IMAGE_TASK_NOT_FOUND", "生成任务不存在。")
 
@@ -1628,7 +1627,7 @@ def _require_owned_task(
     conn: BusinessConnection,
     table: Literal["first_frame_tasks", "character_sheet_tasks"],
     lease: ImageTaskLease,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = load_image_task(conn, table=table, task_id=lease.id)
     if (
         str(row["status"]) != "RUNNING"

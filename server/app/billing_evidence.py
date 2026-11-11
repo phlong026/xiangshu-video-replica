@@ -39,9 +39,12 @@ def record_evidence(
         if operation["state"] == "PENDING":
             raise HTTPException(409, detail="请等待业务请求结束后再核对供应商成本")
     else:
+        # 双轨结算的分流键是 billing_operations.service（本函数不读写
+        # wallet_transactions，入账落库在各自 finalize 侧）。
         service = str(operation["service"])
         table, column = {
             "video_768p": ("generation_tasks", "actual_output_seconds"),
+            "video_768p_long": ("generation_tasks", "actual_output_seconds"),
             "video_2k": ("generation_tasks", "actual_output_seconds"),
             "oral": ("oral_tasks", "duration_sec"),
             "asr": ("script_from_audio_tasks", "result_json"),

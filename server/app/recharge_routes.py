@@ -5,7 +5,6 @@ import csv
 import io
 import json
 import logging
-import sqlite3
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, cast
@@ -68,7 +67,12 @@ from app.customer_ledger import (
     read_ledger_page,
 )
 from app.customer_pricing import read_pricing
-from app.db_portable import BusinessConnection
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.ops_metrics import set_current_trace_fields
 from app.payment_provider import (
     DeploymentConfig,
@@ -410,13 +414,16 @@ def _insert_recharge_order(
 def _retryable_merchant_order_collision(exc: Exception) -> bool:
     """True when the integrity failure is the retryable order-number draw.
 
-    Matches both dialect messages: SQLite spells it
-    ``UNIQUE constraint failed: recharge_orders.merchant_order_no`` while
-    PostgreSQL reports the constraint name
-    (``recharge_orders_merchant_order_key``) - the dotted form only exists on
-    SQLite, so the narrower match silently broke the PG retry (review P1).
+    严格约束鉴别（r3 P1）：只认 PG 的订单号唯一约束（sqlstate=23505 +
+    ``recharge_orders_merchant_order_no_key``——SQLAlchemy 列级 unique 的
+    自动命名，schema 钉住测试用真实迁移库核实过），其余完整性错误一律
+    不可重试、原样冒出。旧的 ``str(exc)`` 文本匹配会随方言/消息格式漂移
+    （其注释里的 SQLite 分支已随 lane 退役），且对消息里碰巧含
+    ``merchant_order_no`` 的其他约束错误有误重试风险。
     """
-    return "merchant_order_no" in str(exc)
+    return isinstance(exc, IntegrityConstraintError) and is_unique_conflict_on(
+        exc, "recharge_orders_merchant_order_no_key"
+    )
 
 
 @router.post(
@@ -474,7 +481,7 @@ def create_recharge_order(
                     deployment=deployment,
                     provider=provider,
                 )
-        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
+        except IntegrityConstraintError as exc:
             # The merchant-order-number collision is a retryable random draw; any
             # other integrity failure is a real bug and must surface.
             if _retryable_merchant_order_collision(exc):
@@ -679,7 +686,7 @@ def create_customer_recharge_order(
                     recovery_expires_at=recovery_expires_at,
                 )
                 return order
-        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
+        except IntegrityConstraintError as exc:
             if _retryable_merchant_order_collision(exc):
                 continue
             raise
@@ -1593,7 +1600,7 @@ def list_customer_recharge_orders(
         ).fetchall()
         return RechargeOrderPage(
             items=[
-                RechargeOrderStatusResponse(**serialize_recharge_order(cast(sqlite3.Row, row)))
+                RechargeOrderStatusResponse(**serialize_recharge_order(cast(BusinessRow, row)))
                 for row in rows
             ],
             total=total,

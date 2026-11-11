@@ -61,7 +61,7 @@ REGISTER_PATH = "/api/customer/register"
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、20260926T0000
 # 爆款首页策展排行与 20260925T1400 计费触发器追加修复（api_metadata 的 PENDING 期写入）。
-HEAD_REVISION = "20261016T1000_replica_prompt_tasks"
+HEAD_REVISION = "20261102T0900_customer_session_last_seen"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.
@@ -1007,6 +1007,9 @@ def test_registration_and_failed_login_limits_persist_after_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP", "1")
+    # 登录准入已退役 IP 维度（账号维度预算）：注册限流与登录限流各自独立，
+    # 错误密码后的正确登录由账号预算拦截。
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "1")
     assert (
         client.post(
             REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}

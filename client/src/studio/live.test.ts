@@ -74,18 +74,9 @@ const api = vi.hoisted(() => ({
   uploadReferenceVideo: vi.fn(),
   fetchViralCopy: vi.fn(),
   claimViralCopy: vi.fn(),
-  createViralCopyExtraction: vi.fn(),
 }));
 
 vi.mock("../api", () => api);
-
-// 桌面端缓存桥接：这三处都碰 Tauri，单测里只关心调用顺序与参数。
-const viralCache = vi.hoisted(() => ({
-  awaitViralCacheReady: vi.fn(async () => {}),
-  ensureViralCacheForVideo: vi.fn(async () => {}),
-  extractViralAudio: vi.fn(async () => new Uint8Array([1, 2, 3])),
-}));
-vi.mock("./viralCache", () => viralCache);
 
 import {
   cancelStudioTask,
@@ -2641,138 +2632,6 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
       analysisTaskId: "analysis-dedup",
       analysisTaskStatus: "PENDING",
     });
-  });
-});
-
-describe("startViralCopyExtraction（爆款文案：本地抽音轨上传）", () => {
-  const billed = {
-    charged: 20,
-    unit: "call" as const,
-    deduped: false,
-    billable: true,
-  };
-  const unbilled = {
-    charged: 0,
-    unit: "call" as const,
-    deduped: false,
-    billable: true,
-  };
-  beforeEach(() => {
-    viralCache.awaitViralCacheReady.mockClear();
-    viralCache.ensureViralCacheForVideo.mockClear();
-    viralCache.extractViralAudio.mockClear();
-    viralCache.extractViralAudio.mockResolvedValue(new Uint8Array([1, 2, 3]));
-    api.claimViralCopy.mockReset();
-    api.createViralCopyExtraction.mockReset();
-  });
-
-  it("共享缓存命中时扣一次获取费并直接返回文案：不下载、不抽音轨、不上传", async () => {
-    api.claimViralCopy.mockResolvedValue({
-      text: "已有文案",
-      updatedAt: "t",
-      billing: billed,
-    });
-    await expect(
-      live.startViralCopyExtraction({ platformKey: "douyin", nativeId: "v-1" }),
-    ).resolves.toEqual({ kind: "cache", text: "已有文案", billing: billed });
-    expect(api.claimViralCopy).toHaveBeenCalledWith("douyin", "v-1");
-    expect(viralCache.ensureViralCacheForVideo).not.toHaveBeenCalled();
-    expect(viralCache.extractViralAudio).not.toHaveBeenCalled();
-    expect(api.createViralCopyExtraction).not.toHaveBeenCalled();
-  });
-
-  it("未命中时先等本地缓存就绪，再抽音轨上传并交出任务回执", async () => {
-    api.claimViralCopy.mockResolvedValue({
-      text: null,
-      updatedAt: null,
-      billing: unbilled,
-    });
-    api.createViralCopyExtraction.mockResolvedValue({
-      text: null,
-      updatedAt: null,
-      projectId: "p-1",
-      sourceAssetId: "a-1",
-      taskId: "t-1",
-    });
-    await expect(
-      live.startViralCopyExtraction({
-        platformKey: "douyin",
-        nativeId: "v-1",
-      }),
-    ).resolves.toEqual({
-      kind: "task",
-      projectId: "p-1",
-      sourceAssetId: "a-1",
-      taskId: "t-1",
-    });
-    // 顺序即语义：`viral_cache_ensure` 入队即返回，不等就绪就抽音轨必定报「尚未缓存」。
-    // 缓存数据源是云端归档，调用方不必再传会过期的直链。
-    expect(viralCache.ensureViralCacheForVideo).toHaveBeenCalledWith({
-      platformKey: "douyin",
-      nativeId: "v-1",
-    });
-    expect(viralCache.awaitViralCacheReady).toHaveBeenCalledWith(
-      "douyin",
-      "v-1",
-    );
-    expect(viralCache.extractViralAudio).toHaveBeenCalledWith("douyin", "v-1");
-    expect(api.createViralCopyExtraction).toHaveBeenCalledWith(
-      "douyin",
-      "v-1",
-      expect.any(Uint8Array),
-    );
-  });
-
-  it("获取文案失败即抛出：不吞错继续上传，避免白花一次转写费", async () => {
-    // 读不到计费口径（未定价 / 停用 / 网络失败）时继续走转写等于自付 ASR 成本，
-    // 所以这里必须让调用方把失败如实告诉用户。
-    api.claimViralCopy.mockRejectedValue(new Error("爆款文案尚未配置价格"));
-    await expect(
-      live.startViralCopyExtraction({ platformKey: "douyin", nativeId: "v-1" }),
-    ).rejects.toThrow("爆款文案尚未配置价格");
-    expect(viralCache.extractViralAudio).not.toHaveBeenCalled();
-    expect(api.createViralCopyExtraction).not.toHaveBeenCalled();
-  });
-
-  it("上传回执撞上并发写入时按缓存交付并带回计费", async () => {
-    api.claimViralCopy.mockResolvedValue({
-      text: null,
-      updatedAt: null,
-      billing: unbilled,
-    });
-    api.createViralCopyExtraction.mockResolvedValue({
-      text: "别人刚好写进去的文案",
-      updatedAt: "t",
-      projectId: null,
-      sourceAssetId: null,
-      taskId: null,
-      billing: billed,
-    });
-    await expect(
-      live.startViralCopyExtraction({ platformKey: "douyin", nativeId: "v-1" }),
-    ).resolves.toEqual({
-      kind: "cache",
-      text: "别人刚好写进去的文案",
-      billing: billed,
-    });
-  });
-
-  it("上传回执缺少任务信息时报错，不让上层拿着空任务去轮询", async () => {
-    api.claimViralCopy.mockResolvedValue({
-      text: null,
-      updatedAt: null,
-      billing: unbilled,
-    });
-    api.createViralCopyExtraction.mockResolvedValue({
-      text: null,
-      updatedAt: null,
-      projectId: null,
-      sourceAssetId: null,
-      taskId: null,
-    });
-    await expect(
-      live.startViralCopyExtraction({ platformKey: "douyin", nativeId: "v-1" }),
-    ).rejects.toThrow("缺少项目或素材结果");
   });
 });
 

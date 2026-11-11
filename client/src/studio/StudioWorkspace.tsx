@@ -53,6 +53,7 @@ import {
 } from "./ContentPages";
 import {
   CopyPage,
+  customerDurationMax,
   normalizeCustomerDuration,
   OralPage,
   ReplacementPage,
@@ -90,7 +91,6 @@ import {
   reloadStats,
   reloadTasks,
   sameTasks,
-  startViralCopyExtraction,
   studioAssetFromMaterial,
 } from "./live";
 import {
@@ -140,7 +140,6 @@ import type {
   StudioTask,
 } from "./types";
 import { Button, Empty, Hint, Icon, Media, StudioDialog } from "./ui";
-import { cacheAvailable } from "./viralCache";
 import { WorkspaceNotifications } from "./WorkspaceNotifications";
 import { WorkspaceSearch } from "./WorkspaceSearch";
 import "./studio.css";
@@ -219,12 +218,16 @@ function quoteMatchesInput(
   );
 }
 
-function videoQuoteInput(draft: StudioDraft): GenerationQuoteInput {
+function videoQuoteInput(
+  draft: StudioDraft,
+  durationMax: number,
+): GenerationQuoteInput {
   return {
     resolution: draft.resolution === "2K" ? "2K" : "768P",
     // P1-4：非法时长钳位（与复刻路径同口径），不再静默回落 8 秒——
     // 报价与提交同源归一，用户看到的时长即实际生成时长。
-    duration_seconds: normalizeCustomerDuration(draft.duration),
+    // 上限随长档 capabilities（16-30 秒）与分辨率（2K 恒 15）联动。
+    duration_seconds: normalizeCustomerDuration(draft.duration, durationMax),
     quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
   };
 }
@@ -963,10 +966,17 @@ export function StudioWorkspace({
   );
 
   // 视频生成确认弹窗：按分辨率/时长/条数拉取按秒报价；草稿参数变化自动刷新。
-  // P1-4：与提交/报价同源钳位（4–15），三处不得再出现「非法 → 8」旁路。
-  const videoDuration = normalizeCustomerDuration(state.draft.duration);
+  // P1-4：与提交/报价同源钳位（4–30，2K 恒 15），三处不得再出现「非法 → 8」旁路。
   const videoResolution: GenerationQuoteInput["resolution"] =
     state.draft.resolution === "2K" ? "2K" : "768P";
+  const videoDurationMax = customerDurationMax(
+    videoCapabilities,
+    videoResolution,
+  );
+  const videoDuration = normalizeCustomerDuration(
+    state.draft.duration,
+    videoDurationMax,
+  );
   const videoCount =
     state.draft.count === 2 || state.draft.count === 4 ? state.draft.count : 1;
   const currentVideoQuoteInput: GenerationQuoteInput = {
@@ -984,6 +994,11 @@ export function StudioWorkspace({
   const videoQuoteDiscountSource = videoQuoteReady
     ? discountSourceLabel(videoQuote?.discount_source)
     : null;
+  // 16-30 秒长档备注（产品口径：30s 价格 = 15s 的 2 倍），随报价一并展示。
+  const videoQuoteTierNote =
+    videoQuoteReady && videoQuote?.price_tier === "16-30s"
+      ? "长视频档单价为 15 秒及以内的 2 倍"
+      : null;
   const videoQuoteDiscountNote = videoQuoteDiscountZhe
     ? `已享${videoQuoteDiscountZhe}优惠${videoQuoteDiscountSource ? `（${videoQuoteDiscountSource}）` : ""}`
     : null;
@@ -1180,7 +1195,13 @@ export function StudioWorkspace({
   ): Promise<string | null> => {
     let result = await createPromptOptimization({
       route: "reference",
-      duration_seconds: normalizeCustomerDuration(draft.duration),
+      duration_seconds: normalizeCustomerDuration(
+        draft.duration,
+        customerDurationMax(
+          videoCapabilities,
+          draft.resolution === "2K" ? "2K" : "768P",
+        ),
+      ),
       ratio: draft.ratio as GenerationRatio,
       resolution: draft.resolution === "2K" ? "2K" : "768P",
       project_id: draft.projectId ?? null,
@@ -1255,7 +1276,13 @@ export function StudioWorkspace({
       notify("请先核对当前提示词与参考素材的绑定。");
       return;
     }
-    const quoteInput = videoQuoteInput(draft);
+    const quoteInput = videoQuoteInput(
+      draft,
+      customerDurationMax(
+        videoCapabilities,
+        draft.resolution === "2K" ? "2K" : "768P",
+      ),
+    );
     if (
       videoQuoteStatus !== "ready" ||
       !quoteMatchesInput(videoQuote, quoteInput)
@@ -1295,7 +1322,13 @@ export function StudioWorkspace({
             ? (draft.tailFrameId ?? null)
             : null,
         reference_asset_ids: mode === "r2v" ? draft.referenceIds : [],
-        output_duration_seconds: normalizeCustomerDuration(draft.duration),
+        output_duration_seconds: normalizeCustomerDuration(
+          draft.duration,
+          customerDurationMax(
+            videoCapabilities,
+            draft.resolution === "2K" ? "2K" : "768P",
+          ),
+        ),
         resolution:
           draft.resolution === "2K" ? ("2K" as const) : ("768P" as const),
         ratio: resolveSubmittedRatio(mode, draft.ratio),
@@ -2486,88 +2519,29 @@ export function StudioWorkspace({
       );
     };
 
-    if (!cacheAvailable()) {
-      // Web 端 claim-first：命中共享缓存即秒回正文（交付免费），跳过整次导入；
-      // 未命中交给调用方的导入 → 转写链路（转写完成后再凭视频身份 claim 交付）。
-      // 口径与桌面端一致。
-      const onCacheMiss = options?.onCacheMiss;
-      if (!onCacheMiss) {
-        // 桌面链路自带未命中处理；Web 分支少了回落链路说明调用方接错了。
-        notify("该视频暂不支持提取文案，请稍后重试。");
-        return;
-      }
-      extractingRef.current = true;
-      void claimViralCopy(platformKey as ViralPlatform, nativeId)
-        .then((claimed) => {
-          extractingRef.current = false;
-          if (!scopeStillCurrent()) return;
-          if (!claimed.text) {
-            // 未命中：本次分文未扣，走调用方的导入 → 转写链路。
-            onCacheMiss();
-            return;
-          }
-          applyClaimedViralCopy(
-            claimed.text,
-            claimed.billing,
-            {
-              permissionGeneration,
-              account: extractionAccount,
-              scope: extractionScope,
-            },
-            video.title,
-          );
-        })
-        .catch((cause: unknown) => {
-          extractingRef.current = false;
-          // 读不到计费口径（未定价 / 停用 / 网络失败）时继续导入会白花一次转写费，
-          // 与桌面端同策略：如实提示，不做静默回落。
-          if (!scopeStillCurrent()) return;
-          if (
-            openWalletIfInsufficientCredits(cause, {
-              notify,
-              openWallet: () => openLive("wallet"),
-            })
-          )
-            return;
-          notify(
-            customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
-          );
-        });
+    // 统一 claim-first（2026-11 爆款链路改造 WP3）：本地抽音轨上传链路已随
+    // POST /videos/copy 退役下线，桌面与 Web 同一动作——命中共享缓存即秒回正文
+    // （交付计费见 claim 回执），未命中交给调用方的服务端导入 → 转写链路
+    // （转写完成后再凭视频身份 claim 交付）。claim 404/异常一律如实报错，
+    // 不静默回落：公开爆款卡片才会走到这里，404 意味着真实下架而非缓存未命中。
+    const onCacheMiss = options?.onCacheMiss;
+    if (!onCacheMiss) {
+      notify("该视频暂不支持提取文案，请稍后重试。");
       return;
     }
-
     extractingRef.current = true;
-    notify("正在准备本地音轨并转写文案，预计一到两分钟，请勿关闭页面…");
-    // 与上传链路一致：提交即进文案工坊，用进度横幅承载等待过程。
-    beginCopyExtractionProgress("正在准备本地音轨…");
-    navigate("copy", { returnTo: "workbench" });
-    void startViralCopyExtraction({
-      platformKey,
-      nativeId,
-    })
-      .then((receipt) => {
-        if (!scopeStillCurrent()) {
-          extractingRef.current = false;
-          endCopyExtractionProgress();
-          return;
-        }
-        if (receipt.kind === "task") {
-          // 未命中共享缓存：服务端已建好任务，交给与上传链路完全相同的轮询与回填通道。
-          // 带上这条视频的身份，转写完成后回来取文案（首提取者的交付与计费点）。
-          extractingRef.current = false;
-          extractScriptFromUpload(
-            receipt.projectId,
-            receipt.sourceAssetId,
-            receipt.taskId,
-            { platformKey, nativeId },
-          );
-          return;
-        }
+    void claimViralCopy(platformKey as ViralPlatform, nativeId)
+      .then((claimed) => {
         extractingRef.current = false;
-        endCopyExtractionProgress();
+        if (!scopeStillCurrent()) return;
+        if (!claimed.text) {
+          // 未命中：本次分文未扣，走调用方的导入 → 转写链路。
+          onCacheMiss();
+          return;
+        }
         applyClaimedViralCopy(
-          receipt.text,
-          receipt.billing,
+          claimed.text,
+          claimed.billing,
           {
             permissionGeneration,
             account: extractionAccount,
@@ -2578,7 +2552,8 @@ export function StudioWorkspace({
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
-        endCopyExtractionProgress();
+        // 读不到计费口径（未定价 / 停用 / 网络失败）时继续导入会白花一次转写费：
+        // 如实提示，不做静默回落。
         if (!scopeStillCurrent()) return;
         if (
           openWalletIfInsufficientCredits(cause, {
@@ -2920,8 +2895,8 @@ export function StudioWorkspace({
                       : `${(oralPriceFen / 100).toFixed(2)} 元/秒`
                     : generation === "视频生成" && videoQuoteReady
                       ? videoQuote.estimated_credits !== undefined
-                        ? `${videoQuote.estimated_credits} 积分（${videoQuote.unit_credits} 积分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}`
-                        : `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}`
+                        ? `${videoQuote.estimated_credits} 积分（${videoQuote.unit_credits} 积分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}${videoQuoteTierNote ? ` · ${videoQuoteTierNote}` : ""}`
+                        : `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}${videoQuoteTierNote ? ` · ${videoQuoteTierNote}` : ""}`
                       : oralQuoteStatus === "loading" ||
                           videoQuoteStatus === "loading"
                         ? "正在读取服务端报价…"

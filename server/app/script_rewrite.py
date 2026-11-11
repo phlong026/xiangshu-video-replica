@@ -10,21 +10,25 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import HTTPException
-from psycopg import errors as psycopg_errors
 from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.external_calls import CallTimer, Outcome, record_external_call
 from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.settings import SettingsRepository, SettingsUnavailableError
+from app.task_lease import TaskLease, claim_script_rewrite_task
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +95,8 @@ class ScriptRewriteResult(BaseModel):
     model: str
 
 
-@dataclass(frozen=True)
-class ScriptRewriteTaskLease:
-    id: str
-    created_by_user_id: str
-    worker_id: str
-    attempt: int
+# 租约凭据统一为共享 TaskLease（T7）；别名保住既有导入面。
+ScriptRewriteTaskLease = TaskLease
 
 
 @dataclass(frozen=True)
@@ -185,7 +185,7 @@ def require_current_script_rewrite_source(
         )
 
 
-def validated_script_rewrite_request(row: sqlite3.Row) -> ValidatedScriptRewriteRequest:
+def validated_script_rewrite_request(row: BusinessRow) -> ValidatedScriptRewriteRequest:
     try:
         payload = json.loads(str(row["request_json"]))
         if not isinstance(payload, dict):
@@ -438,7 +438,7 @@ def enqueue_script_rewrite_task(
     identity_id: str | None = None,
     source_asset_id: str | None = None,
     instructions: str = "",
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -529,7 +529,11 @@ def enqueue_script_rewrite_task(
                     """,
                     (_time_text(datetime.now(UTC)), replay["id"]),
                 ).fetchone()
-            except (sqlite3.IntegrityError, psycopg_errors.UniqueViolation) as exc:
+            except IntegrityConstraintError as exc:
+                # 鉴别闸（r3 P1）：只有「每项目一个进行中改写」部分唯一索引的
+                # 冲突才是并发互斥；其他 235xx 是真实数据错误，必须原样冒出。
+                if not is_unique_conflict_on(exc, "uq_script_rewrite_tasks_active_project"):
+                    raise
                 conn.rollback()
                 raise _script_rewrite_error(
                     409,
@@ -553,7 +557,7 @@ def enqueue_script_rewrite_task(
                     billing_round=int(latest_round) + 1,
                 )
                 conn.commit()
-                return cast(sqlite3.Row, retried)
+                return cast(BusinessRow, retried)
             replay = conn.execute(
                 "SELECT * FROM script_rewrite_tasks WHERE id = %s",
                 (replay["id"],),
@@ -564,7 +568,7 @@ def enqueue_script_rewrite_task(
                     "SCRIPT_REWRITE_ENQUEUE_CONFLICT",
                     "改写任务状态已经变化，请重试。",
                 )
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
 
     active = conn.execute(
         """
@@ -581,7 +585,7 @@ def enqueue_script_rewrite_task(
                 "SCRIPT_REWRITE_ALREADY_RUNNING",
                 "该项目已有口播稿正在后台改写，请等待完成。",
             )
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
 
     task_id = str(uuid4())
     conn.execute(
@@ -665,15 +669,15 @@ def enqueue_script_rewrite_task(
             "ip_profile_hash": profile_hash,
         },
     )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def _validated_idempotent_replay(
-    row: sqlite3.Row,
+    row: BusinessRow,
     *,
     request_hash: str,
     identity_id: str | None,
-) -> sqlite3.Row:
+) -> BusinessRow:
     stored_identity_id = None if row["identity_id"] is None else str(row["identity_id"])
     if str(row["request_hash"]) != request_hash or stored_identity_id != identity_id:
         raise _script_rewrite_error(
@@ -689,62 +693,9 @@ def acquire_script_rewrite_task(
     *,
     worker_id: str,
 ) -> ScriptRewriteTaskLease | None:
-    now = _time_text(datetime.now(UTC))
-    locked_until = _time_text(
-        datetime.now(UTC) + timedelta(minutes=SCRIPT_REWRITE_TASK_LEASE_MINUTES)
-    )
-    conn.execute(
-        """
-        UPDATE script_rewrite_tasks
-        SET status = 'PENDING', locked_by = NULL, locked_until = NULL,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0,
-            updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NULL
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (now, now),
-    )
-    conn.execute(
-        """
-        UPDATE script_rewrite_tasks
-        SET status = 'SUBMISSION_UNCERTAIN', locked_by = NULL, locked_until = NULL,
-            error_code = 'SCRIPT_REWRITE_SUBMISSION_UNCERTAIN',
-            error_message_redacted = %s, retryable = 0,
-            completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (
-            "AI 改写请求可能已经送达服务商，请人工确认后再决定是否重试。",
-            now,
-            now,
-            now,
-        ),
-    )
-    row = conn.execute(
-        """
-        UPDATE script_rewrite_tasks
-        SET status = 'RUNNING', attempt = attempt + 1,
-            locked_by = %s, locked_until = %s,
-            started_at = COALESCE(started_at, %s), updated_at = %s,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0
-        WHERE id = (
-            SELECT id FROM script_rewrite_tasks
-            WHERE status = 'PENDING'
-            ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
-        ) AND status = 'PENDING'
-        RETURNING *
-        """,
-        (worker_id, locked_until, now, now),
-    ).fetchone()
-    conn.commit()
-    if row is None:
-        return None
-    return ScriptRewriteTaskLease(
-        id=str(row["id"]),
-        created_by_user_id=str(row["created_by_user_id"]),
-        worker_id=worker_id,
-        attempt=int(row["attempt"]),
+    """租约 SQL 统一住在 app.task_lease（T7）；本域凭据即标准 TaskLease。"""
+    return claim_script_rewrite_task(
+        conn, worker_id=worker_id, lease_minutes=SCRIPT_REWRITE_TASK_LEASE_MINUTES
     )
 
 
@@ -901,7 +852,7 @@ def fail_script_rewrite_task(
 def load_script_rewrite_task(
     conn: BusinessConnection,
     task_id: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM script_rewrite_tasks WHERE id = %s",
         (task_id,),
@@ -912,7 +863,7 @@ def load_script_rewrite_task(
             "SCRIPT_REWRITE_TASK_NOT_FOUND",
             "改写任务不存在。",
         )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def latest_script_rewrite_task(
@@ -921,7 +872,7 @@ def latest_script_rewrite_task(
     project_id: str,
     identity_id: str | None = None,
     identity_scope: Literal["all", "identity", "none"] = "all",
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     if identity_scope == "all":
         query = """
             SELECT * FROM script_rewrite_tasks
@@ -947,12 +898,12 @@ def latest_script_rewrite_task(
         """
         params = (project_id,)
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(query, params).fetchone(),
     )
 
 
-def script_rewrite_task_result(row: sqlite3.Row) -> ScriptRewriteResult | None:
+def script_rewrite_task_result(row: BusinessRow) -> ScriptRewriteResult | None:
     raw = row["result_json"]
     if raw is None:
         return None
@@ -965,7 +916,7 @@ def script_rewrite_task_result(row: sqlite3.Row) -> ScriptRewriteResult | None:
 def require_owned_script_rewrite_task(
     conn: BusinessConnection,
     lease: ScriptRewriteTaskLease,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = load_script_rewrite_task(conn, lease.id)
     if str(row["status"]) != "RUNNING" or str(row["locked_by"]) != lease.worker_id:
         raise RuntimeError("script rewrite task lease was lost")

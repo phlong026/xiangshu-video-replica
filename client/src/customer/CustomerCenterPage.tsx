@@ -1366,7 +1366,6 @@ export function CustomerCenterPage({
               devices={account.devices}
               onApprovePairing={account.onApprovePairing}
               onDismissPairing={account.onDismissPairing}
-              onManualHeartbeat={account.onManualHeartbeat}
               onPairDevice={account.onPairDevice}
               onRecharge={() => setRecharge(true)}
               onRefreshDevices={account.onRefreshDevices}

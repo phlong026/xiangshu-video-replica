@@ -1,4 +1,8 @@
-"""T19 / SES-01 — login, heartbeat, logout and the 30/90-second DB lease.
+"""T19 / SES-01 — login, heartbeat, logout and the 7-day sliding DB expiry.
+
+（2026-11-02 契约变更：原 30 秒心跳 / 90 秒租约改为 7 天滑动有效期，
+``lease_until`` 语义 = 会话到期时间，续命点在 fence 校验的节流续期；
+heartbeat 端点保留兼容旧客户端。）
 
 Fail-first tests for the frozen files ``server/app/customer_session_service.py``
 and ``server/app/customer_session_routes.py`` (code checklist §3.2 / §3.3):
@@ -14,21 +18,24 @@ acceptance spec §2.3 / §3.4):
   ``customer_session_state``:
 
   * no session row / expired lease -> establish the caller's session
-    (epoch + 1, fresh session token, lease = now + 90 s, ``LOGIN`` event; a
-    lapsed prior lease additionally records the system ``TIMEOUT`` event);
+    (epoch + 1, fresh session token, expiry = now + 7 days, ``LOGIN`` event;
+    a lapsed prior expiry additionally records the system ``TIMEOUT`` event);
   * same device + currently valid session token presented in the body ->
-    renew only: same token, same epoch, lease pushed to now + 90 s;
+    renew only: same token, same epoch, expiry slid to now + 7 days;
   * same device without a usable session token -> epoch + 1 and a fresh
     token (the recovery path — the old token can never heartbeat again);
   * another device online with a live lease -> 409 ``OTHER_DEVICE_ONLINE``
     with the masked device name and the remaining lease (never a silent
     kick, dev doc §3.3);
 
+- ``verify_session_context`` 校验成功后附带节流滑动续期：到期时间落后
+  超过节流窗口才写库（每会话至多每小时一次），失败路径零写；
+
 - ``POST /api/customer/sessions/heartbeat`` authenticates the *session* token
-  (Bearer): a matching token under a live lease renews the lease (epoch
-  untouched — §12.3 same-device lease extension) and appends a ``HEARTBEAT``
-  event; a token that no longer matches the row answers 401
-  ``SESSION_REPLACED``; a matching token under a lapsed lease answers 401
+  (Bearer; 旧客户端兼容端点): a matching token under a live lease renews the
+  expiry (epoch untouched — §12.3 same-device lease extension) and appends a
+  ``HEARTBEAT`` event; a token that no longer matches the row answers 401
+  ``SESSION_REPLACED``; a matching token under a lapsed expiry answers 401
   ``SESSION_EXPIRED`` and must never resurrect the session (acceptance §3.4);
 
 - ``POST /api/customer/sessions/logout`` authenticates the session token,
@@ -68,7 +75,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pg_test_kit import password_admin_session, require_pg_or_explicit_skip
 
@@ -139,10 +146,20 @@ def _t19_dsn() -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_lease_seconds_matches_the_frozen_30_90_contract() -> None:
-    from app.customer_session_service import SESSION_LEASE_SECONDS
+def test_validity_seconds_match_the_7_day_sliding_contract() -> None:
+    """2026-11-02 契约变更：90 秒租约 + 30 秒心跳被 7 天滑动有效期取代。
 
-    assert SESSION_LEASE_SECONDS == 90
+    旧契约把任何 ≥90 秒的服务端断供放大成全体用户终态登出；本测试钉住
+    新常量与节流窗口，防止有人无意中把滑动有效期改回秒级。
+    """
+    from app.customer_session_service import (
+        SESSION_RENEWAL_WRITE_INTERVAL_SECONDS,
+        SESSION_VALIDITY_SECONDS,
+    )
+
+    assert SESSION_VALIDITY_SECONDS == 7 * 24 * 3600
+    # 节流窗口必须远小于有效期（续期才值得节流）且为正。
+    assert 0 < SESSION_RENEWAL_WRITE_INTERVAL_SECONDS < SESSION_VALIDITY_SECONDS
 
 
 def test_session_routes_keep_their_response_models_in_the_openapi_contract() -> None:
@@ -587,6 +604,37 @@ def _expire_lease(device_id: str) -> None:
         )
 
 
+def _age_expiry(device_id: str, remaining: timedelta) -> None:
+    """把到期时间改写为 now + remaining（模拟一个「上次活动已过去一段时间」的会话）。
+
+    滑动续期测试的老化旋钮：remaining 小于「7 天 - 节流窗口」即应触发续期。
+    """
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET lease_until = (now() + %s)::text WHERE device_id = %s",
+            (remaining, device_id),
+        )
+
+
+def _session_activity() -> tuple[str, str | None]:
+    """The live session row's timing pair: (lease_until, last_seen_at).
+
+    时间列是 TEXT 但 GREATEST 写入路径会做 timestamptz 往返（PG 渲染格式），
+    这里统一归一为本服务的 isoformat 线格式，供与 API 返回值直接比较。
+    """
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT lease_until, last_seen_at FROM customer_session_state"
+        ).fetchone()
+    assert row is not None, "expected exactly one session row"
+
+    def _normalize(value: object) -> str:
+        return datetime.fromisoformat(str(value)).astimezone(UTC).isoformat()
+
+    return _normalize(row[0]), _normalize(row[1]) if row[1] is not None else None
+
+
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -969,6 +1017,81 @@ def test_heartbeat_after_logout_fails_with_session_expired(client: TestClient) -
     stale = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
     assert stale.status_code == 401, stale.text
     assert stale.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+
+# ---------------------------------------------------------------------------
+# Sliding renewal — 7 天滑动有效期的服务端续命点（verify_session_context）
+# ---------------------------------------------------------------------------
+
+
+def test_activation_grants_a_seven_day_expiry_and_records_last_seen(
+    client: TestClient,
+) -> None:
+    from app.customer_session_service import SESSION_VALIDITY_SECONDS
+
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    lease_raw, last_seen_raw = _session_activity()
+    remaining = datetime.fromisoformat(lease_raw) - datetime.now(UTC)
+    # 激活即授予完整 7 天（留 30 秒余量覆盖执行耗时）。
+    assert (
+        timedelta(seconds=SESSION_VALIDITY_SECONDS - 30)
+        < remaining
+        <= timedelta(seconds=SESSION_VALIDITY_SECONDS)
+    ), remaining
+    assert last_seen_raw is not None, "activation must stamp last_seen_at"
+
+
+def test_verify_renews_the_expiry_only_beyond_the_throttle_window(
+    client: TestClient,
+) -> None:
+    """节流续期：新鲜会话零写；落后超过节流窗口才滑回 now + 7 天。"""
+    from app.customer_auth import verify_session_context
+    from app.customer_session_service import SESSION_VALIDITY_SECONDS
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    # 新鲜会话（刚刚 now + 7d）：verify 不写库，lease 原样保留。
+    with pg_transaction() as conn:
+        ctx = verify_session_context(conn, presentation_session_token=customer["session_token"])
+    fresh_lease, _ = _session_activity()
+    assert ctx.lease_until == fresh_lease
+    assert datetime.fromisoformat(fresh_lease) - datetime.now(UTC) > timedelta(
+        seconds=SESSION_VALIDITY_SECONDS - 60
+    )
+
+    # 老化到剩余 6 天（落后超过 7 天 - 1 小时的阈值）：verify 滑回 now + 7 天。
+    _age_expiry(customer["device_id"], remaining=timedelta(days=6))
+    with pg_transaction() as conn:
+        ctx = verify_session_context(conn, presentation_session_token=customer["session_token"])
+    renewed_lease, renewed_seen = _session_activity()
+    assert datetime.fromisoformat(renewed_lease) - datetime.now(UTC) > timedelta(
+        seconds=SESSION_VALIDITY_SECONDS - 60
+    ), renewed_lease
+    # ctx 返回续期后的到期时间，且 last_seen_at 一并刷新。
+    assert ctx.lease_until == renewed_lease
+    assert renewed_seen is not None
+    # 续期不写事件、不动 epoch（区别于 heartbeat 的 HEARTBEAT 事件）。
+    _, _, row_epoch, _, _ = _session_row()
+    assert row_epoch == 1
+    assert [e[0] for e in _session_events()] == ["ACTIVATED"]
+
+
+def test_verify_never_renews_an_expired_session(client: TestClient) -> None:
+    """过期校验在续期之前失败：终态不复活，也不留下任何续期写。"""
+    import pytest
+
+    from app.customer_auth import SessionFencingError, verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _expire_lease(customer["device_id"])
+
+    with pg_transaction() as conn, pytest.raises(SessionFencingError) as caught:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    assert caught.value.code == "SESSION_EXPIRED"
+    lapsed_lease, _ = _session_activity()
+    assert datetime.fromisoformat(lapsed_lease) <= datetime.now(UTC) + timedelta(seconds=1)
 
 
 # ---------------------------------------------------------------------------
@@ -1854,3 +1977,251 @@ def test_hundred_concurrent_logins_keep_device_epochs_independent(
             client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"])).status_code
             == 200
         )
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-03 会话 P1 批：S1 活动节流分离 / S2 租约防回缩（真库行为面）
+# ---------------------------------------------------------------------------
+
+
+def _age_activity(device_id: str, age: timedelta) -> None:
+    """把 last_seen_at 改写为 now - age（模拟「上次活动已过去一段时间」）。
+
+    created_at 同步前移：刚建立的会话裸写过去的活动时间会落在 created_at
+    之前，触发 last_seen_not_before_created CHECK（A2 评审指出）。
+    """
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET last_seen_at = (now() - %s::interval), "
+            "created_at = least(created_at::timestamptz, "
+            "(now() - %s::interval - interval '1 minute'))::text "
+            "WHERE device_id = %s",
+            (age, age, device_id),
+        )
+
+
+def _session_timing_triple() -> tuple[str, str | None, str]:
+    """(lease_until, last_seen_at, updated_at) 三元组：字段级不写断言用。"""
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT lease_until, last_seen_at, updated_at FROM customer_session_state"
+        ).fetchone()
+    assert row is not None, "expected exactly one session row"
+    return str(row[0]), str(row[1]) if row[1] is not None else None, str(row[2])
+
+
+def test_verify_updates_activity_without_renewal(client: TestClient) -> None:
+    """S1：未到续期阈值但活动超过 5 分钟 → 只写活动时间，租约原样。"""
+    from app.customer_auth import verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    # 租约新鲜（不触发续期）；活动时间老化 6 分钟（超出 5 分钟活动窗口）。
+    _age_expiry(customer["device_id"], remaining=timedelta(days=7))
+    _age_activity(customer["device_id"], age=timedelta(minutes=6))
+    lease_before, _ = _session_activity()
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    lease_after, seen_after = _session_activity()
+    assert seen_after is not None
+    assert datetime.fromisoformat(seen_after).astimezone(UTC) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+    assert lease_after == lease_before
+
+
+def test_verify_writes_nothing_within_activity_window(client: TestClient) -> None:
+    """S1/r6：5 分钟窗口内的连续请求第二次 verify 零写入（字段级断言）。"""
+    from app.customer_auth import verify_session_context
+    from app.db_pg import pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _age_expiry(customer["device_id"], remaining=timedelta(days=7))
+    _age_activity(customer["device_id"], age=timedelta(minutes=6))
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    first = _session_timing_triple()
+    with pg_transaction() as conn:
+        verify_session_context(conn, presentation_session_token=customer["session_token"])
+    second = _session_timing_triple()
+    assert second == first
+
+
+def test_online_predicate_follows_activity_window(client: TestClient) -> None:
+    """S1 联动：活跃会话（活动 1 分钟前）在线；11 分钟前离线（10 分钟窗口）。"""
+    from app.customer_session_service import ONLINE_SESSION_PREDICATE
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    device = customer["device_id"]
+
+    def _online() -> bool:
+        with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT (" + ONLINE_SESSION_PREDICATE + ") "
+                "FROM customer_session_state css WHERE css.device_id = %s",
+                (device,),
+            ).fetchone()
+        assert row is not None
+        return bool(row[0])
+
+    _age_activity(device, age=timedelta(minutes=1))
+    assert _online() is True
+    _age_activity(device, age=timedelta(minutes=11))
+    assert _online() is False
+
+
+def test_heartbeat_never_shortens_a_longer_lease(client: TestClient) -> None:
+    """S2：现值租约长于 now+7d（时钟回拨场景）时心跳不得缩短它。"""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    _age_expiry(customer["device_id"], remaining=timedelta(days=30))
+    _age_activity(customer["device_id"], age=timedelta(minutes=1))
+    response = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert response.status_code == 200, response.text
+    lease_after, _ = _session_activity()
+    remaining = datetime.fromisoformat(lease_after).astimezone(UTC) - datetime.now(UTC)
+    assert remaining > timedelta(days=29), lease_after
+
+
+def test_login_reservation_refund_is_window_scoped(client: TestClient) -> None:
+    """S3/A2 评审：返还精确匹配占位窗口——旧窗口占位不串扰新窗口计数。"""
+    from app.customer_device_service import highest_device_domain_key, keyed_digest
+    from app.db_pg import pg_transaction
+    from app.security_rate_limit import (
+        DIMENSION_LOGIN_ACCOUNT,
+        consume_rate_limit,
+        refund_rate_limit,
+    )
+
+    _, key = highest_device_domain_key()
+    identifier = keyed_digest(key, "password:refund-window-fixture")
+    old_window = datetime(2026, 11, 3, 8, 0, 0, tzinfo=UTC)
+    late_window = datetime(2026, 11, 3, 9, 0, 0, tzinfo=UTC)
+    with pg_transaction() as conn:
+        first = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=old_window,
+        )
+        assert first.allowed and first.hit_count == 1
+        # 窗口翻篇后另一笔真实失败落账（新窗口计数 1）。
+        second = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=late_window,
+        )
+        assert second.allowed and second.hit_count == 1
+        assert second.window_start != first.window_start
+        # 旧窗口占位返还：只匹配旧窗口 → 无行更新，新窗口计数不受串扰。
+        assert (
+            refund_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=identifier,
+                window_start=first.window_start,
+                now=late_window,
+            )
+            is False
+        )
+        with_memory = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=identifier,
+            limit=5,
+            window_seconds=1800,
+            now=late_window,
+        )
+        assert with_memory.hit_count == 2
+        # 新窗口的真实计数可正常返还。
+        assert (
+            refund_rate_limit(
+                conn,
+                dimension=DIMENSION_LOGIN_ACCOUNT,
+                identifier=identifier,
+                window_start=second.window_start,
+                now=late_window,
+            )
+            is True
+        )
+
+
+def test_login_admission_bounds_concurrent_verification(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 行为面：并发请求超过额度时，实际进入验密的数量被原子占位拦住。
+
+    直接驱动路由的准入门（_reserve_login_admission）：6 个并发线程在限额
+    2 下竞争，只有 2 个拿到占位，其余 429——v2 peek+失败扣减设计的窗口
+    在真库上闭合。
+    """
+    import threading
+
+    from app.customer_auth_routes import _reserve_login_admission
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "2")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+    barrier = threading.Barrier(6)
+    outcomes: list[object] = []
+    lock = threading.Lock()
+
+    def attempt(n: int) -> None:
+        barrier.wait()
+        try:
+            # 同一账号：六个线程争抢同一个预算桶，才能证明原子占位拦并发。
+            _reserve_login_admission("race-user")
+            with lock:
+                outcomes.append("admitted")
+        except HTTPException as exc:
+            with lock:
+                outcomes.append(exc.status_code)
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert outcomes.count("admitted") == 2
+    assert outcomes.count(429) == 4
+
+
+def test_login_reservation_refund_rolls_back_with_minting(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 行为面：占位与返还同事务——铸造失败一起回滚，占位保留。"""
+    from app.customer_auth_routes import (
+        _login_account_identifier,
+        _refund_login_reservation,
+        _reserve_login_admission,
+    )
+    from app.db_pg import pg_transaction
+    from app.security_rate_limit import DIMENSION_LOGIN_ACCOUNT
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "5")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+
+    username = "rollback-mint-fixture"
+    admission_window = _reserve_login_admission(username)
+
+    def _counter() -> int:
+        with pg_transaction() as conn:
+            row = conn.execute(
+                "SELECT hit_count FROM security_rate_limit_counters WHERE bucket_key = %s",
+                (DIMENSION_LOGIN_ACCOUNT + "|" + _login_account_identifier(username),),
+            ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    assert _counter() == 1
+    # 铸造事务在返还后失败：返还与铸造同事务，回滚后占位保留为已消耗。
+    with pytest.raises(RuntimeError):
+        with pg_transaction() as conn:
+            _refund_login_reservation(conn, username, window_start=admission_window)
+            raise RuntimeError("mint failed after refund")
+    assert _counter() == 1

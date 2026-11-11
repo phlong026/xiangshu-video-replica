@@ -134,7 +134,6 @@ const live = vi.hoisted(() => ({
     }),
   ),
   extractViralCopy: vi.fn(),
-  startViralCopyExtraction: vi.fn(),
   awaitScriptFromAudioTask: vi.fn(),
   // 爆款正文交付与计费点：默认未命中，具体用例再覆盖。
   claimExtractedViralCopy: vi.fn(async (): Promise<string | null> => null),
@@ -231,6 +230,13 @@ const api = vi.hoisted(() => ({
     },
   })),
   uploadMaterial: vi.fn(),
+  // 爆款列表：恢复/路由用例路过 ViralPage 时必须拿到数组，不能是 undefined。
+  listViralVideos: vi.fn(async () => ({
+    items: [],
+    total: 0,
+    hasMore: false,
+    nextCursor: null,
+  })),
   getOralPrice: vi.fn(async () => ({
     unit_price_fen: 500,
     estimated_credits: 500,
@@ -241,7 +247,16 @@ const api = vi.hoisted(() => ({
   createOralTask: vi.fn(),
   createIndependentVideoTask: vi.fn(),
   listUserSavedPrompts: vi.fn(async (): Promise<unknown[]> => []),
-  listMaterials: vi.fn(),
+  listMaterials: vi.fn(
+    async (): Promise<{
+      items: unknown[];
+      page?: number;
+      page_size?: number;
+      total: number;
+      hasMore?: boolean;
+      nextCursor?: string | null;
+    }> => ({ items: [], total: 0 }),
+  ),
   getAssetDownloadUrl: vi.fn(),
   getLatestScriptRewriteTask: vi.fn(async (): Promise<unknown> => null),
   getLatestProjectShotCards: vi.fn(async () => null),
@@ -763,7 +778,6 @@ describe("V1.4 workspace integration", () => {
     window.localStorage.clear();
     vi.clearAllMocks();
     extractionProbe.desktop = false;
-    live.startViralCopyExtraction.mockReset();
     live.awaitScriptFromAudioTask.mockReset();
     live.loadLatestScriptFromUpload.mockResolvedValue(null);
     live.loadProjectDraft.mockReset();
@@ -2425,11 +2439,9 @@ describe("V1.4 workspace integration", () => {
           "copy",
           expect.any(String),
         );
-        // Web 端 claim-first：先取共享文案，本次未命中（分文不扣）才回落导入。
-        expect(api.claimViralCopy).toHaveBeenCalledWith(
-          "douyin",
-          "fresh-native",
-        );
+        // 工作台两端统一直接服务端导入（WP3）：不前置 claim——新链接尚无 owner
+        // 旁路，claim 只会 404；命中共享缓存由入队秒回承担，交付走转写完成后的 claim。
+        expect(api.claimViralCopy).not.toHaveBeenCalled();
         expect(await screen.findByLabelText("来源原文")).toHaveValue(
           "新来源的提取结果",
         );
@@ -2437,7 +2449,7 @@ describe("V1.4 workspace integration", () => {
       },
     );
 
-    it("Web 端提取文案命中共享缓存：扣费回填并跳过整次导入", async () => {
+    it("工作台提取文案命中共享缓存：入队秒回任务，交付走完成后的 claim", async () => {
       const source = {
         ...createReviewData().videos[0],
         id: "cached-viral",
@@ -2455,11 +2467,24 @@ describe("V1.4 workspace integration", () => {
         errors: [],
       });
       live.loadCloudDraft.mockResolvedValue(undefined);
-      api.claimViralCopy.mockResolvedValueOnce({
-        text: "共享缓存里的文案",
-        updatedAt: "2026-09-28T10:00:00Z",
-        billing: { charged: 20, unit: "call", deduped: false, billable: true },
+      // 入队时服务端共享缓存命中：导入任务秒回 SUCCEEDED，正文不在任务接口下发。
+      api.createViralImportTask.mockResolvedValue({
+        taskId: "cached-import",
+        status: "SUCCEEDED",
+        projectId: "cached-project",
+        sourceAssetId: "cached-asset",
+        canTranscribe: true,
       });
+      live.extractScriptFromUpload.mockResolvedValue({
+        // mock 工厂签名是 { text: string }；空串表示正文不下发，额外的
+        // viralSource/copyClaimRequired 字段运行时照常驱动 claim 分支。
+        text: "",
+        taskId: "cached-import",
+        status: "SUCCEEDED",
+        viralSource: { platform: "douyin", videoId: "cached-native" },
+        copyClaimRequired: true,
+      } as unknown as { text: string });
+      live.claimExtractedViralCopy.mockResolvedValue("共享缓存里的文案");
       render(
         <StudioWorkspace
           currentUser={reviewUser}
@@ -2470,21 +2495,27 @@ describe("V1.4 workspace integration", () => {
         await screen.findByRole("button", { name: "提取文案：已有文案的爆款" }),
       );
       await waitFor(() =>
-        expect(api.claimViralCopy).toHaveBeenCalledWith(
+        expect(api.createViralImportTask).toHaveBeenCalledWith(
           "douyin",
           "cached-native",
+          "copy",
+          expect.any(String),
         ),
       );
-      // 命中即秒回：不建导入任务、不走转写。
-      expect(api.createViralImportTask).not.toHaveBeenCalled();
-      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
-      // 文案已回填并进入文案工坊。
+      // 工作台不前置 claim（WP3 统一）；交付点是转写完成后的 claimExtractedViralCopy。
+      await waitFor(() =>
+        expect(live.claimExtractedViralCopy).toHaveBeenCalledWith(
+          "douyin",
+          "cached-native",
+          "cached-import",
+        ),
+      );
       expect(await screen.findByLabelText("来源原文")).toHaveValue(
         "共享缓存里的文案",
       );
     });
 
-    it("Web 端读取计费口径失败：如实提示且不回落导入", async () => {
+    it("工作台导入受理失败：如实提示且不建转写任务", async () => {
       const source = {
         ...createReviewData().videos[0],
         id: "unpriced-viral",
@@ -2502,7 +2533,7 @@ describe("V1.4 workspace integration", () => {
         errors: [],
       });
       live.loadCloudDraft.mockResolvedValue(undefined);
-      api.claimViralCopy.mockRejectedValueOnce(
+      api.createViralImportTask.mockRejectedValueOnce(
         new Error("爆款文案尚未配置价格"),
       );
       render(
@@ -2514,11 +2545,11 @@ describe("V1.4 workspace integration", () => {
       fireEvent.click(
         await screen.findByRole("button", { name: "提取文案：未定价的爆款" }),
       );
-      // 失败如实提示；不回落导入，避免白花一次转写费。
+      // 失败如实提示；不建转写任务，避免白花一次转写费。
       expect(
         await screen.findByText("爆款文案尚未配置价格"),
       ).toBeInTheDocument();
-      expect(api.createViralImportTask).not.toHaveBeenCalled();
+      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
     });
 
     it("提取文案后往返视频复刻不会被空项目版本覆盖", async () => {
@@ -2766,17 +2797,22 @@ describe("V1.4 workspace integration", () => {
         live.loadStudioData.mockResolvedValue(emptyStudioData);
         live.loadCloudDraft.mockResolvedValue(undefined);
         let complete!: (value: unknown) => void;
-        const receipt = {
-          kind: "cache",
+        const claimed = {
           text: "新视频原文",
-          billing: { charged: 0 },
+          updatedAt: "t",
+          billing: {
+            charged: 0,
+            unit: "call",
+            deduped: false,
+            billable: false,
+          },
         };
-        live.startViralCopyExtraction.mockImplementation(() =>
+        api.claimViralCopy.mockImplementation(() =>
           delayed
             ? new Promise((resolve) => {
                 complete = resolve;
               })
-            : Promise.resolve(receipt),
+            : Promise.resolve(claimed),
         );
         render(
           <StudioWorkspace
@@ -2787,12 +2823,12 @@ describe("V1.4 workspace integration", () => {
         await waitFor(() => expect(extractionProbe.current).not.toBeNull());
         act(() => {
           currentExtractionContext().patchDraft({ sourceId: "viral-new" });
-          currentExtractionContext().extractViralCopy({
-            platformKey: "douyin",
-            nativeId: "new",
-          });
+          currentExtractionContext().extractViralCopy(
+            { platformKey: "douyin", nativeId: "new" },
+            { onCacheMiss: () => undefined },
+          );
         });
-        if (delayed) await act(async () => complete(receipt));
+        if (delayed) await act(async () => complete(claimed));
         expect(await screen.findByLabelText("来源原文")).toHaveValue(
           "新视频原文",
         );
@@ -2807,7 +2843,7 @@ describe("V1.4 workspace integration", () => {
             ),
           { timeout: 4000 },
         );
-        expect(live.startViralCopyExtraction).toHaveBeenCalledTimes(1);
+        expect(api.claimViralCopy).toHaveBeenCalledTimes(1);
       },
     );
 
@@ -2817,10 +2853,10 @@ describe("V1.4 workspace integration", () => {
       extractionProbe.desktop = true;
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
-      live.startViralCopyExtraction.mockResolvedValue({
-        kind: "cache",
+      api.claimViralCopy.mockResolvedValue({
         text: "缓存命中的原文",
-        billing: { charged: 0 },
+        updatedAt: "t",
+        billing: { charged: 0, unit: "call", deduped: false, billable: false },
       });
       render(
         <StudioWorkspace
@@ -2831,11 +2867,14 @@ describe("V1.4 workspace integration", () => {
       await waitFor(() => expect(extractionProbe.current).not.toBeNull());
       await act(async () => {
         currentExtractionContext().patchDraft({ sourceId: "viral-claimed" });
-        currentExtractionContext().extractViralCopy({
-          title: "乡墅案例",
-          platformKey: "douyin",
-          nativeId: "claimed",
-        });
+        currentExtractionContext().extractViralCopy(
+          {
+            title: "乡墅案例",
+            platformKey: "douyin",
+            nativeId: "claimed",
+          },
+          { onCacheMiss: () => undefined },
+        );
       });
 
       await waitFor(() =>
@@ -2855,15 +2894,15 @@ describe("V1.4 workspace integration", () => {
       expect(screen.queryByText(/缺少来源项目/)).toBeNull();
     });
 
-    it.each(["cache", "task", "error"])(
-      "快速换源后忽略旧桌面%s响应",
+    it.each(["cache", "error"])(
+      "快速换源后忽略旧 claim %s 响应",
       async (kind) => {
         extractionProbe.desktop = true;
         live.loadStudioData.mockResolvedValue(emptyStudioData);
         live.loadCloudDraft.mockResolvedValue(undefined);
         let complete!: (value: unknown) => void;
         let fail!: (cause: Error) => void;
-        live.startViralCopyExtraction.mockImplementation(
+        api.claimViralCopy.mockImplementation(
           () =>
             new Promise((resolve, reject) => {
               complete = resolve;
@@ -2878,10 +2917,10 @@ describe("V1.4 workspace integration", () => {
         );
         act(() => {
           currentExtractionContext().patchDraft({ sourceId: "viral-a" });
-          currentExtractionContext().extractViralCopy({
-            platformKey: "douyin",
-            nativeId: "a",
-          });
+          currentExtractionContext().extractViralCopy(
+            { platformKey: "douyin", nativeId: "a" },
+            { onCacheMiss: () => undefined },
+          );
         });
         act(() =>
           currentExtractionContext().patchDraft({ sourceId: "viral-b" }),
@@ -2889,16 +2928,16 @@ describe("V1.4 workspace integration", () => {
         await act(async () =>
           kind === "error"
             ? fail(new Error("旧源失败"))
-            : complete(
-                kind === "task"
-                  ? {
-                      kind,
-                      taskId: "a-task",
-                      projectId: "a-project",
-                      sourceAssetId: "a-asset",
-                    }
-                  : { kind, text: "A原文", billing: { charged: 0 } },
-              ),
+            : complete({
+                text: "A原文",
+                updatedAt: "t",
+                billing: {
+                  charged: 0,
+                  unit: "call",
+                  deduped: false,
+                  billable: false,
+                },
+              }),
         );
         expect(currentExtractionContext().state.draft.sourceId).toBe("viral-b");
         expect(currentExtractionContext().state.draft.script.original).not.toBe(
@@ -2909,16 +2948,10 @@ describe("V1.4 workspace integration", () => {
       },
     );
 
-    it("桌面任务身份领取一次并防恢复路径重复领取", async () => {
+    it("共享任务身份领取一次并防恢复路径重复领取", async () => {
       extractionProbe.desktop = true;
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
-      live.startViralCopyExtraction.mockResolvedValue({
-        kind: "task",
-        taskId: "owned",
-        projectId: "project-new",
-        sourceAssetId: "asset-new",
-      });
       live.awaitScriptFromAudioTask.mockResolvedValue({
         text: null,
         taskId: "owned",
@@ -2941,19 +2974,20 @@ describe("V1.4 workspace integration", () => {
         />,
       );
       act(() => {
-        currentExtractionContext().patchDraft({ sourceId: "viral-new" });
-        currentExtractionContext().extractViralCopy({
-          platformKey: "douyin",
-          nativeId: "new",
+        currentExtractionContext().patchDraft({
+          sourceId: "viral-new",
+          projectId: "project-new",
+          sourceAssetId: "asset-new",
         });
+        // 统一链路（WP3）后 task 回执来自服务端导入转写，入口与上传链路同通道。
+        currentExtractionContext().extractScriptFromUpload(
+          "project-new",
+          "asset-new",
+          "owned",
+        );
       });
       expect(await screen.findByLabelText("来源原文")).toHaveValue(
         "已领取正文",
-      );
-      await waitFor(() =>
-        expect(live.loadLatestScriptFromUpload).toHaveBeenCalledWith(
-          "project-new",
-        ),
       );
       expect(live.claimExtractedViralCopy).toHaveBeenCalledExactlyOnceWith(
         "douyin",
@@ -4615,7 +4649,8 @@ describe("视频生成（C2 独立创作）", () => {
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      updatedAt: "2026-10-12T00:00:00Z",
+      // 必须用窗口内的相对时间：硬编码日期会随日历流逝跌出 7 天提示窗口。
+      updatedAt: freshUpdatedAt(),
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
     render(

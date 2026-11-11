@@ -3,7 +3,7 @@
 4–180 秒源视频 → 一段完整复刻提示词 + 逐句口播 + 全片摘要（无分镜卡）。
 与 analysis_tasks 刻意保持两个任务族：长视频单次 provider 调用可达十分钟以上，
 需要独立的租约与调用超时；完成载荷也没有分镜卡。隔离演进，避免触碰复刻
-付费主链路（4–15 秒拆解）的状态机与结算口径。
+付费主链路（4–30 秒拆解）的状态机与结算口径。
 
 v1 不建 attempt 历史表：失败原因保留在任务行上直到下一次尝试覆盖；若需要
 attempt 级留痕，参照 analysis_task_attempts 的迁移与读写补齐。
@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -38,7 +37,7 @@ from app.analysis_routes import (
     signed_video_url_for_provider,
 )
 from app.auth import CurrentUser, Database
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.media import (
     DURATION_ROUNDING_TOLERANCE_SECONDS,
     MAX_REPLICA_PROMPT_DURATION_SECONDS,
@@ -50,6 +49,7 @@ from app.permissions import (
     write_audit,
 )
 from app.storage import StorageAdapter
+from app.task_lease import claim_replica_prompt_task
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +113,14 @@ class ReplicaPromptTaskWork:
     storage: StorageAdapter | None = None
 
 
-def load_replica_prompt_task(conn: BusinessConnection, task_id: str) -> sqlite3.Row:
+def load_replica_prompt_task(conn: BusinessConnection, task_id: str) -> BusinessRow:
     row = conn.execute("SELECT * FROM replica_prompt_tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
         raise HTTPException(
             status_code=404,
             detail={"code": "REPLICA_PROMPT_TASK_NOT_FOUND"},
         )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def find_latest_replica_prompt_task(
@@ -128,7 +128,7 @@ def find_latest_replica_prompt_task(
     *,
     project_id: str,
     asset_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT * FROM replica_prompt_tasks
@@ -138,14 +138,14 @@ def find_latest_replica_prompt_task(
         """,
         (project_id, asset_id),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def find_latest_replica_prompt_version(
     conn: BusinessConnection,
     *,
     project_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT id, project_id, asset_id, kind, version_number, payload_json,
@@ -157,7 +157,7 @@ def find_latest_replica_prompt_version(
         """,
         (project_id, REPLICA_PROMPT_KIND),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def enqueue_replica_prompt_task(
@@ -168,7 +168,7 @@ def enqueue_replica_prompt_task(
     created_by_user_id: str,
     duration_seconds: float,
     request_id: str | None = None,
-) -> tuple[sqlite3.Row, bool]:
+) -> tuple[BusinessRow, bool]:
     """入队一个长视频拆解任务；同资产的活跃任务直接复用，不重复计费."""
     existing = conn.execute(
         """
@@ -181,7 +181,7 @@ def enqueue_replica_prompt_task(
         (project_id, asset_id),
     ).fetchone()
     if existing is not None:
-        return cast(sqlite3.Row, existing), False
+        return cast(BusinessRow, existing), False
 
     task_id = str(uuid4())
     conn.execute(
@@ -206,7 +206,7 @@ def enqueue_replica_prompt_task(
         accept_operation(
             conn, user_id=created_by_user_id, service="analysis", source_id=task_id, units=1
         )
-        return cast(sqlite3.Row, inserted), True
+        return cast(BusinessRow, inserted), True
 
     concurrent = conn.execute(
         """
@@ -220,7 +220,7 @@ def enqueue_replica_prompt_task(
     ).fetchone()
     if concurrent is None:
         raise RuntimeError("replica prompt task enqueue conflict left no active task")
-    return cast(sqlite3.Row, concurrent), False
+    return cast(BusinessRow, concurrent), False
 
 
 def acquire_replica_prompt_task(
@@ -228,63 +228,11 @@ def acquire_replica_prompt_task(
     *,
     worker_id: str,
 ) -> ReplicaPromptTaskLease | None:
-    now = datetime.now(UTC)
-    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
-    locked_until = (now + timedelta(minutes=REPLICA_PROMPT_TASK_LEASE_MINUTES)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    """租约 SQL 统一住在 app.task_lease（T7）；域凭据含项目/素材/时长。"""
     try:
-        # 过期 RUNNING 视为 worker 中断：置为可重试失败，终态写不进历史表
-        # （v1 无 attempt 历史），错误字段保留在任务行上供用户与客服查看。
-        conn.execute(
-            """
-            UPDATE replica_prompt_tasks
-            SET status = 'FAILED',
-                error_code = %s,
-                error_message_redacted = '长视频拆解任务执行中断，请重新开始。',
-                retryable = 1,
-                locked_by = NULL,
-                locked_until = NULL,
-                completed_at = %s,
-                updated_at = %s
-            WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
-            """,
-            (ERROR_INTERRUPTED, now_text, now_text, now_text),
+        row = claim_replica_prompt_task(
+            conn, worker_id=worker_id, lease_minutes=REPLICA_PROMPT_TASK_LEASE_MINUTES
         )
-        # 认领前清掉 PENDING 行上残留的旧失败字段：新尝试从干净状态开始。
-        conn.execute(
-            """
-            UPDATE replica_prompt_tasks
-            SET error_code = NULL, error_message_redacted = NULL,
-                failure_phase = NULL, retryable = 0
-            WHERE status = 'PENDING'
-              AND (error_code IS NOT NULL OR failure_phase IS NOT NULL)
-            """,
-        )
-        row = conn.execute(
-            """
-            UPDATE replica_prompt_tasks
-            SET status = 'RUNNING',
-                attempt = attempt + 1,
-                locked_by = %s,
-                locked_until = %s,
-                started_at = COALESCE(started_at, %s),
-                updated_at = %s,
-                error_code = NULL,
-                error_message_redacted = NULL,
-                failure_phase = NULL,
-                retryable = 0
-            WHERE id = (
-                SELECT id FROM replica_prompt_tasks
-                WHERE status = 'PENDING'
-                ORDER BY created_at, id
-                LIMIT 1
-            ) AND status = 'PENDING'
-            RETURNING *
-            """,
-            (worker_id, locked_until, now_text, now_text),
-        ).fetchone()
-        conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -554,7 +502,7 @@ def cancel_replica_prompt_task(
     *,
     task_id: str,
     actor: CurrentUser,
-) -> sqlite3.Row:
+) -> BusinessRow:
     """取消排队中/运行中的长视频拆解并释放预扣.
 
     状态 CHECK 没有 CANCELLED：与拆解同口径，取消落为 FAILED + 专用 error_code，
@@ -606,10 +554,10 @@ def cancel_replica_prompt_task(
 
     finish_source(conn, task_id, units=0, succeeded=False, cancelled=True)
     conn.commit()
-    return cast(sqlite3.Row, updated)
+    return cast(BusinessRow, updated)
 
 
-def assert_replica_prompt_enqueue_allowed(asset: sqlite3.Row, *, measured_duration: float) -> None:
+def assert_replica_prompt_enqueue_allowed(asset: BusinessRow, *, measured_duration: float) -> None:
     """任务入口的时长守护：与上传门禁同口径（4–180 秒 + 舍入容差）."""
     if not is_reference_video_asset(asset):
         raise HTTPException(

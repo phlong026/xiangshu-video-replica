@@ -309,10 +309,9 @@ def _summarize_sync_error(exc: Exception) -> str:
     return text.splitlines()[0][:300] if text else type(exc).__name__
 
 
-# CW-030 移除了 Worker 的 SQLite 业务入口，CW-060 的反向消费者注册表把历史
-# app.db 导入面冻结成只减不增的清单（该守卫按源码子串扫描，注释里出现同样的
-# 字面量也会被计入）。本模块是 CW-068 新增的，从第一天起就只有 PG lane ——
-# 因此这里刻意不存在 SQLite 事务入口。
+# CW-030 移除了 Worker 的 SQLite 业务入口；T3 批 C-4（2026-11-01）删除了
+# app.db 与其 CW-060 冻结守卫后，本注释仅陈述事实：本模块自 CW-068 创建
+# 起就只有 PG lane，不存在也不得引入 SQLite 事务入口。
 
 
 def _pg_round(*, worker_id: str) -> int:  # pragma: no cover - process loop

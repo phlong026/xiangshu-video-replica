@@ -14,7 +14,6 @@ import {
   createScriptFromAudioTask,
   createScriptVersion,
   createVideoUploadIntent,
-  createViralCopyExtraction,
   defaultBatchProvider,
   deleteGenerationBatch,
   deleteOralTask,
@@ -67,7 +66,6 @@ import {
   saveStudioDraft,
   saveStudioSavedScript,
   uploadReferenceVideo,
-  type ViralCopyBilling,
   type ViralPlatform,
   type ViralVideoItem,
   verifyPublishAccount,
@@ -95,11 +93,6 @@ import type {
   StudioVoice,
 } from "./types";
 import { readAppliedOptimization } from "./usePromptOptimization";
-import {
-  awaitViralCacheReady,
-  ensureViralCacheForVideo,
-  extractViralAudio,
-} from "./viralCache";
 
 const projectLimit = 24;
 const personLimit = 8;
@@ -1872,66 +1865,6 @@ export async function awaitScriptFromAudioTask(
     );
   }
   throw new Error("文案仍在后台提取，请返回文案工坊恢复本次任务。");
-}
-
-/** 文案提取的受理结果：命中共享缓存时直接带文案，否则带待轮询的任务与草稿归属。 */
-export type ViralCopyReceipt =
-  | { kind: "cache"; text: string; billing: ViralCopyBilling }
-  | { kind: "task"; projectId: string; sourceAssetId: string; taskId: string };
-
-/**
- * 桌面端爆款文案提取：先取共享文案（命中即秒回正文），未命中才本地抽音轨上传。
- *
- * 计费以服务端 claim 回执为准（2026-10-08 口径：转写者本人免费，非转写者首次获取扣一次）；
- * 秒回省下的是整次转写，未命中时走本地抽音轨上传，转写费由 ASR 科目另计。
- *
- * 与工作台上传链路的区别只有「素材从哪来」：这里上传的是客户端自己从**本地缓存的
- * 原视频**里抽出的单声道音轨，平台因此不必为文案留存原片（设计 §5.3 / §8）。
- *
- * 调用前必须确认这是桌面端（`cacheAvailable()`）：Web 端没有本地缓存，走不了这条
- * 链路，调用方应退回既有的服务端拉取路径。
- */
-export async function startViralCopyExtraction(video: {
-  platformKey: string;
-  nativeId: string;
-}): Promise<ViralCopyReceipt> {
-  const { platformKey, nativeId } = video;
-  // 计费点前移到这里：取文案就是付费动作，读不到计费口径就不该往下走（继续下去
-  // 会白花一次转写费）。失败照实抛出，由调用方提示用户。
-  const claimed = await claimViralCopy(platformKey as ViralPlatform, nativeId);
-  if (claimed.text) {
-    return { kind: "cache", text: claimed.text, billing: claimed.billing };
-  }
-  await ensureViralCacheForVideo(video);
-  await awaitViralCacheReady(platformKey, nativeId);
-  const audio = await extractViralAudio(platformKey, nativeId);
-  const accepted = await createViralCopyExtraction(
-    platformKey as ViralPlatform,
-    nativeId,
-    audio,
-  );
-  // 与获取之间的竞态：别的用户刚好写入了结果，服务端扣费后直接带文案回来。
-  if (accepted.text) {
-    return {
-      kind: "cache",
-      text: accepted.text,
-      billing: accepted.billing ?? {
-        charged: 0,
-        unit: "call",
-        deduped: false,
-        billable: true,
-      },
-    };
-  }
-  if (!accepted.projectId || !accepted.sourceAssetId || !accepted.taskId) {
-    throw new Error("文案提取任务缺少项目或素材结果");
-  }
-  return {
-    kind: "task",
-    projectId: accepted.projectId,
-    sourceAssetId: accepted.sourceAssetId,
-    taskId: accepted.taskId,
-  };
 }
 
 /**

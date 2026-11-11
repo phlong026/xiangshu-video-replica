@@ -150,7 +150,7 @@ def refresh_viral_video(
                             "message": "视频不存在。",
                         },
                     )
-                # 用下标取列：行对象是 db_portable._NamedRow，它仿 sqlite3.Row 只提供
+                # 用下标取列：行对象是 db_portable._NamedRow，它仿 BusinessRow 只提供
                 # row["col"] 与 keys()，没有 .get()（全仓无此写法）。列由
                 # 20260913T1600_shared_viral_media 建立在 viral_videos 上，SELECT * 必含。
                 if row["deleted_at"] is not None:

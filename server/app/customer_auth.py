@@ -26,6 +26,11 @@ verifier is deliberately minimal and self-contained:
   identity mismatch or shortened lease answers ``SESSION_REPLACED`` so a
   request can never commit after a switch. A heartbeat may extend the same
   session during slow business requests; logout/revocation still fences it.
+- after a fully successful verification the session expiry slides forward
+  (``renew_session_expiry``, throttled to one write per hour per session):
+  the 7-day sliding validity (2026-11-02 契约变更) replaced SES-01's
+  90-second lease/heartbeat pair, whose terminal lapse turned any
+  ≥90-second server disruption into a mass logout of every live user.
 
 Timestamps: PostgreSQL is the only trusted clock (SES-01) — the lease
 judgement samples ``SELECT clock_timestamp()`` after the row lock, so a
@@ -80,10 +85,13 @@ class CustomerSessionContext:
 
 
 # SELECT column order: (user_id, activation_code_id, device_id, session_id,
-# session_epoch, lease_until) — mirrors the session-service row probe.
+# session_epoch, lease_until, token_digest, last_seen_at) — mirrors the
+# session-service row probe. last_seen_at 只服务续期的活动节流判定，追加在
+# 尾部以保持既有下标稳定（新列允许 NULL，见 20261102T0900 迁移）。
 _ROW_SQL = (
     "SELECT user_id, activation_code_id, device_id, session_id, "
-    "session_epoch, lease_until FROM customer_session_state"
+    "session_epoch, lease_until, token_digest, last_seen_at "
+    "FROM customer_session_state"
 )
 
 
@@ -115,6 +123,10 @@ def verify_session_context(
     answers a context the epoch cannot move until the caller commits — a
     request whose expectations were formed before a switch observes the
     bump and is fenced out instead of committing over the new session.
+
+    成功通过全部校验后附带一次节流续期（``renew_session_expiry``）：把
+    ``lease_until`` 滑动到 now + 7 天，作为 7 天滑动有效期契约的服务端
+    续命点；校验失败的请求不留下任何续期写。
     """
     digests = _token_digests(presentation_session_token)
     row = conn.execute(
@@ -211,11 +223,24 @@ def verify_session_context(
     if activation_code_id is None and (str(device_row[1]) != user_id or device_row[2] is not None):
         raise _replaced("The device does not belong to this registered customer.")
 
+    # 会话续期（7 天滑动有效期的续命点）：全部校验通过后才滑动 lease_until，
+    # 失败路径绝不留下续期写。函数内导入与 customer_device_service 引
+    # revoke_session 同因——customer_session_service 依赖本模块的 digest
+    # 工具族，模块级导入会成环。
+    from app.customer_session_service import renew_session_expiry
+
+    renewed_expiry = renew_session_expiry(
+        conn,
+        session_id=session_id,
+        lease_until=_as_utc(lease_until_raw),
+        last_seen_at=_as_utc(str(row[7])) if row[7] is not None else None,
+        now=now,
+    )
     return CustomerSessionContext(
         user_id=user_id,
         activation_code_id=activation_code_id,
         device_id=device_id,
         session_id=session_id,
         session_epoch=session_epoch,
-        lease_until=lease_until_raw,
+        lease_until=renewed_expiry or lease_until_raw,
     )

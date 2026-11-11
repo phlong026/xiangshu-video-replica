@@ -515,8 +515,9 @@ def test_dashboard_and_statistics_share_settled_financial_facts(
     # Zero cost is configured, NULL is not。本用例只为 analysis 配了成本单价，故计数 =
     # 全部对客收费科目 - analysis。其中含五个爆款科目（viral_search /
     # viral_search_refresh / viral_statistics / viral_detail / viral_copy，均未配置
-    # 费率 = NULL），所以是 17。
-    assert payload["todos"]["unconfigured_rates"] == 17
+    # 费率 = NULL），加上 16-30 秒长档科目 video_768p_long（本场景未种子，同样
+    # 未配置），所以是 18。
+    assert payload["todos"]["unconfigured_rates"] == 18
 
     with psycopg.connect(dashboard_pg_dsn) as raw:
         _billing_fact(raw, when=lower, revenue=None, costs=("1",))

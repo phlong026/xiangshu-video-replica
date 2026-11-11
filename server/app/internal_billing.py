@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from app.billing_catalog import generation_service_for
 from app.db_portable import BusinessConnection
 
 BillingOutcome = Literal["success", "failed", "cancelled"]
@@ -201,7 +202,8 @@ def reserve_internal_billing(
     if latest and latest["state"] == "PENDING" and billing_round != int(latest["billing_round"]):
         raise BillingInvariantError("previous billing round is still active")
     payload = json.loads(str(task["prompt_snapshot_json"] or "{}"))
-    service = "video_2k" if str(payload.get("resolution", "768P")).upper() == "2K" else "video_768p"
+    # 秒数取本次预留档位（=提交时长快照）；16-30 秒归长档科目，与报价/快照同源。
+    service = generation_service_for(str(payload.get("resolution", "768P")), seconds)
     try:
         accept_operation(
             conn,

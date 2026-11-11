@@ -569,6 +569,17 @@ def _candidate_cte() -> str:
            OR asset.content_type LIKE 'audio/%%'
            OR asset.content_type LIKE 'video/%%')
           AND NOT EXISTS (SELECT 1 FROM generation_tasks task WHERE task.result_asset_id=asset.id)
+          -- 爆款链接导入/文案上传的参考素材只服务本次复刻/转写流程：管线
+          -- 需要项目内资产作输入，但不作为用户素材沉淀（云盘素材只来自
+          -- 管理端采集）。标记写入见 viral_import（shared_content /
+          -- viral_copy_upload）。metadata_json 是 text 列，取键前显式转
+          -- jsonb；空串行经 NULLIF 兜底避免 cast 抛错。
+          AND COALESCE(
+              NULLIF(asset.metadata_json, '')::jsonb ->> 'shared_content', 'false'
+          ) != 'true'
+          AND COALESCE(
+              NULLIF(asset.metadata_json, '')::jsonb ->> 'viral_copy_upload', 'false'
+          ) != 'true'
 
         UNION ALL
 

@@ -246,7 +246,6 @@ function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
           <CustomerWorkspace
             user={session.user}
             sessionRuntime={session.sessionRuntime}
-            onManualHeartbeat={() => void session.sendHeartbeatNow()}
             onLogout={session.logout}
             store={store}
             // F-01 review (P0-3): the workspace calls this when it lost the

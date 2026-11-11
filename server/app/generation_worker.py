@@ -2258,8 +2258,8 @@ def main() -> None:
     from app.bootstrap import (
         assert_customer_production_security,
         check_customer_production_runtime_dependencies,
-        is_customer_production,
     )
+    from app.db_pg import is_customer_production
 
     assert_customer_production_security()
     if config.mode is DatabaseMode.POSTGRESQL:

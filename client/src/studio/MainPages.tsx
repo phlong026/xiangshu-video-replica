@@ -50,7 +50,7 @@ import {
   StudioDialog,
   Tabs,
 } from "./ui";
-import { cacheAvailable, extractLocalVideoAudio } from "./viralCache";
+import { extractLocalVideoAudio } from "./viralCache";
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
@@ -232,7 +232,6 @@ export function WorkbenchPage() {
     state,
     discardSavedDraft,
     extractScriptFromUpload,
-    extractViralCopy,
     refresh,
   } = useStudio();
   const accountId = user.id || "anonymous";
@@ -368,20 +367,11 @@ export function WorkbenchPage() {
       notify("该视频缺少可导入的平台标识");
       return;
     }
-    if (purpose === "copy" && !cacheAvailable()) {
-      // Web 端 claim-first：先取共享文案——命中即秒回填入（交付免费），跳过整次
-      // 导入；未命中回落导入 → 转写链路。
-      extractViralCopy(video, {
-        onCacheMiss: () =>
-          void beginViralImport(
-            video,
-            purpose,
-            providedIdempotencyKey,
-            requestAccount,
-          ),
-      });
-      return;
-    }
+    // 工作台粘贴链接两端统一直接服务端导入（2026-11 爆款链路改造 WP3）：
+    // 新粘贴的链接尚无本人的成功导入行，claim 的 owner 旁路不成立、视频也未
+    // 上架发布，claim-first 只会 404 断链。共享缓存的秒回发生在导入完成后的
+    // 转写任务入队（script-from-audio），不在导入入队本身；交付计费走转写
+    // 完成后的 claim。公开爆款卡片的 claim-first 在 ContentPages 侧执行。
     await beginViralImport(
       video,
       purpose,
@@ -894,7 +884,7 @@ export function WorkbenchPage() {
           </button>
           <input
             aria-label="视频链接"
-            placeholder="粘贴抖音或小红书视频链接"
+            placeholder="粘贴抖音 / 小红书 / 视频号分享链接"
             value={sourceLink}
             onChange={(event) => {
               linkOperationRef.current += 1;
@@ -945,8 +935,9 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          支持抖音、小红书的视频链接；其他平台请上传 MP4/MOV 文件；视频复刻支持
-          4-15 秒、200 MB 以内的视频，更长的视频会自动提取音轨用于提取文案
+          支持抖音、小红书、视频号的分享链接；其他平台请上传 MP4/MOV
+          文件；视频复刻支持 4-30 秒、200 MB
+          以内的视频，更长的视频会自动提取音轨用于提取文案
           （桌面端，原视频不上传）。
         </p>
         {linkState.status === "loading" && (
@@ -1211,11 +1202,11 @@ export function WorkbenchPage() {
                       </span>
                     </div>
                     <div className="studio-home-viral-actions">
-                      {/* 与爆款视频页卡片同一套 4–15s 门槛的主 CTA：一键复刻
+                      {/* 与爆款视频页卡片同一套 4–30s 门槛的主 CTA：一键复刻
                           直达详情页自动开跑；超限视频保留提取文案方向。 */}
                       {typeof video.durationMs === "number" &&
                         video.durationMs >= 4_000 &&
-                        video.durationMs <= 15_000 && (
+                        video.durationMs <= 30_000 && (
                           <Button
                             variant="primary"
                             aria-label={`一键复刻：${video.title}`}

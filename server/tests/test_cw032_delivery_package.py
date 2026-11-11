@@ -42,7 +42,6 @@ README = PACKAGE_DIR / "README.md"
 BOOTSTRAP = PACKAGE_DIR / "bootstrap-base-image.sh"
 ROLLOUT = REPO_ROOT / "deploy" / "customer-git-rollout.sh"
 NGINX = REPO_ROOT / "deploy" / "nginx" / "customer.conf.example"
-LOGGING_YAML = REPO_ROOT / "docker-compose.logging.yml"
 
 # The closed inventory of the formal delivery package.
 PACKAGE_FILES = ("compose.yaml", "README.md", "bootstrap-base-image.sh", "healthcheck.py")
@@ -328,14 +327,34 @@ def test_compose_caps_container_logs_with_json_file_rotation() -> None:
         )
 
 
-def test_readme_and_logging_stack_document_rotation_and_retention() -> None:
+def test_readme_documents_log_rotation_and_retention() -> None:
     # The rotation parameters are only honest if the operator manual states
     # where rotated files live, how to query recent lines, and what the
     # retention boundary is (json-file keeps ~50 MB per container; long-term
     # retention is explicitly out of package scope).
-    logging_yml = LOGGING_YAML.read_text(encoding="utf-8")
-    assert logging_yml.count("logging: *default-logging") == 3  # loki/promtail/grafana
+    # （根目录的 loki/promtail/logging compose 三件套已删：交付包清单与
+    # deploy/customer 从未包含它们，属早期运维实验残留——2026-10-31 T4。）
     readme = README.read_text(encoding="utf-8")
     assert "max-size" in readme and "max-file" in readme
     assert "/var/lib/docker/containers" in readme
     assert "logs --since" in readme and "logs -f" in readme
+
+
+def test_customer_rollout_excludes_historical_sqlite_tooling() -> None:
+    """客户交付链对历史 SQLite 工具的防回流闸门（原 CW-060 用例迁入）。
+
+    operator 打包器与 CW-060 守卫已随 SQLite lane 退役（2026-11-01 T3），
+    但客户构建侧的 fail-closed 检查保留：backup.py / server/scripts /
+    历史导入 CLI 一旦回流进客户镜像即失败。
+    """
+    rollout = ROLLOUT.read_text(encoding="utf-8")
+
+    assert 'rm -f "$BUILD_CTX/server/app/backup.py"' in rollout
+    assert "server/app/backup.py server/scripts" in rollout
+    assert "PRECHECK_FAILED: historical SQLite tooling" in rollout
+    assert "! test -e /opt/video-replica/server/app/backup.py" in rollout
+    assert "! test -e /opt/video-replica/server/scripts/sqlite_to_postgres.py" in rollout
+    assert "! test -e /opt/video-replica/server/scripts/reconcile_customer_billing.py" in rollout
+    assert "historical SQLite tooling in the customer image" in rollout
+    assert "COPY server/scripts" not in rollout
+    assert 'cp -a "$SOURCE/server/scripts"' not in rollout

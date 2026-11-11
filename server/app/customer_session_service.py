@@ -1,12 +1,14 @@
 """Independent customer device sessions with PostgreSQL leases and fencing.
 
-Each device owns one session row, token, monotonic epoch and 90-second lease.
-Login or recovery on one device never changes another device's session. The
-legacy switch endpoint remains compatible and follows the same policy.
-Heartbeat renews only a matching live session; logout expires only that session.
-Administrator account revocation can revoke all matching sessions, while device
-revocation is scoped to its own session. Events remain append-only and tokens
-are stored as keyed digests. Routes use the PostgreSQL clock.
+Each device owns one session row, token, monotonic epoch and a 7-day sliding
+expiry (``SESSION_VALIDITY_SECONDS``). Login or recovery on one device never
+changes another device's session. The legacy switch endpoint remains compatible
+and follows the same policy. Expiry slides forward on every verified request
+(``renew_session_expiry``) and on the legacy heartbeat endpoint, which is kept
+for older clients; logout expires only that session. Administrator account
+revocation can revoke all matching sessions, while device revocation is scoped
+to its own session. Events remain append-only and tokens are stored as keyed
+digests. Routes use the PostgreSQL clock.
 """
 
 from __future__ import annotations
@@ -25,9 +27,31 @@ from app.customer_device_service import (
     keyed_digest,
 )
 
-# SES-01: heartbeat every 30 seconds, lease 90 seconds (the frozen contract;
-# the activation route already grants the first lease with this constant).
-SESSION_LEASE_SECONDS = 90
+# 会话有效期（2026-11-02 契约变更，替代 SES-01 的「心跳 30 秒 / 租约 90 秒」）：
+# 登录、激活与每个通过 fence 校验的请求都把 lease_until 滑动到 now + 7 天。
+# 旧契约把任何 ≥90 秒的服务端断供（连接池耗尽、进程重启、PG 抖动）放大成
+# 全体用户终态登出；长滑动有效期下同类故障只表现为短暂请求失败，恢复后
+# 用户无感续用。旧版客户端仍在调 heartbeat 端点，该端点保留并同样按 7 天续期。
+SESSION_VALIDITY_SECONDS = 7 * 24 * 3600
+# 滑动续期的节流窗口：仅当 lease_until 落后 now + (7 天 - 1 小时) 时才写库，
+# 保证每个会话至多每小时一次 UPDATE，而不是每个请求一次写。
+SESSION_RENEWAL_WRITE_INTERVAL_SECONDS = 3600
+# 活动时间（last_seen_at）的独立节流窗口：必须小于管理端在线判定的 10 分钟
+# 窗口（ONLINE_SESSION_PREDICATE），否则持续发请求的活跃用户在两次续期之间
+# 会被判成离线（2026-11-03 Codex 回评 r1/r6 双确认的 P1）。
+SESSION_ACTIVITY_WRITE_INTERVAL_SECONDS = 300
+
+# 管理端「会话/设备在线」判定 SQL（会话表别名固定为 ``css``）。7 天滑动
+# 契约下 lease_until 长期恒真，不能再当「在线」用；在线 = 会话仍有效
+# （登出/吊销仍把 lease 拉回过去，必须保留该条件）且最近 10 分钟有活动。
+# 活动时间依次回退：last_seen_at（新契约写）→ last_heartbeat_at（旧客户端
+# 心跳写）→ lease_until - 7 天（≈最近一次续期时刻，兜底历史行）。
+ONLINE_SESSION_PREDICATE = (
+    "css.lease_until::timestamptz > clock_timestamp() "
+    "AND COALESCE(css.last_seen_at::timestamptz, css.last_heartbeat_at::timestamptz, "
+    "css.lease_until::timestamptz - interval '7 days') "
+    "> clock_timestamp() - interval '10 minutes'"
+)
 
 # Login state-machine outcomes.
 LOGIN_CREATED = "created"  # new session established (no row / lapsed / recovery)
@@ -231,15 +255,31 @@ def login_session(
     token_matches = any(digest == token_digest for digest in presented_digests)
 
     if token_matches and not lapsed:
-        # Renewal only: same token, same epoch, lease pushed out (§12.3).
-        lease_until_iso = (
-            (now_full + timedelta(seconds=SESSION_LEASE_SECONDS)).replace(microsecond=0).isoformat()
+        # Renewal only: same token, same epoch, expiry slid out to now + 7 days.
+        # 租约防回缩（2026-11-03 回评 r1 P1）：SQL GREATEST 取现值与新值较大
+        # 者——时钟回拨或异常路径写入更短有效期时不得缩短已授予的会话；
+        # logout/吊销走独立语句保持缩短语义。RETURNING 取回真实落库值作为
+        # 快照（A2 评审 P2：Python 侧整秒截断会与存值的微秒产生偏差）。
+        lease_candidate = (
+            (now_full + timedelta(seconds=SESSION_VALIDITY_SECONDS))
+            .replace(microsecond=0)
+            .isoformat()
         )
-        conn.execute(
+        # last_seen_at 的 GREATEST 兜底沿袭 logout 的 lease 写法：now() 是事务
+        # 起点时钟，一个早于行创建才开始的事务在行锁等待后拿到锁时，其
+        # now() 可能早于 created_at，裸写会触发 last_seen_not_before_created。
+        stored = conn.execute(
             "UPDATE customer_session_state "
-            "SET lease_until = %s, updated_at = %s WHERE session_id = %s",
-            (lease_until_iso, now_iso, session_id),
-        )
+            "SET lease_until = GREATEST(lease_until::timestamptz, %s::timestamptz), "
+            "last_seen_at = GREATEST(%s::timestamptz, "
+            "created_at::timestamptz + interval '1 microsecond'), "
+            "updated_at = %s WHERE session_id = %s "
+            "RETURNING lease_until",
+            (lease_candidate, now_full.isoformat(), now_iso, session_id),
+        ).fetchone()
+        if stored is None:
+            raise RuntimeError("unreachable: locked session row vanished during renewal")
+        lease_until_iso = _as_utc(str(stored[0])).isoformat()
         _write_event(
             conn,
             event="LOGIN",
@@ -301,8 +341,11 @@ def _establish(
     the winner's row and re-drives the state machine (never a 500).
     """
     now_iso = now.replace(microsecond=0).isoformat()
+    # last_seen_at 保留微秒精度：与 last_heartbeat_at 同理，整秒截断可能在
+    # 同秒写入时落到 created_at 之前而触发 last_seen_not_before_created CHECK。
+    now_seen_iso = now.isoformat()
     lease_until_iso = (
-        (now + timedelta(seconds=SESSION_LEASE_SECONDS)).replace(microsecond=0).isoformat()
+        (now + timedelta(seconds=SESSION_VALIDITY_SECONDS)).replace(microsecond=0).isoformat()
     )
 
     session_token = secrets.token_urlsafe(32)
@@ -315,8 +358,8 @@ def _establish(
         inserted = conn.execute(
             "INSERT INTO customer_session_state "
             "(user_id, activation_code_id, device_id, session_id, token_digest, "
-            " session_epoch, lease_until) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            " session_epoch, lease_until, last_seen_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (device_id) DO NOTHING",
             (
                 user_id,
@@ -326,6 +369,7 @@ def _establish(
                 token_digest,
                 new_epoch,
                 lease_until_iso,
+                now_seen_iso,
             ),
         )
         if inserted.rowcount == 0:
@@ -341,6 +385,8 @@ def _establish(
             "UPDATE customer_session_state "
             "SET device_id = %s, session_id = %s, token_digest = %s, "
             "session_epoch = %s, lease_until = %s, last_heartbeat_at = NULL, "
+            "last_seen_at = GREATEST(%s::timestamptz, "
+            "created_at::timestamptz + interval '1 microsecond'), "
             "updated_at = %s WHERE session_id = %s",
             (
                 device_id,
@@ -348,6 +394,7 @@ def _establish(
                 token_digest,
                 new_epoch,
                 lease_until_iso,
+                now_seen_iso,
                 now_iso,
                 old_session_id,
             ),
@@ -388,7 +435,8 @@ def _establish(
 
 
 # ---------------------------------------------------------------------------
-# Heartbeat (dev doc §12.3 same-device lease extension)
+# Heartbeat (dev doc §12.3 same-device lease extension) —— 旧客户端兼容端点。
+# 新客户端不再心跳：会话由 fence 校验时的 renew_session_expiry 滑动续期。
 # ---------------------------------------------------------------------------
 
 
@@ -433,20 +481,32 @@ def heartbeat_session(
             session_epoch=session_epoch,
         )
 
-    lease_until_iso = (
-        (now_full + timedelta(seconds=SESSION_LEASE_SECONDS)).replace(microsecond=0).isoformat()
+    # 租约防回缩与 login 续租同款：SQL GREATEST 取较大者，RETURNING 取回
+    # 真实落库值作为快照（A2 评审 P2：整秒截断快照会与存值微秒偏差）。
+    lease_candidate = (
+        (now_full + timedelta(seconds=SESSION_VALIDITY_SECONDS)).replace(microsecond=0).isoformat()
     )
     # PR #47 Codex review P2 (the unbind lesson): keep the PostgreSQL
     # microsecond precision — a whole-second trim lands a same-second
     # heartbeat before created_at and trips the heartbeat_not_before_created
-    # CHECK.
+    # CHECK. last_seen_at 同理保留微秒，并叠 GREATEST 兜底（事务起点时钟在
+    # 行锁等待后可能早于 created_at，见 login_session 续租处的同款注释）。
     now_full_iso = now_full.isoformat()
-    conn.execute(
+    stored = conn.execute(
         "UPDATE customer_session_state "
-        "SET lease_until = %s, last_heartbeat_at = %s, updated_at = %s "
-        "WHERE session_id = %s",
-        (lease_until_iso, now_full_iso, now_full_iso, session_id),
-    )
+        "SET lease_until = GREATEST(lease_until::timestamptz, %s::timestamptz), "
+        "last_heartbeat_at = %s, "
+        "last_seen_at = GREATEST(%s::timestamptz, "
+        "created_at::timestamptz + interval '1 microsecond'), "
+        "updated_at = %s WHERE session_id = %s "
+        "RETURNING lease_until",
+        (lease_candidate, now_full_iso, now_full_iso, now_full_iso, session_id),
+    ).fetchone()
+    if stored is None:
+        raise RuntimeError("unreachable: locked session row vanished during heartbeat")
+    # 会话表时间列是 TEXT：RETURNING 取回真实存值，统一以本服务的
+    # isoformat 线格式返回（既有 API 契约；解析-重渲染不做精度截断）。
+    lease_until_iso = _as_utc(str(stored[0])).isoformat()
     _write_event(
         conn,
         event="HEARTBEAT",
@@ -467,8 +527,72 @@ def heartbeat_session(
 
 
 # ---------------------------------------------------------------------------
-# Logout (dev doc §3.3 / §12.3)
+# Sliding renewal (verify_session_context 的续期副作用)
 # ---------------------------------------------------------------------------
+
+
+def renew_session_expiry(
+    conn: psycopg.Connection,
+    *,
+    session_id: str,
+    lease_until: datetime,
+    last_seen_at: datetime | None,
+    now: datetime,
+) -> str | None:
+    """滑动有效期与活动时间的双节流写（供 fence 校验调用）。
+
+    会话从 90 秒租约改为 7 天滑动有效后，「续命」从客户端心跳移到服务端：
+    每个通过 :func:`~app.customer_auth.verify_session_context` 校验的请求都
+    在同一事务内调用本函数。两个维度各自节流、互不绑定（2026-11-03 回评
+    r1/r6 的 P1：旧实现共用 1 小时节流，未到续期阈值早退时活动时间不写，
+    持续发请求的活跃用户在管理端 10 分钟在线窗口之外被判离线）：
+
+    - 有效期续期：仅当 ``lease_until`` 落后 ``now + (7 天 - 1 小时)`` 才写
+      ——至多每小时一次；
+    - 活动时间：``last_seen_at`` 落后 ``now - 5 分钟`` 才写——活跃会话至多
+      每 5 分钟一次，仍远低于逐请求写的负担，且始终落在在线窗口内。
+
+    调用方已持有该行的 FOR UPDATE 锁（verify 取锁），这里只补 UPDATE，
+    无二次锁竞争。租约写入取 ``max(现值, 新值)`` + SQL ``GREATEST`` 双保险
+    （防回缩，与 login/heartbeat 同款）。last_seen_at 保留微秒并叠
+    GREATEST 兜底，防同秒写入触发 last_seen_not_before_created CHECK。
+
+    返回新的到期 ISO 串；有效期未动（仅活动写或零写）返回 ``None``。
+    """
+    renewal_needed = lease_until < now + timedelta(
+        seconds=SESSION_VALIDITY_SECONDS - SESSION_RENEWAL_WRITE_INTERVAL_SECONDS
+    )
+    activity_needed = last_seen_at is None or last_seen_at < now - timedelta(
+        seconds=SESSION_ACTIVITY_WRITE_INTERVAL_SECONDS
+    )
+    if not renewal_needed and not activity_needed:
+        return None
+    now_seen_iso = now.isoformat()
+    now_second_iso = now.replace(microsecond=0).isoformat()
+    if renewal_needed:
+        new_expiry_iso = (
+            (now + timedelta(seconds=SESSION_VALIDITY_SECONDS)).replace(microsecond=0).isoformat()
+        )
+        stored = conn.execute(
+            "UPDATE customer_session_state "
+            "SET lease_until = GREATEST(lease_until::timestamptz, %s::timestamptz), "
+            "last_seen_at = GREATEST(%s::timestamptz, "
+            "created_at::timestamptz + interval '1 microsecond'), "
+            "updated_at = %s WHERE session_id = %s "
+            "RETURNING lease_until",
+            (new_expiry_iso, now_seen_iso, now_second_iso, session_id),
+        ).fetchone()
+        if stored is None:
+            raise RuntimeError("unreachable: locked session row vanished during renewal")
+        return _as_utc(str(stored[0])).isoformat()
+    conn.execute(
+        "UPDATE customer_session_state "
+        "SET last_seen_at = GREATEST(%s::timestamptz, "
+        "created_at::timestamptz + interval '1 microsecond'), "
+        "updated_at = %s WHERE session_id = %s",
+        (now_seen_iso, now_second_iso, session_id),
+    )
+    return None
 
 
 def logout_session(

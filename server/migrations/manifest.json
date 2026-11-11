@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261016T1000_replica_prompt_tasks"
+      "20261102T0900_customer_session_last_seen"
     ],
     "parents": {
       "001_core": null,
@@ -194,9 +194,11 @@
       "20261014T1000_support_ticket_priority": "20261013T1020_publish_submission_safety",
       "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority",
       "20261014T1200_admin_role_templates": "20261014T1100_customer_ops_params",
-      "20261016T1000_replica_prompt_tasks": "20261014T1200_admin_role_templates"
+      "20261016T1000_replica_prompt_tasks": "20261014T1200_admin_role_templates",
+      "20261101T1000_video_long_tier": "20261016T1000_replica_prompt_tasks",
+      "20261102T0900_customer_session_last_seen": "20261101T1000_video_long_tier"
     },
-    "revision_count": 175
+    "revision_count": 177
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -910,6 +912,14 @@
     "20261016T1000_replica_prompt_tasks": {
       "file": "versions/20261016T1000_replica_prompt_tasks.py",
       "sha256": "9774a9e481b2ffd5b1bae05a33731e6c25fc3aa010e3536e37a70f3535000a75"
+    },
+    "20261101T1000_video_long_tier": {
+      "file": "versions/20261101T1000_video_long_tier.py",
+      "sha256": "b84b53ce6ad2df553056ca6fff2821e55702f4c926e94d12b896e5004cc7fb36"
+    },
+    "20261102T0900_customer_session_last_seen": {
+      "file": "versions/20261102T0900_customer_session_last_seen.py",
+      "sha256": "ef5ec2ab6bfd4f29cb7b805c80437a860c12c2efb3636538ed2bc2a4a209cd93"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

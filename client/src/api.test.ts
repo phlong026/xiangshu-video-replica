@@ -40,7 +40,6 @@ import {
   createProject,
   createScriptVersion,
   createVideoUploadIntent,
-  createViralCopyExtraction,
   customerVisibleErrorMessage,
   downloadCharacterAsset,
   downloadGenerationResult,
@@ -4531,45 +4530,5 @@ describe("爆款文案提取（本地抽音轨上传）", () => {
         signal: expect.any(AbortSignal),
       }),
     );
-  });
-
-  it("上传音轨时按 multipart 提交并带上幂等键", async () => {
-    const accepted = {
-      text: null,
-      updatedAt: null,
-      projectId: "project-1",
-      sourceAssetId: "asset-1",
-      taskId: "task-1",
-    };
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => accepted,
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const audio = new Uint8Array([0, 0, 0, 32, 102, 116, 121, 112]);
-    await expect(
-      createViralCopyExtraction("douyin", "native-1", audio, "copy-key"),
-    ).resolves.toEqual(accepted);
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/viral/videos/copy",
-      expect.objectContaining({
-        method: "POST",
-        signal: expect.any(AbortSignal),
-      }),
-    );
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(new Headers(init.headers).get("Idempotency-Key")).toBe("copy-key");
-    // 手写 multipart 会把 Content-Type 的 boundary 弄丢，所以必须交给浏览器；
-    // 上传的是音轨字节而不是逐元素 JSON 数组，否则一个几百 KB 的音轨会膨胀成 MB 级。
-    expect(new Headers(init.headers).get("Content-Type")).toBeNull();
-    const form = init.body as FormData;
-    expect(form).toBeInstanceOf(FormData);
-    expect(form.get("platform")).toBe("douyin");
-    expect(form.get("videoId")).toBe("native-1");
-    const file = form.get("file") as File;
-    expect(file.type).toBe("audio/mp4");
-    expect(new Uint8Array(await file.arrayBuffer())).toEqual(audio);
   });
 });

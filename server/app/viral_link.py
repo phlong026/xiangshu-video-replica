@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -23,11 +23,14 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+")
 # 小红书 2025 起分享口令不再带 http:// 前缀；裸域名仅认已支持平台的域名。
 _BARE_URL_PATTERN = re.compile(
-    r"\b(?:[a-zA-Z0-9-]+\.)*(?:douyin\.com|xiaohongshu\.com|xhslink\.com|iesdouyin\.com)"
+    r"\b(?:[a-zA-Z0-9-]+\.)*(?:douyin\.com|xiaohongshu\.com|xhslink\.com|iesdouyin\.com"
+    r"|weixin\.qq\.com)"
     r"(?:/[^\s<>'\"]+)?",
     re.IGNORECASE,
 )
 _TRAILING_PUNCTUATION = ".,;:!?，。；：！？、)）]】}"
+# 视频号分享短链（weixin.qq.com/sph/...）与会话内完整链接（channels.weixin.qq.com）
+# 统一走登录态解析通道；具体内容是否可解析由上游裁决，这里只认域名。
 _WECHAT_HOSTS = {"channels.weixin.qq.com", "weixin.qq.com", "www.weixin.qq.com"}
 _DOUYIN_HOSTS = {
     "douyin.com",
@@ -145,7 +148,7 @@ class ResolvedViralMetadata:
 
 @dataclass(frozen=True)
 class ResolvedViralLink:
-    platform: Literal["douyin", "xiaohongshu"]
+    platform: Literal["douyin", "xiaohongshu", "wechat_channels"]
     video_id: str
     title: str
     author: str
@@ -155,6 +158,9 @@ class ResolvedViralLink:
     duration_ms: int
     source_description: str
     metadata: ResolvedViralMetadata = ResolvedViralMetadata()
+    # 解析通道回填的溯源键（如视频号的 share_url/export_id），由
+    # _resolved_video 原样并入条目 native，供媒体管线与统计刷新使用。
+    native: Mapping[str, Any] = field(default_factory=dict)
 
 
 def normalize_supported_link(raw: str) -> str:
@@ -166,7 +172,7 @@ def normalize_supported_link(raw: str) -> str:
         raise ViralLinkError(
             422,
             "VIRAL_LINK_INVALID",
-            "请输入完整的抖音或小红书视频链接，或上传 MP4/MOV 文件。",
+            "请输入完整的抖音、小红书或视频号分享链接，或上传 MP4/MOV 文件。",
             retryable=False,
         )
     url = match.group(0).rstrip(_TRAILING_PUNCTUATION)
@@ -187,25 +193,26 @@ def normalize_supported_link(raw: str) -> str:
             422, "VIRAL_LINK_INVALID", "视频链接格式无效，请重新复制分享链接。", retryable=False
         )
     if host in _WECHAT_HOSTS or host.endswith(".weixin.qq.com"):
-        raise ViralLinkError(
-            422,
-            "WECHAT_CHANNELS_LINK_UNSUPPORTED",
-            "视频号链接暂不支持解析，请上传 MP4 或 MOV 文件。",
-            retryable=False,
-        )
+        # 视频号不再前置拒绝：域名命中即按视频号分发到登录态解析通道。
+        return url
     if host not in _DOUYIN_HOSTS | _XIAOHONGSHU_HOSTS and not host.endswith(".douyin.com"):
         raise ViralLinkError(
             422,
             "VIRAL_LINK_PLATFORM_UNSUPPORTED",
-            "当前支持抖音和小红书视频链接，其他平台请上传 MP4 或 MOV 文件。",
+            "当前支持抖音、小红书和视频号分享链接，其他平台请上传 MP4 或 MOV 文件。",
             retryable=False,
         )
     return url
 
 
-def supported_link_platform(normalized_url: str) -> Literal["douyin", "xiaohongshu"]:
+def supported_link_platform(
+    normalized_url: str,
+) -> Literal["douyin", "xiaohongshu", "wechat_channels"]:
     """Classify only URLs already checked by normalize_supported_link."""
-    return "xiaohongshu" if urlsplit(normalized_url).hostname in _XIAOHONGSHU_HOSTS else "douyin"
+    host = urlsplit(normalized_url).hostname
+    if host in _WECHAT_HOSTS or (host or "").endswith(".weixin.qq.com"):
+        return "wechat_channels"
+    return "xiaohongshu" if host in _XIAOHONGSHU_HOSTS else "douyin"
 
 
 class LinkRedirectTransport:
@@ -304,6 +311,10 @@ def canonicalize_viral_link(
     行为保持一致）。任何一步失败都原样返回输入，绝不阻塞解析主流程。
     """
     platform = supported_link_platform(normalized_url)
+    if platform == "wechat_channels":
+        # 视频号没有网关规范形态：分享短链原样交给登录态解析通道，
+        # 也不参与 302 还原（解析通道自己处理预览参数）。
+        return normalized_url
     direct_id = _extract_content_id(normalized_url, platform)
     if direct_id:
         return _canonical_url(platform, direct_id, original=normalized_url, resolved=normalized_url)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -10,8 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.async_compat import reject_legacy_sync_operation
 from app.auth import AuthenticatedUser, Database
-from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep, BusinessReadConn
+from app.db_pg import is_customer_production
+from app.db_portable import BusinessRow
 from app.first_frames import (
     APILIO_DEFAULT_BASE_URL,
     FIRST_FRAME_SELECTION_KIND,
@@ -445,7 +445,7 @@ def read_latest_first_frame_selection(
     return version_response(row)
 
 
-def version_response(row: sqlite3.Row) -> VersionResponse:
+def version_response(row: BusinessRow) -> VersionResponse:
     return VersionResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -460,7 +460,7 @@ def version_response(row: sqlite3.Row) -> VersionResponse:
     )
 
 
-def first_frame_task_response(row: sqlite3.Row) -> FirstFrameTaskResponse:
+def first_frame_task_response(row: BusinessRow) -> FirstFrameTaskResponse:
     return FirstFrameTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -482,7 +482,7 @@ def first_frame_task_response(row: sqlite3.Row) -> FirstFrameTaskResponse:
     )
 
 
-def first_frame_task_stage(row: sqlite3.Row) -> FirstFrameTaskStage:
+def first_frame_task_stage(row: BusinessRow) -> FirstFrameTaskStage:
     task_status = str(row["status"])
     if task_status == "PENDING":
         return "QUEUED"

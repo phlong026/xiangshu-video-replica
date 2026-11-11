@@ -47,7 +47,7 @@ from pg_test_kit import (
 
 import app.internal_billing as internal_billing
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, IntegrityConstraintError
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
@@ -167,6 +167,18 @@ def _deltas() -> list[tuple[str, int, int]]:
     ]
 
 
+def _terminal_keys() -> list[str]:
+    """task_1 的终态入账幂等键（T2b 计费收敛的黄金冻结面）。"""
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        rows = conn.execute(
+            "SELECT idempotency_key FROM wallet_transactions "
+            "WHERE task_id = 'task_1' AND type IN ('SETTLE', 'RELEASE') "
+            "ORDER BY ledger_sequence"
+        ).fetchall()
+    return [str(row["idempotency_key"]) for row in rows]
+
+
 def test_reserve_and_finalize_support_multiple_seconds_per_round(wallet_db: str) -> None:
     """W11 按秒计费：预留/结算/释放按提交档位秒数记账（不再固定 1）。"""
     seed_task(wallet_db, available_credits=20)
@@ -259,6 +271,82 @@ def test_missing_video_duration_stays_pending_until_verified_evidence(wallet_db:
         )
     assert wallet_state() == (8, 0)
     assert transaction_types() == [("RESERVE", 1), ("SETTLE", 1), ("RELEASE", 1)]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "terminal_prefix"),
+    [("success", "settle"), ("failed", "release"), ("cancelled", "release")],
+)
+def test_finalize_terminal_idempotency_keys_are_frozen(
+    wallet_db: str, outcome: str, terminal_prefix: str
+) -> None:
+    """T2b（internal_billing 入账收敛）的黄金前置：终态幂等键逐字符冻结。
+
+    三条 finalize 腿的键格式 ``{type}:{task_id}:{billing_round}`` 是防双记的
+    精确契约——任何实现收敛若改变键（哪怕大小写或分隔符），同键重放语义
+    即被破坏；本测试先红是实现漂移的第一道闸。回放恰好一条终态行同时锁定。
+    """
+    seed_task(wallet_db, available_credits=1)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        reserve_internal_billing(conn, user_id="user_1", task_id="task_1", billing_round=1)
+        if outcome == "success":
+            conn.execute(
+                "INSERT INTO assets ("
+                " id, project_id, kind, storage_uri, sha256, size_bytes, content_type, "
+                " created_by_user_id"
+                ") VALUES ('result_1', 'project_1', 'video', 'cos://bucket/result.mp4', "
+                " 'sha', 12, 'video/mp4', 'user_1')"
+            )
+            conn.execute(
+                "UPDATE generation_tasks "
+                "SET status = 'SUCCEEDED', actual_output_seconds = 1, archive_status = "
+                "'ARCHIVED', result_asset_id = 'result_1' "
+                "WHERE id = 'task_1'"
+            )
+        else:
+            conn.execute(
+                "UPDATE generation_tasks SET status = %s WHERE id = 'task_1'",
+                ("FAILED" if outcome == "failed" else "CANCELLED",),
+            )
+        first = finalize_internal_billing(conn, task_id="task_1", outcome=outcome)
+        replay = finalize_internal_billing(conn, task_id="task_1", outcome=outcome)
+    assert first.transaction_type == replay.transaction_type
+    # 回放不新增终态行；主路径（经 billing_operations）的终态键契约是
+    # usage:{TYPE}:{operation_id}——与悬空预留分支的键格式不同，分开锁定。
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        operation_id = str(
+            conn.execute("SELECT id FROM billing_operations WHERE source_id = 'task_1'").fetchone()[
+                "id"
+            ]
+        )
+    assert _terminal_keys() == [f"usage:{first.transaction_type}:{operation_id}"]
+
+
+def test_finalize_dangling_reservation_terminal_key_is_frozen(wallet_db: str) -> None:
+    """悬空预留（无 billing_operation）走 internal_billing 自有 INSERT 分支。
+
+    这是 T2b 三处 INSERT 收敛的直接改动面：终态键格式
+    ``{type}:{task_id}:{billing_round}`` 逐字符冻结，回放恰好一条终态行。
+    """
+    seed_task(wallet_db, available_credits=1)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute("UPDATE wallets SET reserved_credits = 1 WHERE user_id = 'user_1'")
+        conn.execute(
+            "INSERT INTO wallet_transactions ("
+            " id, user_id, type, available_delta, reserved_delta, "
+            " task_id, billing_round, idempotency_key"
+            ") VALUES ("
+            " 'dangling-reserve-1', 'user_1', 'RESERVE', -1, 1, "
+            " 'task_1', 1, 'dangling-reserve-key')"
+        )
+        conn.execute("UPDATE generation_tasks SET status = 'FAILED' WHERE id = 'task_1'")
+        first = finalize_internal_billing(conn, task_id="task_1", outcome="failed")
+        replay = finalize_internal_billing(conn, task_id="task_1", outcome="failed")
+    assert first.transaction_type == replay.transaction_type == "RELEASE"
+    assert _terminal_keys() == ["release:task_1:1"]
 
 
 def test_reserve_moves_one_credit_and_is_idempotent(wallet_db: str) -> None:
@@ -611,6 +699,8 @@ def test_concurrent_task_reservations_cannot_overspend(wallet_db: str) -> None:
         thread.join()
 
     assert sorted(results) == ["insufficient", "reserved"]
+    # T2a 曾把以下两段钱包验证截进后一个测试（r3 评审 C2）：归还本测试——
+    # 双连接竞争后恰一次预留，钱包 (0, 1)。
     assert wallet_state() == (0, 1)
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
@@ -619,3 +709,151 @@ def test_concurrent_task_reservations_cannot_overspend(wallet_db: str) -> None:
         ).fetchone()
     assert reserve_rows is not None
     assert int(reserve_rows[0]) == 1
+
+
+def test_portable_layer_maps_unique_violation_for_race_backstops(wallet_db: str) -> None:
+    """T2a 契约：翻译层把唯一冲突统一抛 IntegrityConstraintError。
+
+    它是 psycopg.IntegrityError 的子类但**不是** UniqueViolation 的子类，
+    且携带 sqlstate/constraint_name——业务侧的幂等竞争兜底（充值订单号
+    碰撞重试、批次并发回放、口播稿互斥）必须捕它；本测试把类型关系与
+    属性载荷一次钉死，防止将来有人「改回」UniqueViolation 而兜底再次失活。
+    """
+    with psycopg.connect(wallet_db, autocommit=True) as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES (%s, true, 3) ON CONFLICT (service) DO UPDATE SET unit_credits = 3",
+            ("contract-tariff-t2a",),
+        )
+        with pytest.raises(IntegrityConstraintError) as exc_info:
+            conn.execute(
+                "INSERT INTO billing_tariffs(service,enabled,unit_credits) VALUES (%s, true, 3)",
+                ("contract-tariff-t2a",),
+            )
+    assert isinstance(exc_info.value, psycopg.IntegrityError)
+    assert not isinstance(exc_info.value, psycopg.errors.UniqueViolation)
+    assert exc_info.value.sqlstate == "23505"
+    assert "billing_tariffs_pkey" in str(exc_info.value.constraint_name)
+
+
+def test_unique_conflict_discriminator_gates_non_target_constraints() -> None:
+    """C1 鉴别闸（r3 评审）：非 23505 / 非目标约束 / 缺约束名都不按竞争处理。"""
+    from app.db_portable import is_unique_conflict_on
+
+    def make(sqlstate: str | None, name: str | None) -> IntegrityConstraintError:
+        return IntegrityConstraintError("boom", sqlstate=sqlstate, constraint_name=name)
+
+    target = "uq_generation_batches_user_project_key"
+    assert is_unique_conflict_on(make("23505", target), target)
+    # CHECK 违反（23514）、其他唯一约束、缺约束名：一律不按竞争映射。
+    assert not is_unique_conflict_on(make("23514", "ck_something"), target)
+    assert not is_unique_conflict_on(make("23505", "some_other_unique"), target)
+    assert not is_unique_conflict_on(make("23505", None), target)
+
+
+# ---------------------------------------------------------------------------
+# C3：真库双连接竞争——鉴别闸与账务原子性
+# ---------------------------------------------------------------------------
+
+
+def test_race_backstop_constraint_names_exist_in_schema(wallet_db: str) -> None:
+    """C1 应用点（r3 复审）：五个兜底约束名绑表核实且确为唯一约束。
+
+    约束名写错（拼写/漂移）会让鉴别闸永远不命中——兜底退化为「非目标异常
+    原样冒出」，并发竞争从 409/回放/重试退化为 500。本测试按「表 + 名 +
+    唯一性」三重绑定查询；recharge_orders 的真实约束名
+    recharge_orders_merchant_order_no_key 即由本测试首次核实（旧注释里的
+    ..._order_key 是错的，str(exc) 文本匹配侥幸生效）。
+    """
+    from app.db_pg import pg_transaction
+
+    expected = (
+        ("generation_batches", "uq_generation_batches_user_project_key"),
+        ("generation_batches", "uq_generation_batches_independent_idempotency"),
+        ("script_rewrite_tasks", "uq_script_rewrite_tasks_active_project"),
+        ("billing_reconciliation_items", "billing_reconciliation_open_key"),
+        ("recharge_orders", "recharge_orders_merchant_order_no_key"),
+    )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        for table, name in expected:
+            # 唯一性必须经 pg_index 验证（r3 评审：pg_indexes 分支 + OR 约束
+            # 分支，普通同名索引也能混过）。
+            as_unique_index = conn.execute(
+                "SELECT 1 FROM pg_index ix "
+                "JOIN pg_class ic ON ic.oid = ix.indexrelid "
+                "WHERE ix.indrelid = %s::regclass AND ic.relname = %s "
+                "AND ix.indisunique AND ix.indisvalid",
+                (table, name),
+            ).fetchone()
+            as_constraint = conn.execute(
+                "SELECT 1 FROM pg_constraint WHERE conrelid = %s::regclass "
+                "AND conname = %s AND contype = 'u'",
+                (table, name),
+            ).fetchone()
+            assert as_unique_index is not None or as_constraint is not None, (
+                f"race backstop unique constraint missing on {table}: {name}"
+            )
+
+
+def test_idempotency_race_loser_rolls_back_without_poisoning_winner(wallet_db: str) -> None:
+    """C3（r3 复审要求）：双连接同幂等键真并发——恰一个赢家提交，输家
+    目标约束拒绝，账务恰好一次预留、零双扣。两笔写都不预提交，靠屏障
+    同时进场争抢同一唯一索引。"""
+    seed_task(wallet_db, available_credits=2)
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def contender(batch_id: str, request_hash: str) -> None:
+        barrier.wait()
+        try:
+            with pg_transaction() as raw:
+                conn = BusinessConnection.postgres(raw)
+                conn.execute(
+                    "INSERT INTO generation_batches "
+                    "(id, project_id, created_by_user_id, idempotency_key, "
+                    " request_hash, request_snapshot_json, creation_kind, status) "
+                    "VALUES (%s, NULL, 'user_1', 'race-key', %s, '{}', 'independent', 'QUEUED')",
+                    (batch_id, request_hash),
+                )
+                # 与批次写同事务的账务操作：赢家应完整提交，输家整体回滚。
+                reserve_internal_billing(
+                    conn,
+                    user_id="user_1",
+                    task_id="task_1",
+                    billing_round=1,
+                )
+            with lock:
+                outcomes.append("committed:" + batch_id)
+        except IntegrityConstraintError as exc:
+            with lock:
+                outcomes.append("rejected:" + str(exc.constraint_name))
+
+    threads = [
+        threading.Thread(target=contender, args=("race-a", "hash-a")),
+        threading.Thread(target=contender, args=("race-b", "hash-b")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    winners = [item for item in outcomes if item.startswith("committed:")]
+    rejected = [item for item in outcomes if item.startswith("rejected:")]
+    assert len(winners) == 1 and len(rejected) == 1
+    # NULL project 场景命中的是 075 部分唯一索引。
+    assert rejected[0] == "rejected:uq_generation_batches_independent_idempotency"
+    # 赢家事务完整提交：批次恰 1 行、恰一次预留、钱包 (1, 1)；输家零残留。
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        batch_rows = conn.execute(
+            "SELECT COUNT(*) FROM generation_batches WHERE idempotency_key = 'race-key'"
+        ).fetchone()
+        reserve_rows = conn.execute(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'RESERVE'"
+        ).fetchone()
+    assert batch_rows is not None and int(batch_rows[0]) == 1
+    assert reserve_rows is not None and int(reserve_rows[0]) == 1
+    assert wallet_state() == (1, 1)

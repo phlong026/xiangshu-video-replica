@@ -5,12 +5,11 @@ import json
 import logging
 import re
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
@@ -21,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app import content_store
 from app.analysis import insert_version
 from app.auth import CurrentUser, Role
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.media import is_reference_video_asset
 from app.permissions import (
     require_asset_access,
@@ -35,6 +34,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
+from app.task_lease import TaskLease, claim_source_frame_task
 
 SOURCE_FRAME_CANDIDATES_KIND = "source_frame_candidates"
 SOURCE_FRAME_SELECTION_KIND = "source_frame_selection"
@@ -48,7 +48,7 @@ SOURCE_FRAME_TASK_LEASE_MINUTES = 5
 logger = logging.getLogger(__name__)
 
 
-def source_video_duration_seconds(asset: sqlite3.Row) -> float | None:
+def source_video_duration_seconds(asset: BusinessRow) -> float | None:
     try:
         metadata = json.loads(str(asset["metadata_json"] or "{}"))
         duration = metadata.get("duration_seconds") if isinstance(metadata, dict) else None
@@ -114,12 +114,8 @@ class StoredSourceFrameCandidates:
     semantic_model: str | None
 
 
-@dataclass(frozen=True)
-class SourceFrameTaskLease:
-    id: str
-    created_by_user_id: str
-    worker_id: str
-    attempt: int
+# 租约凭据统一为共享 TaskLease（T7 试点）；别名保住既有导入面。
+SourceFrameTaskLease = TaskLease
 
 
 class SourceFrameExtractor(Protocol):
@@ -518,68 +514,59 @@ def complete_source_frame_extraction(
     plan: SourceFrameExtractionPlan,
     stored: StoredSourceFrameCandidates,
     commit: bool = True,
-) -> sqlite3.Row:
-    try:
-        for candidate in stored.candidates:
-            conn.execute(
-                """
-                INSERT INTO assets (
-                    id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
-                    created_by_user_id
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    candidate["asset_id"],
-                    plan.project_id,
-                    "source_frame",
-                    candidate["storage_uri"],
-                    candidate["sha256"],
-                    candidate["size_bytes"],
-                    "image/jpeg",
-                    plan.actor.id,
-                ),
+) -> BusinessRow:
+    for candidate in stored.candidates:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
+                created_by_user_id
             )
-        row = insert_version(
-            conn,
-            project_id=plan.project_id,
-            asset_id=plan.asset_id,
-            kind=SOURCE_FRAME_CANDIDATES_KIND,
-            created_by_user_id=plan.actor.id,
-            payload={
-                "schema_version": SOURCE_FRAME_SCHEMA_VERSION,
-                "source_asset_id": plan.asset_id,
-                "requested_timestamps_seconds": list(plan.requested_timestamps),
-                "semantic_quality_status": stored.semantic_quality_status,
-                "semantic_provider": stored.semantic_provider,
-                "semantic_model": stored.semantic_model,
-                "candidates": stored.candidates,
-            },
-            commit=False,
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                candidate["asset_id"],
+                plan.project_id,
+                "source_frame",
+                candidate["storage_uri"],
+                candidate["sha256"],
+                candidate["size_bytes"],
+                "image/jpeg",
+                plan.actor.id,
+            ),
         )
-        write_audit(
-            conn,
-            actor=plan.actor,
-            action="source_frame.extract",
-            entity_type="version",
-            entity_id=str(row["id"]),
-            metadata={
-                "project_id": plan.project_id,
-                "source_asset_id": plan.asset_id,
-            },
-            commit=False,
-        )
-        if commit:
-            conn.commit()
-        return row
-    except sqlite3.Error as exc:
-        if commit:
-            conn.rollback()
-        raise source_frame_error(
-            500,
-            "SOURCE_FRAME_PERSIST_FAILED",
-            "Source frame candidates could not be saved. Extract them again.",
-        ) from exc
+    row = insert_version(
+        conn,
+        project_id=plan.project_id,
+        asset_id=plan.asset_id,
+        kind=SOURCE_FRAME_CANDIDATES_KIND,
+        created_by_user_id=plan.actor.id,
+        payload={
+            "schema_version": SOURCE_FRAME_SCHEMA_VERSION,
+            "source_asset_id": plan.asset_id,
+            "requested_timestamps_seconds": list(plan.requested_timestamps),
+            "semantic_quality_status": stored.semantic_quality_status,
+            "semantic_provider": stored.semantic_provider,
+            "semantic_model": stored.semantic_model,
+            "candidates": stored.candidates,
+        },
+        commit=False,
+    )
+    write_audit(
+        conn,
+        actor=plan.actor,
+        action="source_frame.extract",
+        entity_type="version",
+        entity_id=str(row["id"]),
+        metadata={
+            "project_id": plan.project_id,
+            "source_asset_id": plan.asset_id,
+        },
+        commit=False,
+    )
+    if commit:
+        conn.commit()
+    return row
 
 
 def enqueue_source_frame_task(
@@ -590,7 +577,7 @@ def enqueue_source_frame_task(
     asset_id: str,
     timestamps_seconds: tuple[float, ...] | None,
     idempotency_key: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     plan = prepare_source_frame_extraction(
         conn,
         project_id=project_id,
@@ -624,7 +611,7 @@ def enqueue_source_frame_task(
                 "SOURCE_FRAME_TASK_IDEMPOTENCY_CONFLICT",
                 "取帧参数已经变化，请重新提交。",
             )
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
 
     active = conn.execute(
         """
@@ -636,7 +623,7 @@ def enqueue_source_frame_task(
         (project_id, asset_id),
     ).fetchone()
     if active is not None:
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
 
     task_id = str(uuid4())
     conn.execute(
@@ -685,7 +672,7 @@ def enqueue_source_frame_task(
         entity_id=str(row["id"]),
         metadata={"project_id": project_id, "source_asset_id": asset_id},
     )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def acquire_source_frame_task(
@@ -693,45 +680,9 @@ def acquire_source_frame_task(
     *,
     worker_id: str,
 ) -> SourceFrameTaskLease | None:
-    now = _time_text(datetime.now(UTC))
-    locked_until = _time_text(
-        datetime.now(UTC) + timedelta(minutes=SOURCE_FRAME_TASK_LEASE_MINUTES)
-    )
-    conn.execute(
-        """
-        UPDATE source_frame_tasks
-        SET status = 'FAILED', locked_by = NULL, locked_until = NULL,
-            error_code = 'SOURCE_FRAME_TASK_RECOVERY_REQUIRED',
-            error_message_redacted = '取帧任务执行中断，请重新开始。',
-            retryable = 1, completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (now, now, now),
-    )
-    row = conn.execute(
-        """
-        UPDATE source_frame_tasks
-        SET status = 'RUNNING', attempt = attempt + 1,
-            locked_by = %s, locked_until = %s,
-            started_at = COALESCE(started_at, %s), updated_at = %s,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0
-        WHERE id = (
-            SELECT id FROM source_frame_tasks
-            WHERE status = 'PENDING'
-            ORDER BY created_at, id LIMIT 1
-        ) AND status = 'PENDING'
-        RETURNING *
-        """,
-        (worker_id, locked_until, now, now),
-    ).fetchone()
-    conn.commit()
-    if row is None:
-        return None
-    return SourceFrameTaskLease(
-        id=str(row["id"]),
-        created_by_user_id=str(row["created_by_user_id"]),
-        worker_id=worker_id,
-        attempt=int(row["attempt"]),
+    """租约 SQL 统一住在 app.task_lease（T7）。"""
+    return claim_source_frame_task(
+        conn, worker_id=worker_id, lease_minutes=SOURCE_FRAME_TASK_LEASE_MINUTES
     )
 
 
@@ -787,7 +738,7 @@ def complete_source_frame_task(
     lease: SourceFrameTaskLease,
     plan: SourceFrameExtractionPlan,
     stored: StoredSourceFrameCandidates,
-) -> sqlite3.Row:
+) -> BusinessRow:
     now = _time_text(datetime.now(UTC))
     with conn:
         require_owned_source_frame_task(conn, lease)
@@ -855,7 +806,7 @@ def fail_source_frame_task(
 def load_source_frame_task(
     conn: BusinessConnection,
     task_id: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM source_frame_tasks WHERE id = %s",
         (task_id,),
@@ -866,7 +817,7 @@ def load_source_frame_task(
             "SOURCE_FRAME_TASK_NOT_FOUND",
             "取帧任务不存在。",
         )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def cancel_source_frame_task(
@@ -874,7 +825,7 @@ def cancel_source_frame_task(
     *,
     task_id: str,
     actor: CurrentUser,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = load_source_frame_task(conn, task_id)
     project_id = str(row["project_id"])
     require_not_auditor(
@@ -925,7 +876,7 @@ def cancel_source_frame_task(
         commit=False,
     )
     conn.commit()
-    return cast(sqlite3.Row, updated)
+    return cast(BusinessRow, updated)
 
 
 def latest_source_frame_task(
@@ -933,9 +884,9 @@ def latest_source_frame_task(
     *,
     project_id: str,
     asset_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             """
             SELECT * FROM source_frame_tasks
@@ -951,7 +902,7 @@ def latest_source_frame_task(
 def require_owned_source_frame_task(
     conn: BusinessConnection,
     lease: SourceFrameTaskLease,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = load_source_frame_task(conn, lease.id)
     if str(row["status"]) != "RUNNING" or str(row["locked_by"]) != lease.worker_id:
         raise RuntimeError("source frame task lease was lost")
@@ -1022,7 +973,7 @@ def confirm_source_frame(
     source_frame_asset_id: str,
     actor: CurrentUser,
     character_features: dict[str, object] | None = None,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1105,7 +1056,7 @@ def latest_version(
     conn: BusinessConnection,
     project_id: str,
     kind: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
@@ -1117,7 +1068,7 @@ def latest_version(
         """,
         (project_id, kind),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def source_frame_error(status_code: int, code: str, message: str) -> HTTPException:

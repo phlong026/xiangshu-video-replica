@@ -3,6 +3,7 @@ import {
   type AdminViralSearchTimeRange,
   addViralKeyword,
   adminActivationErrorMessage,
+  adminImportViralLink,
   adminSearchViralVideos,
   archiveCollectedViralVideo,
   type CollectedViralVideo,
@@ -992,6 +993,10 @@ export function ViralVideosPage({
   const [upstreamError, setUpstreamError] = useState("");
   const [upstreamNotice, setUpstreamNotice] = useState("");
   const [keywordBusy, setKeywordBusy] = useState(false);
+  // 粘贴链接采集：单条解析入库 + 自动入队媒体转存（不扣客户积分）。
+  const [linkImportUrl, setLinkImportUrl] = useState("");
+  const [linkImportBusy, setLinkImportBusy] = useState(false);
+  const [linkImportNotice, setLinkImportNotice] = useState("");
   const generation = useRef(0);
   const previewGeneration = useRef(0);
   const statisticsKeys = useRef(new Map<string, string>());
@@ -1465,6 +1470,36 @@ export function ViralVideosPage({
     }
   }
 
+  /** 粘贴链接采集：解析 → 入内容池 → 自动入队媒体转存（自有链接播放）。 */
+  async function runLinkImport() {
+    if (readOnly || linkImportBusy) return;
+    const url = linkImportUrl.trim();
+    if (!url) return;
+    setLinkImportBusy(true);
+    setLinkImportNotice("");
+    setUpstreamError("");
+    try {
+      const result = await adminImportViralLink(
+        url,
+        "粘贴链接采集",
+        crypto.randomUUID(),
+      );
+      setLinkImportUrl("");
+      setLinkImportNotice(
+        result.archiveQueued
+          ? "已采集入库，媒体转存进行中；完成后客户即可在线播放与一键复刻。"
+          : "已采集入库；平台转存任务占用中，稍后请在列表中对该视频手动转存。",
+      );
+      setWatchRows(result.items.filter(archiveBusy));
+      await load();
+      await loadOverview();
+    } catch (cause) {
+      setUpstreamError(adminActivationErrorMessage(cause, "链接采集失败"));
+    } finally {
+      setLinkImportBusy(false);
+    }
+  }
+
   /** 把当前搜索词加入定时采集配置，让后续采集周期持续拉取该词。 */
   async function addUpstreamKeywordToCollection() {
     const keyword = upstreamKeyword.trim();
@@ -1801,7 +1836,9 @@ export function ViralVideosPage({
         <section aria-label="实时搜索上游" className="admin-viral-upstream">
           <h3>实时搜索入库</h3>
           <p className="admin-hint">
-            按关键词获取视频，结果保存到视频库；可能产生平台接口费用，执行前展示费用确认，不扣客户积分。搜索后可预览并发布给客户；首页推荐独立设置。
+            按关键词获取视频，结果保存到视频库；可能产生平台接口费用，执行前展示费用确认，不扣客户积分。也可直接粘贴抖音
+            / 小红书 /
+            视频号分享链接采集，媒体自动转存云端，客户可在线播放与一键复刻。首页推荐独立设置。
           </p>
           <form
             className="admin-toolbar admin-viral-toolbar"
@@ -1859,6 +1896,34 @@ export function ViralVideosPage({
               {upstreamLoading ? "搜索中…" : "搜索"}
             </button>
           </form>
+          <form
+            aria-label="粘贴链接采集"
+            className="admin-toolbar admin-viral-toolbar"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void runLinkImport();
+            }}
+          >
+            <label className="admin-viral-search">
+              粘贴链接采集
+              <input
+                disabled={linkImportBusy}
+                maxLength={2000}
+                placeholder="粘贴抖音 / 小红书 / 视频号分享链接，解析后入库并自动转存"
+                value={linkImportUrl}
+                onChange={(event) => setLinkImportUrl(event.target.value)}
+              />
+            </label>
+            <button
+              disabled={linkImportBusy || !linkImportUrl.trim()}
+              type="submit"
+            >
+              {linkImportBusy ? "采集中…" : "采集"}
+            </button>
+          </form>
+          {linkImportNotice ? (
+            <PageBanner tone="notice">{linkImportNotice}</PageBanner>
+          ) : null}
           {upstreamError ? (
             <PageBanner tone="error">{upstreamError}</PageBanner>
           ) : null}

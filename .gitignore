@@ -103,3 +103,4 @@ archive/
 .qoder/
 .zcode/
 .test-postgres-data/
+.workbuddy-ai/

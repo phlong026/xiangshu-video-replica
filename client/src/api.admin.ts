@@ -4263,6 +4263,14 @@ export type AdminViralSearchResult = {
   timeRange: string;
 };
 
+export type AdminViralLinkImportResult = {
+  items: CollectedViralVideo[];
+  platform: string;
+  videoId: string;
+  /** false = 平台转存槽位被占用：条目已入库，需稍后手动转存 */
+  archiveQueued: boolean;
+};
+
 /**
  * 管理端实时搜索：走管理端写契约（confirm + reason + 幂等键），结果直接
  * upsert 进内容池，但**不扣任何客户积分**（供应商成本记平台账）。响应行
@@ -4290,6 +4298,29 @@ export async function adminSearchViralVideos(
     240_000,
   );
   // 命中行与爆款视频库同构，封面同样是站内代理地址，必须一并绝对化后再 `<img>`。
+  return { ...result, items: result.items.map(withManagedCover) };
+}
+
+/**
+ * 管理端粘贴链接采集：解析（抖音 / 小红书 / 视频号）→ 入内容池 → 入队媒体
+ * 转存主存储，加盟商播放与复刻都走自有签名链接。不计客户积分；
+ * archiveQueued=false 表示平台转存槽位被占用，条目已入库、需稍后手动转存。
+ */
+export async function adminImportViralLink(
+  url: string,
+  reason: string,
+  idempotencyKey: string,
+): Promise<AdminViralLinkImportResult> {
+  const result = await adminWrite<AdminViralLinkImportResult>(
+    "/api/control/viral/link-import",
+    { url },
+    reason,
+    "链接采集失败",
+    idempotencyKey,
+    "POST",
+    // 与搜索同量级：解析通道外呼（视频号为三步链）+ 封面归档，远慢于普通读。
+    240_000,
+  );
   return { ...result, items: result.items.map(withManagedCover) };
 }
 

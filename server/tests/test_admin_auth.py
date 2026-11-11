@@ -1051,10 +1051,10 @@ def test_password_login_has_unified_failure_and_shared_ip_account_budgets(
             "SELECT dimension, identifier FROM security_auth_failures "
             "WHERE dimension IN ('login:ip', 'login:account')"
         ).fetchall()
-    assert {str(row[0]).split("|", 1)[0] for row in counters} == {
-        "login:account",
-        "login:ip",
-    }
+    # IP 维度退役（NAT 共桶，2026-11-02「登录频繁」工单根因）：预算只剩账号
+    # 桶，且同 IP 的 admin_u 与 ghost_admin 各占独立账号桶、互不影响。
+    assert {str(row[0]).split("|", 1)[0] for row in counters} == {"login:account"}
+    assert len(counters) == 2
     assert len(failures) == 4
     assert all(len(str(row[1])) == 64 for row in failures)
     assert all("admin_u" not in str(row) and "ghost_admin" not in str(row) for row in failures)

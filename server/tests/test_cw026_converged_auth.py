@@ -708,6 +708,11 @@ def _expand_routes(app: object) -> list[tuple[str, str, tuple[str, ...]]]:
 def classify(method: str, path: str, deps: tuple[str, ...]) -> str:
     if not path.startswith("/api/"):
         return "PUBLIC_INFRA"
+    if method == "POST" and path == "/api/viral/videos/copy":
+        # 2026-11 爆款链路改造：客户端音轨上传退役为 410 壳——无依赖、不触库
+        # 的墓碑路由，任何请求一律 410 引导升级（保留路由是为了旧桌面客户端
+        # 拿到明确错误码而不是裸 404）。
+        return "RETIRED_ENDPOINT"
     if "get_business_db" in deps and "get_current_user" in deps:
         return "UNCLASSIFIED"  # a fenced write must not also take the read gate
     if "get_current_user" in deps:

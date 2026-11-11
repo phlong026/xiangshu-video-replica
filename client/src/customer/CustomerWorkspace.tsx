@@ -39,7 +39,6 @@ import type {
 export function CustomerWorkspace({
   user,
   sessionRuntime = null,
-  onManualHeartbeat,
   onLogout,
   store,
   onSessionExpired,
@@ -47,7 +46,6 @@ export function CustomerWorkspace({
 }: {
   user: CustomerWorkspaceUser;
   sessionRuntime?: CustomerSessionRuntime | null;
-  onManualHeartbeat?: () => void;
   onLogout: () => Promise<CustomerLogoutOutcome>;
   store: CustomerCredentialStore;
   /** 可选 notice 随本地过期落到终屏（P2-2：改密/退出所有设备成功后的说明）。 */
@@ -395,7 +393,6 @@ export function CustomerWorkspace({
             identity: storedIdentity,
             loadIdentity,
             sessionRuntime,
-            onManualHeartbeat,
             onPairDevice,
           }}
         />

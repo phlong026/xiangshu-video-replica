@@ -44,7 +44,6 @@ from app.billing_viral_routes import router as billing_viral_router
 from app.bootstrap import (
     check_customer_production_runtime_dependencies,
     customer_public_origin,
-    is_customer_production,
     trusted_proxy_networks,
 )
 from app.character_contracts import character_domain_openapi_schemas
@@ -62,7 +61,7 @@ from app.customer_pricing_routes import router as customer_pricing_router
 from app.customer_security_routes import router as customer_security_router
 from app.customer_session_routes import router as customer_session_router
 from app.customer_sub_account_routes import router as customer_sub_account_router
-from app.db_pg import DATABASE_URL_ENV, SQLITE_URL_SCHEMES, close_pg_pool
+from app.db_pg import DATABASE_URL_ENV, SQLITE_URL_SCHEMES, close_pg_pool, is_customer_production
 from app.export_controller import router as export_router
 from app.failure_rate_alerts import router as admin_alerts_router
 from app.first_frame_routes import router as first_frame_router

@@ -216,6 +216,8 @@ export type GenerationPriceQuote = {
   resolution: "768P" | "2K";
   duration_seconds: number;
   quantity: number;
+  /** 计价档位："16-30s" 为长视频档（单价为 15 秒及以内档的 2 倍）。 */
+  price_tier?: "4-15s" | "16-30s";
   unit_price_fen_per_second: number;
   estimated_seconds: number;
   estimated_price_fen: number;
@@ -298,7 +300,8 @@ export type ProviderName =
   | "tikhub"
   | "dashscope"
   | "douyidou"
-  | "ses";
+  | "ses"
+  | "yuanbao";
 
 export type ProviderSettings = {
   provider: ProviderName;
@@ -528,18 +531,6 @@ export type ShotCardPayload = {
   source_analysis_version_id: string;
   duration_seconds: number;
   shots: ShotCard[];
-};
-
-export type Character = {
-  id: string;
-  name: string;
-  reference_asset_ids: string[];
-  authorization_project_ids: string[];
-  authorization_expires_at: string | null;
-  is_active: boolean;
-  created_by_user_id: string | null;
-  created_at: string;
-  updated_at: string;
 };
 
 export type ProjectMainCharacter = Omit<
@@ -2158,6 +2149,10 @@ export type IndependentCapabilities = {
   max_reference_videos: number;
   max_reference_audios: number;
   max_quantity: number;
+  /** 768P 可选时长上限：16-30 秒长档（后台价目启用）开放时为 30，否则 15；
+   * 旧服务端/测试夹具缺省时前端按保守值 15 处理。2K 恒为 15（上游契约），
+   * 前端按分辨率分别取上限。 */
+  max_output_duration_seconds?: number;
 };
 
 export async function getIndependentCapabilities(): Promise<IndependentCapabilities> {
@@ -3782,14 +3777,8 @@ export async function saveShotCards(
   );
 }
 
-export async function listProjectCharacters(
-  projectId: string,
-): Promise<Character[]> {
-  return requestApiJson<Character[]>(
-    `/api/characters?project_id=${encodeURIComponent(projectId)}`,
-    "读取可用人物失败",
-  );
-}
+// 旧轨 GET /api/characters 的封装（listProjectCharacters）已删：前端人物
+// 列表全面走新轨端点，本封装零调用方（2026-11-01 T1 第一步）。
 
 export async function listProjectCharacterVersions(
   projectId: string,
@@ -4547,16 +4536,8 @@ export async function getProjectMainCharacter(
   return (await response.json()) as ProjectMainCharacter | null;
 }
 
-export async function chooseProjectMainCharacter(
-  projectId: string,
-  characterId: string,
-): Promise<ProjectMainCharacter> {
-  return requestApiJson<ProjectMainCharacter>(
-    `/api/projects/${encodeURIComponent(projectId)}/main-character`,
-    "选择人物失败",
-    { method: "PUT", body: JSON.stringify({ character_id: characterId }) },
-  );
-}
+// PUT main-character 的 character_id 旧形态封装已删：前端仅剩 version 形态
+// （chooseProjectMainCharacterVersion）；服务端旧分支的下线随 T1 第二步。
 
 export async function chooseProjectMainCharacterVersion(
   projectId: string,
@@ -8298,9 +8279,6 @@ export async function customerCloseRechargeOrder(
 const VIRAL_LIST_TIMEOUT_MS = 120_000;
 const VIRAL_MEDIA_TIMEOUT_MS = 120_000;
 const VIRAL_STATISTICS_TIMEOUT_MS = 150_000;
-// 本地抽出的音轨只有几百 KB，但桌面端还要在本机跑一次 ffmpeg 抽轨后才上传，
-// 冷启动的 ffmpeg 首帧较慢，给足余量而不是让它撞 10 秒的默认超时。
-const VIRAL_COPY_UPLOAD_TIMEOUT_MS = 180_000;
 // 关键词搜索除上游检索外，还要并发归档命中视频的封面（8 路，单封面上限 10MB），
 // 比纯读列表慢一个量级；给足余量，避免在归档中途被客户端超时中断。
 const VIRAL_SEARCH_TIMEOUT_MS = 240_000;
@@ -8910,55 +8888,6 @@ export function claimViralCopy(
       }),
     },
     VIRAL_LIST_TIMEOUT_MS,
-  );
-}
-
-/** 本地抽音轨上传后的受理回执：命中共享缓存时直接带文案，否则带待轮询的任务号。 */
-export type ViralCopyExtraction = {
-  text: string | null;
-  updatedAt: string | null;
-  /** 命中缓存时的计费回执：这条秒回同样扣过费（未命中时为 null）。 */
-  billing: ViralCopyBilling | null;
-  projectId: string | null;
-  sourceAssetId: string | null;
-  taskId: string | null;
-};
-
-/**
- * 上传客户端本地抽出的音轨，由服务端登记素材并建转写任务。
- *
- * 这是「平台不留存视频」的前提：上传的是客户端自己从**本地缓存的原视频**里抽出的
- * 单声道音轨（`viralCache.extractViralAudio`），平台不再需要为文案留存原片。
- * 幂等键相同的重试复用同一条任务，不会重复预留或重复转写。
- */
-export function createViralCopyExtraction(
-  platform: ViralPlatform,
-  videoId: string,
-  audio: Uint8Array,
-  idempotencyKey: string = createRequestKey("viral-copy"),
-): Promise<ViralCopyExtraction> {
-  const form = new FormData();
-  form.set("platform", platform);
-  form.set("videoId", videoId);
-  // 服务端只认 MP4 容器（抽取端与 provider 都固定 m4a），文件名不参与判定。
-  // 复制进独立的 ArrayBuffer：`Uint8Array<ArrayBufferLike>` 可能是 SharedArrayBuffer，
-  // 不是 BlobPart 接受的 ArrayBufferView<ArrayBuffer>。
-  const audioBuffer = new ArrayBuffer(audio.byteLength);
-  new Uint8Array(audioBuffer).set(audio);
-  form.set(
-    "file",
-    new Blob([audioBuffer], { type: "audio/mp4" }),
-    "copy-audio.m4a",
-  );
-  return requestApiJson<ViralCopyExtraction>(
-    "/api/viral/videos/copy",
-    "提交文案提取失败",
-    {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: form,
-    },
-    VIRAL_COPY_UPLOAD_TIMEOUT_MS,
   );
 }
 

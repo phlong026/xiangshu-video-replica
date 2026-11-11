@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import socket
-import sqlite3
 import subprocess
 import tempfile
 import time
@@ -32,8 +31,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis import get_version, insert_version, next_version_number
 from app.auth import CurrentUser, Role
-from app.bootstrap import is_customer_production
-from app.db_portable import BusinessConnection
+from app.db_pg import is_customer_production
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.external_calls import (
     endpoint_from_url,
     external_call_context,
@@ -189,10 +193,11 @@ REFERENCE_ROLE_MEDIA_KEYS = {
     "reference_video": "video_url",
     "reference_audio": "audio_url",
 }
-# 客户可选时长 = provider 接受的范围（validate_h3_request 校验 4–15 的每一秒），
-# 报价端点同样是 ge=4 le=15 的按秒线性计价。曾收窄成 {4, 15}，结果 12 秒的源视频
-# 被拉成 15 秒或压成 4 秒，动作节奏与口播必然失真。
-CUSTOMER_DURATION_OPTIONS = frozenset(range(4, 16))
+# 客户可选时长 = provider 接受的范围（validate_h3_request 校验 4–30 的每一秒；
+# 上游 16-30 秒走长视频规则、按基础费用 2 倍计费，2K 不支持超 15 秒）。
+# 报价端点同样是 ge=4 le=30 的按秒线性计价。曾收窄成 {4, 15}，结果 12 秒的
+# 源视频被拉成 15 秒或压成 4 秒，动作节奏与口播必然失真。
+CUSTOMER_DURATION_OPTIONS = frozenset(range(4, 31))
 CUSTOMER_QUANTITY_OPTIONS = {1, 2, 4}
 MAX_GENERATION_PROMPT_CHARS = 7_000
 # A real H3 request polls for up to five minutes. Leave headroom so another
@@ -245,7 +250,9 @@ class PromptCompileRequest(BaseModel):
     script_version_id: str = Field(min_length=1)
     shot_card_version_id: str = Field(min_length=1)
     first_frame_asset_id: str = Field(min_length=1)
-    output_duration_seconds: int = Field(ge=4, le=15)
+    # 编译/预览的时长上限与 CUSTOMER_DURATION_OPTIONS 同源（4–30）；复刻流调用方
+    # 的源片 ≤15 秒，实际取值仍 ≤15，这里放宽只为独立创作长档可用。
+    output_duration_seconds: int = Field(ge=4, le=30)
     resolution: Literal["768P", "2K"] = "768P"
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
     timeline_policy: Literal["preserve", "scale_confirmed"] = "preserve"
@@ -255,7 +262,7 @@ class PromptCompileRequest(BaseModel):
 class PromptPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    output_duration_seconds: int | None = Field(default=None, ge=4, le=15)
+    output_duration_seconds: int | None = Field(default=None, ge=4, le=30)
     resolution: Literal["768P", "2K"] = "768P"
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
 
@@ -948,6 +955,8 @@ class GenerationPriceQuote(BaseModel):
     resolution: Literal["768P", "2K"]
     duration_seconds: int
     quantity: int
+    # 计价档位：16-30 秒走独立档（单价为 15 秒及以内档的 2 倍）。
+    price_tier: Literal["4-15s", "16-30s"] = "4-15s"
     unit_price_fen_per_second: int
     estimated_seconds: int
     estimated_price_fen: int
@@ -1098,9 +1107,9 @@ def latest_version(
     *,
     project_id: str,
     kind: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             """
             SELECT id, project_id, asset_id, kind, version_number, payload_json,
@@ -1118,7 +1127,7 @@ def latest_version(
 def require_latest_version(
     conn: BusinessConnection,
     *,
-    row: sqlite3.Row,
+    row: BusinessRow,
     project_id: str,
     kind: str,
     code: str,
@@ -1154,7 +1163,7 @@ def version_state(
     )
 
 
-def version_stale_reasons(conn: BusinessConnection, *, row: sqlite3.Row) -> list[str]:
+def version_stale_reasons(conn: BusinessConnection, *, row: BusinessRow) -> list[str]:
     project_id = str(row["project_id"])
     kind = str(row["kind"])
     payload = json.loads(str(row["payload_json"]))
@@ -1246,7 +1255,7 @@ def version_stale_reasons(conn: BusinessConnection, *, row: sqlite3.Row) -> list
 def shot_card_stale_reasons(
     conn: BusinessConnection,
     *,
-    row: sqlite3.Row,
+    row: BusinessRow,
 ) -> list[str]:
     payload = json.loads(str(row["payload_json"]))
     source_analysis_version_id = payload.get("source_analysis_version_id")
@@ -1337,7 +1346,7 @@ def create_script_version(
     project_id: str,
     actor: CurrentUser,
     request: ScriptRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1347,7 +1356,6 @@ def create_script_version(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="script.create")
     try:
-        conn.execute("BEGIN IMMEDIATE")
         shot_card = require_version(
             conn,
             version_id=request.shot_card_version_id,
@@ -1422,7 +1430,7 @@ def compile_prompt_version(
     project_id: str,
     actor: CurrentUser,
     request: PromptCompileRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1438,10 +1446,9 @@ def compile_prompt_version(
         raise generation_error(
             422,
             "DURATION_OPTION_INVALID",
-            "Customer generation duration must be an integer from 4 to 15 seconds.",
+            "Customer generation duration must be an integer from 4 to 30 seconds.",
         )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         script = require_version(
             conn,
             version_id=request.script_version_id,
@@ -1705,7 +1712,7 @@ def preview_prompt_text(
         raise generation_error(
             422,
             "DURATION_OPTION_INVALID",
-            "Customer generation duration must be an integer from 4 to 15 seconds.",
+            "Customer generation duration must be an integer from 4 to 30 seconds.",
         )
     prompt_text = compile_prompt_text(
         script_payload=script_payload,
@@ -1737,7 +1744,7 @@ def revise_prompt_version(
     actor: CurrentUser,
     request: PromptRevisionRequest,
     commit: bool = True,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1747,7 +1754,6 @@ def revise_prompt_version(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="prompt.revise")
     try:
-        conn.execute("BEGIN IMMEDIATE")
         base = require_version(
             conn,
             version_id=request.base_prompt_version_id,
@@ -1826,7 +1832,7 @@ def save_prompt_to_library(
     project_id: str,
     actor: CurrentUser,
     request: SavedPromptRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -1890,7 +1896,6 @@ def save_prompt_to_library(
         "resolution": base_payload.get("resolution"),
     }
     try:
-        conn.execute("BEGIN IMMEDIATE")
         version_id = str(uuid4())
         conn.execute(
             """
@@ -1935,7 +1940,7 @@ def list_saved_prompts(
     *,
     project_id: str,
     actor: CurrentUser,
-) -> list[sqlite3.Row]:
+) -> list[BusinessRow]:
     require_project_access(conn, actor=actor, project_id=project_id, action="saved_prompt.read")
     return list(
         conn.execute(
@@ -1958,7 +1963,7 @@ def apply_saved_prompt(
     saved_prompt_id: str,
     actor: CurrentUser,
     request: ApplySavedPromptRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -2015,7 +2020,7 @@ def lock_prompt_version(
     project_id: str,
     prompt_version_id: str,
     actor: CurrentUser,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,
@@ -2025,7 +2030,6 @@ def lock_prompt_version(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="prompt.lock")
     try:
-        conn.execute("BEGIN IMMEDIATE")
         row = require_version(
             conn,
             version_id=prompt_version_id,
@@ -2077,7 +2081,7 @@ def lock_prompt_version(
 
 def _find_idempotent_batch(
     conn: BusinessConnection, *, actor_id: str, project_id: str | None, key: str
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     # 独立批次（project_id NULL）在 SQL 等值比较下永远不命中，须用 IS NULL。
     if project_id is None:
         clause = "created_by_user_id = %s AND project_id IS NULL AND idempotency_key = %s"
@@ -2086,7 +2090,7 @@ def _find_idempotent_batch(
         clause = "created_by_user_id = %s AND project_id = %s AND idempotency_key = %s"
         params = (actor_id, project_id, key)
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             f"""
             SELECT id, request_hash
@@ -2247,7 +2251,6 @@ def create_generation_batch(
         return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
         concurrent_existing = _find_idempotent_batch(
             conn,
             actor_id=actor.id,
@@ -2504,7 +2507,7 @@ def create_generation_batch(
             raise generation_error(
                 422,
                 "DURATION_OPTION_INVALID",
-                "Customer generation duration must be an integer from 4 to 15 seconds.",
+                "Customer generation duration must be an integer from 4 to 30 seconds.",
             )
         if actor.role == "customer" and request.quantity not in CUSTOMER_QUANTITY_OPTIONS:
             raise generation_error(
@@ -2541,12 +2544,13 @@ def create_generation_batch(
                 "Generation must use the first frame that was used to compile the locked prompt.",
             )
 
+        from app.billing_catalog import generation_service_for
         from app.quote_contracts import validate_quote
 
         pricing_snapshot = validate_quote(
             conn,
             user_id=actor.id,
-            service="video_2k" if request.resolution == "2K" else "video_768p",
+            service=generation_service_for(request.resolution, request.output_duration_seconds),
             units=request.output_duration_seconds,
             quantity=request.quantity,
             quote_token=request.quote_token,
@@ -2664,10 +2668,16 @@ def create_generation_batch(
         # row is upserted in the same transaction so rotation can serve them.
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
-    except sqlite3.IntegrityError:
+    except IntegrityConstraintError as exc:
         conn.rollback()
-        # A concurrent request committed the same idempotency key first; return
-        # the existing batch instead of a misleading 409.
+        # 鉴别闸（r3 P1）：只有批次幂等键唯一约束的冲突才按竞争处理——
+        # 同 try 块内其他 235xx（CHECK/外键/其他唯一约束）是真实数据错误，
+        # 必须原样冒出，不得误报成「幂等冲突」。
+        if not is_unique_conflict_on(exc, "uq_generation_batches_user_project_key"):
+            raise
+        # 同幂等键的并发提交者后到（事务已中止，无法在同事务内回放）：查既有
+        # 批次回放而非误报。T2a 2026-11-01 按翻译层真实类型恢复兜底——
+        # 此前 sqlite3/UniqueViolation 两个名字在 PG lane 都接不住翻译异常。
         existing = _find_idempotent_batch(
             conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
         )
@@ -2740,7 +2750,6 @@ def regenerate_generation_batch(
 
     new_batch_id = ""
     try:
-        conn.execute("BEGIN IMMEDIATE")
         source_batch = conn.execute(
             """
             SELECT id, project_id, created_by_user_id, creation_kind,
@@ -2756,7 +2765,9 @@ def regenerate_generation_batch(
         source_tasks = conn.execute(
             """
             SELECT id, generation_mode, provider, model, prompt_version_id,
-                   prompt_snapshot_json
+                   prompt_snapshot_json, status, archive_status, quality_status,
+                   quality_issue_codes, provider_task_id, provider_result_url,
+                   submitted_at, superseded_by_task_id
             FROM generation_tasks
             WHERE batch_id = %s
             ORDER BY created_at, id
@@ -2796,6 +2807,18 @@ def regenerate_generation_batch(
             conn.rollback()
             require_matching_idempotent_batch(existing, request_hash=request_hash)
             return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+        # R0（深审 P0）：批级重生成此前绕过任务级终态门禁与 supersede 写入，
+        # 对 RUNNING/SUBMISSION_UNCERTAIN 批次会双份生成 + 双份扣费。此处逐任务
+        # 复用与任务级相同的门禁；进行中/未对账的源任务在此被 409 拦截。
+        for source_task in source_tasks:
+            if source_task["superseded_by_task_id"] is not None:
+                raise generation_error(
+                    409,
+                    "SOURCE_TASK_ALREADY_SUPERSEDED",
+                    f"Source task {source_task['id']} already has a paid replacement.",
+                )
+            require_task_paid_regeneration_state(source_task)
 
         runtime = read_runtime_limits(conn)
         if len(source_tasks) > runtime["max_generation_count_per_batch"]:
@@ -2890,6 +2913,25 @@ def regenerate_generation_batch(
                 seconds=_seconds_from_prompt_snapshot(prompt_snapshot),
                 pricing_snapshot=pricing_snapshot,
             )
+            # 与任务级相同的 CAS supersede：并发窗口内源任务已被他方替换时整单回滚，
+            # 防止同一源任务挂上两个付费替代。
+            cursor = conn.execute(
+                """
+                UPDATE generation_tasks
+                SET superseded_by_task_id = %s, superseded_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND superseded_by_task_id IS NULL
+                """,
+                (replacement_task_id, str(source_task["id"])),
+            )
+            if cursor.rowcount != 1:
+                raise generation_error(
+                    409,
+                    "SOURCE_TASK_ALREADY_SUPERSEDED",
+                    f"Source task {source_task['id']} already has a paid replacement.",
+                )
+        # 源批次任务已全部被替代，与任务级路径一致地刷新批次状态。
+        _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
         insert_audit(
             conn,
             actor=actor,
@@ -2954,7 +2996,6 @@ def regenerate_generation_task(
 
     new_batch_id = ""
     try:
-        conn.execute("BEGIN IMMEDIATE")
         source = conn.execute(
             """
             SELECT
@@ -3213,12 +3254,15 @@ def _validate_regeneration_quote(
     request: PaidRegenerationRequest,
     parameters: dict[str, Any],
 ) -> dict[str, Any]:
+    from app.billing_catalog import generation_service_for
     from app.quote_contracts import validate_quote
 
     return validate_quote(
         conn,
         user_id=user_id,
-        service="video_2k" if parameters["resolution"] == "2K" else "video_768p",
+        service=generation_service_for(
+            str(parameters["resolution"]), int(parameters["duration_seconds"])
+        ),
         units=parameters["duration_seconds"],
         quantity=parameters["quantity"],
         specification=parameters["specification"],
@@ -3330,7 +3374,7 @@ def canonical_snapshot_hash(snapshot: str) -> str:
     return content_hash(json.dumps(parsed, ensure_ascii=True, sort_keys=True))
 
 
-def require_matching_idempotent_batch(row: sqlite3.Row, *, request_hash: str) -> None:
+def require_matching_idempotent_batch(row: BusinessRow, *, request_hash: str) -> None:
     if str(row["request_hash"]) != request_hash:
         raise generation_error(
             409,
@@ -3357,7 +3401,7 @@ def require_regeneration_provider_ready(
     require_cos_first_frame_storage(conn)
 
 
-def require_task_paid_regeneration_state(row: sqlite3.Row) -> None:
+def require_task_paid_regeneration_state(row: BusinessRow) -> None:
     if str(row["archive_status"]) == "ARCHIVE_FAILED":
         raise generation_error(
             409,
@@ -3780,7 +3824,7 @@ def _idempotent_task_operation(
     action: str,
     idempotency_key: str,
     request_hash: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT request_hash, result_status
@@ -3795,7 +3839,7 @@ def _idempotent_task_operation(
             "IDEMPOTENCY_CONFLICT",
             "This idempotency key was already used for a different task operation.",
         )
-    return cast(sqlite3.Row | None, row)
+    return cast(BusinessRow | None, row)
 
 
 def _record_completed_task_operation(
@@ -3979,15 +4023,13 @@ def _pre_provider_retry_pricing_snapshot(
 ) -> dict[str, Any] | None:
     from decimal import InvalidOperation
 
-    from app.billing_catalog import amount, credits_from_snapshot
+    from app.billing_catalog import amount, credits_from_snapshot, generation_service_for
 
     try:
         payload = json.loads(prompt_snapshot)
         if not isinstance(payload, dict):
             raise ValueError("原任务冻结参数无效")
-        service = (
-            "video_2k" if str(payload.get("resolution", "768P")).upper() == "2K" else "video_768p"
-        )
+        service = generation_service_for(str(payload.get("resolution", "768P")), seconds)
         previous = conn.execute(
             "SELECT user_id, service, state, budget_units, reserved_credits, charged_credits, "
             "pricing_snapshot_json FROM billing_operations "
@@ -4048,7 +4090,6 @@ def retry_generation_task(
         payload={"retry_reason": request.retry_reason},
     )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         existing = _idempotent_task_operation(
             conn,
             actor_id=actor.id,
@@ -4288,7 +4329,6 @@ def confirm_generation_task_not_charged(
         payload={"reason": request.reason},
     )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         existing = _idempotent_task_operation(
             conn,
             actor_id=actor.id,
@@ -4404,14 +4444,13 @@ def enqueue_generation_reconcile_operation(
     project_id: str,
     actor: CurrentUser,
     request: ReconcileGenerationTaskRequest,
-) -> sqlite3.Row:
+) -> BusinessRow:
     action = "RECONCILE"
     request_hash = generation_task_operation_hash(
         action=action,
         task_id=task_id,
         payload={},
     )
-    conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
         """
         SELECT status, provider_task_id, superseded_by_task_id
@@ -4446,7 +4485,7 @@ def enqueue_generation_reconcile_operation(
                 "This idempotency key was already used for a different task operation.",
             )
         conn.commit()
-        return cast(sqlite3.Row, existing)
+        return cast(BusinessRow, existing)
     active = conn.execute(
         """
         SELECT * FROM generation_task_operations
@@ -4457,7 +4496,7 @@ def enqueue_generation_reconcile_operation(
     ).fetchone()
     if active is not None:
         conn.commit()
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
     if str(row["status"]) != "SUBMISSION_UNCERTAIN":
         conn.rollback()
         raise generation_error(
@@ -4527,7 +4566,7 @@ def enqueue_generation_reconcile_operation(
         },
     )
     conn.commit()
-    return cast(sqlite3.Row, operation)
+    return cast(BusinessRow, operation)
 
 
 def acquire_generation_reconcile_operation(
@@ -4865,7 +4904,7 @@ def fail_generation_reconcile_operation(
 def load_generation_reconcile_operation(
     conn: BusinessConnection,
     operation_id: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         """
         SELECT operation.*, batch.project_id
@@ -4878,16 +4917,16 @@ def load_generation_reconcile_operation(
     ).fetchone()
     if row is None:
         raise generation_error(404, "RECONCILE_OPERATION_NOT_FOUND", "对账任务不存在。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def latest_generation_reconcile_operation(
     conn: BusinessConnection,
     *,
     task_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     return cast(
-        sqlite3.Row | None,
+        BusinessRow | None,
         conn.execute(
             """
             SELECT operation.*, batch.project_id
@@ -4906,7 +4945,7 @@ def latest_generation_reconcile_operation(
 def _require_owned_reconcile_operation(
     conn: BusinessConnection,
     lease: ReconcileOperationLease,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM generation_task_operations WHERE id = %s",
         (lease.id,),
@@ -4919,7 +4958,7 @@ def _require_owned_reconcile_operation(
         or int(row["attempt"]) != lease.attempt
     ):
         raise _reconcile_reservation_lost()
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def _timestamp_text(value: datetime) -> str:
@@ -4946,7 +4985,6 @@ def reconcile_generation_task(
         payload={},
     )
     try:
-        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
             SELECT
@@ -5089,8 +5127,12 @@ def reconcile_generation_task(
             },
         )
         conn.commit()
-    except sqlite3.IntegrityError as exc:
+    except IntegrityConstraintError as exc:
         conn.rollback()
+        # 鉴别闸（r3 P1）：只有对账互斥唯一索引的冲突才是「已有对账在跑」；
+        # 其他 235xx 是真实数据错误，必须原样冒出。
+        if not is_unique_conflict_on(exc, "billing_reconciliation_open_key"):
+            raise
         raise generation_error(
             409,
             "RECONCILE_IN_PROGRESS",
@@ -5377,14 +5419,6 @@ def _fair_queue_enabled(conn: BusinessConnection) -> bool:
         # Missing column is the documented "feature off" state (the desktop
         # SQLite lane has no such column; a PG database that never ran 041).
         return False
-    except sqlite3.OperationalError as exc:
-        # The SQLite lane reports a missing column as "no such column";
-        # anything else is a real fault and must fail loudly instead of
-        # silently degrading to global FIFO (M5 review P1-7).
-        if "no such column" in str(exc):
-            return False
-        logger.warning("fair_queue_enabled probe failed: %s: %s", type(exc).__name__, exc)
-        raise
     except Exception as exc:
         # Any other failure is a real fault and must fail loudly instead of
         # silently degrading to global FIFO (M5 review P1-7). The message
@@ -5678,7 +5712,6 @@ def acquire_generation_task_lease(
 ) -> dict[str, Any] | None:
     mark_expired_active_leases_needing_attention(conn)
     try:
-        conn.execute("BEGIN IMMEDIATE")
         from app.h3_account_pool import assign_task_account, pool_capacity
 
         lock_shared_generation_capacity(conn)
@@ -7294,7 +7327,6 @@ def cancel_generation_batch(
             "Only queued batches can be cancelled.",
         )
 
-    conn.execute("BEGIN IMMEDIATE")
     try:
         task_rows = conn.execute(
             """
@@ -7390,8 +7422,7 @@ def build_h3_request(
     """
     if not prompt_text.strip():
         raise ValueError("prompt_text is required")
-    if duration_seconds < 4 or duration_seconds > 15:
-        raise ValueError("duration must be between 4 and 15 seconds")
+    _validate_h3_duration(resolution, duration_seconds)
     if resolution not in SUPPORTED_RESOLUTIONS:
         raise ValueError("resolution must be 768P or 2K")
     if ratio not in SUPPORTED_RATIOS:
@@ -7468,6 +7499,15 @@ def build_h3_request(
     }
 
 
+def _validate_h3_duration(resolution: str, duration: Any) -> None:
+    # 上游契约：单次 4–30 秒整数；16–30 秒走长视频规则（按基础费用 2 倍计费），
+    # 2K 分辨率目前最长 15 秒——超档组合在提交前本地拒绝，不烧一次不确定的调用。
+    if not isinstance(duration, int) or isinstance(duration, bool) or not 4 <= duration <= 30:
+        raise ValueError("H3 duration must be 4-30 seconds")
+    if duration > 15 and str(resolution).upper() == "2K":
+        raise ValueError("H3 2K resolution currently supports up to 15 seconds")
+
+
 def validate_h3_request(request: dict[str, Any]) -> None:
     content = request.get("content")
     if not isinstance(content, list) or not content:
@@ -7475,9 +7515,7 @@ def validate_h3_request(request: dict[str, Any]) -> None:
     if content[0].get("type") != "text" or not str(content[0].get("text", "")).strip():
         raise ValueError("H3 I2V content requires non-empty text")
     roles = [str(item.get("role")) if isinstance(item, dict) else None for item in content[1:]]
-    duration = request.get("duration")
-    if not isinstance(duration, int) or duration < 4 or duration > 15:
-        raise ValueError("H3 duration must be 4-15 seconds")
+    _validate_h3_duration(str(request.get("resolution", "768P")), request.get("duration"))
     if request.get("ratio") not in SUPPORTED_RATIOS:
         raise ValueError("H3 ratio is unsupported")
     if not roles:
@@ -7533,9 +7571,7 @@ def _validate_h3_reference_request(
             raise ValueError(f"H3 R2V {role} object requires a url")
     if request.get("ratio") not in SUPPORTED_RATIOS:
         raise ValueError("H3 R2V ratio is unsupported")
-    duration = request.get("duration")
-    if not isinstance(duration, int) or duration < 4 or duration > 15:
-        raise ValueError("H3 R2V duration must be 4-15 seconds")
+    _validate_h3_duration(str(request.get("resolution", "768P")), request.get("duration"))
 
 
 def _metaso_json_object(content: bytes) -> dict[str, Any]:
@@ -7836,7 +7872,7 @@ def require_version(
     version_id: str,
     project_id: str,
     kind: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     try:
         row = get_version(conn, version_id)
     except LookupError as exc:
@@ -8200,10 +8236,26 @@ def generation_price_quote(
 ) -> GenerationPriceQuote:
     from decimal import ROUND_CEILING, Decimal
 
-    from app.billing_catalog import snapshot_discount_rate
+    from app.billing_catalog import generation_service_for, snapshot_discount_rate
     from app.quote_contracts import issue_quote
 
-    subject = "video_2k" if resolution == "2K" else "video_768p"
+    if duration_seconds > 15 and resolution == "2K":
+        # 2K 不存在长档：不给出无法成交的报价，避免客户拿着报价过不了提交闸。
+        raise generation_error(
+            422, "DURATION_RESOLUTION_UNSUPPORTED", "2K 分辨率目前最长支持 15 秒。"
+        )
+    subject = generation_service_for(resolution, duration_seconds)
+    if duration_seconds > 15:
+        # 长档未启用时不给报价：0 积分报价会误导客户以为免费，提交闸也会拒绝。
+        from app.billing_catalog import read_tariff
+
+        tariff = read_tariff(conn, subject)
+        if tariff is None or not tariff.enabled or not tariff.unit_credits:
+            raise generation_error(
+                422,
+                "LONG_DURATION_TIER_DISABLED",
+                "16-30 秒时长档暂未开放，请选择 15 秒及以内的时长。",
+            )
     contract = issue_quote(
         conn,
         user_id=user_id or "",
@@ -8233,6 +8285,7 @@ def generation_price_quote(
         resolution=resolution,
         duration_seconds=duration_seconds,
         quantity=quantity,
+        price_tier="16-30s" if duration_seconds > 15 else "4-15s",
         unit_price_fen_per_second=unit_price,
         estimated_seconds=estimated_seconds,
         estimated_price_fen=unit_price * estimated_seconds,
@@ -8386,7 +8439,7 @@ def batch_status(stored_status: str, progress: BatchProgress) -> str:
     return stored_status
 
 
-def task_result(row: sqlite3.Row) -> TaskResult:
+def task_result(row: BusinessRow) -> TaskResult:
     summary = task_summary(row)
     prompt_snapshot = (
         None
@@ -8399,7 +8452,7 @@ def task_result(row: sqlite3.Row) -> TaskResult:
     )
 
 
-def task_summary(row: sqlite3.Row) -> TaskSummary:
+def task_summary(row: BusinessRow) -> TaskSummary:
     quality_issue_codes = parse_json_list(row["quality_issue_codes"])
     provider_task_id = optional_text(row["provider_task_id"])
     submitted_at = optional_text(row["submitted_at"])
@@ -8448,7 +8501,7 @@ def task_summary(row: sqlite3.Row) -> TaskSummary:
 
 
 def generation_task_available_actions(
-    row: sqlite3.Row,
+    row: BusinessRow,
 ) -> list[Literal["RETRY", "RECONCILE", "CONFIRM_NOT_CHARGED", "REGENERATE"]]:
     status = str(row["status"])
     archive_status = str(row["archive_status"])
@@ -8571,7 +8624,7 @@ def generation_quality_failed(quality_status: str, issue_codes: Sequence[str]) -
     )
 
 
-def version_result(row: sqlite3.Row) -> VersionResult:
+def version_result(row: BusinessRow) -> VersionResult:
     return VersionResult(
         id=str(row["id"]),
         project_id=str(row["project_id"]),

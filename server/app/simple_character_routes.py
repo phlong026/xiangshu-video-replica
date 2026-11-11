@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -31,6 +30,7 @@ from app.character_contracts import PersonIdentity, RequiredCharacterViewType
 from app.character_identity import character_error, read_identity_row, required_text
 from app.character_identity_routes import get_character_storage
 from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessRow
 from app.first_frame_routes import get_image_provider
 from app.first_frames import ImageProvider
 from app.image_tasks import (
@@ -1101,7 +1101,7 @@ async def _enqueue_simple_character_upload(
         raise
 
 
-def character_sheet_task_response(row: sqlite3.Row) -> CharacterSheetTaskResponse:
+def character_sheet_task_response(row: BusinessRow) -> CharacterSheetTaskResponse:
     task = row
     request_payload = json.loads(str(task["request_json"]))
     result_payload = None if task["result_json"] is None else json.loads(str(task["result_json"]))

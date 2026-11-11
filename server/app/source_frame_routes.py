@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
@@ -11,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessRow
 from app.media_routes import get_media_storage
 from app.permissions import remap_security_denial, require_project_access
 from app.source_frames import (
@@ -254,7 +254,7 @@ def read_latest_source_frame_selection(
     return version_response(row)
 
 
-def version_response(row: sqlite3.Row) -> VersionResponse:
+def version_response(row: BusinessRow) -> VersionResponse:
     return VersionResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -269,7 +269,7 @@ def version_response(row: sqlite3.Row) -> VersionResponse:
     )
 
 
-def source_frame_task_response(row: sqlite3.Row) -> SourceFrameTaskResponse:
+def source_frame_task_response(row: BusinessRow) -> SourceFrameTaskResponse:
     request = json.loads(str(row["request_json"]))
     timestamps = request.get("timestamps_seconds")
     return SourceFrameTaskResponse(

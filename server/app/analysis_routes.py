@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -38,9 +37,9 @@ from app.analysis import (
 )
 from app.async_compat import reject_legacy_sync_operation
 from app.auth import AuthenticatedUser, CurrentUser, Database, Role
-from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep
-from app.db_portable import BusinessConnection
+from app.db_pg import is_customer_production
+from app.db_portable import BusinessConnection, BusinessRow
 from app.h3_prompts import GenerationContext
 from app.media import (
     DURATION_ROUNDING_TOLERANCE_SECONDS,
@@ -72,6 +71,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
+from app.task_lease import recover_analysis_interrupted
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 logger = logging.getLogger(__name__)
@@ -641,7 +641,7 @@ def validate_analysis_enqueue(
     actor: CurrentUser,
     project_id: str,
     request: CreateAnalysisRequest,
-) -> tuple[sqlite3.Row, float]:
+) -> tuple[BusinessRow, float]:
     require_not_auditor(
         conn,
         actor=actor,
@@ -723,8 +723,8 @@ def analysis_duration_for_asset(
             detail={
                 "code": "ANALYSIS_DURATION_EXCEEDED",
                 "message": (
-                    f"参考视频时长 {round(measured_duration)} 秒，超过 15 秒上限，"
-                    "无法拆解；请上传 15 秒以内的视频。"
+                    f"参考视频时长 {round(measured_duration)} 秒，超过 30 秒上限，"
+                    "无法拆解；请上传 30 秒以内的视频。"
                 ),
             },
         )
@@ -801,22 +801,7 @@ def acquire_analysis_task(
         "%Y-%m-%d %H:%M:%S"
     )
     try:
-        interrupted = conn.execute(
-            """
-            UPDATE analysis_tasks
-            SET status = 'FAILED',
-                error_code = 'ANALYSIS_WORKER_INTERRUPTED',
-                error_message_redacted = '拆解任务执行中断，请重新拆解。',
-                retryable = 1,
-                locked_by = NULL,
-                locked_until = NULL,
-                completed_at = %s,
-                updated_at = %s
-            WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
-            RETURNING id, attempt, request_id
-            """,
-            (now_text, now_text, now_text),
-        ).fetchall()
+        interrupted = recover_analysis_interrupted(conn)
         # P1-6：被接管的中断尝试也要留痕，否则失败历史只剩用户重试后的记录。
         for interrupted_row in interrupted:
             record_analysis_task_attempt(
@@ -1298,7 +1283,7 @@ def cancel_analysis_task(
     *,
     task_id: str,
     actor: CurrentUser,
-) -> sqlite3.Row:
+) -> BusinessRow:
     """Cancel a queued or running analysis task and release the reservation.
 
     Switching the source video used to leave the old task running (and paying)
@@ -1364,7 +1349,7 @@ def cancel_analysis_task(
     from app.usage_billing import finish_source
 
     finish_source(conn, task_id, units=0, succeeded=False, cancelled=True)
-    return cast(sqlite3.Row, updated)
+    return cast(BusinessRow, updated)
 
 
 def load_task_actor(conn: BusinessConnection, user_id: str) -> CurrentUser:
@@ -1382,14 +1367,14 @@ def load_task_actor(conn: BusinessConnection, user_id: str) -> CurrentUser:
     )
 
 
-def load_analysis_task(conn: BusinessConnection, task_id: str) -> sqlite3.Row:
+def load_analysis_task(conn: BusinessConnection, task_id: str) -> BusinessRow:
     row = conn.execute("SELECT * FROM analysis_tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "ANALYSIS_TASK_NOT_FOUND"})
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
-def analysis_task_response(row: sqlite3.Row) -> AnalysisTaskResponse:
+def analysis_task_response(row: BusinessRow) -> AnalysisTaskResponse:
     return AnalysisTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -1443,7 +1428,7 @@ def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
     )
 
 
-def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> sqlite3.Row:
+def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> BusinessRow:
     try:
         row = get_version(conn, analysis_id)
     except LookupError as exc:
@@ -1460,7 +1445,7 @@ def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> sqlite3
     return row
 
 
-def version_response(row: sqlite3.Row) -> VersionResponse:
+def version_response(row: BusinessRow) -> VersionResponse:
     return VersionResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),

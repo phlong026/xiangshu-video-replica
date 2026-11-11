@@ -16,15 +16,18 @@ from __future__ import annotations
 import json
 import math
 import re
-import sqlite3
 from typing import Any, Literal
 from uuid import uuid4
 
-import psycopg.errors as psycopg_errors
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.bootstrap import is_customer_production
-from app.db_portable import BusinessConnection
+from app.db_pg import is_customer_production
+from app.db_portable import (
+    BusinessConnection,
+    BusinessRow,
+    IntegrityConstraintError,
+    is_unique_conflict_on,
+)
 from app.generation import (
     H3_MODEL,
     BatchResult,
@@ -81,7 +84,8 @@ class IndependentVideoRequest(BaseModel):
     first_frame_asset_id: str | None = Field(default=None, min_length=1)
     last_frame_asset_id: str | None = Field(default=None, min_length=1)
     reference_asset_ids: list[str] = Field(default_factory=list, max_length=_MAX_REFERENCE_TOTAL)
-    output_duration_seconds: int = Field(ge=4, le=15)
+    # 16-30 秒走独立计费长档（上游长视频规则），档位未开放时建单闸 fail-closed。
+    output_duration_seconds: int = Field(ge=4, le=30)
     resolution: Literal["768P", "2K"] = "768P"
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
     quantity: int = Field(ge=1)
@@ -102,16 +106,24 @@ class IndependentCapabilities(BaseModel):
     max_reference_videos: int = MAX_REFERENCE_VIDEOS
     max_reference_audios: int = MAX_REFERENCE_AUDIOS
     max_quantity: int
+    # 768P 可选时长上限：16-30 秒长档（后台价目启用）开放时为 30，否则 15。
+    # 2K 恒为 15（上游契约），前端按分辨率分别取上限。
+    max_output_duration_seconds: int = 15
 
 
 def read_independent_capabilities(conn: BusinessConnection) -> IndependentCapabilities:
-    # 所有能力默认全部开放
+    # 所有能力默认全部开放；长档开关 = video_768p_long 价目已启用且已定价。
+    from app.billing_catalog import read_tariff
+
+    tier = read_tariff(conn, "video_768p_long")
+    long_enabled = bool(tier and tier.enabled and tier.unit_credits)
     return IndependentCapabilities(
         extended_modes_enabled=True,
         t2v_enabled=True,
         i2v_enabled=True,
         r2v_enabled=True,
         last_frame_enabled=True,
+        max_output_duration_seconds=30 if long_enabled else 15,
         max_quantity=read_runtime_limits(conn)["max_generation_count_per_batch"],
     )
 
@@ -125,8 +137,8 @@ def _independent_request_hash(request: IndependentVideoRequest) -> str:
 
 def _find_independent_batch(
     conn: BusinessConnection, *, actor_id: str, key: str
-) -> sqlite3.Row | None:
-    row: sqlite3.Row | None = conn.execute(
+) -> BusinessRow | None:
+    row: BusinessRow | None = conn.execute(
         """
         SELECT id, request_hash
         FROM generation_batches
@@ -302,6 +314,29 @@ def create_independent_batch(
             )
         return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
 
+    # 长档（16-30 秒）双重前置闸：2K 不支持超 15 秒（上游契约）；768P 长档必须
+    # 已在后台启用价目——没有启用的价目就没有可冻结的单价，绝不能让长任务按
+    # 0 积分放行。闸在幂等回放之后：档位中途关闭不影响已建任务的回放取回。
+    if request.output_duration_seconds > 15:
+        if request.resolution == "2K":
+            raise generation_error(
+                422,
+                "DURATION_RESOLUTION_UNSUPPORTED",
+                "2K 分辨率目前最长支持 15 秒，请选择 768P 或缩短时长。",
+            )
+        from app.billing_catalog import generation_service_for, read_tariff
+
+        tier = read_tariff(
+            conn,
+            generation_service_for(request.resolution, request.output_duration_seconds),
+        )
+        if tier is None or not tier.enabled or not tier.unit_credits:
+            raise generation_error(
+                422,
+                "LONG_DURATION_TIER_DISABLED",
+                "16-30 秒时长档暂未开放，请选择 15 秒及以内的时长。",
+            )
+
     # 与复刻流同源的生产红线：客户生产禁止模拟任务；metaso 需配置就绪并
     # 遵守付费试用限额。仅对“真正的新提交”生效——幂等回放已在上面返回，
     # 否则网络超时后用同一个键重放会被限额误拒，而任务其实已经建好。
@@ -466,7 +501,6 @@ def create_independent_batch(
         raise generation_error(422, issues[0].code, message)
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
         concurrent_existing = _find_independent_batch(
             conn, actor_id=actor.id, key=request.idempotency_key
         )
@@ -480,12 +514,13 @@ def create_independent_batch(
                 )
             return get_generation_batch(conn, batch_id=str(concurrent_existing["id"]), actor=actor)
 
+        from app.billing_catalog import generation_service_for
         from app.quote_contracts import validate_quote
 
         pricing_snapshot = validate_quote(
             conn,
             user_id=actor.id,
-            service="video_2k" if request.resolution == "2K" else "video_768p",
+            service=generation_service_for(request.resolution, request.output_duration_seconds),
             units=request.output_duration_seconds,
             quantity=request.quantity,
             quote_token=request.quote_token,
@@ -591,11 +626,15 @@ def create_independent_batch(
             )
         ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
-    except (sqlite3.IntegrityError, psycopg_errors.UniqueViolation):
-        # SQLite：写锁保证事务内复查可见，可安全回放；
-        # PG：NULL project 不受 UNIQUE 约束保护，由 075 的部分唯一索引兜底。
-        # fenced 事务冲突后已中止，无法在同事务内回放——返回 409 让客户端
-        # 重试（重试会命中幂等回放）。
+    except IntegrityConstraintError as exc:
+        # 鉴别闸（r3 P1）：只有 075 独立批次幂等键部分唯一索引的冲突才按
+        # 并发竞争处理；其他 235xx 是真实数据错误，必须原样冒出。
+        if not is_unique_conflict_on(exc, "uq_generation_batches_independent_idempotency"):
+            raise
+        # 并发同键提交者后到（075 部分唯一索引兜底 NULL project 场景）；
+        # 翻译层把唯一冲突统一抛 IntegrityConstraintError（T2a 2026-11-01
+        # 修正捕获类型），fenced 事务已中止无法回放——409 让客户端重试，
+        # 重试命中幂等回放。
         conn.rollback()
         if conn.is_postgres:
             raise generation_error(

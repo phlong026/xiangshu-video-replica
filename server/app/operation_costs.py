@@ -44,12 +44,13 @@ def snapshot_generation_rates(
     if billed_seconds < 1:
         raise ValueError("billed_seconds must be positive")
     suffix = _resolution_suffix(resolution)
-    cost_subject = f"video_generation_{suffix}"
+    # 16-30 秒走长档成本科目（费率为标准档的 2 倍），客户售价快照同档取值。
+    cost_subject = f"video_generation_{suffix}" + ("_long" if billed_seconds > 15 else "")
     if not getattr(conn, "is_postgres", False):
         return GenerationRateSnapshot(cost_subject, None, None, billed_seconds)
-    from app.billing_catalog import retail_snapshot
+    from app.billing_catalog import generation_service_for, retail_snapshot
 
-    quote = retail_snapshot(conn, "video_2k" if suffix == "2k" else "video_768p", 1)
+    quote = retail_snapshot(conn, generation_service_for(resolution, billed_seconds), 1)
     _, cost_price = _rate(conn, cost_subject)
     ratio = quote["points_per_yuan"]
     external_price = int(Decimal(str(quote["credits"])) * 100 / Decimal(str(ratio))) if ratio else 0

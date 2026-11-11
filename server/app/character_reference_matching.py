@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass
 from typing import Literal, cast
 from uuid import uuid4
@@ -24,7 +23,7 @@ from app.character_identity import (
     parse_datetime,
 )
 from app.character_policy import identity_values_are_current
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.permissions import require_not_auditor, require_project_access
 from app.source_frames import (
     SOURCE_FRAME_CANDIDATES_KIND,
@@ -129,7 +128,6 @@ def create_character_reference_selection(
     )
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
         inputs = load_reference_selection_inputs(
             conn,
             project_id=project_id,
@@ -183,14 +181,6 @@ def create_character_reference_selection(
     except HTTPException:
         conn.rollback()
         raise
-    except sqlite3.Error as exc:
-        conn.rollback()
-        logger.exception("Character reference selection persistence failed")
-        raise reference_error(
-            500,
-            "CHARACTER_REFERENCE_PERSIST_FAILED",
-            "人物参考图选择未能保存，请重试。",
-        ) from exc
     return character_reference_selection_from_row(row)
 
 
@@ -466,7 +456,7 @@ def current_main_character_binding(
     conn: BusinessConnection,
     *,
     project_id: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         """
         SELECT project_id, version_id, character_version_id
@@ -481,13 +471,13 @@ def current_main_character_binding(
             "CHARACTER_VERSION_REQUIRED",
             "请先为项目选择一个已发布人物版本。",
         )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def load_character_context(
     conn: BusinessConnection,
     version_id: str,
-) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
+) -> tuple[BusinessRow, BusinessRow, BusinessRow]:
     version = conn.execute(
         "SELECT * FROM character_versions WHERE id = %s",
         (version_id,),
@@ -506,10 +496,10 @@ def load_character_context(
     ).fetchone()
     if identity is None:
         raise reference_error(409, "CHARACTER_IDENTITY_INVALID", "项目人物身份不存在。")
-    return cast(sqlite3.Row, version), cast(sqlite3.Row, persona), cast(sqlite3.Row, identity)
+    return cast(BusinessRow, version), cast(BusinessRow, persona), cast(BusinessRow, identity)
 
 
-def validated_publication(version: sqlite3.Row) -> tuple[dict[str, object], str]:
+def validated_publication(version: BusinessRow) -> tuple[dict[str, object], str]:
     snapshot_value = version["publication_snapshot_json"]
     publication_hash_value = version["publication_hash"]
     if snapshot_value is None or publication_hash_value is None:
@@ -647,7 +637,7 @@ def latest_character_reference_selection_row(
     conn: BusinessConnection,
     *,
     project_id: str,
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT * FROM character_reference_selections
@@ -657,14 +647,14 @@ def latest_character_reference_selection_row(
         """,
         (project_id,),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def read_character_reference_selection_row(
     conn: BusinessConnection,
     *,
     selection_id: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM character_reference_selections WHERE id = %s",
         (selection_id,),
@@ -675,10 +665,10 @@ def read_character_reference_selection_row(
             "CHARACTER_REFERENCE_SELECTION_NOT_FOUND",
             "人物参考图选择不存在。",
         )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
-def selection_row_matches(row: sqlite3.Row, inputs: ReferenceSelectionInputs) -> bool:
+def selection_row_matches(row: BusinessRow, inputs: ReferenceSelectionInputs) -> bool:
     return (
         str(row["source_frame_version_id"]) == inputs.source_frame_version_id
         and str(row["character_version_id"]) == inputs.character_version_id
@@ -690,7 +680,7 @@ def selection_row_matches(row: sqlite3.Row, inputs: ReferenceSelectionInputs) ->
     )
 
 
-def character_reference_selection_from_row(row: sqlite3.Row) -> CharacterReferenceSelection:
+def character_reference_selection_from_row(row: BusinessRow) -> CharacterReferenceSelection:
     return CharacterReferenceSelection(
         id=str(row["id"]),
         project_id=str(row["project_id"]),

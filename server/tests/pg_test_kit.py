@@ -94,6 +94,8 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         "customer_annotations_test",
         # IA 改版第 5 项：平台培训素材库（admin 上传 + 客户只读）。
         "training_materials_test",
+        # R0 批级重生成门禁的真库回滚验证专用库（test_generation_batch_regen_gate_pg.py）。
+        "r0_batch_regen_gate_test",
         "w15_dashboard_test",
         # 经营看板聚合端点（business/overview）专用迁移库。
         "w15_business_overview_test",
@@ -281,6 +283,9 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         "billing_reconcile_test",
         "character_delete_guard_test",
         "studio_draft_tombstone_test",
+        # 2026-11 爆款链路改造 WP1：服务端归档音频的跨形态共享文案缓存矩阵
+        # (test_viral_audio_shared_cache_pg.py)，migrated to head。
+        "viral_audio_shared_cache_test",
     }
 )
 

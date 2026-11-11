@@ -27,6 +27,9 @@ class Service:
 
 SERVICES: dict[str, Service] = {
     "video_768p": Service("视频生成 · 768P", "second", "metaso", "video"),
+    # 16-30 秒长档：上游按基础费用 2 倍计费，客户售价与成本因此按档独立配置；
+    # 档位开关即 tariff.enabled（默认停用，后台开启后才对客户可见）。
+    "video_768p_long": Service("视频生成 · 768P · 16-30秒", "second", "metaso", "video"),
     "video_2k": Service("视频生成 · 2K", "second", "metaso", "video"),
     "analysis": Service("视频分析", "call", "apilio", "replica"),
     "first_frame": Service("首帧图片", "image", "apilio", "replacement"),
@@ -60,6 +63,7 @@ SERVICES: dict[str, Service] = {
 # Existing cost hooks refer to these provider subjects; they share the same tariff.
 COST_SUBJECTS = {
     "video_generation_768p": "video_768p",
+    "video_generation_768p_long": "video_768p_long",
     "video_generation_2k": "video_2k",
     "video_analysis_768p": "analysis",
     "video_analysis_2k": "analysis",
@@ -87,6 +91,7 @@ PLATFORM_INTERFACE_KEY = "platform_internal"
 # 计费科目 → 折扣接口键（覆盖 SERVICES 全集；可计费科目的键必须在 INTERFACE_KEYS 中）。
 SERVICE_INTERFACE: dict[str, str] = {
     "video_768p": "video_generation",
+    "video_768p_long": "video_generation",
     "video_2k": "video_generation",
     "analysis": "video_analysis",
     "first_frame": "first_frame",
@@ -117,6 +122,17 @@ def interface_for_service(service: str) -> str:
     if service not in SERVICES:
         raise ValueError("未知计费科目")
     return SERVICE_INTERFACE[service]
+
+
+def generation_service_for(resolution: str, seconds: int) -> str:
+    """视频生成计费科目：报价、预留与结算必须同用本函数选档.
+
+    16-30 秒是独立计费档（上游长视频按基础费用 2 倍计费，客户售价单独配置）；
+    2K 不存在超 15 秒的合法请求（契约层已拒绝），这里只按分辨率归档。
+    """
+    if str(resolution).upper() == "2K":
+        return "video_2k"
+    return "video_768p_long" if seconds > 15 else "video_768p"
 
 
 class Tariff(BaseModel):

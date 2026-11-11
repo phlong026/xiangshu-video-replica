@@ -22,7 +22,29 @@ from test_customer_pricing import (  # noqa: F401
 from app.billing_catalog import SERVICES, Tariff, calculate_credits
 from app.billing_reports import date_bounds, operation_rows, statistics
 from app.db_portable import BusinessConnection
-from app.usage_billing import accept_operation, finish_operation, record_attempt
+from app.usage_billing import (
+    accept_operation,
+    begin_attempt,
+    complete_attempt,
+    finish_operation,
+)
+
+
+def record_attempt(
+    conn,
+    *,
+    operation_id: str,
+    attempt_key: str,
+    usage,
+    service: str | None = None,
+) -> str:
+    """测试播种辅助：begin+complete 一步落一条 attempt（原生产函数已删，
+    语义即 begin_attempt + complete_attempt 的组合）。"""
+    attempt_id = begin_attempt(
+        conn, operation_id=operation_id, attempt_key=attempt_key, service=service
+    )
+    complete_attempt(conn, attempt_id=attempt_id, usage=usage)
+    return attempt_id
 
 
 def test_panorama_name_and_stable_id_filter_match_operations(pricing_client, route_state):
@@ -1610,6 +1632,70 @@ def test_admin_publishes_independent_cost_and_price_with_audit_and_conflict(
                 conn, user_id=uid, service="oral", source_id="zero-wallet-paid", units=5.1
             )
         assert insufficient.value.status_code == 402
+
+
+def test_admin_enables_long_duration_tier_and_opens_thirty_second_quotes(
+    pricing_client, route_state
+):
+    """后台启档全链路（16-30 秒长档）：管理端 PUT 启用价目 → capabilities 上限
+    放开到 30 → 客户 30 秒报价按长档科目出价并带 16-30s 档标注；15 秒仍走标准档。"""
+    from uuid import uuid4
+
+    from app.billing_routes import router
+    from app.independent import read_independent_capabilities
+
+    client = pricing_client
+    client.app.include_router(router)
+    customer, uid = account(client)
+    admin = admin_login(client, route_state)
+
+    # 启档前：30 秒报价 fail-closed。
+    disabled = client.get(
+        "/api/generation/price-quote?resolution=768P&duration_seconds=30&quantity=1",
+        headers=customer,
+    )
+    assert disabled.status_code == 422, disabled.text
+    assert disabled.json()["detail"]["code"] == "LONG_DURATION_TIER_DISABLED"
+
+    payload = {
+        "confirm": True,
+        "reason": "开放 16-30 秒长档（上游长视频规则按基础费用 2 倍计费）",
+        "service": "video_768p_long",
+        "expected_version": 0,
+        "tariff": {
+            "enabled": True,
+            "unit_credits": "0.5",
+            "unit_cost_fen": "0.00025",
+            "unit_rounding": "ceil",
+        },
+    }
+    response = client.put(
+        "/api/control/billing/tariff",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json=payload,
+    )
+    assert response.status_code == 200, response.text
+
+    # 启档后：30 秒按长档出价（ceil(30 × 0.5) = 15 积分）并带档位标注。
+    quote = client.get(
+        "/api/generation/price-quote?resolution=768P&duration_seconds=30&quantity=1",
+        headers=customer,
+    )
+    assert quote.status_code == 200, quote.text
+    body = quote.json()
+    assert body["price_tier"] == "16-30s"
+    assert body["unit_credits"] == 0.5
+    assert body["estimated_credits"] == 15
+    standard = client.get(
+        "/api/generation/price-quote?resolution=768P&duration_seconds=10&quantity=1",
+        headers=customer,
+    )
+    assert standard.status_code == 200, standard.text
+    assert standard.json()["price_tier"] == "4-15s"
+
+    with psycopg.connect(route_state) as raw:
+        caps = read_independent_capabilities(BusinessConnection.postgres(raw))
+    assert caps.max_output_duration_seconds == 30
 
 
 def test_core_facts_cannot_be_repriced_or_rewritten(client, route_state):

@@ -15,7 +15,6 @@ import hashlib
 import json
 import logging
 import math
-import sqlite3
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -38,7 +37,7 @@ from app.asr import (
     TranscriptResult,
     get_asr_provider,
 )
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 from app.media_tools import (
     MediaToolFailed,
     MediaToolUnavailable,
@@ -48,6 +47,7 @@ from app.media_tools import (
 )
 from app.permissions import require_not_auditor, require_project_access
 from app.storage import StorageAdapter
+from app.task_lease import claim_script_from_audio_task
 
 logger = logging.getLogger("app.script_from_audio")
 
@@ -107,7 +107,7 @@ class ScriptFromAudioTaskResponse(BaseModel):
     completed_at: str | None
 
 
-def _row_viral_source(row: sqlite3.Row) -> tuple[str, str] | None:
+def _row_viral_source(row: BusinessRow) -> tuple[str, str] | None:
     """任务入队时服务端核验并写入的爆款身份；客户端自报的元数据不算数."""
     try:
         payload = json.loads(str(row["request_json"] or "{}"))
@@ -119,7 +119,7 @@ def _row_viral_source(row: sqlite3.Row) -> tuple[str, str] | None:
     return None
 
 
-def script_from_audio_task_response(row: sqlite3.Row) -> ScriptFromAudioTaskResponse:
+def script_from_audio_task_response(row: BusinessRow) -> ScriptFromAudioTaskResponse:
     viral_source = _row_viral_source(row)
     result_json = row["result_json"]
     result: ScriptFromAudioResult | None = None
@@ -190,15 +190,51 @@ class ScriptCachePending(Exception):
     """Another durable task owns this video's one upstream transcription."""
 
 
-def _viral_source(conn: BusinessConnection, asset: sqlite3.Row) -> tuple[str, str] | None:
-    # 客户端音轨与独立解析音频都不能证明原视频口播身份；只有服务端归档
-    # 的原视频及其不可变内容对象可以成为跨用户共享的生产者。
+def _viral_media_kind(asset_kind: str) -> str:
+    """资产 kind → 共享归档形态：reference_audio 对应 audio 归档，其余按视频."""
+    return "audio" if asset_kind == "reference_audio" else "video"
+
+
+def _credential_archive_kind(value: object) -> str:
+    """凭据形态：新凭据带 kind；旧凭据只有视频资产能写入共享缓存，回溯按 video."""
+    if isinstance(value, str) and value in ("audio", "video"):
+        return value
+    return "video"
+
+
+def _credential_archive_is_current(
+    conn: BusinessConnection,
+    source: tuple[str, str],
+    kind: str,
+    storage_uri: object,
+) -> bool:
+    """给定形态的当前归档与给定 URI 是否同一版本；该形态归档缺失时不判过期.
+
+    音频与视频是同一条视频的两个独立归档形态：音频凭据只对 audio 归档负责，
+    不会被并存的视频重归档误伤，反之亦然。任一形态被重新归档（换源/换版本）
+    时，指向旧对象的凭据即过期。
+    """
+    current = conn.execute(
+        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
+        "AND media_kind=%s AND status='SUCCEEDED'",
+        (*source, kind),
+    ).fetchone()
+    if current is None:
+        return True
+    return bool(storage_uri) and str(storage_uri) == str(current["storage_uri"])
+
+
+def _viral_source(conn: BusinessConnection, asset: BusinessRow) -> tuple[str, str] | None:
+    # 客户端上传音轨与独立解析音频不能证明原视频口播身份；服务端归档的原视频
+    # 与上游音频（链接解析直下的音轨，经全局内容对象背书）都可以成为跨用户
+    # 共享的生产者——正文属于视频本身，不绑定音频/视频形态。
     row = conn.execute(
         "SELECT i.platform,i.video_id FROM viral_import_tasks i "
         "JOIN content_objects c ON c.id=%s AND c.sha256=%s AND c.size_bytes=%s "
         "AND c.scope='global' "
         "WHERE i.source_asset_id=%s AND i.project_id=%s AND i.status='SUCCEEDED' "
-        "AND %s='reference_video' ORDER BY i.created_at,i.id LIMIT 1",
+        "AND %s IN ('reference_video','reference_audio') "
+        "ORDER BY i.created_at,i.id LIMIT 1",
         (
             asset["content_object_id"],
             asset["sha256"],
@@ -211,7 +247,7 @@ def _viral_source(conn: BusinessConnection, asset: sqlite3.Row) -> tuple[str, st
     if row is None:
         return None
     source = (str(row["platform"]), str(row["video_id"]))
-    # 同视频重归档不是同一版本；已有正文不覆盖，新版本先按私有成果交付。
+    asset_media_kind = _viral_media_kind(str(asset["kind"]))
     cached = conn.execute(
         "SELECT t.request_json,c.result_json FROM viral_script_cache c "
         "LEFT JOIN script_from_audio_tasks t "
@@ -220,23 +256,29 @@ def _viral_source(conn: BusinessConnection, asset: sqlite3.Row) -> tuple[str, st
     ).fetchone()
     if cached is not None:
         try:
-            fingerprint = json.loads(str(cached["request_json"] or "{}")).get(
-                "viral_archive_sha256"
-            )
-            if fingerprint is None and cached["result_json"] is not None:
-                fingerprint = (
-                    json.loads(str(cached["result_json"])).get("archive", {}).get("sha256")
-                )
+            request_json = json.loads(str(cached["request_json"] or "{}"))
+            archive = json.loads(str(cached["result_json"] or "{}")).get("archive", {})
         except (ValueError, TypeError, AttributeError):
             return None
-        if fingerprint is not None and fingerprint != asset["sha256"]:
-            return None
-    current = conn.execute(
-        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
-        "AND media_kind='video' AND status='SUCCEEDED'",
-        source,
-    ).fetchone()
-    if current is not None and current["storage_uri"] != asset["storage_uri"]:
+        credential_kind = _credential_archive_kind(
+            request_json.get("viral_archive_kind", archive.get("kind"))
+        )
+        fingerprint = request_json.get("viral_archive_sha256")
+        if fingerprint is None:
+            fingerprint = archive.get("sha256")
+        credential_uri = request_json.get("viral_archive_uri") or archive.get("storage_uri")
+        # 同形态重归档不是同一版本：凭据与资产同为音频（或同为视频）时字节指纹
+        # 必须一致，新版本先按私有成果交付；跨形态不比指纹（音频↔视频是同一视频
+        # 的两个载体）。已有凭据时还要求凭据所指的归档仍是当前版本——缓存行刚
+        # 创建（尚无凭据）时没有可比对的凭据，只做下方资产自身的新鲜度校验。
+        if fingerprint is not None:
+            if credential_kind == asset_media_kind and str(fingerprint) != str(asset["sha256"]):
+                return None
+            if not _credential_archive_is_current(conn, source, credential_kind, credential_uri):
+                return None
+    if not _credential_archive_is_current(
+        conn, source, asset_media_kind, str(asset["storage_uri"])
+    ):
         return None
     return source
 
@@ -282,6 +324,8 @@ def _verified_cache_result(raw: object, source: tuple[str, str]) -> TranscriptRe
         digest = archive.get("sha256", "")
         if (archive.get("platform"), archive.get("video_id")) != source:
             return None
+        if archive.get("kind") is not None and archive.get("kind") not in ("audio", "video"):
+            return None
         if (
             not isinstance(digest, str)
             or len(digest) != 64
@@ -297,18 +341,14 @@ def _cache_archive_is_current(
     conn: BusinessConnection, raw: object, source: tuple[str, str]
 ) -> bool:
     # 同一平台 ID 重新归档后不能交付旧版本的正文；归档缺失不会撤销个人已受理成果。
-    current = conn.execute(
-        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
-        "AND media_kind='video' AND status='SUCCEEDED'",
-        source,
-    ).fetchone()
-    if current is None:
-        return True
+    # 凭据只对它自己形态的归档负责：音频正文不被并存的视频重归档误伤，反之亦然。
     try:
         archive = json.loads(str(raw)).get("archive", {})
-        return bool(archive.get("storage_uri")) and archive["storage_uri"] == current["storage_uri"]
     except (ValueError, TypeError, AttributeError):
         return False
+    return _credential_archive_is_current(
+        conn, source, _credential_archive_kind(archive.get("kind")), archive.get("storage_uri")
+    )
 
 
 def cached_transcript(
@@ -362,18 +402,19 @@ def cached_transcripts(
 
 def _historical_transcripts(
     conn: BusinessConnection, source: tuple[str, str], *, exclude: str | None = None
-) -> list[sqlite3.Row]:
+) -> list[BusinessRow]:
     # One snapshot for successes and in-flight work: a legacy worker completing
     # between two separate queries must not become invisible to both queries.
     return cast(
-        list[sqlite3.Row],
+        list[BusinessRow],
         conn.execute(
             "SELECT t.id,t.status,t.provider_started_at,t.result_json "
             "FROM script_from_audio_tasks t "
             "JOIN viral_import_tasks i ON i.source_asset_id=t.source_asset_id "
             "AND i.project_id=t.project_id JOIN assets a ON a.id=t.source_asset_id "
             "WHERE i.platform=%s AND i.video_id=%s AND i.status='SUCCEEDED' "
-            "AND a.kind='reference_video' AND a.content_object_id IS NOT NULL "
+            "AND a.kind IN ('reference_video','reference_audio') "
+            "AND a.content_object_id IS NOT NULL "
             "AND COALESCE(t.error_code,'')<>'SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED' "
             "AND (t.status IN "
             "('PENDING','RUNNING','SUBMISSION_UNCERTAIN','SUCCEEDED') "
@@ -386,13 +427,13 @@ def _historical_transcripts(
     )
 
 
-def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sqlite3.Row:
+def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> BusinessRow:
     inserted = conn.execute(
         "INSERT INTO viral_script_cache(platform,video_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
         source,
     )
     cache = cast(
-        sqlite3.Row,
+        BusinessRow,
         conn.execute(
             "SELECT * FROM viral_script_cache WHERE platform=%s AND video_id=%s FOR UPDATE",
             source,
@@ -429,7 +470,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
             chosen = next((old for old in previous if old["status"] != "SUCCEEDED"), None)
         if chosen is not None:
             cache = cast(
-                sqlite3.Row,
+                BusinessRow,
                 conn.execute(
                     "UPDATE viral_script_cache SET producer_task_id=%s,result_json=%s,"
                     "updated_at=now() "
@@ -448,7 +489,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
         ).fetchone()
         if previous_result is not None and _cached_transcript(previous_result["result_json"]):
             cache = cast(
-                sqlite3.Row,
+                BusinessRow,
                 conn.execute(
                     "UPDATE viral_script_cache SET result_json=%s,updated_at=now() "
                     "WHERE platform=%s AND video_id=%s RETURNING *",
@@ -460,13 +501,13 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
         and _verified_cache_result(cache["result_json"], source) is None
     ):
         proof = conn.execute(
-            "SELECT a.sha256,a.storage_uri FROM script_from_audio_tasks t "
+            "SELECT a.kind,a.sha256,a.storage_uri FROM script_from_audio_tasks t "
             "JOIN assets a ON a.id=t.source_asset_id AND a.project_id=t.project_id "
             "JOIN content_objects c ON c.id=a.content_object_id AND c.sha256=a.sha256 "
             "AND c.size_bytes=a.size_bytes AND c.scope='global' "
             "JOIN viral_import_tasks i ON i.source_asset_id=a.id AND i.project_id=a.project_id "
-            "WHERE t.id=%s AND a.kind='reference_video' AND i.platform=%s AND i.video_id=%s "
-            "AND i.status='SUCCEEDED'",
+            "WHERE t.id=%s AND a.kind IN ('reference_video','reference_audio') "
+            "AND i.platform=%s AND i.video_id=%s AND i.status='SUCCEEDED'",
             (cache["producer_task_id"], *source),
         ).fetchone()
         if proof is not None:
@@ -476,11 +517,12 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
                 value["archive"] = {
                     "platform": source[0],
                     "video_id": source[1],
+                    "kind": _viral_media_kind(str(proof["kind"])),
                     "sha256": str(proof["sha256"]),
                     "storage_uri": str(proof["storage_uri"]),
                 }
                 cache = cast(
-                    sqlite3.Row,
+                    BusinessRow,
                     conn.execute(
                         "UPDATE viral_script_cache SET result_json=%s "
                         "WHERE platform=%s AND video_id=%s RETURNING *",
@@ -490,7 +532,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
     return cache
 
 
-def _cache_producer_state(conn: BusinessConnection, cache: sqlite3.Row) -> str:
+def _cache_producer_state(conn: BusinessConnection, cache: BusinessRow) -> str:
     if (
         cache["result_json"] is not None
         and _verified_cache_result(
@@ -548,7 +590,7 @@ def _time_text(value: datetime) -> str:
 
 def private_source_task(
     conn: BusinessConnection, *, owner_user_id: str, sha256: str, size_bytes: int
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     """私有音轨也按真实内容串行核对；更换项目或幂等键不能绕过未知提交。"""
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
@@ -570,7 +612,7 @@ def private_source_task(
             "SCRIPT_FROM_AUDIO_SOURCE_UNCERTAIN",
             "该音轨的上次提交结果尚未确认，请核对原任务；更换请求不能重新提交。",
         )
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def enqueue_script_from_audio_task(
@@ -580,7 +622,7 @@ def enqueue_script_from_audio_task(
     project_id: str,
     source_asset_id: str,
     idempotency_key: str,
-) -> sqlite3.Row:
+) -> BusinessRow:
     require_not_auditor(
         conn,
         actor=actor,  # type: ignore[arg-type]
@@ -629,7 +671,7 @@ def enqueue_script_from_audio_task(
                 "SCRIPT_FROM_AUDIO_IDEMPOTENCY_CONFLICT",
                 "提取内容已经变化，请重新提交。",
             )
-        return cast(sqlite3.Row, replay)
+        return cast(BusinessRow, replay)
     if viral_source is None:
         source_task = private_source_task(
             conn,
@@ -654,12 +696,24 @@ def enqueue_script_from_audio_task(
                 "SCRIPT_FROM_AUDIO_ALREADY_RUNNING",
                 "该项目已有文案提取任务在进行，请等待完成。",
             )
-        return cast(sqlite3.Row, active)
+        return cast(BusinessRow, active)
 
     cache = _lock_script_cache(conn, viral_source) if viral_source else None
     if cache is not None and _viral_source(conn, asset) != viral_source:
         cache = None
         viral_source = None
+        # 共享资格在锁内被历史回溯改判为私有时（如凭据指向旧版本资产），必须
+        # 补跑与首次私有路径相同的内容指纹门禁：跳过它会让同一音轨绕开
+        # 「未知提交禁止重发」的保护，对 SUBMISSION_UNCERTAIN 重复预留并
+        # 提交 ASR（Codex S 级评审 P1）。
+        demoted_task = private_source_task(
+            conn,
+            owner_user_id=str(getattr(actor, "id")),
+            sha256=str(asset["sha256"]),
+            size_bytes=int(asset["size_bytes"]),
+        )
+        if demoted_task is not None:
+            return demoted_task
     cached = (
         _verified_cache_result(cache["result_json"], viral_source)
         if cache is not None and viral_source is not None
@@ -671,6 +725,7 @@ def enqueue_script_from_audio_task(
         request_payload["viral_source"] = [cache["platform"], cache["video_id"]]
         request_payload["viral_archive_sha256"] = str(asset["sha256"])
         request_payload["viral_archive_uri"] = str(asset["storage_uri"])
+        request_payload["viral_archive_kind"] = _viral_media_kind(str(asset["kind"]))
     if cached is None and (cache is None or _cache_producer_state(conn, cache) == "AVAILABLE"):
         _configured_asr(conn)
 
@@ -726,7 +781,7 @@ def enqueue_script_from_audio_task(
             409, "SCRIPT_FROM_AUDIO_ALREADY_RUNNING", "该项目已有文案提取任务在进行，请等待完成。"
         )
     if str(row["id"]) != task_id:
-        return cast(sqlite3.Row, row)
+        return cast(BusinessRow, row)
     from app.permissions import write_audit
 
     cache_hit = cached is not None
@@ -773,7 +828,7 @@ def enqueue_script_from_audio_task(
             "cache_hit": cached is not None,
         },
     )
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def acquire_script_from_audio_task(
@@ -781,55 +836,10 @@ def acquire_script_from_audio_task(
     *,
     worker_id: str,
 ) -> ScriptFromAudioTaskLease | None:
-    now = _time_text(datetime.now(UTC))
-    locked_until = _time_text(
-        datetime.now(UTC) + timedelta(minutes=SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES)
+    """租约 SQL 统一住在 app.task_lease（T7）；本域凭据含 project_id。"""
+    row = claim_script_from_audio_task(
+        conn, worker_id=worker_id, lease_minutes=SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES
     )
-    conn.execute(
-        """
-        UPDATE script_from_audio_tasks
-        SET status = 'PENDING', locked_by = NULL, locked_until = NULL,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0,
-            updated_at = %s
-        WHERE status = 'RUNNING' AND (provider_started_at IS NULL OR provider_task_id IS NOT NULL)
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (now, now),
-    )
-    conn.execute(
-        """
-        UPDATE script_from_audio_tasks
-        SET status = 'SUBMISSION_UNCERTAIN', locked_by = NULL, locked_until = NULL,
-            error_code = 'SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN',
-            error_message_redacted = %s, retryable = 0,
-            completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL AND provider_task_id IS NULL
-          AND locked_until IS NOT NULL AND locked_until <= %s
-        """,
-        (
-            "语音转写请求可能已经送达服务商，请人工确认后再决定是否重试。",
-            now,
-            now,
-            now,
-        ),
-    )
-    row = conn.execute(
-        """
-        UPDATE script_from_audio_tasks
-        SET status = 'RUNNING', attempt = attempt + 1,
-            locked_by = %s, locked_until = %s,
-            started_at = COALESCE(started_at, %s), updated_at = %s,
-            error_code = NULL, error_message_redacted = NULL, retryable = 0
-        WHERE id = (
-            SELECT id FROM script_from_audio_tasks
-            WHERE status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
-            ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
-        ) AND status = 'PENDING'
-        RETURNING *
-        """,
-        (worker_id, locked_until, now, now, now),
-    ).fetchone()
-    conn.commit()
     if row is None:
         return None
     return ScriptFromAudioTaskLease(
@@ -841,7 +851,7 @@ def acquire_script_from_audio_task(
     )
 
 
-def _require_leased_task(conn: BusinessConnection, lease: ScriptFromAudioTaskLease) -> sqlite3.Row:
+def _require_leased_task(conn: BusinessConnection, lease: ScriptFromAudioTaskLease) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM script_from_audio_tasks WHERE id = %s AND status = 'RUNNING'",
         (lease.id,),
@@ -853,7 +863,7 @@ def _require_leased_task(conn: BusinessConnection, lease: ScriptFromAudioTaskLea
         or str(row["locked_until"] or "") <= _time_text(datetime.now(UTC))
     ):
         raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def _configured_asr(conn: BusinessConnection) -> AsrProvider:
@@ -868,7 +878,7 @@ def _configured_asr(conn: BusinessConnection) -> AsrProvider:
         ) from exc
 
 
-def _validate_source(asset: sqlite3.Row) -> None:
+def _validate_source(asset: BusinessRow) -> None:
     if not str(asset["content_type"] or "").lower().startswith(("audio/", "video/")):
         raise script_from_audio_error(
             422, "SCRIPT_FROM_AUDIO_SOURCE_TYPE_INVALID", "请选择有效的视频或音频文件。"
@@ -879,7 +889,7 @@ def _validate_source(asset: sqlite3.Row) -> None:
         )
 
 
-def _verified_task_payload(conn: BusinessConnection, row: sqlite3.Row) -> dict[str, object]:
+def _verified_task_payload(conn: BusinessConnection, row: BusinessRow) -> dict[str, object]:
     payload: dict[str, object] = json.loads(str(row["request_json"]))
     source = payload.get("viral_source")
     if not isinstance(source, list) or len(source) != 2 or payload.get("viral_archive_sha256"):
@@ -893,6 +903,7 @@ def _verified_task_payload(conn: BusinessConnection, row: sqlite3.Row) -> dict[s
     if trusted == (str(source[0]), str(source[1])) and asset is not None:
         payload["viral_archive_sha256"] = str(asset["sha256"])
         payload["viral_archive_uri"] = str(asset["storage_uri"])
+        payload["viral_archive_kind"] = _viral_media_kind(str(asset["kind"]))
     else:
         del payload["viral_source"]
         conn.execute(
@@ -1176,6 +1187,9 @@ def complete_script_from_audio_task(
         result_payload["archive"] = {
             "platform": str(source[0]),
             "video_id": str(source[1]),
+            # 凭据形态随来源资产：音频/视频是同一视频的两个归档载体，
+            # 交付侧按 kind 对应校验，跨形态正文不再被误判过期。
+            "kind": _credential_archive_kind(request_payload.get("viral_archive_kind")),
             "sha256": str(archive_digest),
             "storage_uri": request_payload.get("viral_archive_uri"),
         }
@@ -1339,19 +1353,19 @@ def fail_script_from_audio_task(
     conn.commit()
 
 
-def load_script_from_audio_task(conn: BusinessConnection, task_id: str) -> sqlite3.Row:
+def load_script_from_audio_task(conn: BusinessConnection, task_id: str) -> BusinessRow:
     row = conn.execute(
         "SELECT * FROM script_from_audio_tasks WHERE id = %s",
         (task_id,),
     ).fetchone()
     if row is None:
         raise script_from_audio_error(404, "SCRIPT_FROM_AUDIO_TASK_NOT_FOUND", "提取任务不存在。")
-    return cast(sqlite3.Row, row)
+    return cast(BusinessRow, row)
 
 
 def latest_script_from_audio_task(
     conn: BusinessConnection, *, project_id: str
-) -> sqlite3.Row | None:
+) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT * FROM script_from_audio_tasks
@@ -1360,7 +1374,7 @@ def latest_script_from_audio_task(
         """,
         (project_id,),
     ).fetchone()
-    return None if row is None else cast(sqlite3.Row, row)
+    return None if row is None else cast(BusinessRow, row)
 
 
 def _redacted_message(cause: Exception) -> str:

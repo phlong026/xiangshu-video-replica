@@ -64,7 +64,7 @@ from app.viral_import import (
 CW043_VIRAL_IMPORT_TEST_DB = "cw043_viral_import_test"
 
 
-@pytest.mark.parametrize("duration_ms", [0, 3_000, 16_000])
+@pytest.mark.parametrize("duration_ms", [0, 3_000, 31_000])
 def test_replica_import_rejects_out_of_range_duration(monkeypatch, duration_ms):
     from app import viral_import
     from app.auth import CurrentUser
@@ -303,7 +303,7 @@ def test_preview_and_import_share_one_object_across_every_import(pg_state, monke
     video = _video("douyin", _playback_version=1)
     calls = []
 
-    def stream(self, url):
+    def stream(self, url, *, extra_headers=None):
         calls.append(url)
         yield b"\x00\x00\x00\x18ftypisom" + b"video"
 
@@ -371,7 +371,7 @@ def test_broken_copy_backend_cannot_fail_an_import(pg_state, monkeypatch):
     video = _video("douyin", _playback_version=1)
     calls = []
 
-    def stream(self, url):
+    def stream(self, url, *, extra_headers=None):
         calls.append(url)
         yield b"\x00\x00\x00\x18ftypisom"
 
@@ -421,7 +421,7 @@ def test_copy_import_prefers_audio_and_falls_back_to_archived_video(pg_state, mo
     storage = FakeStorageAdapter(provider="cos", bucket="shared")
     video = _video("douyin", "copy-mixed-archive")
 
-    def stream(self, url):
+    def stream(self, url, *, extra_headers=None):
         yield b"\x00\x00\x00\x18ftypisom" + b"bytes"
 
     monkeypatch.setattr(viral_media.UrlFetcher, "iter_fetch", stream)

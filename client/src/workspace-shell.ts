@@ -48,10 +48,11 @@ export type WorkspaceShellProps = {
     identity?: CustomerStoredIdentity | null;
     /** CW-062：再次读取本地缓存身份（挂载时同步读，不触发网络）。 */
     loadIdentity?: () => Promise<CustomerStoredIdentity | null>;
-    /** Live heartbeat/lease health from the customer session hook; absent
-     * on the internal lane. Rendered in the profile centre's device tab. */
+    /** Session expiry health from the customer session hook (the 7-day
+     * sliding expiry; the heartbeat runtime retired with the 90-second
+     * lease); absent on the internal lane. Rendered in the profile centre's
+     * device tab. */
     sessionRuntime?: CustomerSessionRuntime | null;
-    onManualHeartbeat?: () => void;
     /** 设备管理页"绑定第二台设备"的页内导航（F-01 review：客户 lane 必传，
      * 内部 lane 无配对流程故缺省）。 */
     onPairDevice?: () => void;
