@@ -17,7 +17,9 @@ import type {
 } from "../api";
 import {
   bulkUpdateMaterials,
+  cancelReplicaPipeline,
   clearMaterialCache,
+  confirmReplicaPipeline,
   createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
   createPublishRecord,
@@ -25,6 +27,7 @@ import {
   downloadMaterialAsset,
   downloadVideoToFile,
   evictMaterialCachedPreview,
+  fetchReplicaPipeline,
   fetchViralVideoMedia,
   fetchViralVideoSource,
   fetchViralVideoStatistics,
@@ -36,17 +39,23 @@ import {
   getStudioDraft,
   getViralImportTask,
   hideMaterial,
+  initiateReplicaPipeline,
   listMaterialGroups,
   listMaterials,
   listMaterialTags,
+  listReplicaPipelineCharacters,
   listViralFavorites,
   listViralVideos,
   newViralSearchKey,
   openViralVideoDetail,
   putMaterial,
+  quoteReplicaPipeline,
+  type ReplicaPipelineQuote,
+  type ReplicaPipelineStatus,
   refreshViralVideoResource,
   refreshViralVideoStatistics,
   removeViralFavorite,
+  replicaPipelineIdempotencyKey,
   resolveMaterials,
   saveStudioDraft,
   saveViralFavorite,
@@ -799,6 +808,159 @@ function ViralStatsRow({ video }: { video: StudioVideo }) {
           {value}
         </span>
       ))}
+    </div>
+  );
+}
+
+export const REPLICA_STAGE_LABELS: Record<string, string> = {
+  ENQUEUED: "排队中",
+  IMPORTING: "导入参考素材",
+  ANALYZING: "拆解分镜与文案",
+  SCRIPT_VERSIONING: "保存文案",
+  FIRST_FRAMING: "准备人物首帧",
+  COMPOSING: "合成最终提示词",
+  AWAIT_CONFIRM: "待确认费用",
+  GENERATING: "生成视频中",
+  NEEDS_REVIEW: "待核对",
+  NEEDS_REVIEW_SETTLED: "待核对（已收口）",
+  DRAINING: "收尾中",
+  DELIVERED: "已交付",
+  DELIVERED_PARTIAL: "已交付（部分）",
+  FAILED: "失败",
+  CANCELLED: "已放弃",
+  EXPIRED: "已过期",
+};
+
+/**
+ * 全自动复刻入口与状态控制（M8 v1）.
+ *
+ * 一键发起：导入→拆解→首帧→合成提示词全程自动；到达确认点显示预估积分，
+ * 用户确认后才建批次扣费（资金闸门在前端只做展示与确认，校验在服务端）。
+ * v1 简化（M8b 迭代）：人物候选自动取第一个（多人物选择弹层待做）、
+ * 300s 报价倒计时未做（过期确认会被服务端拒绝并要求重核价）。
+ */
+function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
+  const { notify, user } = useStudio();
+  const [pipelineId, setPipelineId] = useState<string | null>(null);
+  const [status, setStatus] = useState<ReplicaPipelineStatus | null>(null);
+  const [quote, setQuote] = useState<ReplicaPipelineQuote | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!pipelineId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await fetchReplicaPipeline(pipelineId);
+        if (cancelled) return;
+        setStatus(next);
+        if (next.status === "AWAIT_CONFIRM") {
+          const fresh = await quoteReplicaPipeline(pipelineId);
+          if (!cancelled) setQuote(fresh);
+        }
+      } catch {
+        // 轮询失败静默重试（页面离开由 cleanup 停止）。
+      }
+    };
+    void tick();
+    const timer = window.setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pipelineId]);
+
+  const begin = async () => {
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少平台标识，无法发起全自动复刻");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { characters } = await listReplicaPipelineCharacters();
+      const character = characters[0];
+      if (!character) {
+        notify("请先在人物库创建一个可用角色后再使用全自动复刻");
+        return;
+      }
+      const created = await initiateReplicaPipeline({
+        platform: video.platformKey,
+        videoId: video.nativeId,
+        characterVersionId: character.characterVersionId,
+        idempotencyKey: replicaPipelineIdempotencyKey(
+          user.id,
+          video.platformKey,
+          video.nativeId,
+        ),
+      });
+      setPipelineId(created.id);
+      notify("全自动复刻已启动：完成后会请你确认费用再生成");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "全自动复刻发起失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmGeneration = async () => {
+    if (!pipelineId || !quote) return;
+    setBusy(true);
+    try {
+      await confirmReplicaPipeline(pipelineId, quote);
+      notify("已确认，开始生成视频");
+      setQuote(null);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "确认失败，请刷新重试");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const abandon = async () => {
+    if (!pipelineId) return;
+    setBusy(true);
+    try {
+      await cancelReplicaPipeline(pipelineId);
+      notify("已放弃全自动复刻（已产出内容保留在项目中）");
+      setPipelineId(null);
+      setStatus(null);
+      setQuote(null);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "放弃失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!pipelineId) {
+    return (
+      <Button disabled={busy} variant="outline" onClick={begin}>
+        {busy ? "准备中…" : "全自动复刻"}
+      </Button>
+    );
+  }
+  const label = status
+    ? (REPLICA_STAGE_LABELS[status.status] ?? status.status)
+    : "启动中…";
+  return (
+    <div className="replica-pipeline-panel">
+      <p role="status">全自动复刻：{label}</p>
+      {quote && status?.status === "AWAIT_CONFIRM" ? (
+        <div className="replica-pipeline-actions">
+          <Button disabled={busy} variant="primary" onClick={confirmGeneration}>
+            确认并生成（预估 {quote.estimatedCredits} 积分）
+          </Button>
+          <Button disabled={busy} variant="quiet" onClick={abandon}>
+            放弃
+          </Button>
+        </div>
+      ) : null}
+      {status && ["FAILED", "CANCELLED", "EXPIRED"].includes(status.status) ? (
+        <p className="admin-hint">任务已结束，可在项目里转手动继续处理</p>
+      ) : null}
+      {status && ["DELIVERED", "DELIVERED_PARTIAL"].includes(status.status) ? (
+        <p className="admin-hint">成片已生成，可在任务中心查看与下载</p>
+      ) : null}
     </div>
   );
 }
@@ -2542,6 +2704,11 @@ export function ViralDetailPage() {
                 >
                   {importState.status === "loading" ? "导入中…" : "去复刻"}
                 </Button>
+              </div>
+            )}
+            {canReplicate && !review && (
+              <div className="content-detail-action">
+                <ReplicaPipelineControl video={video} />
               </div>
             )}
             {!review && video.platformKey === "douyin" && (

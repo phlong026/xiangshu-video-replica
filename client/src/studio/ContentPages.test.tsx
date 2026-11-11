@@ -51,6 +51,9 @@ const {
   hideMaterial,
   downloadMaterialAsset,
   getAssetDownloadUrl,
+  initiateReplicaPipeline,
+  fetchReplicaPipeline,
+  listReplicaPipelineCharacters,
   getMaterialBatchPreviews,
   getMaterialCachedPreview,
   getMaterialCacheUsage,
@@ -73,6 +76,9 @@ const {
   fetchViralVideoStatistics: vi.fn(),
   fetchViralVideo: vi.fn(),
   openViralVideoDetail: vi.fn(),
+  initiateReplicaPipeline: vi.fn(),
+  fetchReplicaPipeline: vi.fn(),
+  listReplicaPipelineCharacters: vi.fn(),
   // 默认空报价表：卡片「查看详情」不显示积分（需要报价的用例自行打桩）。
   getWorkspacePricing: vi.fn(async () => ({
     version: 1,
@@ -145,6 +151,14 @@ vi.mock("../api", () => ({
   fetchViralVideoStatistics,
   fetchViralVideo,
   openViralVideoDetail,
+  initiateReplicaPipeline,
+  fetchReplicaPipeline,
+  listReplicaPipelineCharacters,
+  confirmReplicaPipeline: vi.fn(),
+  cancelReplicaPipeline: vi.fn(),
+  quoteReplicaPipeline: vi.fn(),
+  replicaPipelineIdempotencyKey: (accountId: string, p: string, n: string) =>
+    `replica-pipeline:${accountId}:${p}:${n}`,
   getWorkspacePricing,
   createViralImportTask,
   getViralImportTask,
@@ -6639,5 +6653,87 @@ describe("V1.4 内容与运营页面", () => {
       screen.queryByAltText("不可随机回退的完成视频.mp4 视频预览"),
     ).toBeNull();
     expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+  });
+});
+
+describe("全自动复刻入口（M8 v1）", () => {
+  it("详情页渲染入口按钮，点击后校验人物并调用发起接口", async () => {
+    const nativeId = "replica-native-1";
+    const base = studio();
+    const value = studio({
+      review: false,
+      state: { ...base.state, selectedVideoId: `douyin-${nativeId}` },
+      data: {
+        ...base.data,
+        videos: [
+          {
+            id: `douyin-${nativeId}`,
+            title: "全自动复刻样例",
+            author: "乡墅作者",
+            platform: "抖音",
+            category: "庭院案例",
+            poster: "",
+            duration: "00:08",
+            durationMs: 8_000,
+            likes: 123,
+            comments: 4,
+            shares: 5,
+            collections: 6,
+            description: "",
+            platformKey: "douyin",
+            nativeId,
+          },
+        ],
+      },
+    });
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView({
+        platform: "douyin",
+        videoId: nativeId,
+        category: "庭院案例",
+        title: "全自动复刻样例",
+        author: "乡墅作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 8_000,
+        likes: 123,
+        comments: 4,
+        shares: 5,
+        collects: 6,
+        publishedAt: 1_788_600_000,
+        publishedDisplay: "1天前",
+        likeDisplay: "123",
+        tags: ["庭院"],
+        hasPlayableAudio: true,
+        playUrl: null,
+        isFavorite: false,
+        availability: "available",
+      }),
+    );
+    vi.mocked(listReplicaPipelineCharacters).mockResolvedValue({
+      characters: [
+        { characterVersionId: "cv-1", name: "主角", versionNumber: 1 },
+      ],
+    });
+    vi.mocked(initiateReplicaPipeline).mockResolvedValue({
+      id: "rplc-1",
+      projectId: "p-1",
+      status: "ENQUEUED",
+      replay: false,
+    });
+    useStudio.mockReturnValue(value);
+    const view = render(<ViralDetailPage />);
+    const entry = await screen.findByRole("button", { name: "全自动复刻" });
+    fireEvent.click(entry);
+    await waitFor(() => expect(initiateReplicaPipeline).toHaveBeenCalledOnce());
+    expect(vi.mocked(initiateReplicaPipeline).mock.calls[0]?.[0]).toMatchObject(
+      {
+        platform: "douyin",
+        videoId: nativeId,
+        characterVersionId: "cv-1",
+      },
+    );
+    view.unmount();
   });
 });
