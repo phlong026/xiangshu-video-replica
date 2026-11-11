@@ -1658,15 +1658,18 @@ export async function deleteAnnouncement(input: {
 
 // --- IA 改版第 5 项：平台培训素材库-------------------------------------------
 
+export type TrainingMaterialKind = "video" | "audio" | "image" | "doc";
+
 export interface TrainingMaterialItem {
   id: string;
   title: string;
   description: string;
-  kind: "video" | "training";
+  kind: TrainingMaterialKind;
   kind_label: string;
   content_type: string;
   file_suffix: string;
   size_bytes: number;
+  tags: string[];
   sort_order: number;
   visible: boolean;
   download_count: number;
@@ -1677,6 +1680,7 @@ export interface TrainingMaterialItem {
 
 export interface TrainingMaterialPage {
   items: TrainingMaterialItem[];
+  tag_facet: string[];
   total: number;
   limit: number;
   offset: number;
@@ -1686,6 +1690,7 @@ export async function listTrainingMaterials(
   options: {
     includeHidden?: boolean;
     kind?: string;
+    tag?: string;
     limit?: number;
     offset?: number;
   } = {},
@@ -1693,6 +1698,7 @@ export async function listTrainingMaterials(
   const params = new URLSearchParams();
   if (options.includeHidden === false) params.set("include_hidden", "false");
   if (options.kind) params.set("kind", options.kind);
+  if (options.tag) params.set("tag", options.tag);
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));
@@ -1707,6 +1713,7 @@ export async function updateTrainingMaterial(input: {
   id: string;
   title?: string;
   description?: string;
+  tags?: string[];
   sortOrder?: number;
   visible?: boolean;
   reason: string;
@@ -1717,6 +1724,7 @@ export async function updateTrainingMaterial(input: {
     {
       title: input.title ?? "",
       description: input.description ?? "",
+      tags: input.tags ?? null,
       sort_order: input.sortOrder ?? null,
       visible: input.visible ?? null,
     },
@@ -1742,6 +1750,16 @@ export async function deleteTrainingMaterial(input: {
   );
 }
 
+/** 管理端复制用直链（30 分钟时效）：分享给客户前复制，到期后重取即可。 */
+export async function fetchTrainingMaterialDirectLink(
+  materialId: string,
+): Promise<{ url: string; expires_at: string; title: string; file_suffix: string }> {
+  return adminRead(
+    `/api/control/training-materials/${encodeURIComponent(materialId)}/direct-link`,
+    "获取直链失败",
+  );
+}
+
 /** 上传走 XHR（fetch 无上传进度）；大视频的进度条是运营的必要反馈。
  * 写契约的 confirm/reason 与 Idempotency-Key 以 multipart 表单 + 头送达，
  * 与后端 TrainingMaterialCreateContract 的服务端组包口径一致。 */
@@ -1749,6 +1767,7 @@ export function uploadTrainingMaterial(input: {
   file: File;
   title: string;
   description: string;
+  tags: string[];
   sortOrder: number;
   visible: boolean;
   reason: string;
@@ -1761,6 +1780,7 @@ export function uploadTrainingMaterial(input: {
     form.set("file", input.file, input.file.name);
     form.set("title", input.title);
     form.set("description", input.description);
+    form.set("tags", JSON.stringify(input.tags));
     form.set("sort_order", String(input.sortOrder));
     form.set("visible", input.visible ? "true" : "false");
     form.set("confirm", "true");

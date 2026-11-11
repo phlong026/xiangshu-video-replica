@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   deleteTrainingMaterial,
+  fetchTrainingMaterialDirectLink,
   listTrainingMaterials,
   type TrainingMaterialItem,
+  type TrainingMaterialKind,
   updateTrainingMaterial,
   uploadTrainingMaterial,
 } from "../api.admin";
@@ -14,31 +16,63 @@ import { StatusBadge } from "./ui/StatusBadge";
 import { formatDateTime } from "./ui/vocabulary";
 
 /**
- * IA 改版第 5 项：平台培训素材库的管理面。
+ * IA 改版第 5 项：平台培训素材库的管理面（2026-11-12 接入网盘存储）。
  *
  * 工作台素材库已整体替换为本库的只读视图（产品拍板彻底替换，2026-11-01），
- * 这里是唯一上传口：视频（mp4/mov）与培训文档（pdf/docx/pptx/xlsx）。
- * kind 由文件类型推导，上传侧不提供手填，避免栏目错位。
+ * 这里是唯一上传口：视频 / 音频 / 图片 / 文档四组白名单格式，标签必填
+ * （1-5 个，驱动客户侧的分类筛选），支持格式分组与标签筛选，可复制分享用
+ * 直链（30 分钟时效）。kind 由文件类型推导，上传侧不提供手填，避免栏目错位。
  */
 const PAGE_SIZE = 20;
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+
+const KIND_TABS: Array<{ id: "" | TrainingMaterialKind; label: string }> = [
+  { id: "", label: "全部" },
+  { id: "video", label: "视频" },
+  { id: "audio", label: "音频" },
+  { id: "image", label: "图片" },
+  { id: "doc", label: "文档" },
+];
 
 /** 后端白名单的 (后缀, content-type) 对；与 TRAINING_UPLOADS 一一对应。 */
 const ALLOWED_UPLOAD_TYPES = new Set([
   "video/mp4",
   "video/quicktime",
+  "video/webm",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/wav",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
   "application/pdf",
+  "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 ]);
 const ALLOWED_SUFFIXES = new Set([
   ".mp4",
   ".mov",
+  ".webm",
+  ".mp3",
+  ".m4a",
+  ".wav",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".gif",
+  ".webp",
   ".pdf",
   ".docx",
-  ".pptx",
+  ".doc",
   ".xlsx",
+  ".xls",
+  ".pptx",
+  ".ppt",
 ]);
 
 function formatSizeMb(sizeBytes: number): string {
@@ -49,13 +83,17 @@ function formatSizeMb(sizeBytes: number): string {
 }
 
 function fileKindLabel(file: File): string {
-  return file.type.startsWith("video/") ? "视频" : "培训文档";
+  const type = file.type;
+  if (type.startsWith("video/")) return "视频";
+  if (type.startsWith("audio/")) return "音频";
+  if (type.startsWith("image/")) return "图片";
+  return "文档";
 }
 
 function uploadFileError(file: File): string {
   const suffix = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
   if (!ALLOWED_SUFFIXES.has(suffix) || !ALLOWED_UPLOAD_TYPES.has(file.type)) {
-    return "仅支持 mp4/mov 视频与 pdf/docx/pptx/xlsx 文档（后缀与类型需匹配）。";
+    return "仅支持视频（mp4/mov/webm）、音频（mp3/m4a/wav）、图片（jpg/png/gif/webp）与文档（pdf/docx/doc/xlsx/xls/pptx/ppt），后缀与类型需匹配。";
   }
   if (file.size > MAX_UPLOAD_BYTES) {
     return "文件超过 200MB 上限。";
@@ -63,10 +101,21 @@ function uploadFileError(file: File): string {
   return "";
 }
 
+/** 表单输入的标签串 → 数组：逗号/顿号/换行分隔，strip、去空、保序去重。 */
+function parseTagInput(raw: string): string[] {
+  const seen: string[] = [];
+  for (const piece of raw.split(/[,，、\n]/)) {
+    const tag = piece.trim().replace(/\s+/g, " ");
+    if (tag && !seen.includes(tag)) seen.push(tag);
+  }
+  return seen;
+}
+
 type UploadDraft = {
   file: File | null;
   title: string;
   description: string;
+  tagsInput: string;
   sortOrder: number;
   visible: boolean;
 };
@@ -75,6 +124,7 @@ type EditDraft = {
   item: TrainingMaterialItem;
   title: string;
   description: string;
+  tagsInput: string;
   sortOrder: number;
 };
 
@@ -82,6 +132,7 @@ const EMPTY_UPLOAD: UploadDraft = {
   file: null,
   title: "",
   description: "",
+  tagsInput: "",
   sortOrder: 0,
   visible: true,
 };
@@ -92,8 +143,11 @@ export function TrainingMaterialsPage({
   readOnly?: boolean;
 }) {
   const [items, setItems] = useState<TrainingMaterialItem[]>([]);
+  const [tagFacet, setTagFacet] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
+  const [kindTab, setKindTab] = useState<"" | TrainingMaterialKind>("");
+  const [tagFilter, setTagFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -115,15 +169,18 @@ export function TrainingMaterialsPage({
       const response = await listTrainingMaterials({
         limit: PAGE_SIZE,
         offset,
+        kind: kindTab || undefined,
+        tag: tagFilter || undefined,
       });
       setItems(response.items);
+      setTagFacet(response.tag_facet ?? []);
       setTotal(response.total ?? response.items.length);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "读取培训素材失败");
     } finally {
       setLoading(false);
     }
-  }, [offset]);
+  }, [offset, kindTab, tagFilter]);
 
   useEffect(() => {
     void load();
@@ -149,6 +206,11 @@ export function TrainingMaterialsPage({
       setError(fileProblem);
       return;
     }
+    const tags = parseTagInput(uploadDraft.tagsInput);
+    if (tags.length < 1) {
+      setError("请至少填写 1 个标签（逗号分隔，用于客户侧分类筛选）。");
+      return;
+    }
     setSaving(true);
     setError("");
     setUploadPercent(0);
@@ -157,6 +219,7 @@ export function TrainingMaterialsPage({
         file,
         title: uploadDraft.title.trim(),
         description: uploadDraft.description.trim(),
+        tags,
         sortOrder: uploadDraft.sortOrder,
         visible: uploadDraft.visible,
         reason,
@@ -181,6 +244,7 @@ export function TrainingMaterialsPage({
       item,
       title: item.title,
       description: item.description,
+      tagsInput: item.tags.join("、"),
       sortOrder: item.sort_order,
     });
     setEditKey(`tm-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -188,6 +252,11 @@ export function TrainingMaterialsPage({
 
   async function submitEdit(reason: string) {
     if (!editing) return;
+    const tags = parseTagInput(editing.tagsInput);
+    if (tags.length < 1) {
+      setError("请至少保留 1 个标签。");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -195,6 +264,7 @@ export function TrainingMaterialsPage({
         id: editing.item.id,
         title: editing.title.trim(),
         description: editing.description.trim(),
+        tags,
         sortOrder: editing.sortOrder,
         reason,
         idempotencyKey: editKey,
@@ -229,6 +299,26 @@ export function TrainingMaterialsPage({
       setError(cause instanceof Error ? cause.message : "修改培训素材失败");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function copyDirectLink(item: TrainingMaterialItem) {
+    setError("");
+    try {
+      const link = await fetchTrainingMaterialDirectLink(item.id);
+      const minutes = Math.max(
+        1,
+        Math.round((Number(link.expires_at) - Date.now() / 1000) / 60),
+      );
+      try {
+        await navigator.clipboard.writeText(link.url);
+        setNotice(`「${item.title}」直链已复制，约 ${minutes} 分钟后失效。`);
+      } catch {
+        // 剪贴板不可用（桌面壳限制等）时展示链接让运营手动复制。
+        setNotice(`直链（约 ${minutes} 分钟后失效）：${link.url}`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "获取直链失败");
     }
   }
 
@@ -267,9 +357,43 @@ export function TrainingMaterialsPage({
           <>
             <header>
               <p className="admin-hint">
-                工作台「素材库」页面已替换为本库的只读视图：这里统一上传培训文档与
-                示例视频，客户只能浏览与下载。数字越大排在越前（同序按新→旧）。
+                工作台「素材库」页面展示本库内容：这里统一上传培训视频、音频、
+                图片与文档，客户只能浏览与下载。数字越大排在越前（同序按新→旧）；
+                标签必填，客户按标签筛选内容。
               </p>
+              <div role="tablist" aria-label="格式分组">
+                {KIND_TABS.map((entry) => (
+                  <button
+                    key={entry.id || "all"}
+                    type="button"
+                    role="tab"
+                    aria-selected={kindTab === entry.id}
+                    onClick={() => {
+                      setKindTab(entry.id);
+                      setOffset(0);
+                    }}
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
+              {tagFacet.length > 0 ? (
+                <div aria-label="按标签筛选">
+                  {tagFacet.map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      aria-pressed={tagFilter === tag}
+                      onClick={() => {
+                        setTagFilter(tagFilter === tag ? "" : tag);
+                        setOffset(0);
+                      }}
+                    >
+                      #{tag}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </header>
             {!readOnly && !uploadOpen && editing === null ? (
               <button type="button" onClick={openUpload}>
@@ -295,6 +419,7 @@ export function TrainingMaterialsPage({
               <th>标题 / 说明</th>
               <th>类型</th>
               <th>大小</th>
+              <th>标签</th>
               <th>排序 / 状态</th>
               <th>下载次数</th>
               <th>上传时间 / 人</th>
@@ -315,6 +440,7 @@ export function TrainingMaterialsPage({
                 <small>{item.file_suffix}</small>
               </td>
               <td>{formatSizeMb(item.size_bytes)}</td>
+              <td>{item.tags.map((tag) => `#${tag}`).join(" ")}</td>
               <td>
                 <strong>{item.sort_order}</strong>
                 <br />
@@ -329,6 +455,13 @@ export function TrainingMaterialsPage({
               <td>
                 {readOnly ? null : (
                   <>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void copyDirectLink(item)}
+                    >
+                      复制直链
+                    </button>{" "}
                     <button
                       type="button"
                       disabled={saving}
@@ -375,21 +508,19 @@ export function TrainingMaterialsPage({
         onConfirm={(reason) => void submitUpload(reason)}
       >
         <label>
-          文件（mp4/mov/pdf/docx/pptx/xlsx，≤200MB）
+          文件（视频/音频/图片/文档，≤200MB）
           <input
             ref={fileInputRef}
             type="file"
-            accept=".mp4,.mov,.pdf,.docx,.pptx,.xlsx"
+            accept=".mp4,.mov,.webm,.mp3,.m4a,.wav,.jpg,.jpeg,.png,.gif,.webp,.pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt"
             disabled={saving}
             onChange={(event) => {
               const file = event.target.files?.[0] ?? null;
-              setUploadDraft({ ...uploadDraft, file });
               if (file && !uploadDraft.title.trim()) {
                 setUploadDraft((draft) => ({
                   ...draft,
                   file,
-                  title:
-                    draft.title.trim() || file.name.replace(/\.[^.]+$/, ""),
+                  title: draft.title.trim() || file.name.replace(/\.[^.]+$/, ""),
                 }));
                 return;
               }
@@ -413,6 +544,22 @@ export function TrainingMaterialsPage({
             maxLength={120}
             placeholder="如：三步完成爆款复刻"
           />
+        </label>
+        <label>
+          标签（必填 1-5 个，逗号/顿号分隔；客户按标签筛选）
+          <input
+            value={uploadDraft.tagsInput}
+            onChange={(event) =>
+              setUploadDraft({ ...uploadDraft, tagsInput: event.target.value })
+            }
+            list="training-tag-options"
+            placeholder="如：入门教程,剪映技巧"
+          />
+          <datalist id="training-tag-options">
+            {tagFacet.map((tag) => (
+              <option key={tag} value={tag} />
+            ))}
+          </datalist>
         </label>
         <label>
           说明（≤1000 字，客户在素材卡片上可见）
@@ -465,7 +612,7 @@ export function TrainingMaterialsPage({
           open
           title="编辑培训素材"
           confirmLabel="保存修改"
-          description="修改标题、说明与排序；上下架请用列表上的开关。"
+          description="修改标题、说明、标签与排序；上下架请用列表上的开关。"
           busy={saving}
           error={error}
           level="reason"
@@ -480,6 +627,16 @@ export function TrainingMaterialsPage({
                 setEditing({ ...editing, title: event.target.value })
               }
               maxLength={120}
+            />
+          </label>
+          <label>
+            标签（必填 1-5 个，逗号/顿号分隔）
+            <input
+              value={editing.tagsInput}
+              onChange={(event) =>
+                setEditing({ ...editing, tagsInput: event.target.value })
+              }
+              list="training-tag-options"
             />
           </label>
           <label>
@@ -514,7 +671,7 @@ export function TrainingMaterialsPage({
         confirmLabel="确认删除"
         description={
           pendingDelete
-            ? `「${pendingDelete.title}」将立即对客户不可见；文件保留在存储中，误删可联系管理员恢复。`
+            ? `「${pendingDelete.title}」将立即对客户不可见且无法再签发链接；文件保留在存储中，误删可联系管理员恢复。`
             : ""
         }
         busy={saving}

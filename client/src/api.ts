@@ -2943,30 +2943,41 @@ export async function listMaterials(
 
 // --- 平台培训素材库（IA 改版第 5 项：客户只读）-------------------------------
 
+export type TrainingMaterialKind = "video" | "audio" | "image" | "doc";
+
 export interface TrainingMaterialPublicItem {
   id: string;
   title: string;
   description: string;
-  kind: "video" | "training";
+  kind: TrainingMaterialKind;
   kind_label: string;
   content_type: string;
   file_suffix: string;
   size_bytes: number;
+  tags: string[];
   created_at: string;
 }
 
 export interface TrainingMaterialPublicPage {
   items: TrainingMaterialPublicItem[];
+  /** 分页前全量可见集合的标签面（筛选 chips 不随分页缩水）。 */
+  tag_facet: string[];
   page: number;
   page_size: number;
   total: number;
 }
 
 export async function listTrainingMaterials(
-  options: { kind?: string; page?: number; pageSize?: number } = {},
+  options: {
+    kind?: string;
+    tag?: string;
+    page?: number;
+    pageSize?: number;
+  } = {},
 ): Promise<TrainingMaterialPublicPage> {
   const params = new URLSearchParams();
   if (options.kind) params.set("kind", options.kind);
+  if (options.tag) params.set("tag", options.tag);
   if (options.page) params.set("page", String(options.page));
   if (options.pageSize) params.set("page_size", String(options.pageSize));
   const query = params.toString();

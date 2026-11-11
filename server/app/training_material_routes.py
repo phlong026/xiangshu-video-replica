@@ -12,7 +12,7 @@
 两组端点、同一张表（与公告同构的「admin 管理 + 客户只读」范式）：
 
 - **管理端** ``/api/control/training-materials``：multipart 上传（四组白名单）、
-  改标题/说明/排序/标签/上下架、软删；另有 ``POST /{id}/direct-link`` 取复制
+  改标题/说明/排序/标签/上下架、软删；另有 ``GET /{id}/direct-link`` 取复制
   用直链（不递增下载计数）。写走四段契约（真实管理员会话、Idempotency-Key、
   confirm、reason），审计 ``training_material.*``。
 - **客户侧** ``/api/training-materials``：上架素材分页列表（kind/tag 筛选，
@@ -368,8 +368,8 @@ def list_training_materials_admin(
     }
 
 
-@router.post("/control/training-materials/{material_id}/direct-link")
-def create_training_material_direct_link(
+@router.get("/control/training-materials/{material_id}/direct-link")
+def get_training_material_direct_link(
     material_id: str, conn: Database, actor: AdminReader
 ) -> dict[str, object]:
     """管理端复制用直链：不递增下载计数；软删拒绝签发（下架仍可签，便于预演）。"""
