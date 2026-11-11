@@ -217,8 +217,7 @@ class SettingsRepository:
         密钥）都会改变版本，缓存自动失效（方案 §3.3）。
         """
         row = self.conn.execute(
-            "SELECT COALESCE(to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US'), '') "
-            "FROM provider_settings WHERE provider = %s",
+            "SELECT COALESCE(updated_at, '') FROM provider_settings WHERE provider = %s",
             (provider,),
         ).fetchone()
         return str(row[0]) if row else ""

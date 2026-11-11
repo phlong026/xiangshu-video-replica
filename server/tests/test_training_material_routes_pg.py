@@ -1,22 +1,21 @@
-"""平台培训素材库（IA 改版第 5 项）HTTP 契约测试。
+"""平台培训素材库（123网盘车道）HTTP 契约测试。
 
-覆盖：管理端 multipart 上传（白名单/超限/写契约/幂等重放/审计员只读）、
-部分更新与软删、客户只读列表的可见性/类型筛选/分页、下载链接的本地
-HMAC 车道（签名有效性、踢线 epoch 失效、Range 读取）与下载计数自增。
-存储全部走 FakeStorageAdapter（本地车道语义），不触网。
+覆盖：管理端 multipart 上传（四组白名单/超限/写契约/标签必填/幂等重放/
+审计员只读）、部分更新（含 tags）与软删、客户只读列表的可见性/类型与标签
+筛选/标签面/分页、防盗链直链签发与下载计数、管理端 direct-link 不计数、
+上传提交时的配置指纹复核（换配置拒绝入库）、CHECK 放宽迁移的带行回滚。
+存储全部走 FakePan123Storage（离线替身），不触网。
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import os
 import secrets
+import time
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault(
     "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY",
@@ -34,19 +33,43 @@ from app.admin_auth_routes import (
     ADMIN_SESSION_HMAC_KEY_ENV,
 )
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
-from app.storage import FakeStorageAdapter
+from app.pan123_client import Pan123File
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 DB_NAME = "training_materials_test"
 TEST_ADMIN_SESSION_KEY = secrets.token_urlsafe(48)
 TEST_ACTIVATION_KEY = secrets.token_urlsafe(48)
+ACTIVATION_CODE_HMAC_KEY_ENV = "VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY"
 FUTURE_EXPIRY = "2099-01-01T00:00:00+00:00"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
-ACTIVATION_CODE_HMAC_KEY_ENV = "VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY"
 
-# mp4 魔数（ftyp）开头的最小合法负载；上传白名单按 (后缀, content-type) 判定。
+# 各格式魔数开头；上传白名单按 (后缀, content-type) 成对判定。
 MP4_BYTES = b"\x00\x00\x00\x18ftypisom" + b"x" * 64
 PDF_BYTES = b"%PDF-1.7\n" + b"y" * 64
+MP3_BYTES = b"ID3" + b"m" * 64
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"p" * 64
+
+
+class FakePan123Storage:
+    """路由用到的最小存储面离线替身（put_file/resolve_direct_link）。"""
+
+    provider = "pan123"
+
+    def __init__(self) -> None:
+        self._seq = 0
+        self.remote_names: list[str] = []
+        self.links_served = 0
+
+    def put_file(self, remote_name: str, path, *, content_type: str) -> Pan123File:
+        self.remote_names.append(remote_name)
+        self._seq += 1
+        return Pan123File(file_id=self._seq, size=path.stat().st_size)
+
+    def resolve_direct_link(self, file_id: int, *, ttl_seconds: int = 1800) -> tuple[str, int]:
+        self.links_served += 1
+        expire = int(time.time()) + ttl_seconds
+        url = f"https://cdn.test.invalid/direct/1000/{file_id}/f?auth_key={expire}-r-1-0"
+        return url, expire
 
 
 def _pg_dsn() -> str:
@@ -99,7 +122,7 @@ def route_state(training_materials_dsn: str) -> Iterator[str]:
             "wallet_transactions, recharge_orders, wallets, audit_logs, users, "
             "projects, customer_fencing_write_evidence, "
             "security_rate_limit_counters, security_auth_failures, "
-            "runtime_settings, provider_settings CASCADE"
+            "runtime_settings, provider_settings, provider_runtime_state CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
@@ -121,7 +144,7 @@ def route_state(training_materials_dsn: str) -> Iterator[str]:
 @pytest.fixture()
 def app_under_test(
     route_state: str, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[tuple[FastAPI, FakeStorageAdapter]]:
+) -> Iterator[tuple[FastAPI, FakePan123Storage, dict[str, str]]]:
     from app import training_material_routes
     from app.activation_code_routes import router as activation_code_router
     from app.admin_auth_routes import router as admin_auth_router
@@ -156,16 +179,33 @@ def app_under_test(
     )
     monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
     monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
-    # 本地车道语义的存储替身：客户下载走 HMAC 签名 + /file 端点。
-    fake_storage = FakeStorageAdapter(provider="fake", bucket="training-test")
-    fake_storage.provider = "local"
-    monkeypatch.setattr(training_material_routes, "get_media_storage", lambda _conn: fake_storage)
-    yield app, fake_storage
+    # 网盘车道替身 + 可变的配置指纹（指纹复核用例切换它）。种子 pan123 行
+    # 使「业务提交时读 DB 版本」与注入版本同源（与生产读真实配置一致）。
+    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO provider_settings (provider, encrypted_config, "
+            "updated_by_user_id, created_at, updated_at) "
+            "VALUES ('pan123', 'seed', 'admin_u', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (provider) DO NOTHING"
+        )
+        seeded = conn.execute(
+            "SELECT updated_at FROM provider_settings WHERE provider = 'pan123'"
+        ).fetchone()
+    fake_storage = FakePan123Storage()
+    version_holder: dict[str, str] = {"version": str(seeded[0])}
+    monkeypatch.setattr(
+        training_material_routes,
+        "get_training_material_storage",
+        lambda: (fake_storage, version_holder["version"]),
+    )
+    yield app, fake_storage, version_holder
     app.dependency_overrides.clear()
 
 
 @pytest.fixture()
-def client(app_under_test: tuple[FastAPI, FakeStorageAdapter]) -> Iterator[TestClient]:
+def client(
+    app_under_test: tuple[FastAPI, FakePan123Storage, dict[str, str]],
+) -> Iterator[TestClient]:
     with TestClient(app_under_test[0]) as test_client:
         yield test_client
 
@@ -184,6 +224,7 @@ def _upload_material(
     content: bytes = MP4_BYTES,
     content_type: str = "video/mp4",
     title: str = "新手教学",
+    tags: str = '["入门教程"]',
     visible: bool = True,
     idempotency_key: str | None = None,
 ) -> object:
@@ -194,6 +235,7 @@ def _upload_material(
         data={
             "title": title,
             "description": "平台统一提供的培训内容",
+            "tags": tags,
             "sort_order": 0,
             "visible": "true" if visible else "false",
             "confirm": "true",
@@ -238,8 +280,9 @@ def _customer_token(client: TestClient) -> str:
     return str(response.json()["session_token"])
 
 
-def test_admin_upload_validation_and_idempotency(
-    client: TestClient, app_under_test: tuple[FastAPI, FakeStorageAdapter]
+def test_admin_upload_validation_idempotency_and_tags(
+    client: TestClient,
+    app_under_test: tuple[FastAPI, FakePan123Storage, dict[str, str]],
 ) -> None:
     storage = app_under_test[1]
     headers = _admin_session(client)
@@ -247,13 +290,45 @@ def test_admin_upload_validation_and_idempotency(
     created = _upload_material(client, headers)
     assert created.status_code == 200, created.text
     material_id = created.json()["id"]
+    # 远端名唯一（material_id 前缀）且已上报网盘替身。
+    assert len(storage.remote_names) == 1
+    assert storage.remote_names[0].endswith("-新手教学.mp4")
+    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT remote_file_id, tags, kind FROM training_materials WHERE id = %s",
+            (material_id,),
+        ).fetchone()
+        assert int(row[0]) == 1
+        assert list(row[1]) == ["入门教程"]
+        assert row[2] == "video"
 
-    # 对象已落存储，键含内容摘要（内容寻址）。
-    keys = [key for key in storage._objects if key.startswith("training-materials/")]
-    assert len(keys) == 1
-    assert hashlib.sha256(MP4_BYTES).hexdigest() in keys[0]
+    # 四组白名单：audio/image 同样放行（kind 推导）。
+    assert (
+        _upload_material(
+            client,
+            headers,
+            filename="课.mp3",
+            content=MP3_BYTES,
+            content_type="audio/mpeg",
+            title="口播音",
+            tags='["音频课"]',
+        ).status_code
+        == 200
+    )
+    assert (
+        _upload_material(
+            client,
+            headers,
+            filename="图.png",
+            content=PNG_BYTES,
+            content_type="image/png",
+            title="封面图",
+            tags='["海报"]',
+        ).status_code
+        == 200
+    )
 
-    # 白名单外的 (后缀, content-type) 组合 → 415。
+    # 白名单外的 (后缀, content-type) 组合 → 415；混搭同样拒绝。
     assert (
         _upload_material(
             client,
@@ -264,10 +339,19 @@ def test_admin_upload_validation_and_idempotency(
         ).status_code
         == 415
     )
-    # 后缀与 content-type 混搭（mp4 后缀 + pdf 类型）同样拒绝。
     assert _upload_material(client, headers, content_type="application/pdf").status_code == 415
-    # 标题缺失 → 422；审计员无内容写权限 → 403。
+    # 标题缺失 / 标签缺失 / 标签超限 / 单标签过长 → 422；审计员无写权限 → 403。
     assert _upload_material(client, headers, title="  ").status_code == 422
+    assert _upload_material(client, headers, tags="[]").status_code == 422
+    assert (
+        _upload_material(client, headers, tags='["a", "b", "c", "d", "e", "f"]').status_code == 422
+    )
+    assert (
+        _upload_material(
+            client, headers, tags='["这一条标签内容明显超过了二十个字的长度限制"]'
+        ).status_code
+        == 422
+    )
     auditor = _admin_session(client, "auditor_u")
     assert _upload_material(client, auditor).status_code == 403
     # TestClient 的 cookie jar 已被 auditor 会话覆盖，换回管理员会话再验证契约。
@@ -278,19 +362,18 @@ def test_admin_upload_validation_and_idempotency(
     assert (
         client.post(
             "/api/control/training-materials",
-            data={"title": "x", "confirm": "false", "reason": ""},
+            data={"title": "x", "tags": '["x"]', "confirm": "false", "reason": ""},
             files={"file": ("a.mp4", MP4_BYTES, "video/mp4")},
             headers=merged,
         ).status_code
         == 400
     )
 
-    # 幂等重放：同键同请求 → 200 + X-Idempotent-Replay，不产生第二行。
+    # 幂等重放：同键同请求 → 回放，不产生第二行、不再上传。
     replay_key = f"replay-{uuid.uuid4()}"
     first = _upload_material(client, headers, title="重放用", idempotency_key=replay_key)
     assert first.status_code == 200
     second = _upload_material(client, headers, title="重放用", idempotency_key=replay_key)
-    # 快照层回放的是记录时的 success_status（201），与首响 200 不同属既有行为。
     assert second.status_code in (200, 201)
     assert second.headers.get("X-Idempotent-Replay") == "true"
     with psycopg.connect(_db_dsn(), autocommit=True) as conn:
@@ -299,7 +382,7 @@ def test_admin_upload_validation_and_idempotency(
         ).fetchone()
         assert rows[0] == 1
 
-    # 同键不同文件 → 409（内容指纹进契约体）。
+    # 同键不同文件 / 同键不同标签 → 409（内容指纹与规范化标签都在契约体）。
     conflict = _upload_material(
         client,
         headers,
@@ -308,6 +391,14 @@ def test_admin_upload_validation_and_idempotency(
         idempotency_key=replay_key,
     )
     assert conflict.status_code == 409
+    conflict_tags = _upload_material(
+        client,
+        headers,
+        title="重放用",
+        tags='["别的标签"]',
+        idempotency_key=replay_key,
+    )
+    assert conflict_tags.status_code == 409
 
     with psycopg.connect(_db_dsn(), autocommit=True) as conn:
         audit = conn.execute(
@@ -318,11 +409,15 @@ def test_admin_upload_validation_and_idempotency(
         assert {row[0] for row in audit} == {"training_material.create"}
 
 
-def test_customer_visibility_listing_and_download(
-    client: TestClient, app_under_test: tuple[FastAPI, FakeStorageAdapter]
+def test_customer_listing_tag_filter_facet_and_direct_link(
+    client: TestClient,
+    app_under_test: tuple[FastAPI, FakePan123Storage, dict[str, str]],
 ) -> None:
+    storage = app_under_test[1]
     headers = _admin_session(client)
-    video_id = _upload_material(client, headers, title="封面视频").json()["id"]
+    video_id = _upload_material(
+        client, headers, title="封面视频", tags='["入门教程", "剪映"]'
+    ).json()["id"]
     _upload_material(
         client,
         headers,
@@ -330,9 +425,18 @@ def test_customer_visibility_listing_and_download(
         filename="讲义.pdf",
         content=PDF_BYTES,
         content_type="application/pdf",
+        tags='["结算"]',
     )
-    hidden_id = _upload_material(client, headers, title="未上架视频", visible=False).json()["id"]
-    del hidden_id
+    _upload_material(
+        client,
+        headers,
+        title="口播音",
+        filename="课.mp3",
+        content=MP3_BYTES,
+        content_type="audio/mpeg",
+        tags='["入门教程"]',
+        visible=False,
+    )
 
     token = _customer_token(client)
     auth = {"Authorization": f"Bearer {token}"}
@@ -347,77 +451,88 @@ def test_customer_visibility_listing_and_download(
     assert payload["total"] == 2
     kinds = {item["title"]: item["kind"] for item in payload["items"]}
     assert kinds["封面视频"] == "video"
-    assert kinds["讲义"] == "training"
+    assert kinds["讲义"] == "doc"
+    # 标签面按分页前可见集合聚合（下架素材的标签不入面）。
+    assert sorted(payload["tag_facet"]) == sorted(["入门教程", "剪映", "结算"])
 
-    # 类型筛选 + 无效类型。
+    # 类型筛选 + 标签筛选（可叠加）+ 无效类型。
     video_only = client.get(
         "/api/training-materials", params={"kind": "video"}, headers=auth
     ).json()
     assert [item["title"] for item in video_only["items"]] == ["封面视频"]
+    tagged = client.get("/api/training-materials", params={"tag": "入门教程"}, headers=auth).json()
+    assert [item["title"] for item in tagged["items"]] == ["封面视频"]
+    both = client.get(
+        "/api/training-materials",
+        params={"kind": "doc", "tag": "结算"},
+        headers=auth,
+    ).json()
+    assert [item["title"] for item in both["items"]] == ["讲义"]
     assert (
         client.get("/api/training-materials", params={"kind": "neon"}, headers=auth).status_code
         == 422
     )
 
-    # 下载链接：本地车道返回 HMAC 站内 URL；下载计数自增；/file 可读且校验签名。
-    before = client.get("/api/control/training-materials", headers=headers).json()
-    before_count = {item["title"]: item["download_count"] for item in before["items"]}
+    # 直链签发：防盗链签名 URL + 到期时间；下载计数自增。
+    before_page = client.get("/api/control/training-materials", headers=headers).json()
+    before = {item["title"]: item["download_count"] for item in before_page["items"]}
     download = client.post(f"/api/training-materials/{video_id}/download-url", headers=auth)
     assert download.status_code == 200, download.text
-    url = download.json()["url"]
-    assert "/api/training-materials/" in url and "/file?" in url
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query)
-    assert {"expires", "user_id", "session_epoch", "sig"} <= set(query)
-
-    file_response = client.get(parsed.path + f"?{parsed.query}")
-    assert file_response.status_code == 200, file_response.text
-    assert file_response.content == MP4_BYTES
-    assert file_response.headers["content-type"].startswith("video/mp4")
-
+    body = download.json()
+    assert "auth_key=" in body["url"]
+    assert int(body["expires_at"]) > int(time.time())
+    assert storage.links_served == 1
     after = client.get("/api/control/training-materials", headers=headers).json()
-    after_count = {item["title"]: item["download_count"] for item in after["items"]}
-    assert after_count["封面视频"] == before_count["封面视频"] + 1
+    after_counts = {item["title"]: item["download_count"] for item in after["items"]}
+    assert after_counts["封面视频"] == before["封面视频"] + 1
 
-    # 篡改签名 / 过期时间 → 拒绝。
-    tampered = parsed.path + "?" + parsed.query.replace(query["sig"][0], "0" * 64)
-    assert client.get(tampered).status_code == 403
-    stale = (
-        f"{parsed.path}?expires=1000000000&user_id={query['user_id'][0]}"
-        f"&session_epoch={query['session_epoch'][0]}&sig={query['sig'][0]}"
-    )
-    assert client.get(stale).status_code == 410
-
-    # Range 请求（页内播放拖动）。
-    ranged = client.get(parsed.path + f"?{parsed.query}", headers={"Range": "bytes=0-3"})
-    assert ranged.status_code == 206
-    assert ranged.content == MP4_BYTES[:4]
+    # 管理端 direct-link：可签（AdminReader 权限）、不递增计数。
+    direct = client.get(f"/api/control/training-materials/{video_id}/direct-link", headers=headers)
+    assert direct.status_code == 200, direct.text
+    assert "auth_key=" in direct.json()["url"]
+    final = client.get("/api/control/training-materials", headers=headers).json()
+    final_counts = {item["title"]: item["download_count"] for item in final["items"]}
+    assert final_counts["封面视频"] == after_counts["封面视频"]
 
 
-def test_update_soft_delete_and_kick_invalidates_url(
-    client: TestClient, app_under_test: tuple[FastAPI, FakeStorageAdapter]
+def test_update_soft_delete_blocks_resign(
+    client: TestClient,
+    app_under_test: tuple[FastAPI, FakePan123Storage, dict[str, str]],
 ) -> None:
+    storage = app_under_test[1]
     headers = _admin_session(client)
     material_id = _upload_material(client, headers, title="待更新").json()["id"]
     token = _customer_token(client)
     auth = {"Authorization": f"Bearer {token}"}
 
-    # 下架：客户列表与下载立即不可见。
+    # 编辑（含 tags 修改）：PATCH tags 进契约。
     merged = dict(headers)
     merged[IDEMPOTENCY_KEY_HEADER] = f"key-{uuid.uuid4()}"
     patched = client.patch(
         f"/api/control/training-materials/{material_id}",
-        json={"confirm": True, "reason": "先下架", "visible": False},
+        json={
+            "confirm": True,
+            "reason": "改标签",
+            "tags": ["进阶课"],
+            "visible": False,
+        },
         headers=merged,
     )
     assert patched.status_code == 200, patched.text
+    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
+        tags = conn.execute(
+            "SELECT tags, visible FROM training_materials WHERE id = %s",
+            (material_id,),
+        ).fetchone()
+        assert list(tags[0]) == ["进阶课"]
+        assert int(tags[1]) == 0
     assert client.get("/api/training-materials", headers=auth).json()["total"] == 0
     assert (
         client.post(f"/api/training-materials/{material_id}/download-url", headers=auth).status_code
         == 404
     )
 
-    # 重新上架并取一条有效链接，然后踢线（epoch 递增）——旧链接必须失效。
+    # 重新上架后客户可签；软删后客户 404、管理端 direct-link 也拒绝。
     merged[IDEMPOTENCY_KEY_HEADER] = f"key-{uuid.uuid4()}"
     assert (
         client.patch(
@@ -427,19 +542,10 @@ def test_update_soft_delete_and_kick_invalidates_url(
         ).status_code
         == 200
     )
-    url = client.post(f"/api/training-materials/{material_id}/download-url", headers=auth).json()[
-        "url"
-    ]
-    parsed = urlparse(url)
-    alive = client.get(parsed.path + f"?{parsed.query}")
-    assert alive.status_code == 200
-
-    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
-        # 踢线语义 = epoch 递增（revocation 同款）；lease 列受 CHECK 保护不能倒拨。
-        conn.execute("UPDATE customer_session_state SET session_epoch = session_epoch + 1")
-    assert client.get(parsed.path + f"?{parsed.query}").status_code == 401
-
-    # 软删：管理列表默认不可见，客户 404。
+    assert (
+        client.post(f"/api/training-materials/{material_id}/download-url", headers=auth).status_code
+        == 200
+    )
     merged[IDEMPOTENCY_KEY_HEADER] = f"key-{uuid.uuid4()}"
     deleted = client.request(
         "DELETE",
@@ -454,13 +560,78 @@ def test_update_soft_delete_and_kick_invalidates_url(
         client.post(f"/api/training-materials/{material_id}/download-url", headers=auth).status_code
         == 404
     )
+    assert (
+        client.get(
+            f"/api/control/training-materials/{material_id}/direct-link", headers=headers
+        ).status_code
+        == 404
+    )
+    # 软删不回收网盘对象（可恢复口径）：替身里的远端名仍保留。
+    assert storage.remote_names
 
 
-def test_expired_timestamp_guard_and_unused_expiry() -> None:
-    """契约面上锁死过期口径：DOWNLOAD_URL_EXPIRES_IN 必须 ≤ 15 分钟。"""
-    from app.training_material_routes import DOWNLOAD_URL_EXPIRES_IN
+def test_upload_rejected_when_config_changes_in_flight(
+    client: TestClient,
+    app_under_test: tuple[FastAPI, FakePan123Storage, dict[str, str]],
+) -> None:
+    """指纹复核：上传期间配置版本变化（换号/换密钥）→ 拒绝入库 + 孤儿日志。"""
+    _app, storage, version_holder = app_under_test
+    headers = _admin_session(client)
+    uploads_before = len(storage.remote_names)
 
-    assert DOWNLOAD_URL_EXPIRES_IN <= timedelta(minutes=15)
-    assert isinstance(DOWNLOAD_URL_EXPIRES_IN, timedelta)
-    # 防呆：时间工具引用未漂移（模块导入成功即证明）。
-    assert datetime.now(UTC).tzinfo is not None
+    ok = _upload_material(client, headers, title="正常入库")
+    assert ok.status_code == 200, ok.text
+
+    # 模拟上传解析发生在旧版本、业务提交前配置被保存（版本已变）。
+    version_holder["version"] = "cfg-v2"
+    rejected = _upload_material(client, headers, title="期间换配置")
+    assert rejected.status_code == 503, rejected.text
+    assert rejected.json()["detail"]["code"] == "TRAINING_MATERIAL_CONFIG_CHANGED"
+    with psycopg.connect(_db_dsn(), autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT count(*) FROM training_materials WHERE title = '期间换配置'"
+        ).fetchone()
+        assert rows[0] == 0
+    # 网盘侧留下了无引用文件（唯一远端名），由孤儿日志口径运维清理。
+    assert len(storage.remote_names) == uploads_before + 2
+
+
+def test_provider_widen_migration_downgrade_fail_fast(
+    training_materials_dsn: str,
+) -> None:
+    """CHECK 放宽迁移回滚契约：pan123 行被清理；旧白名单外行（yuanbao）
+    存在时 downgrade 显式失败并给清理步骤，清掉后才能成功（方案 §3.5）。"""
+    from alembic import command
+    from alembic.config import Config
+
+    server_dir = Path(__file__).resolve().parent.parent
+    config = Config(str(server_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(server_dir / "migrations"))
+    config.set_main_option(
+        "sqlalchemy.url", training_materials_dsn.replace("postgresql://", "postgresql+psycopg://")
+    )
+    target = "20261102T0900_customer_session_last_seen"
+    with psycopg.connect(training_materials_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO provider_settings (provider, encrypted_config, updated_by_user_id) "
+            "VALUES ('yuanbao', 'x', 'admin_u'), ('pan123', 'x', 'admin_u') "
+            "ON CONFLICT (provider) DO NOTHING"
+        )
+    # yuanbao 行存在 → 退到 CHECK 放宽迁移本身必须失败（fail-fast）。
+    with pytest.raises(Exception, match="受控清理|旧白名单"):
+        command.downgrade(config, target)
+    with psycopg.connect(training_materials_dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM provider_settings WHERE provider = 'yuanbao'")
+    # 清理 yuanbao 后 downgrade 成功（pan123 行由迁移自身删除），再升回 head。
+    command.downgrade(config, target)
+    with psycopg.connect(training_materials_dsn, autocommit=True) as conn:
+        names = {
+            row[0] for row in conn.execute("SELECT provider FROM provider_settings").fetchall()
+        }
+        assert "pan123" not in names
+        constraint = conn.execute(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_provider_settings_supported_provider'"
+        ).fetchone()
+        assert "pan123" not in constraint[0]
+    command.upgrade(config, "head")

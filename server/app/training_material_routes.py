@@ -406,9 +406,10 @@ def get_training_material_direct_link(
 
 
 class TrainingMaterialCreateContract(AdminWriteRequest):
-    """multipart 上传的契约体由服务端在读文件后组装（含内容指纹、规范化标签
-    与网盘 fileID），使同键不同文件/不同标签的重放撞 IDEMPOTENCY_CONFLICT，
-    而不是静默覆盖或重复上传。"""
+    """multipart 上传的契约体由服务端在读文件后组装（含内容指纹与规范化
+    标签），使同键不同文件/不同标签的重放撞 IDEMPOTENCY_CONFLICT，而不是
+    静默覆盖或重复上传。注意契约只含**请求意图**：网盘 fileID 与配置版本
+    是每次执行的产物（重放时服务端会重新上传），进契约反而破坏重放。"""
 
     title: str = ""
     description: str = ""
@@ -419,8 +420,6 @@ class TrainingMaterialCreateContract(AdminWriteRequest):
     size_bytes: int = 0
     file_suffix: str = ""
     content_type: str = ""
-    remote_file_id: str = ""
-    config_version: str = ""
 
 
 class TrainingMaterialUpdateRequest(AdminWriteRequest):
@@ -584,8 +583,6 @@ async def create_training_material(
             size_bytes=total,
             file_suffix=normalized_suffix,
             content_type=content_type,
-            remote_file_id=str(uploaded.file_id),
-            config_version=config_version,
             confirm=confirm,
             reason=reason,
         )

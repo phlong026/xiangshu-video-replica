@@ -39,7 +39,7 @@ def upgrade() -> None:
     )
     op.execute(
         "ALTER TABLE provider_settings ADD CONSTRAINT ck_provider_settings_supported_provider "
-        f"CHECK {_WIDENED_LIST}"
+        f"CHECK ({_WIDENED_LIST})"
     )
 
 
@@ -70,5 +70,5 @@ def downgrade() -> None:
     )
     op.execute(
         "ALTER TABLE provider_settings ADD CONSTRAINT ck_provider_settings_supported_provider "
-        f"CHECK {_PREVIOUS_LIST}"
+        f"CHECK ({_PREVIOUS_LIST})"
     )
