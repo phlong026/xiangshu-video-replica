@@ -288,7 +288,7 @@ def _replay_if_exists(
     row = cast(
         "BusinessRow | None",
         conn.execute(
-            "SELECT id, request_hash, status FROM replica_pipeline_tasks "
+            "SELECT id, request_hash, status, project_id FROM replica_pipeline_tasks "
             "WHERE idempotency_key = %s",
             (scoped_key,),
         ).fetchone(),
@@ -301,7 +301,12 @@ def _replay_if_exists(
             "REPLICA_PIPELINE_IDEMPOTENCY_CONFLICT",
             "该幂等键已用于不同的发起参数，请刷新后重试。",
         )
-    return {"id": str(row["id"]), "status": str(row["status"]), "replay": True}
+    return {
+        "id": str(row["id"]),
+        "projectId": str(row["project_id"]),
+        "status": str(row["status"]),
+        "replay": True,
+    }
 
 
 def _require_lease(conn: BusinessConnection, lease: ReplicaPipelineLease) -> BusinessRow:
@@ -627,3 +632,23 @@ def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> None:
         """,
         (pipeline_id,),
     )
+
+
+def pipeline_enabled(conn: BusinessConnection) -> bool:
+    """总开关：runtime_settings.replica_pipeline_enabled（方案 §6/§8，默认关）."""
+    row = conn.execute(
+        "SELECT replica_pipeline_enabled FROM runtime_settings WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return False
+    return bool(row["replica_pipeline_enabled"])
+
+
+def require_pipeline_enabled(conn: BusinessConnection) -> None:
+    """新发起入口的开关门（M7 路由与 M3 drive 共用）."""
+    if not pipeline_enabled(conn):
+        raise ReplicaPipelineError(
+            422,
+            "REPLICA_PIPELINE_DISABLED",
+            "全自动复刻暂未开放。",
+        )

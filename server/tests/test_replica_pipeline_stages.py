@@ -104,8 +104,14 @@ def biz(dsn: str) -> Iterator[BusinessConnection]:
 
 @pytest.fixture(autouse=True)
 def _clear_pipelines(biz: BusinessConnection) -> None:
-    """每测清场：acquire 按 next_poll_at 选最旧可领行，遗留行会抢走领取。"""
+    """每测清场：acquire 按 next_poll_at 选最旧可领行，遗留行会抢走领取."""
     biz.execute("DELETE FROM replica_pipeline_tasks")
+    # drive_pipeline_once 的总开关门（M6）：测试默认放行；开关语义由
+    # test_replica_pipeline_routes 专门覆盖。
+    biz.execute(
+        "INSERT INTO runtime_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING"
+    )
+    biz.execute("UPDATE runtime_settings SET replica_pipeline_enabled = true WHERE id = 1")
 
 
 @pytest.fixture(autouse=True)

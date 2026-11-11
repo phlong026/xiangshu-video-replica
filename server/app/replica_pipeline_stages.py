@@ -799,6 +799,12 @@ def drive_pipeline_once(conn: BusinessConnection, lease: rp.ReplicaPipelineLease
     """
     row = _load_row(conn, lease)
     status = str(row["status"])
+    # 总开关关闭：挂起父编排、不产生任何新付费子任务（方案 §6）。已入队子
+    # 任务的供应商调用点 fencing 属 M6b 迭代（如实登记，不在此声称已覆盖）。
+    if not rp.pipeline_enabled(conn):
+        rp.mark_suspended(conn, lease.id)
+        rp.release_lease(conn, lease)
+        return "suspended"
     result = run_pipeline_stage(conn, lease)
     if result.kind == "waiting":
         rp.set_next_poll(conn, lease, wait_failures=1)

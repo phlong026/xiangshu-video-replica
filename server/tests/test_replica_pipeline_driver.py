@@ -157,6 +157,8 @@ def test_enqueue_replays_same_key_and_params(biz: BusinessConnection) -> None:
         request_hash="hash-1",
     )
     assert second["replay"] is True and second["id"] == first["id"]
+    # 重放必须携带 projectId（评审 B-r4#1：路由人物预检依赖它）。
+    assert second["projectId"] == first["projectId"]
 
 
 def test_enqueue_rejects_same_key_with_different_params(biz: BusinessConnection) -> None:

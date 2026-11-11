@@ -96,6 +96,9 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 确认点与生成域映射专用库（test_replica_pipeline_confirm.py）：
         # 指纹校验/cancel/expire/观察映射/接收入口。
         "rplc_pipeline_confirm_test",
+        # 路由层专用库（test_replica_pipeline_routes.py）：端点注册/总开关/
+        # 人物预检归属链。
+        "rplc_pipeline_routes_test",
         # Existing business fixtures using W13 routine admin sessions.
         "t09_admin_session_test",
         "t12_admin_activation_test",

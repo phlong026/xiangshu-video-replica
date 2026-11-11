@@ -357,6 +357,35 @@ def expire_pipelines(conn: BusinessConnection, *, limit: int = 50) -> int:
     return len(expired)
 
 
+def resume_suspended_pipelines(conn: BusinessConnection, *, limit: int = 50) -> int:
+    """总开关重开后的恢复扫描（评审 B-r1#2）：挂起行里清屏障、累计时长、重轮询.
+
+    与 expire_pipelines 同为独立扫描（不进轮询白名单——挂起行按设计不被领取）。
+    调用方：worker 定时任务在开关开启时调用；恢复后行重新可领、断点续跑
+    （挂起产物纳回版本链依赖子任务域既有恢复语义，M6b 迭代登记）。
+    """
+    resumed = conn.execute(
+        """
+        UPDATE replica_pipeline_tasks SET
+            suspended_seconds_total = suspended_seconds_total +
+                CASE WHEN suspended_at IS NULL THEN 0
+                     ELSE FLOOR(EXTRACT(EPOCH FROM (now() - suspended_at)))::int END,
+            suspended_at = NULL,
+            next_poll_at = now(),
+            updated_at = now()
+        WHERE id IN (
+            SELECT id FROM replica_pipeline_tasks
+            WHERE suspended_at IS NOT NULL
+            ORDER BY suspended_at LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id
+        """,
+        (limit,),
+    ).fetchall()
+    return len(resumed)
+
+
 def confirm_quote_payload(row: BusinessRow) -> dict[str, object]:
     """GET 状态接口的报价展示载荷（M7 消费；也供前端确认卡渲染）."""
     snapshot = row["quote_snapshot"]
