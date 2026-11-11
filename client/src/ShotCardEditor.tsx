@@ -101,13 +101,18 @@ function motionClipboardText(motion: ShotMotion | null | undefined): string {
 }
 
 /** 旧版拆解（2026-10 之前）没有 motion 字段：这些镜头编译后只会得到
- * action 文本拼接，成片人物容易僵立原地。编辑器据此显式提示（方案 T11）。 */
+ * action 文本拼接，成片人物容易僵立原地。编辑器据此显式提示（方案 T11）。
+ * 序号取原数组下标：先过滤后编号会把「第 2 镜」错报成「第 1 镜」（评审 #8）。 */
 export function missingMotionShotIds(shots: ShotCard[]): string[] {
   return shots
-    .filter((shot) => shot.motion == null)
     .map((shot, index) =>
-      shot.shot_id?.trim() ? shot.shot_id : `第 ${index + 1} 镜`,
-    );
+      shot.motion == null
+        ? shot.shot_id?.trim()
+          ? shot.shot_id
+          : `第 ${index + 1} 镜`
+        : "",
+    )
+    .filter((label) => label !== "");
 }
 
 /** 制表符格式可直接粘贴到 Excel、飞书表格和常见文档表格。 */

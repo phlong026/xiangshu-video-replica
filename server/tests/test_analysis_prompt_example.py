@@ -71,3 +71,13 @@ def test_example_warns_against_copying_values() -> None:
     instruction = _instruction_text()
     assert "数值一律不得照抄" in instruction
     assert "真实 duration_seconds" in instruction
+
+
+def test_example_transition_matches_segment_kind() -> None:
+    """SHOT_CUT 段的 transition 必须是切镜、首段是视频开始（评审变更集 #6）。"""
+    shots = _example_payload()["analysis"]["shots"]
+    first, last = shots[0], shots[-1]
+    assert first["segment_kind"] == "ACTION_BEAT"
+    assert first["transition"] == "视频开始"
+    assert last["segment_kind"] == "SHOT_CUT"
+    assert "切" in last["transition"]

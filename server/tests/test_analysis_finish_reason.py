@@ -124,7 +124,7 @@ def test_truncated_body_is_rejected_even_when_content_present() -> None:
     """length + 非空正文：半截 JSON 不许流到业务解析层变成笼统「格式无效」。"""
     provider, transport = _provider(
         [_completion_body(content='{"analysis": {"sho', finish_reason="length")],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
     with pytest.raises(AnalysisProviderFailed) as caught:
@@ -207,13 +207,25 @@ def test_non_string_finish_reason_is_treated_as_unknown() -> None:
     assert response.raw["finish_reason"] is None
 
 
-def test_missing_message_is_still_an_unreadable_completion() -> None:
+def test_missing_message_with_unknown_reason_is_unreadable() -> None:
     provider, _ = _provider([_completion_body(content=None, include_message=False)])
 
     with pytest.raises(AnalysisProviderFailed) as caught:
         provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
 
-    assert (caught.value.upstream_diagnostic or {})["reason"] == "KeyError"
+    assert (caught.value.upstream_diagnostic or {})["reason"] == "missing_content"
+
+
+def test_missing_message_does_not_short_circuit_finish_reason() -> None:
+    """连 message 都缺失的拦截响应也必须归到明确原因（评审变更集 #4）。"""
+    body = json.dumps({"choices": [{"finish_reason": "content_filter"}]}).encode()
+    provider, _ = _provider([body])
+
+    with pytest.raises(AnalysisProviderFailed) as caught:
+        provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+
+    assert (caught.value.upstream_diagnostic or {})["reason"] == "finish_reason_content_filter"
+    assert caught.value.retryable is False
 
 
 def test_success_metadata_carries_finish_reason_and_whitelisted_usage() -> None:
@@ -276,7 +288,7 @@ def test_output_budget_rejected_by_upstream_falls_back_once() -> None:
     )
     provider, transport = _provider(
         [rejected, _completion_body(content='{"ok": 1}')],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
     response = provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=30.0)
@@ -284,6 +296,26 @@ def test_output_budget_rejected_by_upstream_falls_back_once() -> None:
     budgets = [payload["max_tokens"] for payload in transport.requested_payloads]
     assert budgets == [ANALYSIS_MAX_TOKENS_CAP, ANALYSIS_MIN_MAX_TOKENS]
     assert response.text == '{"ok": 1}'
+
+
+def test_input_token_limit_does_not_trigger_output_budget_fallback() -> None:
+    """输入超限降输出预算救不了：不得误触发回退（评审变更集 #5）。"""
+    rejected = AnalysisProviderFailed(
+        "视频拆解服务拒绝了请求（HTTP 400）：Input token limit exceeded: prompt is too long",
+        http_status=400,
+        failure_phase=HTTP_FAILURE_PHASE,
+        upstream_diagnostic={"reason": "Input token limit exceeded: prompt is too long"},
+    )
+    provider, transport = _provider(
+        [rejected],
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
+    )
+
+    with pytest.raises(AnalysisProviderFailed):
+        provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+
+    assert len(transport.requested_payloads) == 1
+    assert transport.requested_payloads[0]["max_tokens"] == ANALYSIS_MIN_MAX_TOKENS + 15 * 800
 
 
 def test_unrelated_http_400_does_not_touch_the_budget() -> None:
@@ -311,7 +343,7 @@ def test_rate_limited_retries_same_model_before_falling_over() -> None:
     """预算内 429 先同模型重试，恢复后不再消耗备选模型。"""
     provider, transport = _provider(
         [_rate_limited(), _rate_limited(), _completion_body(content='{"ok": 1}')],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
     response = provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
@@ -324,7 +356,7 @@ def test_global_call_cap_limits_total_provider_requests() -> None:
     """物理请求总数封顶：主模型重试用尽后换道，备选只拿到最后一个名额。"""
     provider, transport = _provider(
         [_rate_limited(), _rate_limited(), _rate_limited(), _rate_limited(), _rate_limited()],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
     with pytest.raises(AnalysisProviderFailed) as caught:
@@ -346,7 +378,7 @@ def test_budget_deadline_stops_new_calls_after_slow_failure(
     monkeypatch.setattr(analysis_module.time, "monotonic", lambda: clock[0])
     provider, transport = _provider(
         [_rate_limited()],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=500),
+        video_call_budget=VideoCallBudget(attempt_deadline=600.0),
         pause=lambda _seconds: clock.__setitem__(0, clock[0] + FAKE_PAUSE_ADVANCE),
     )
     transport.timeout_seconds = 240.0
@@ -364,7 +396,7 @@ def test_tiny_budget_below_one_timeout_fails_before_any_call() -> None:
     """预算小于单次超时的防御路径：零请求即失败，不产生半次付费调用。"""
     provider, transport = _provider(
         [_completion_body(content='{"ok": 1}')],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10),
+        video_call_budget=VideoCallBudget(attempt_deadline=__import__("time").monotonic() + 10),
     )
     transport.timeout_seconds = 240.0
 
@@ -379,7 +411,7 @@ def test_timeout_failures_are_never_auto_retried() -> None:
     """超时可能已被上游受理并计费：同模型与备选都不自动重发（决策 D5）。"""
     provider, transport = _provider(
         [_network_failure(kind="timeout"), _completion_body(content='{"ok": 1}')],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
     with pytest.raises(AnalysisProviderFailed) as caught:
@@ -390,17 +422,19 @@ def test_timeout_failures_are_never_auto_retried() -> None:
     assert caught.value.upstream_diagnostic["failure_kind"] == "timeout"
 
 
-def test_connect_failures_retry_on_the_same_model() -> None:
-    """连接类失败（DNS/拒绝/复位）请求未达对端：预算内自动重试。"""
+def test_connect_failures_are_not_auto_retried() -> None:
+    """断连可能发生在请求已提交之后：一律不自动重发（评审变更集 #1）。"""
     provider, transport = _provider(
         [_network_failure(kind="connect"), _completion_body(content='{"ok": 1}')],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
-    response = provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+    with pytest.raises(AnalysisProviderFailed) as caught:
+        provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
 
-    assert transport.requested_models == [PRIMARY, PRIMARY]
-    assert response.text == '{"ok": 1}'
+    assert transport.requested_models == [PRIMARY]
+    assert caught.value.upstream_diagnostic is not None
+    assert caught.value.upstream_diagnostic["failure_kind"] == "connect"
 
 
 def test_safety_and_length_failures_consume_no_retry_and_no_fallback() -> None:
@@ -411,7 +445,7 @@ def test_safety_and_length_failures_consume_no_retry_and_no_fallback() -> None:
     ):
         provider, transport = _provider(
             [body, _completion_body(content='{"ok": 1}')],
-            video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+            video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
         )
 
         with pytest.raises(AnalysisProviderFailed):
@@ -427,7 +461,7 @@ def test_empty_completion_retries_within_budget() -> None:
             _completion_body(content=""),
             _completion_body(content='{"ok": 1}'),
         ],
-        video_call_budget=VideoCallBudget(attempt_budget_seconds=10_000),
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
     response = provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)

@@ -179,7 +179,7 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
         "ambient_sound": "鸟鸣与远处车流",
         "music_style_hint": "无可辨识配乐",
         "spoken_text": "大家好，今天带大家看这个院子。",
-        "transition": "硬切",
+        "transition": "视频开始",
         "segment_kind": "ACTION_BEAT",
         "boundary_reason": "视频开始",
         "motion": {
@@ -208,7 +208,7 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
         "ambient_sound": "鸟鸣延续",
         "music_style_hint": "无可辨识配乐",
         "spoken_text": "这个石桌是整院的中心。",
-        "transition": "同镜头连续，无切镜",
+        "transition": "硬切",
         "segment_kind": "SHOT_CUT",
         "boundary_reason": "硬切到石桌近景",
         "motion": {

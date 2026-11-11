@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -101,7 +102,7 @@ def build_long_video_provider(conn: Database) -> VideoAnalysisProvider:
         conn,
         transport=UrllibApilioChatTransport(timeout_seconds=provider_timeout_seconds()),
         video_call_budget=VideoCallBudget(
-            attempt_budget_seconds=REPLICA_PROMPT_CALL_BUDGET_SECONDS,
+            attempt_deadline=time.monotonic() + REPLICA_PROMPT_CALL_BUDGET_SECONDS,
         ),
         lane="replica_prompt",
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -90,8 +91,12 @@ ANALYSIS_CALL_BUDGET_SECONDS = ANALYSIS_TASK_LEASE_MINUTES * 60 - 90
 
 
 def analysis_call_budget() -> VideoCallBudget:
-    """主拆解链路每次任务尝试的调用预算；由任务工厂在领取租约后注入。"""
-    return VideoCallBudget(attempt_budget_seconds=ANALYSIS_CALL_BUDGET_SECONDS)
+    """主拆解链路每次任务尝试的调用预算；由任务工厂在领取租约后注入。
+
+    截止线在工厂构造时定格为绝对单调时钟（租约预算 − 缓冲）：构造到实际
+    调用之间的预处理耗时（ffprobe/场景检测/签名）被自然计入预算。
+    """
+    return VideoCallBudget(attempt_deadline=time.monotonic() + ANALYSIS_CALL_BUDGET_SECONDS)
 
 
 def get_video_analysis_provider(

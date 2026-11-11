@@ -335,19 +335,26 @@ class AnalysisProviderFailed(RuntimeError):
 
 
 def _is_timeout_failure(exc: Exception) -> bool:
-    """区分网络超时与连接失败：超时不可自动重试，连接失败可以（决策 D5）。"""
+    """区分网络超时与连接失败——仅作诊断分类（``failure_kind``）。
+
+    两者都不可自动重试（决策 D5 经评审 #1 修订）：断连可能发生在请求已提交
+    之后，异常本身无法证明「请求未到达对端」。
+    """
     if isinstance(exc, TimeoutError):
         return True
     # urllib 在部分路径把 socket 超时包进 URLError(reason=timeout)。
     return isinstance(exc, URLError) and isinstance(getattr(exc, "reason", None), TimeoutError)
 
 
-# 视频入口的调用预算：从首次 provider 调用起算的截止时间 + 全局物理请求上限
-# + 同模型有界重试。只由视频任务工厂启用；优化器等文本入口保持「一次请求、
-# 直接按既有语义换道」的行为，避免隐式继承重试把它的租约吃满（方案 T14）。
+# 视频入口的调用预算：绝对单调时钟截止线 + 全局物理请求上限 + 同模型有界
+# 重试。截止线由任务工厂在领取租约后即刻定格（attempt_deadline = 当前单调
+# 时钟 + 租约剩余 − 落库缓冲），预处理（ffprobe/场景检测/签名）的耗时因此
+# 被自然计入，重试/换道/token 回退共享同一条线、不可能突破任务租约（评审
+# 变更集 #2）。只由视频任务工厂启用；优化器等文本入口保持「一次请求、直接
+# 按既有语义换道」的行为，避免隐式继承重试把它的租约吃满（方案 T14）。
 @dataclass(frozen=True)
 class VideoCallBudget:
-    attempt_budget_seconds: float
+    attempt_deadline: float
     max_provider_calls: int = 4
     max_retries_per_model: int = 2
     retry_backoff_seconds: tuple[float, ...] = (2.0, 8.0)
@@ -357,13 +364,12 @@ class VideoCallBudget:
 class _BudgetTracker:
     """一次视频任务尝试的调用预算状态；生命周期与单次 ``_complete_video`` 相同。
 
-    截止时间在首次构造时定格（≈ 任务租约剩余 − 落库缓冲），此后只减不增；
-    token 回退触发的第二次 ``_complete`` 共享同一 tracker，总次数与截止时间
-    因此不会被回退绕过。
+    截止时间继承工厂定格的绝对线（``budget.attempt_deadline``），此后只减不
+    增；token 回退触发的第二次 ``_complete`` 共享同一 tracker，总次数与截止
+    时间因此不会被回退绕过。
     """
 
     budget: VideoCallBudget
-    deadline: float
     calls_used: int = 0
 
     def can_start(self, timeout_seconds: object) -> bool:
@@ -371,17 +377,19 @@ class _BudgetTracker:
             return False
         if not isinstance(timeout_seconds, int | float):
             return True
-        return time.monotonic() + timeout_seconds <= self.deadline
+        return time.monotonic() + timeout_seconds <= self.budget.attempt_deadline
 
 
 def _is_auto_retryable(failure: AnalysisProviderFailed) -> bool:
-    """同模型自动重试的白名单；换道与否仍由 ``_should_try_fallback`` 决定。"""
+    """同模型自动重试的白名单；换道与否仍由 ``_should_try_fallback`` 决定。
+
+    网络类失败一律不自动重试（评审变更集 #1）：``RemoteDisconnected`` 等断连
+    可能发生在请求已提交之后，无法从异常证明「请求未到达对端」，盲目重发会
+    叠加一次结果不确定的付费调用；这类失败交由用户重新提交。
+    """
     if failure.failure_phase == HTTP_FAILURE_PHASE:
         status = failure.http_status
         return status == 429 or (status is not None and status >= 500)
-    if failure.failure_phase == NETWORK_FAILURE_PHASE:
-        kind = (failure.upstream_diagnostic or {}).get("failure_kind")
-        return kind == "connect"
     if failure.failure_phase == RESPONSE_FAILURE_PHASE:
         return (failure.upstream_diagnostic or {}).get("reason") == "empty_completion"
     return False
@@ -403,9 +411,14 @@ def _analysis_max_tokens(duration_seconds: float) -> int:
 
 
 # 上游拒绝输出预算（请求期 400）的特征词；与「输入超限」「无关 400」区分开，
-# 只有命中才允许把预算回退到保守值再试一次（方案 T5）。
+# 只有命中才允许把预算回退到保守值再试一次（方案 T5）。输入超限必须显式
+# 排除——降输出预算救不了过长的输入，只会白烧一次请求（评审变更集 #5）。
 _OUTPUT_LIMIT_PATTERN = re.compile(
-    r"max[_ ]?tokens|output[_ ]?tokens?|token[_ ]?limit|context.{0,12}output", re.IGNORECASE
+    r"max[_ ]?tokens\b|output[_ ]?tokens?\b|max[_ ]?output", re.IGNORECASE
+)
+_INPUT_LIMIT_PATTERN = re.compile(
+    r"input[_ ]?tokens?\b|prompt[_ ]?tokens?\b|prompt is too long|context[_ ]?length",
+    re.IGNORECASE,
 )
 
 
@@ -531,10 +544,10 @@ class UrllibApilioChatTransport:
             raise AnalysisProviderFailed(
                 f"Apilio video analysis request failed ({reason})",
                 failure_phase=NETWORK_FAILURE_PHASE,
-                # 超时意味着请求可能已被上游受理并计费，自动重发会叠加一次结果
-                # 不确定的付费调用（决策 D5）——只允许用户重新提交；连接类失败
-                # （DNS/拒绝/复位）请求没有到达对端，自动重试是安全的。
-                retryable=not timed_out,
+                # 对用户「可重试」；但自动重试一律关闭（决策 D5 经评审 #1 修订）：
+                # 断连可能发生在请求已提交之后，重发会叠加一次结果不确定的付费
+                # 调用。failure_kind 仅作诊断，不再驱动任何重试分支。
+                retryable=True,
                 upstream_diagnostic={
                     "http_status": None,
                     "failure_phase": NETWORK_FAILURE_PHASE,
@@ -723,10 +736,7 @@ class ApilioGemini:
         if self.video_call_budget is None:
             # 无预算（历史行为/文本入口兜底）：仍然带动态预算，但不做回退。
             return self._complete(payload)
-        tracker = _BudgetTracker(
-            budget=self.video_call_budget,
-            deadline=time.monotonic() + self.video_call_budget.attempt_budget_seconds,
-        )
+        tracker = _BudgetTracker(budget=self.video_call_budget)
         try:
             return self._complete(payload, tracker=tracker)
         except AnalysisProviderFailed as exc:
@@ -735,6 +745,7 @@ class ApilioGemini:
                 exc.http_status == 400
                 and budget > ANALYSIS_MIN_MAX_TOKENS
                 and _OUTPUT_LIMIT_PATTERN.search(reason)
+                and not _INPUT_LIMIT_PATTERN.search(reason)
             ):
                 logger.warning(
                     "%s 输出预算 %s 被上游拒绝，回退 %s 后重试一次",
@@ -849,8 +860,6 @@ class ApilioGemini:
         try:
             response, body_salvaged = _parse_completion_body(raw_body)
             choice = response["choices"][0]
-            message = choice["message"]
-            content = message["content"]
             finish_reason = choice.get("finish_reason")
         except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             logger.warning(
@@ -873,9 +882,9 @@ class ApilioGemini:
                 "%s 补全响应体存在换行注入（网关分块缺陷），已剔除后解析成功",
                 analysis_log_ref(),
             )
-        # 终止原因先于正文可用性判定（方案 T2）：截断/安全拦截的正文哪怕存在
-        # 也不可信——半截 JSON 流到业务解析层只会变成笼统的「格式无效」，安全
-        # 拦截附带的正文则可能把拦截原因漏成一次「成功」。
+        # 终止原因先于正文可用性判定（方案 T2，评审变更集 #4）：截断/安全拦截
+        # 的响应哪怕连 message 都缺失，也必须先归到明确原因，而不是笼统的
+        # 「结构无法识别」；分类通过后才读取正文。
         reason_text = finish_reason.strip().lower() if isinstance(finish_reason, str) else ""
         diagnostic_finish = finish_reason if isinstance(finish_reason, str) else None
         if "length" in reason_text:
@@ -910,6 +919,23 @@ class ApilioGemini:
                     "finish_reason": diagnostic_finish,
                 },
             )
+        try:
+            content = choice["message"]["content"]
+        except (KeyError, TypeError) as exc:
+            logger.warning(
+                "%s Apilio Gemini completion carried no message/content: %s",
+                analysis_log_ref(),
+                type(exc).__name__,
+            )
+            raise AnalysisProviderFailed(
+                "视频拆解服务返回的数据结构无法识别；请重试或更换参考视频。",
+                upstream_diagnostic={
+                    "http_status": None,
+                    "failure_phase": RESPONSE_FAILURE_PHASE,
+                    "reason": "missing_content",
+                    "finish_reason": diagnostic_finish,
+                },
+            ) from exc
         if not isinstance(content, str) or not content.strip():
             logger.warning(
                 "%s Apilio Gemini completion carried no analysis content", analysis_log_ref()
@@ -1080,7 +1106,12 @@ def parse_replica_prompt_payload(
     duration_seconds = info.get("duration_seconds")
     if isinstance(duration_seconds, int | float) and not isinstance(duration_seconds, bool):
         whole_seconds = int(duration_seconds)
-        if not re.search(rf"(?<!\d){whole_seconds}(?:\.\d+)?(?!\d)", prompt_text):
+        # 数字后不得紧跟字母：把 "30fps" 的 30 当成时长会漏报（评审变更集 #7）。
+        # 「约 180 秒」的四舍五入写法合法，容忍 +1 秒。
+        duration_numbers = "|".join(
+            rf"(?<!\d){value}(?:\.\d+)?(?![a-zA-Z])" for value in (whole_seconds, whole_seconds + 1)
+        )
+        if not re.search(duration_numbers, prompt_text):
             warnings.append(
                 {
                     "code": "REPLICA_DURATION_MISSING",
