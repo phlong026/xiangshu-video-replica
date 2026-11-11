@@ -15,6 +15,11 @@ from app.settings import SettingsRepository, SettingsUnavailableError
 
 router = APIRouter(prefix="/api/prompt-optimizations", tags=["prompts"])
 
+# 优化器模型钉死为正式版 flash（方案 T14）：不跟随拆解默认值换代，也不启用
+# 视频重试预算——它的租约按「结构纠错再调一次」设计，隐式升级会吃满租约。
+# 模型换代须单独评估后改这里，不接受设置页隐式覆盖。
+PROMPT_OPTIMIZER_MODEL = "gemini-3.8-flash"
+
 
 def get_prompt_optimizer_provider(conn: BusinessConnection) -> ApilioGemini:
     try:
@@ -30,7 +35,7 @@ def get_prompt_optimizer_provider(conn: BusinessConnection) -> ApilioGemini:
             503,
             detail={"code": "PROMPT_OPTIMIZER_UNAVAILABLE", "message": "请先配置提示词优化服务。"},
         )
-    return ApilioGemini(api_key=key)
+    return ApilioGemini(api_key=key, model=PROMPT_OPTIMIZER_MODEL)
 
 
 @router.post("", status_code=202)

@@ -2,8 +2,68 @@ import { describe, expect, it } from "vitest";
 import type { ShotCard } from "./api";
 import {
   formatShotCardsForClipboard,
+  missingMotionShotIds,
   promptTextFromShotTableClipboard,
 } from "./ShotCardEditor";
+
+describe("missingMotionShotIds", () => {
+  const withMotion: ShotCard = {
+    shot_id: "s1",
+    start_time: 0,
+    end_time: 4,
+    shot_type: "中景",
+    composition: "人物居中",
+    camera_motion: "固定",
+    subject: "主讲人",
+    action: "面向镜头讲解",
+    scene: "室内",
+    spoken_text: "",
+    transition: "硬切",
+    motion: {
+      subject_motion_state: "STATIC",
+      subject_direction: "in_place",
+      subject_displacement: "无位移",
+      hand_action: "双手自然下垂",
+      camera_motion: "STATIC",
+      relative_motion: "人物与摄影机相对静止",
+    },
+  };
+
+  it("列出缺运动信息的镜头编号（旧版拆解）", () => {
+    const legacy: ShotCard = {
+      ...withMotion,
+      shot_id: "s2",
+      motion: undefined,
+    };
+
+    expect(missingMotionShotIds([withMotion, legacy])).toEqual(["s2"]);
+  });
+
+  it("全部镜头都有运动时返回空数组", () => {
+    expect(missingMotionShotIds([withMotion])).toEqual([]);
+  });
+
+  it("镜头编号为空时按序号兜底命名", () => {
+    const unnamed: ShotCard = {
+      ...withMotion,
+      shot_id: "  ",
+      motion: undefined,
+    };
+
+    expect(missingMotionShotIds([unnamed])).toEqual(["第 1 镜"]);
+  });
+
+  it("混合顺序下匿名序号取原数组下标，不因先过滤而错位", () => {
+    const named: ShotCard = { ...withMotion, shot_id: "s1" };
+    const unnamedMissing: ShotCard = {
+      ...withMotion,
+      shot_id: "",
+      motion: undefined,
+    };
+
+    expect(missingMotionShotIds([named, unnamedMissing])).toEqual(["第 2 镜"]);
+  });
+});
 
 describe("formatShotCardsForClipboard", () => {
   it("输出可直接粘贴到表格的完整制表符分镜", () => {

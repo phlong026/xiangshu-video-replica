@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,8 @@ from app.analysis import (
     ANALYSIS_KIND,
     APILIO_ANALYSIS_MODEL,
     APILIO_DEFAULT_BASE_URL,
+    APILIO_REPLICA_PROMPT_FALLBACK_MODELS,
+    APILIO_REPLICA_PROMPT_MODEL,
     NETWORK_FAILURE_PHASE,
     SHOT_CARD_KIND,
     AnalysisProviderFailed,
@@ -23,6 +26,7 @@ from app.analysis import (
     ApilioGemini,
     FakeGemini,
     VideoAnalysisProvider,
+    VideoCallBudget,
     analysis_task_context,
     analyze_video,
     create_analysis_version,
@@ -80,17 +84,40 @@ logger = logging.getLogger(__name__)
 # analysable instead of being rejected as an invalid request.
 MAX_ANALYSIS_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERANCE_SECONDS
 ANALYSIS_TASK_LEASE_MINUTES = 10
+# 拆解任务调用预算（方案 T4/T6）：租约 10 分钟 − 预处理与落库缓冲。预算在
+# 发起每个 provider 请求前校验，重试、换道、token 回退都被同一截止线约束；
+# 满额超时连烧两次后剩余预算已不足以再发起任何完整调用，任务转为失败。
+ANALYSIS_CALL_BUDGET_SECONDS = ANALYSIS_TASK_LEASE_MINUTES * 60 - 90
+
+
+def analysis_call_budget() -> VideoCallBudget:
+    """主拆解链路每次任务尝试的调用预算；由任务工厂在领取租约后注入。
+
+    截止线在工厂构造时定格为绝对单调时钟（租约预算 − 缓冲）：构造到实际
+    调用之间的预处理耗时（ffprobe/场景检测/签名）被自然计入预算。
+    """
+    return VideoCallBudget(attempt_deadline=time.monotonic() + ANALYSIS_CALL_BUDGET_SECONDS)
 
 
 def get_video_analysis_provider(
     conn: Database,
     *,
     transport: ApilioChatTransport | None = None,
+    video_call_budget: VideoCallBudget | None = None,
+    lane: str = "analysis",
 ) -> VideoAnalysisProvider:
     """构建视频分析 provider。
 
     ``transport`` 供长视频任务族注入更长的调用超时（180 秒源片单次调用可到
-    十分钟以上）；拆解链路不传，维持 240 秒默认。
+    十分钟以上）；拆解链路不传，维持 240 秒默认。``video_call_budget`` 启用
+    截止预算与有界重试，仅视频任务工厂传入；提示词优化器等文本入口不传，
+    保持一次请求、按既有语义换道的历史行为（方案 T14）。
+
+    ``lane`` 决定模型路由（决策 D9 按链路分工，Phase 0 分段实测驱动）：
+    ``analysis``（分镜主链路，默认）走 analysis_model 设置、出厂
+    gemini-3.8-flash；``replica_prompt``（长视频一段式）走可选设置键
+    replica_prompt_model / replica_prompt_model_fallbacks、出厂
+    gemini-4-carbon——长视频无分段需求，4-carbon 的速度与零断连优势真实。
     """
     has_saved_apilio_config = (
         conn.execute(
@@ -127,6 +154,17 @@ def get_video_analysis_provider(
                 },
             )
         return FakeGemini()
+    if lane == "replica_prompt":
+        model = (config.get("replica_prompt_model") or "").strip() or APILIO_REPLICA_PROMPT_MODEL
+        raw_replica_fallbacks = (config.get("replica_prompt_model_fallbacks") or "").strip()
+        fallback_models = (
+            parse_analysis_fallback_models(raw_replica_fallbacks)
+            if raw_replica_fallbacks
+            else APILIO_REPLICA_PROMPT_FALLBACK_MODELS
+        )
+    else:
+        model = (config.get("analysis_model") or "").strip() or APILIO_ANALYSIS_MODEL
+        fallback_models = parse_analysis_fallback_models(config.get("analysis_model_fallbacks"))
     return ApilioGemini(
         api_key=api_key,
         # The desktop settings page does not expose a custom Apilio endpoint.
@@ -137,11 +175,11 @@ def get_video_analysis_provider(
         # receives the token, so it is safe to configure.  It needs to be:
         # upstream retires preview models without notice and every analysis
         # then fails with HTTP 400 until a new build ships.
-        model=(config.get("analysis_model") or "").strip() or APILIO_ANALYSIS_MODEL,
-        # 主模型限流/下线时自动换道；出厂名单见
-        # APILIO_ANALYSIS_FALLBACK_MODELS，设置项可整组覆盖。
-        fallback_models=parse_analysis_fallback_models(config.get("analysis_model_fallbacks")),
+        model=model,
+        # 主模型限流/下线时自动换道；出厂名单见各链路常量，设置项可整组覆盖。
+        fallback_models=fallback_models,
         transport=transport,
+        video_call_budget=video_call_budget,
     )
 
 
@@ -931,7 +969,9 @@ def prepare_analysis_task(
                 "retryable": True,
             },
         )
-    resolved_provider = provider or get_video_analysis_provider(conn)
+    resolved_provider = provider or get_video_analysis_provider(
+        conn, video_call_budget=analysis_call_budget()
+    )
     asset_uri = str(row["storage_uri"])
     video_uri = asset_uri
     if resolved_provider.requires_https_video_url:
@@ -1417,6 +1457,10 @@ def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
         # reason; collapsing them into one sentence hid the real cause from the
         # UI, from ``error_message_redacted`` and from support alike.
         message = str(failure).strip() or "视频拆解失败，请稍后重新拆解。"
+    # 429/网络分支的固定话术会覆盖原始 message，重试/换道的摘录在这里以追加
+    # 方式保留（方案 T7）；其余分支的 message 已含摘录，去重避免重复。
+    if failure.failover_note and failure.failover_note not in message:
+        message = f"{message}（{failure.failover_note}）"
     return HTTPException(
         status_code=status_code,
         detail={
@@ -1445,6 +1489,28 @@ def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> Busines
     return row
 
 
+def external_version_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """对外输出前的供应商名中性化（方案 T7b / 决策 D7）。
+
+    供应商名只允许存在于内部存储与内部日志；``provider_response_ref`` 会随
+    版本 payload 原样返回 API 且客户端可读，序列化时把 provider 值映射为中性
+    标识。字段名与结构保持不变，客户端读取面不受影响；内部存储值不动。
+    """
+    ref = payload.get("provider_response_ref")
+    if not isinstance(ref, dict):
+        return payload
+    raw = ref.get("raw")
+    if not isinstance(raw, dict) or not isinstance(raw.get("provider"), str):
+        return payload
+    return {
+        **payload,
+        "provider_response_ref": {
+            **ref,
+            "raw": {**raw, "provider": "analysis_gateway"},
+        },
+    }
+
+
 def version_response(row: BusinessRow) -> VersionResponse:
     return VersionResponse(
         id=str(row["id"]),
@@ -1452,7 +1518,7 @@ def version_response(row: BusinessRow) -> VersionResponse:
         asset_id=None if row["asset_id"] is None else str(row["asset_id"]),
         kind=str(row["kind"]),
         version_number=int(row["version_number"]),
-        payload=json.loads(str(row["payload_json"])),
+        payload=external_version_payload(json.loads(str(row["payload_json"]))),
         created_by_user_id=None
         if row["created_by_user_id"] is None
         else str(row["created_by_user_id"]),
