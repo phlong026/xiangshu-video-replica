@@ -351,11 +351,7 @@ def list_viral_search_discoveries(
                 videoId=item.video_id,
                 keyword=item.keyword,
                 searchedAt=item.searched_at,
-                video=(
-                    _search_item(item.video)
-                    if item.video is not None
-                    else None
-                ),
+                video=(_search_item(item.video) if item.video is not None else None),
             )
             for item in discoveries
         ],

@@ -339,16 +339,12 @@ def test_metadata_snapshot_writes_json_sidecar() -> None:
     key = write_viral_metadata_snapshot(
         storage,
         video,
-        copy_text="文案",
-        copy_updated_at="2026-10-06T00:00:00+00:00",
         pushed_at="2026-10-06T01:00:00+00:00",
     )
     assert key == viral_meta_snapshot_key("douyin", "vid/1")
     snapshot = json.loads(storage.get_object(key))
     assert snapshot["videoId"] == "vid/1"
     assert snapshot["statistics"] == {"likes": 10, "comments": 2, "shares": 3, "collects": 4}
-    assert snapshot["copy"] == {
-        "text": "文案",
-        "updatedAt": "2026-10-06T00:00:00+00:00",
-    }
+    # 共享文案缓存退役后快照不再携带 copy 字段（文案只落数据库，见 viral_push.py）。
+    assert "copy" not in snapshot
     assert snapshot["pushedAt"] == "2026-10-06T01:00:00+00:00"
