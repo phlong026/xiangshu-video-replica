@@ -55,10 +55,7 @@ def upgrade() -> None:
         "training_materials(deleted_at, visible, kind, sort_order DESC, created_at DESC)"
     )
     # 标签筛选走 jsonb contains（tags @> '["标签"]'），GIN 是它的唯一索引形态。
-    op.execute(
-        "CREATE INDEX training_materials_tags_idx ON "
-        "training_materials USING gin(tags)"
-    )
+    op.execute("CREATE INDEX training_materials_tags_idx ON training_materials USING gin(tags)")
 
 
 def downgrade() -> None:
