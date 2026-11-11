@@ -464,7 +464,9 @@ const analysisTaskObservers = new Map<
   string,
   Set<(task: AnalysisTask) => void>
 >();
-export type AnalysisProvider = "apilio_gemini" | "fake_gemini";
+// 服务端对外序列化已把供应商名中性化（analysis_routes.external_version_payload），
+// 客户端只见中性标识；内部存储值不出仓库边界。
+export type AnalysisProvider = "analysis_gateway";
 
 export type ShotMotion = {
   /**
@@ -3549,6 +3551,11 @@ export type ReplicaPromptSpokenLine = {
   text: string;
 };
 
+export type ReplicaPromptWarning = {
+  code: string;
+  message: string;
+};
+
 export type ReplicaPromptResult = {
   schema_version: string;
   summary: {
@@ -3560,6 +3567,8 @@ export type ReplicaPromptResult = {
   };
   spoken_script: ReplicaPromptSpokenLine[];
   replica_prompt: string;
+  /** 服务端软警告（画幅/时长要素缺失、超长）；禁词是硬拒绝，不会出现在这里。 */
+  warnings?: ReplicaPromptWarning[];
 };
 
 export type ReplicaPromptVersion = {
@@ -5789,9 +5798,7 @@ export function readAnalysisProvider(
     return null;
   }
   const provider = responseRef.raw.provider;
-  return provider === "apilio_gemini" || provider === "fake_gemini"
-    ? provider
-    : null;
+  return provider === "analysis_gateway" ? provider : null;
 }
 
 function isSourceFrameCandidate(value: unknown): value is SourceFrameCandidate {
