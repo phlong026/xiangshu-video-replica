@@ -378,7 +378,10 @@ export function TrainingMaterialsPage({
                 ))}
               </div>
               {tagFacet.length > 0 ? (
-                <div aria-label="按标签筛选">
+                <fieldset
+                  aria-label="按标签筛选"
+                  style={{ border: 0, padding: 0, margin: 0 }}
+                >
                   {tagFacet.map((tag) => (
                     <button
                       key={tag}
@@ -392,7 +395,7 @@ export function TrainingMaterialsPage({
                       #{tag}
                     </button>
                   ))}
-                </div>
+                </fieldset>
               ) : null}
             </header>
             {!readOnly && !uploadOpen && editing === null ? (
@@ -520,7 +523,8 @@ export function TrainingMaterialsPage({
                 setUploadDraft((draft) => ({
                   ...draft,
                   file,
-                  title: draft.title.trim() || file.name.replace(/\.[^.]+$/, ""),
+                  title:
+                    draft.title.trim() || file.name.replace(/\.[^.]+$/, ""),
                 }));
                 return;
               }
