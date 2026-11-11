@@ -6722,10 +6722,14 @@ describe("全自动复刻入口（M8 v1）", () => {
       status: "ENQUEUED",
       replay: false,
     });
+    // 预处理费用披露确认（评审 M8-r1#1）：用户点「确定」后才发起。
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     useStudio.mockReturnValue(value);
     const view = render(<ViralDetailPage />);
     const entry = await screen.findByRole("button", { name: "全自动复刻" });
     fireEvent.click(entry);
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    confirmSpy.mockRestore();
     await waitFor(() => expect(initiateReplicaPipeline).toHaveBeenCalledOnce());
     expect(vi.mocked(initiateReplicaPipeline).mock.calls[0]?.[0]).toMatchObject(
       {

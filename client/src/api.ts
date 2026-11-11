@@ -9463,6 +9463,13 @@ export interface ReplicaPipelineStatus {
   estimatedCredits?: number;
   durationSeconds?: number;
   fingerprint?: string;
+  promptText?: string;
+  scriptText?: string;
+  feeSummary?: {
+    settledCredits: number;
+    reservedCredits: number;
+    newCredits: number;
+  };
 }
 
 /** 发起幂等键：同一账号同一视频的全自动复刻动作复用同一键。 */

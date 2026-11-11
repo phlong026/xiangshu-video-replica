@@ -844,7 +844,11 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [status, setStatus] = useState<ReplicaPipelineStatus | null>(null);
   const [quote, setQuote] = useState<ReplicaPipelineQuote | null>(null);
+  const [quoteAgeMs, setQuoteAgeMs] = useState(0);
   const [busy, setBusy] = useState(false);
+  // 幂等键按「尝试」生成（评审 M8-r1#6）：同一 busy 周期内网络重试复用，
+  // 放弃/终态后清空，下一次点击是新尝试（不会重放原终态）。
+  const attemptKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!pipelineId) return;
@@ -854,9 +858,14 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
         const next = await fetchReplicaPipeline(pipelineId);
         if (cancelled) return;
         setStatus(next);
-        if (next.status === "AWAIT_CONFIRM") {
+        // 报价不随轮询自动续发（评审 M8-r1#3）：进入待确认时取一次，
+        // 用户核对的是这一份；过期后由「重新核价」显式刷新。
+        if (next.status === "AWAIT_CONFIRM" && !quote) {
           const fresh = await quoteReplicaPipeline(pipelineId);
-          if (!cancelled) setQuote(fresh);
+          if (!cancelled) {
+            setQuote(fresh);
+            setQuoteAgeMs(0);
+          }
         }
       } catch {
         // 轮询失败静默重试（页面离开由 cleanup 停止）。
@@ -868,13 +877,34 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [pipelineId]);
+  }, [pipelineId, quote]);
+
+  // 报价 300 秒有效期：倒计时用于置灰确认。
+  useEffect(() => {
+    if (!quote) return;
+    const timer = window.setInterval(
+      () => setQuoteAgeMs((age) => age + 1000),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [quote]);
 
   const begin = async () => {
     if (!video.platformKey || !video.nativeId) {
       notify("该视频缺少平台标识，无法发起全自动复刻");
       return;
     }
+    // 预处理费用披露（评审 M8-r1#1）：拆解与首帧在确认点之前就会产生费用。
+    const acknowledged = window.confirm(
+      [
+        "全自动复刻说明：",
+        "1. 系统将自动完成：导入参考素材 → 拆解分镜与文案 → 生成 3 张首帧候选并选定 → 合成最终提示词。",
+        "2. 拆解与首帧生成会按现有计费口径产生费用（具体以账单为准），每个环节失败自动重试至多 2 次。",
+        "3. 提示词就绪后**不会自动扣费生成**：会先展示费用明细，需要你确认一次才开始生成视频。",
+        "是否继续？",
+      ].join("\n"),
+    );
+    if (!acknowledged) return;
     setBusy(true);
     try {
       const { characters } = await listReplicaPipelineCharacters();
@@ -883,15 +913,12 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
         notify("请先在人物库创建一个可用角色后再使用全自动复刻");
         return;
       }
+      attemptKeyRef.current ??= `${replicaPipelineIdempotencyKey(user.id, video.platformKey, video.nativeId)}:${Date.now()}`;
       const created = await initiateReplicaPipeline({
         platform: video.platformKey,
         videoId: video.nativeId,
         characterVersionId: character.characterVersionId,
-        idempotencyKey: replicaPipelineIdempotencyKey(
-          user.id,
-          video.platformKey,
-          video.nativeId,
-        ),
+        idempotencyKey: attemptKeyRef.current,
       });
       setPipelineId(created.id);
       notify("全自动复刻已启动：完成后会请你确认费用再生成");
@@ -904,6 +931,10 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
 
   const confirmGeneration = async () => {
     if (!pipelineId || !quote) return;
+    if (quoteAgeMs > 300_000) {
+      notify("报价已过期，请点击「重新核价」");
+      return;
+    }
     setBusy(true);
     try {
       await confirmReplicaPipeline(pipelineId, quote);
@@ -916,12 +947,27 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
     }
   };
 
+  const requote = async () => {
+    if (!pipelineId) return;
+    setBusy(true);
+    try {
+      const fresh = await quoteReplicaPipeline(pipelineId);
+      setQuote(fresh);
+      setQuoteAgeMs(0);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "报价刷新失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const abandon = async () => {
     if (!pipelineId) return;
     setBusy(true);
     try {
       await cancelReplicaPipeline(pipelineId);
       notify("已放弃全自动复刻（已产出内容保留在项目中）");
+      attemptKeyRef.current = null;
       setPipelineId(null);
       setStatus(null);
       setQuote(null);
@@ -942,17 +988,51 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
   const label = status
     ? (REPLICA_STAGE_LABELS[status.status] ?? status.status)
     : "启动中…";
+  const quoteStale = quoteAgeMs > 300_000;
+  const fees = status?.feeSummary;
   return (
     <div className="replica-pipeline-panel">
       <p role="status">全自动复刻：{label}</p>
       {quote && status?.status === "AWAIT_CONFIRM" ? (
-        <div className="replica-pipeline-actions">
-          <Button disabled={busy} variant="primary" onClick={confirmGeneration}>
-            确认并生成（预估 {quote.estimatedCredits} 积分）
-          </Button>
-          <Button disabled={busy} variant="quiet" onClick={abandon}>
-            放弃
-          </Button>
+        <div className="replica-pipeline-review">
+          {status.promptText ? (
+            <details>
+              <summary>最终提示词（核对后确认）</summary>
+              <p>{status.promptText}</p>
+            </details>
+          ) : null}
+          {status.scriptText ? (
+            <details>
+              <summary>口播文案终稿</summary>
+              <p>{status.scriptText}</p>
+            </details>
+          ) : null}
+          {status.firstFrameAssetId ? (
+            <p className="admin-hint">首帧已选定（可在复刻页预览）</p>
+          ) : null}
+          <p className="admin-hint">
+            费用：已结算 {fees?.settledCredits ?? 0} 积分 · 仍预占{" "}
+            {fees?.reservedCredits ?? 0} 积分 · 本次新增{" "}
+            {quote.estimatedCredits} 积分 （{quote.priceTier}，
+            {quote.durationSeconds} 秒）
+          </p>
+          <div className="replica-pipeline-actions">
+            <Button
+              disabled={busy || quoteStale}
+              variant="primary"
+              onClick={confirmGeneration}
+            >
+              {quoteStale
+                ? "报价已过期"
+                : `确认并生成（预估 ${quote.estimatedCredits} 积分）`}
+            </Button>
+            <Button disabled={busy} variant="outline" onClick={requote}>
+              重新核价
+            </Button>
+            <Button disabled={busy} variant="quiet" onClick={abandon}>
+              放弃
+            </Button>
+          </div>
         </div>
       ) : null}
       {status && ["FAILED", "CANCELLED", "EXPIRED"].includes(status.status) ? (

@@ -26,6 +26,7 @@ from app import replica_pipeline_confirm as confirm
 from app import replica_pipeline_generation as generation
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessRow
 from app.permissions import require_not_auditor
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
@@ -142,7 +143,12 @@ def list_pipeline_characters(conn: Database, actor: AuthenticatedUser) -> dict[s
         JOIN person_identities pi ON pi.id = p.identity_id
         WHERE pi.owner_user_id = %s AND pi.status = 'ACTIVE'
             AND pi.authorization_status = 'AUTHORIZED'
+            AND (pi.authorization_expires_at IS NULL
+                 OR pi.authorization_expires_at > now())
             AND cv.status = 'PUBLISHED'
+            AND cv.published_at IS NOT NULL
+            AND cv.publication_hash IS NOT NULL
+            AND cv.publication_snapshot_json IS NOT NULL
         ORDER BY cv.created_at DESC
         LIMIT 50
         """,
@@ -188,6 +194,23 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
                 409,
                 detail={"code": "REPLICA_PIPELINE_QUOTE_MISSING", "message": "报价快照缺失。"},
             )
+        # 72h 确认期限（评审 M8-r1#7）：过期直接拒绝报价，不依赖扫描先跑。
+        awaiting_since = row["awaiting_since"]
+        if awaiting_since is not None:
+            elapsed = conn.execute(
+                "SELECT EXTRACT(EPOCH FROM (now() - %s::timestamptz)) AS seconds",
+                (awaiting_since,),
+            ).fetchone()
+            if elapsed is not None and float(elapsed["seconds"]) > rp.CONFIRM_WINDOW_SECONDS:
+                conn.execute(
+                    "UPDATE replica_pipeline_tasks SET status = %s, finished_at = now(), "
+                    "updated_at = now() WHERE id = %s AND status = %s",
+                    (rp.STATUS_EXPIRED, pipeline_id, rp.STATUS_AWAIT_CONFIRM),
+                )
+                raise HTTPException(
+                    410,
+                    detail={"code": "REPLICA_PIPELINE_EXPIRED", "message": "确认窗口已过期。"},
+                )
         from app.generation import generation_price_quote
 
         resolution = str(snapshot.get("resolution") or "768P")
@@ -247,7 +270,93 @@ def read_replica_pipeline(
     payload.update(confirm.confirm_quote_payload(row))
     if row["batch_id"]:
         payload["batchId"] = str(row["batch_id"])
+    # 确认卡核对内容（评审 M8-r1#2）：提示词/文案正文 + 三栏费用。
+    _attach_review_material(conn, row, detail, payload)
     return payload
+
+
+def _attach_review_material(
+    conn: Database,
+    row: BusinessRow,
+    detail: dict[str, object],
+    payload: dict[str, object],
+) -> None:
+    """确认卡核对产物与费用三栏（方案 §7/§4.3）.
+
+    三栏：已结算（charged_credits 汇总）/ 仍预占（reserved_credits 汇总，
+    按尚未终态的计费操作）/ 本次新增（冻结报价 estimatedCredits）。
+    计费按子任务 source_id 关联（billing_operations 无 project 维度）。
+    """
+    prompt_version_id = detail.get("promptVersionId")
+    if isinstance(prompt_version_id, str) and prompt_version_id:
+        version = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = %s", (prompt_version_id,)
+        ).fetchone()
+        if version is not None:
+            prompt_payload = version["payload_json"]
+            if isinstance(prompt_payload, str):
+                import json as _json
+
+                try:
+                    prompt_payload = _json.loads(prompt_payload)
+                except ValueError:
+                    prompt_payload = None
+            if isinstance(prompt_payload, dict) and isinstance(
+                prompt_payload.get("prompt_text"), str
+            ):
+                payload["promptText"] = prompt_payload["prompt_text"]
+    script_version_id = detail.get("scriptVersionId")
+    if isinstance(script_version_id, str) and script_version_id:
+        version = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = %s", (script_version_id,)
+        ).fetchone()
+        if version is not None:
+            script_payload = version["payload_json"]
+            if isinstance(script_payload, str):
+                import json as _json
+
+                try:
+                    script_payload = _json.loads(script_payload)
+                except ValueError:
+                    script_payload = None
+            if isinstance(script_payload, dict):
+                text = script_payload.get("full_text") or script_payload.get("text")
+                if isinstance(text, str):
+                    payload["scriptText"] = text
+    # 三栏费用（按预处理子任务 source 汇总）。
+    source_ids = [
+        value
+        for value in (
+            str(row["analysis_task_id"]) if row["analysis_task_id"] else None,
+            str(row["first_frame_task_id"]) if row["first_frame_task_id"] else None,
+        )
+        if value
+    ]
+    settled = 0
+    reserved = 0
+    if source_ids:
+        sums = conn.execute(
+            """
+            SELECT COALESCE(SUM(CASE WHEN state = 'SUCCEEDED' THEN charged_credits END), 0)
+                       AS settled,
+                   COALESCE(SUM(CASE WHEN state NOT IN ('SUCCEEDED','CANCELLED','FAILED')
+                       THEN reserved_credits END), 0) AS reserved
+            FROM billing_operations WHERE source_id = ANY(%s)
+            """,
+            (source_ids,),
+        ).fetchone()
+        if sums is not None:
+            settled = int(sums["settled"] or 0)
+            reserved = int(sums["reserved"] or 0)
+    payload["feeSummary"] = {
+        "settledCredits": settled,
+        "reservedCredits": reserved,
+        "newCredits": int(
+            (row["quote_snapshot"] or {}).get("estimatedCredits", 0)
+            if isinstance(row["quote_snapshot"], dict)
+            else 0
+        ),
+    }
 
 
 @router.post("/replica-pipelines/{pipeline_id}/confirm")
