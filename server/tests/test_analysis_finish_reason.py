@@ -18,11 +18,10 @@ from app.analysis import (
     ANALYSIS_MAX_TOKENS_CAP,
     ANALYSIS_MIN_MAX_TOKENS,
     APILIO_ANALYSIS_MODEL,
-    AnalysisProviderFailed,
-    ApilioGemini,
     HTTP_FAILURE_PHASE,
     NETWORK_FAILURE_PHASE,
-    RESPONSE_FAILURE_PHASE,
+    AnalysisProviderFailed,
+    ApilioGemini,
     VideoCallBudget,
     _analysis_max_tokens,
     _with_failover_note,
@@ -512,3 +511,72 @@ def test_prompt_optimizer_provider_pins_its_own_model(
     assert provider.model == "gemini-3.8-flash"
     assert provider.model != APILIO_ANALYSIS_MODEL
     assert provider.video_call_budget is None
+
+
+# ---------------------------------------------------------------------------
+# 网关换行注入兜底（T15，2026-11-12 Phase 0 实测发现）
+# ---------------------------------------------------------------------------
+
+
+def _body_with_injected_newlines(*, mid_multibyte: bool = False) -> bytes:
+    """复刻网关流式分块的注入形态：\\r\\n 落进键名内部或汉字字节中间."""
+    if mid_multibyte:
+        raw = json.dumps(
+            {
+                "id": "resp-1",
+                "choices": [{"message": {"content": '{"ok": "好"}'}, "finish_reason": "stop"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        needle = "好".encode()
+        index = raw.index(needle)
+        # 在多字节汉字（e5 a5 bd）的第一个字节后插入 \r\n：裸解码必失败，
+        # 0x0D/0x0A 不在 UTF-8 续字节范围内，字节级剔除后应完整恢复。
+        return raw[: index + 1] + b"\r\n" + raw[index + 1 :]
+    body = _completion_body(content='{"ok": 1}', finish_reason="stop")
+    return body.replace(b'"finish_reason"', b'"finish_reason\r\n"', 1)
+
+
+def test_injected_newlines_in_completion_body_are_sanitized() -> None:
+    provider, _ = _provider([_body_with_injected_newlines()])
+
+    response = provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+
+    assert response.text == '{"ok": 1}'
+    assert response.raw["salvaged"] is True
+    assert response.raw["finish_reason"] == "stop"
+
+
+def test_clean_body_is_not_marked_salvaged() -> None:
+    provider, _ = _provider([_completion_body(content='{"ok": 1}', finish_reason="stop")])
+
+    response = provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+
+    assert response.raw["salvaged"] is False
+
+
+def test_newlines_injected_inside_a_multibyte_char_are_safe() -> None:
+    """注入落在多字节字符字节中间时，字节级剔除仍能完整恢复正文。"""
+    provider, _ = _provider([_body_with_injected_newlines(mid_multibyte=True)])
+
+    response = provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+
+    assert response.text == '{"ok": "好"}'
+    assert response.raw["salvaged"] is True
+
+
+def test_garbage_completion_body_still_fails_closed() -> None:
+    """剔除换行救不了真正的坏响应：仍然按不可读补全失败，不静默放行。"""
+    transport = _ScriptedTransport([b"not a json body"])
+    provider = ApilioGemini(
+        api_key="k",
+        model=PRIMARY,
+        fallback_models=(),
+        transport=transport,
+        failover_pause=lambda _seconds: None,
+    )
+
+    with pytest.raises(AnalysisProviderFailed) as caught:
+        provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+
+    assert (caught.value.upstream_diagnostic or {})["reason"] == "JSONDecodeError"

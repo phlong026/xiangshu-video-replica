@@ -416,6 +416,23 @@ def _external_usage(usage: object) -> dict[str, int] | None:
     return picked or None
 
 
+def _parse_completion_body(raw_body: bytes) -> tuple[Any, bool]:
+    """解析补全响应体；网关注入换行时剔除 \\r\\n 重解析一次（方案 T15）.
+
+    2026-11-12 Phase 0 实测：网关流式分块会把 \\r\\n 周期性地注入响应体内部
+    （插进键名与数字字面量中间），gemini-4-carbon 路线 18/18 命中，原始
+    json.loads 必然失败。0x0D/0x0A 不会出现在 UTF-8 多字节序列内部，字节级
+    剔除是安全的；正文里转义形态的 \\n 是反斜杠+n 两个字符，不受影响。
+    返回 (解析结果, 是否触发了剔除)；剔除后仍失败则由调用方按不可读处理。
+    """
+    try:
+        return json.loads(raw_body.decode("utf-8")), False
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    cleaned_body = raw_body.replace(b"\r", b"").replace(b"\n", b"")
+    return json.loads(cleaned_body.decode("utf-8")), True
+
+
 class ApilioChatTransport(Protocol):
     def post(
         self, url: str, *, headers: Mapping[str, str], body: bytes
@@ -825,7 +842,7 @@ class ApilioGemini:
             body=json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(),
         )
         try:
-            response = json.loads(raw_body.decode("utf-8"))
+            response, body_salvaged = _parse_completion_body(raw_body)
             choice = response["choices"][0]
             message = choice["message"]
             content = message["content"]
@@ -844,6 +861,13 @@ class ApilioGemini:
                     "reason": type(exc).__name__,
                 },
             ) from exc
+        if body_salvaged:
+            # 命中的是网关流式分块缺陷（T15），不是内容问题：留痕供运维统计
+            # 注入率，正文已完整恢复，不向用户暴露。
+            logger.warning(
+                "%s 补全响应体存在换行注入（网关分块缺陷），已剔除后解析成功",
+                analysis_log_ref(),
+            )
         # 终止原因先于正文可用性判定（方案 T2）：截断/安全拦截的正文哪怕存在
         # 也不可信——半截 JSON 流到业务解析层只会变成笼统的「格式无效」，安全
         # 拦截附带的正文则可能把拦截原因漏成一次「成功」。
@@ -906,6 +930,8 @@ class ApilioGemini:
             # 与对账使用；未知名段一律不外带。
             "finish_reason": diagnostic_finish,
             "usage": _external_usage(response.get("usage")),
+            # 网关换行注入命中标记（T15）：生产据此统计注入率。
+            "salvaged": body_salvaged,
         }
 
 
