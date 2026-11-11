@@ -9,21 +9,15 @@ import type {
   ViralVideoItem,
 } from "../api";
 import {
-  clearMaterialCache,
-  createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
   createPublishRecord,
   createViralImportTask,
   downloadMaterialAsset,
   downloadVideoToFile,
-  evictMaterialCachedPreview,
   fetchViralVideoMedia,
   fetchViralVideoSource,
   fetchViralVideoStatistics,
   getAssetDownloadUrl,
-  getMaterialBatchPreviews,
-  getMaterialCachedPreview,
-  getMaterialCacheUsage,
   getStudioDraft,
   getViralImportTask,
   listTrainingMaterials,
@@ -45,13 +39,8 @@ import {
   openWalletIfInsufficientCredits,
 } from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
-import { CharacterMaterialViews } from "./CharacterMaterialViews";
 import { useStudio } from "./context";
-import {
-  readAudioDuration,
-  studioAssetFromMaterial,
-  studioVideoFromViral,
-} from "./live";
+import { studioAssetFromMaterial, studioVideoFromViral } from "./live";
 import {
   type CloudPublishAccount,
   canUseLocalPublishAccounts,
@@ -79,7 +68,6 @@ import {
   Icon,
   Media,
   Panel,
-  Tabs,
 } from "./ui";
 import {
   awaitViralCacheReady,
@@ -108,9 +96,6 @@ import {
   viralImportIdempotencyKey,
 } from "./viralImport";
 import "./content.css";
-
-const pageSize = 24;
-const categoryTabs = ["全部", "建房预算", "户型设计", "施工避坑", "庭院案例"];
 
 /** MATERIAL-PERF-A（P0-1）：分页按钮窗口化——始终含首末页与当前页 ±1，
  * 其余以「…」折叠，页数多时不再渲染整排页码按钮。 */
@@ -142,10 +127,6 @@ function formatCount(value: number | null) {
   return value >= 10000
     ? `${(value / 10000).toFixed(1).replace(".0", "")}万`
     : value.toLocaleString("zh-CN");
-}
-
-function assetKindLabel(kind: StudioAsset["kind"]) {
-  return kind === "image" ? "图片" : kind === "video" ? "视频" : "音频";
 }
 
 const viralInitialCount = 12;
@@ -2434,14 +2415,9 @@ function formatMaterialSizeBytes(bytes: number): string {
 }
 
 function isOfficeDoc(item: TrainingMaterialPublicItem): boolean {
-  return [
-    ".docx",
-    ".doc",
-    ".xlsx",
-    ".xls",
-    ".pptx",
-    ".ppt",
-  ].includes(item.file_suffix);
+  return [".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt"].includes(
+    item.file_suffix,
+  );
 }
 
 export function MaterialsPage() {
@@ -2569,10 +2545,10 @@ export function MaterialsPage() {
         </div>
       </header>
       {tagFacet.length > 0 ? (
-        <div
+        <fieldset
           className="content-material-tags"
-          role="group"
           aria-label="按标签筛选"
+          style={{ border: 0, padding: 0, margin: 0 }}
         >
           {tagFacet.map((entry) => (
             <button
@@ -2588,7 +2564,7 @@ export function MaterialsPage() {
               #{entry}
             </button>
           ))}
-        </div>
+        </fieldset>
       ) : null}
       {error ? <p className="le-hint le-hint--error">{error}</p> : null}
       {loading ? (
@@ -2769,7 +2745,6 @@ export function MaterialsPage() {
     </section>
   );
 }
-
 
 function publishPlatformLabel(platform: string) {
   return platform === "douyin"
