@@ -1196,15 +1196,18 @@ def enable_pan123_direct_link_after_save(config: dict[str, str], version: str) -
 
 def get_provider_tester() -> ProviderTester:
     # 函数内导入：email_delivery 与 viral_wechat_link 反向依赖本模块的
-    # SettingsRepository，模块级导入会成环。
+    # SettingsRepository，模块级导入会成环（pan123_client 同理）。
     from app.email_delivery import EmailProviderTester
+    from app.pan123_client import Pan123ProviderTester
     from app.viral_wechat_link import YuanbaoProviderTester
 
-    return StorageProviderTester(
-        fallback=HiflyProviderTester(
-            fallback=MetasoProviderTester(
-                fallback=YuanbaoProviderTester(
-                    fallback=EmailProviderTester(fallback=NoopProviderTester())
+    return Pan123ProviderTester(
+        fallback=StorageProviderTester(
+            fallback=HiflyProviderTester(
+                fallback=MetasoProviderTester(
+                    fallback=YuanbaoProviderTester(
+                        fallback=EmailProviderTester(fallback=NoopProviderTester())
+                    )
                 )
             )
         )

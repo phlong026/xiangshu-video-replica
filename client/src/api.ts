@@ -301,7 +301,8 @@ export type ProviderName =
   | "dashscope"
   | "douyidou"
   | "ses"
-  | "yuanbao";
+  | "yuanbao"
+  | "pan123";
 
 export type ProviderSettings = {
   provider: ProviderName;

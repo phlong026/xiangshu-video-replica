@@ -713,3 +713,50 @@ def _expire_auth_key(url: str) -> str:
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
     ]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+
+class Pan123ProviderTester:
+    """连接测试：1KB 探针全链路（上传→直链签名读取→防盗链负例→删除）。
+
+    负例必检是本测试的核心价值：签名读取「成功」也可能是防盗链未开启的
+    公开直链，只有非法签名被拒才证明访问边界成立（方案 §3.4 / 评审 r2-P2-2）。
+    """
+
+    REQUIRED_FIELDS = ("client_id", "client_secret", "uid", "sign_secret", "folder_id")
+
+    def __init__(self, fallback: Any) -> None:
+        self._fallback = fallback
+
+    def connection_test(self, provider: str, config: dict[str, str]) -> Any:
+        from fastapi import HTTPException
+
+        if provider != PAN123_PROVIDER:
+            return self._fallback.connection_test(provider, config)
+        missing = [
+            field for field in self.REQUIRED_FIELDS if not str(config.get(field, "")).strip()
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PAN123_SETTINGS_INCOMPLETE",
+                    "message": "123网盘配置不完整，请补齐全部字段后再测试。",
+                },
+            )
+        client = Pan123Client(config, config_version="connection-test")
+        try:
+            client.probe()
+        except (Pan123AuthError, Pan123Unavailable, Pan123ConfigError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "PAN123_CONNECTION_TEST_FAILED",
+                    "message": str(exc) or "123网盘连接测试未通过，请检查配置。",
+                },
+            ) from exc
+        from app.settings import ProviderTestResult
+
+        return ProviderTestResult(status="ok", provider=provider, test_kind="connection")
+
+    def paid_test(self, provider: str, config: dict[str, str]) -> Any:
+        return self._fallback.paid_test(provider, config)
