@@ -127,6 +127,89 @@ def initiate_replica_pipeline(
         return result
 
 
+@router.get("/replica-pipelines/characters")
+def list_pipeline_characters(conn: Database, actor: AuthenticatedUser) -> dict[str, object]:
+    """发起弹层的人物候选（owner 的可用已发布人物版本）.
+
+    归属链、发布状态与授权状态在 SQL 里一次过滤（域权威判定仍由
+    list_available_project_character_versions 在受理时兜底）。
+    """
+    rows = conn.execute(
+        """
+        SELECT cv.id, cv.version_number, p.name
+        FROM character_versions cv
+        JOIN character_personas p ON p.id = cv.persona_id
+        JOIN person_identities pi ON pi.id = p.identity_id
+        WHERE pi.owner_user_id = %s AND pi.status = 'ACTIVE'
+            AND pi.authorization_status = 'AUTHORIZED'
+            AND cv.status = 'PUBLISHED'
+        ORDER BY cv.created_at DESC
+        LIMIT 50
+        """,
+        (actor.id,),
+    ).fetchall()
+    return {
+        "characters": [
+            {
+                "characterVersionId": str(row["id"]),
+                "name": str(row["name"]),
+                "versionNumber": int(row["version_number"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/replica-pipelines/{pipeline_id}/quote")
+def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, object]:
+    """确认卡报价（300s 凭证）：仅待确认、owner、未过 72h 窗口.
+
+    方案 §4.1：确认必须携带**当前有效**报价凭证；确认卡过期重核价走本端点。
+    """
+    from fastapi import HTTPException
+
+    with db.write() as (conn, actor):
+        row = conn.execute(
+            "SELECT * FROM replica_pipeline_tasks WHERE id = %s AND owner_user_id = %s",
+            (pipeline_id, actor.id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                404, detail={"code": "REPLICA_PIPELINE_NOT_FOUND", "message": "编排任务不存在。"}
+            )
+        if str(row["status"]) != rp.STATUS_AWAIT_CONFIRM:
+            raise HTTPException(
+                409,
+                detail={"code": "REPLICA_PIPELINE_NOT_AWAITING", "message": "当前不在待确认状态。"},
+            )
+        snapshot = row["quote_snapshot"]
+        if not isinstance(snapshot, dict):
+            raise HTTPException(
+                409,
+                detail={"code": "REPLICA_PIPELINE_QUOTE_MISSING", "message": "报价快照缺失。"},
+            )
+        from app.generation import generation_price_quote
+
+        resolution = str(snapshot.get("resolution") or "768P")
+        if resolution not in ("768P", "2K"):
+            resolution = "768P"
+        quote = generation_price_quote(
+            conn,
+            resolution=resolution,  # type: ignore[arg-type]
+            duration_seconds=int(snapshot.get("durationSeconds") or 0),
+            quantity=int(snapshot.get("quantity") or 1),
+            user_id=actor.id,
+        )
+        return {
+            "quoteToken": quote.quote_token,
+            "maxCredits": quote.estimated_credits,
+            "estimatedCredits": quote.estimated_credits,
+            "priceTier": quote.price_tier,
+            "durationSeconds": quote.duration_seconds,
+            "fingerprint": str(snapshot.get("fingerprint") or ""),
+        }
+
+
 @router.get("/replica-pipelines/{pipeline_id}")
 def read_replica_pipeline(
     pipeline_id: str, conn: Database, actor: AuthenticatedUser
