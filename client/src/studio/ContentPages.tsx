@@ -1611,8 +1611,9 @@ export function ViralPage() {
         "全部",
         ...new Set(
           curated
-            .filter((video: { platform: string; category?: string }) =>
-              video.platform === platform && Boolean(video.category)
+            .filter(
+              (video: { platform: string; category?: string }) =>
+                video.platform === platform && Boolean(video.category),
             )
             .map((video: { category?: string }) => video.category as string),
         ),
