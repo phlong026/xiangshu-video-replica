@@ -75,19 +75,22 @@ fi
 GATE_SECONDS=$((SECONDS - GATE_STARTED))
 
 GATE_LOG="$(ls -t .shard-logs/full-gate-*.log 2>/dev/null | head -1 || true)"
+# git-dir 而非字面 .git/：linked worktree 里 .git 是文件，真实 gitdir 在主仓
+# .git/worktrees/<name>/ 下（2026-11-11 集成实战踩坑：六段门禁全绿后栽在这里）。
+GIT_MSG="$(git rev-parse --git-dir)/INTEGRATE_MSG"
 {
   printf "Merge branch '%s'\n" "${FEATURE}"
   printf '\nLocal gate: check:full PASS（%s，耗时 %ds）\n' "$(date '+%F %T %z')" "${GATE_SECONDS}"
   [ -n "${GATE_LOG}" ] && printf 'Evidence: %s\n' "${GATE_LOG}"
   printf 'Integrator: scripts/local-integrate.sh\n'
-} > .git/INTEGRATE_MSG
+} > "${GIT_MSG}"
 
-if ! git commit -F .git/INTEGRATE_MSG; then
-  rm -f .git/INTEGRATE_MSG
+if ! git commit -F "${GIT_MSG}"; then
+  rm -f "${GIT_MSG}"
   restore
   abort "merge commit 创建失败，main 已还原"
 fi
-rm -f .git/INTEGRATE_MSG
+rm -f "${GIT_MSG}"
 
 printf '\n[integrate] 已合入 main（%s），门禁耗时 %ds，证据：%s\n' \
   "$(git rev-parse --short HEAD)" "${GATE_SECONDS}" "${GATE_LOG:-<未找到>}"

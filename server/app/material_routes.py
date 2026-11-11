@@ -8,8 +8,10 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, Database, ShortAuthUser
 from app.customer_fence import BusinessDbDep
+from app.db_pg import pg_transaction
+from app.db_portable import BusinessConnection
 from app.materials import (
     MaterialBulkRequest,
     MaterialBulkResult,
@@ -42,6 +44,7 @@ from app.materials import (
     update_material,
 )
 from app.media_routes import MediaStorage
+from app.permissions import AuditedSecurityDenial, persist_security_denial
 from app.storage import StorageBackendUnavailable
 
 router = APIRouter(prefix="/api/studio/materials", tags=["studio-materials"])
@@ -153,13 +156,29 @@ def create_upload_intent(
 async def put_local_material(
     asset_id: str,
     request: Request,
-    conn: Database,
-    actor: AuthenticatedUser,
+    actor: ShortAuthUser,
     storage: MediaStorage,
 ) -> Response:
+    """素材本地上传：意图校验短事务先行，上传体接收与落盘不持事务.
+
+    2026-11-02 池饿死事故改造：认证（ShortAuthUser）与 prepare_material_upload
+    （require_asset_access 门禁在内）一个前置短事务完成，随后的请求体流式接收
+    与 storage.put_object 以分钟计，不得占用任何事务窗口。门禁拒绝随短事务
+    回滚后独立落审计事实（与 get_database 原职责一致）。
+    """
     if storage.provider != "local":
         raise HTTPException(status_code=404, detail={"code": "LOCAL_UPLOAD_UNAVAILABLE"})
-    prepared = prepare_material_upload(conn, actor=actor, asset_id=asset_id, pending_only=True)
+    try:
+        with pg_transaction() as pg_conn:
+            prepared = prepare_material_upload(
+                BusinessConnection.postgres(pg_conn),
+                actor=actor,
+                asset_id=asset_id,
+                pending_only=True,
+            )
+    except AuditedSecurityDenial as exc:
+        persist_security_denial(exc)
+        raise
     content_length = request.headers.get("content-length")
     if (
         content_length
