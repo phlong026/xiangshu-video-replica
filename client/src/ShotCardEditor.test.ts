@@ -55,7 +55,11 @@ describe("missingMotionShotIds", () => {
 
   it("混合顺序下匿名序号取原数组下标，不因先过滤而错位", () => {
     const named: ShotCard = { ...withMotion, shot_id: "s1" };
-    const unnamedMissing: ShotCard = { ...withMotion, shot_id: "", motion: undefined };
+    const unnamedMissing: ShotCard = {
+      ...withMotion,
+      shot_id: "",
+      motion: undefined,
+    };
 
     expect(missingMotionShotIds([named, unnamedMissing])).toEqual(["第 2 镜"]);
   });
