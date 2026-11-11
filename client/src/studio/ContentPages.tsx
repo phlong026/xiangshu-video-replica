@@ -2412,9 +2412,18 @@ export function ViralDetailPage() {
 const TRAINING_TABS: Array<{ id: string; label: string }> = [
   { id: "", label: "全部" },
   { id: "video", label: "视频" },
-  { id: "training", label: "培训文档" },
+  { id: "audio", label: "音频" },
+  { id: "image", label: "图片" },
+  { id: "doc", label: "文档" },
 ];
 const TRAINING_PAGE_SIZE = 24;
+// Office Online 预览入口（用户拍板，2026-11-12）：直链 URL 会经微软服务转码
+// 渲染；预览失败/超限时弹层内常驻下载按钮兜底（方案 §5.2）。
+function officeViewerUrl(directUrl: string): string {
+  return `https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(
+    directUrl,
+  )}`;
+}
 
 function formatMaterialSizeBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -2424,74 +2433,107 @@ function formatMaterialSizeBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+function isOfficeDoc(item: TrainingMaterialPublicItem): boolean {
+  return [
+    ".docx",
+    ".doc",
+    ".xlsx",
+    ".xls",
+    ".pptx",
+    ".ppt",
+  ].includes(item.file_suffix);
+}
+
 export function MaterialsPage() {
   const { notify } = useStudio();
   const [tab, setTab] = useState("");
+  const [tag, setTag] = useState("");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<TrainingMaterialPublicPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  // 视频播放地址按需签发（短时效），会话内已签的复用；文档只走下载。
-  const [playUrls, setPlayUrls] = useState<Record<string, string>>({});
+  // 预览地址按需签发（30 分钟防盗链直链），会话内已签的复用；文档在弹层内
+  // 取链，媒体在卡片内取链。直链过期由媒体 error 事件触发重签一次（§5.2）。
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState("");
+  const [docPreview, setDocPreview] =
+    useState<TrainingMaterialPublicItem | null>(null);
 
-  const load = useCallback(async (kind: string, targetPage: number) => {
-    try {
-      setLoading(true);
-      setError("");
-      const result = await listTrainingMaterials({
-        kind: kind || undefined,
-        page: targetPage,
-        pageSize: TRAINING_PAGE_SIZE,
-      });
-      setData(result);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "读取培训素材失败");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (kind: string, tagFilter: string, targetPage: number) => {
+      try {
+        setLoading(true);
+        setError("");
+        const result = await listTrainingMaterials({
+          kind: kind || undefined,
+          tag: tagFilter || undefined,
+          page: targetPage,
+          pageSize: TRAINING_PAGE_SIZE,
+        });
+        setData(result);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "读取培训素材失败");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
-  // 换账号时按 key 重挂载由调用方保证（与旧页同语义）；这里只随筛选与页码重拉。
+  // 换账号时按 key 重挂载由调用方保证（与旧页同语义）；这里随筛选与页码重拉。
   useEffect(() => {
-    void load(tab, page);
-  }, [load, tab, page]);
+    void load(tab, tag, page);
+  }, [load, tab, tag, page]);
 
-  async function playVideo(item: TrainingMaterialPublicItem) {
-    if (playUrls[item.id] || busyId) return;
+  async function ensurePreviewUrl(
+    item: TrainingMaterialPublicItem,
+  ): Promise<string | null> {
+    const cached = previewUrls[item.id];
+    if (cached) return cached;
     try {
       setBusyId(item.id);
       const url = await trainingMaterialDownloadUrl(item.id);
-      setPlayUrls((current) => ({ ...current, [item.id]: url }));
+      setPreviewUrls((current) => ({ ...current, [item.id]: url }));
+      return url;
     } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "获取播放地址失败");
+      notify(cause instanceof Error ? cause.message : "获取预览地址失败");
+      return null;
     } finally {
       setBusyId("");
     }
   }
 
+  // 媒体加载/播放失败多半是直链过期：清缓存重签一次（有界，不做循环重试）。
+  async function resignOnMediaError(item: TrainingMaterialPublicItem) {
+    setPreviewUrls((current) => {
+      const { [item.id]: _stale, ...rest } = current;
+      return rest;
+    });
+    await ensurePreviewUrl(item);
+  }
+
+  async function openDocPreview(item: TrainingMaterialPublicItem) {
+    const url = await ensurePreviewUrl(item);
+    if (url) setDocPreview(item);
+  }
+
   async function download(item: TrainingMaterialPublicItem) {
-    if (busyId) return;
-    try {
-      setBusyId(item.id);
-      const url = await trainingMaterialDownloadUrl(item.id);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${item.title}${item.file_suffix}`;
-      anchor.rel = "noopener";
-      document.body.append(anchor);
-      anchor.click();
-      anchor.remove();
-    } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "下载失败，请稍后重试");
-    } finally {
-      setBusyId("");
-    }
+    const url = await ensurePreviewUrl(item);
+    if (!url) return;
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${item.title}${item.file_suffix}`;
+    anchor.rel = "noopener";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
   }
 
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / TRAINING_PAGE_SIZE));
+  const tagFacet = data?.tag_facet ?? [];
+  const docUrl = docPreview ? previewUrls[docPreview.id] : undefined;
 
   return (
     <section className="content-page content-materials">
@@ -2499,7 +2541,8 @@ export function MaterialsPage() {
         <div>
           <h1>素材库</h1>
           <p className="le-sub">
-            平台统一提供的培训课程与示例视频；点击卡片上的按钮即可播放或下载。
+            平台统一提供的培训课程、示例视频与资料文档；按分组与标签查找，
+            卡片上即可预览或下载。
           </p>
         </div>
         <div
@@ -2516,6 +2559,7 @@ export function MaterialsPage() {
               className={tab === entry.id ? "is-active" : undefined}
               onClick={() => {
                 setTab(entry.id);
+                setTag("");
                 setPage(1);
               }}
             >
@@ -2524,6 +2568,28 @@ export function MaterialsPage() {
           ))}
         </div>
       </header>
+      {tagFacet.length > 0 ? (
+        <div
+          className="content-material-tags"
+          role="group"
+          aria-label="按标签筛选"
+        >
+          {tagFacet.map((entry) => (
+            <button
+              key={entry}
+              type="button"
+              aria-pressed={tag === entry}
+              className={tag === entry ? "is-active" : undefined}
+              onClick={() => {
+                setTag(tag === entry ? "" : entry);
+                setPage(1);
+              }}
+            >
+              #{entry}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {error ? <p className="le-hint le-hint--error">{error}</p> : null}
       {loading ? (
         <p className="le-hint">正在读取培训素材…</p>
@@ -2531,48 +2597,154 @@ export function MaterialsPage() {
         <p className="le-hint">暂无素材，请等待运营上传。</p>
       ) : (
         <div className="content-asset-grid">
-          {items.map((item) => (
-            <article key={item.id} className="content-asset">
-              {item.kind === "video" && playUrls[item.id] ? (
-                // biome-ignore lint/a11y/useMediaCaption: 平台培训视频不提供字幕轨，浏览器原生控件即可。
-                <video controls preload="metadata" src={playUrls[item.id]} />
-              ) : (
-                <div className="content-asset__quick">
-                  <span className="studio-status">{item.kind_label}</span>
-                  <strong>{item.title}</strong>
-                  {item.description ? (
-                    <p className="le-sub">{item.description}</p>
-                  ) : null}
-                </div>
-              )}
-              <footer>
-                <small>
-                  {formatTaskTime(item.created_at)} ·{" "}
-                  {formatMaterialSizeBytes(item.size_bytes)}
-                </small>
-                <span>
-                  {item.kind === "video" ? (
+          {items.map((item) => {
+            const url = previewUrls[item.id];
+            return (
+              <article key={item.id} className="content-asset">
+                {item.kind === "image" && url ? (
+                  <img
+                    alt={item.title}
+                    loading="lazy"
+                    src={url}
+                    onError={() => void resignOnMediaError(item)}
+                  />
+                ) : item.kind === "video" && url ? (
+                  // biome-ignore lint/a11y/useMediaCaption: 平台培训视频不提供字幕轨，浏览器原生控件即可。
+                  <video
+                    controls
+                    preload="metadata"
+                    src={url}
+                    onError={() => void resignOnMediaError(item)}
+                  />
+                ) : item.kind === "audio" && url ? (
+                  // biome-ignore lint/a11y/useMediaCaption: 平台培训音频不提供字幕轨。
+                  <audio controls src={url} />
+                ) : (
+                  <div className="content-asset__quick">
+                    <span className="studio-status">{item.kind_label}</span>
+                    <strong>{item.title}</strong>
+                    {item.description ? (
+                      <p className="le-sub">{item.description}</p>
+                    ) : null}
+                    {item.tags.length > 0 ? (
+                      <p className="le-sub">
+                        {item.tags.map((entry) => `#${entry}`).join(" ")}
+                      </p>
+                    ) : null}
+                  </div>
+                )}
+                <footer>
+                  <small>
+                    {formatTaskTime(item.created_at)} ·{" "}
+                    {formatMaterialSizeBytes(item.size_bytes)}
+                  </small>
+                  <span>
+                    {item.kind === "video" || item.kind === "audio" ? (
+                      <button
+                        type="button"
+                        disabled={busyId === item.id}
+                        onClick={() => void ensurePreviewUrl(item)}
+                      >
+                        {url ? "重新加载" : "播放"}
+                      </button>
+                    ) : item.kind === "image" ? (
+                      <button
+                        type="button"
+                        disabled={busyId === item.id}
+                        onClick={() => void ensurePreviewUrl(item)}
+                      >
+                        {url ? "重新加载" : "查看"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busyId === item.id}
+                        onClick={() => void openDocPreview(item)}
+                      >
+                        预览
+                      </button>
+                    )}{" "}
                     <button
                       type="button"
                       disabled={busyId === item.id}
-                      onClick={() => void playVideo(item)}
+                      onClick={() => void download(item)}
                     >
-                      {playUrls[item.id] ? "重新播放" : "播放"}
+                      {busyId === item.id ? "获取链接…" : "下载"}
                     </button>
-                  ) : null}{" "}
-                  <button
-                    type="button"
-                    disabled={busyId === item.id}
-                    onClick={() => void download(item)}
-                  >
-                    {busyId === item.id ? "获取链接…" : "下载"}
-                  </button>
-                </span>
-              </footer>
-            </article>
-          ))}
+                  </span>
+                </footer>
+              </article>
+            );
+          })}
         </div>
       )}
+      {docPreview ? (
+        <div
+          aria-label="文档预览"
+          role="dialog"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 60,
+            background: "rgba(0,0,0,.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+          }}
+        >
+          <div
+            style={{
+              background: "var(--panel-bg, #fff)",
+              borderRadius: 12,
+              width: "min(960px, 100%)",
+              maxHeight: "90vh",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
+          >
+            <header
+              style={{
+                display: "flex",
+                gap: 12,
+                alignItems: "center",
+                padding: "10px 14px",
+              }}
+            >
+              <strong style={{ flex: 1 }}>{docPreview.title}</strong>
+              <button
+                type="button"
+                onClick={() => {
+                  if (docPreview) void download(docPreview);
+                }}
+              >
+                下载文件
+              </button>
+              <button type="button" onClick={() => setDocPreview(null)}>
+                关闭
+              </button>
+            </header>
+            {docUrl ? (
+              isOfficeDoc(docPreview) ? (
+                <iframe
+                  src={officeViewerUrl(docUrl)}
+                  style={{ flex: 1, border: 0, minHeight: 480 }}
+                  title={`${docPreview.title} 预览`}
+                />
+              ) : (
+                <iframe
+                  src={docUrl}
+                  style={{ flex: 1, border: 0, minHeight: 480 }}
+                  title={`${docPreview.title} 预览`}
+                />
+              )
+            ) : (
+              <p className="le-hint">正在获取预览地址…</p>
+            )}
+          </div>
+        </div>
+      ) : null}
       {totalPages > 1 ? (
         <nav className="content-pagination" aria-label="培训素材分页">
           <button
@@ -2597,6 +2769,7 @@ export function MaterialsPage() {
     </section>
   );
 }
+
 
 function publishPlatformLabel(platform: string) {
   return platform === "douyin"
