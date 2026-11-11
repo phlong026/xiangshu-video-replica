@@ -92,7 +92,7 @@ type Filters = {
   hasUsage: "" | "used" | "unused";
   query: string;
   offset: number;
-  cohortStage: "" | "collected" | "prepared" | "homepage" | "detail" | "copy";
+  cohortStage: "" | "collected" | "prepared" | "homepage" | "detail";
   collectedFrom: string;
   collectedTo: string;
   attention: "" | "missing_cover" | "unknown_statistics";
@@ -129,7 +129,6 @@ function initialVideoFilters(query: string): Partial<Filters> {
       "prepared",
       "homepage",
       "detail",
-      "copy",
     ] as const),
     collectedFrom: values.get("collectedFrom") ?? "",
     collectedTo: values.get("collectedTo") ?? "",

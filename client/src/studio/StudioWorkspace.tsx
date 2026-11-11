@@ -7,10 +7,8 @@ import {
   useState,
 } from "react";
 import {
-  claimViralCopy,
   createIndependentVideoTask,
   createOralTask,
-  createProject,
   createPromptOptimization,
   customerGetWallet,
   customerVisibleErrorMessage,
@@ -29,15 +27,10 @@ import {
   listMaterials,
   type OralPrice,
   type Project,
-  type ViralCopyBilling,
-  type ViralPlatform,
 } from "../api";
 import { BrandIdentity } from "../BrandIdentity";
 import { CustomerCenterPage } from "../customer/CustomerCenterPage";
-import {
-  isInsufficientCredits,
-  openWalletIfInsufficientCredits,
-} from "../insufficientCredits";
+import { isInsufficientCredits } from "../insufficientCredits";
 import {
   discountSourceLabel,
   formatDiscountZhe,
@@ -72,7 +65,6 @@ import { LongReplicaPage } from "./LongReplicaPage";
 import {
   awaitScriptFromAudioTask,
   type CloudDraftRestore,
-  claimExtractedViralCopy,
   discardCloudDraft,
   extractScriptFromUpload as extractScriptFromUploadLive,
   loadCloudDraft,
@@ -1753,67 +1745,9 @@ export function StudioWorkspace({
           extractingRef.current = false;
           const deliveryKey = JSON.stringify([saveAccountRef.current, task.id]);
           if (deliveredExtractionTasksRef.current.has(deliveryKey)) return;
-          // 普通任务正文随任务接口下发；爆款任务正文为 null，凭任务里带的视频身份
-          // 回「获取文案」取一次（计费以服务端回执为准：转写者本人免费，非转写者首次扣一次）。
+          // 正文随本人任务直出（2026-11-11 共享文案缓存退役）：任务成功即含
+          // 转写结果，无需再回「获取文案」补一次交付。
           const text = task.result?.text ?? "";
-          const viralSource = task.copyClaimRequired
-            ? task.viralSource
-            : undefined;
-          if (!text.trim() && viralSource) {
-            try {
-              const claimed = await claimExtractedViralCopy(
-                viralSource.platform,
-                viralSource.videoId,
-                task.id,
-              );
-              if (!restorationStillCurrent()) return;
-              if (claimed) {
-                deliveredExtractionTasksRef.current.add(deliveryKey);
-                // 回执后重读最新草稿（T44）：claim 挂起期间用户可能已输入新的
-                // 二创或做了手动保存，旧快照做基线会把编辑覆盖掉。函数式最小
-                // 字段合并——original 归本次请求；text/resultKind 只在用户尚无
-                // 二创时才落提取结果，已有编辑原样保留。
-                const latest = latestDraftRef.current;
-                const preservedCopy = hasCopyResult(latest.script);
-                const restored = patchStudioDraft(latest, {
-                  sourceId: extractionAssetId,
-                  projectId: extractionProjectId,
-                  sourceAssetId: extractionAssetId,
-                  script: {
-                    ...latest.script,
-                    original: claimed,
-                    text: preservedCopy ? latest.script.text : "",
-                    resultKind: preservedCopy ? "manual" : "extracted",
-                    confirmed: false,
-                  },
-                  scriptEdited: true,
-                });
-                draftTouchedRef.current = true;
-                latestDraftRef.current = restored;
-                setState((previous) => ({ ...previous, draft: restored }));
-                setWalletRevision((value) => value + 1);
-                notify(
-                  preservedCopy
-                    ? "文案提取已完成，已保留你的编辑并补回来源原文。"
-                    : "文案提取已完成，已恢复到当前草稿。",
-                );
-                return;
-              }
-            } catch (cause: unknown) {
-              // 失败原因原样带给用户（服务端文案里常带处置指引），不再折叠成通用提示。
-              notify(
-                customerVisibleErrorMessage(
-                  cause,
-                  "上次提取的文案还未完成「获取」，请点击「提取文案」补齐。",
-                ),
-              );
-              return;
-            }
-            notify(
-              "上次提取的文案还未完成「获取」结算，请点击「提取文案」补齐。",
-            );
-            return;
-          }
           if (text.trim()) {
             const restored = patchStudioDraft(current, {
               sourceId: extractionAssetId,
@@ -2191,9 +2125,6 @@ export function StudioWorkspace({
     importedProjectId?: string,
     importedAssetId?: string,
     preparedTaskId?: string,
-    // 爆款链路的文案归属：转写只是把结果写进共享缓存，正文还要凭它回获取接口取一次
-    // （那里才是交付与计费点，见 live.claimExtractedViralCopy）。
-    copyClaim?: { platformKey: string; nativeId: string },
   ) => {
     if (review) {
       notify("审核示例不调用真实接口。");
@@ -2280,288 +2211,63 @@ export function StudioWorkspace({
         ? awaitScriptFromAudioTask(preparedTaskId)
         : extractScriptFromUploadLive(projectId, assetId)
     )
-      .then(
-        async ({ text: taskText, taskId, viralSource, copyClaimRequired }) => {
-          // 爆款链路：转写完成只代表结果进了共享缓存，正文凭视频身份回「获取文案」
-          // 交付（2026-10-04 拍板：交付不再计费）。正文也只在 claim 回执里——服务端
-          // 任务接口对爆款任务不下发正文，这里没有「取不到就退回任务结果」的旁路；
-          // 欠下的交付由下次「提取文案」补齐（桌面端 claim-first 秒回，不再走转写）。
-          if (!scopeStillCurrent()) {
-            extractingRef.current = false;
-            endCopyExtractionProgress();
-            return;
-          }
-          let text = taskText;
-          let copyDeliveryError: string | null = null;
-          const claimIdentity = viralSource
-            ? {
-                platformKey: viralSource.platform,
-                nativeId: viralSource.videoId,
-              }
-            : copyClaim;
-          if (!taskText && claimIdentity && copyClaimRequired !== false) {
-            try {
-              const claimed = await claimExtractedViralCopy(
-                claimIdentity.platformKey,
-                claimIdentity.nativeId,
-                taskId,
-              );
-              if (claimed) {
-                text = claimed;
-              }
-            } catch (cause: unknown) {
-              // 服务端文案常带处置指引（如「请联系管理员」），折叠成通用提示
-              // 会让这类可运营问题只能上服务器查日志。
-              copyDeliveryError = customerVisibleErrorMessage(
-                cause,
-                "「获取文案」未完成，请稍后重试。",
-              );
-            }
-          }
-          extractingRef.current = false;
-          endCopyExtractionProgress();
-          if (!scopeStillCurrent()) {
-            // FIX-11：任务已被服务端受理、转写费已产生，用户此时切走不能静默丢弃结果；
-            // 文案已进共享缓存，回原视频再点「提取文案」即可免费取回。
-            if (saveAccountRef.current === extractionAccount) {
-              setWalletRevision((value) => value + 1);
-              notify(
-                "文案已提取，但你已切换到其他来源，未写入当前草稿；回到原视频再点「提取文案」即可取回，不会重复收转写费。",
-              );
-            }
-            return;
-          }
-          const currentDraft = latestDraftRef.current;
-          if (!text) {
-            // claim 未完成（未命中 / 失败）：正文拿不到就不能把空文案写进草稿，
-            // 也不能假装交付已完成——失败原因原样透传，让用户照着处置。
-            navigate("copy", { returnTo: "workbench" });
+      .then(({ text: taskText, taskId }) => {
+        extractingRef.current = false;
+        endCopyExtractionProgress();
+        if (!scopeStillCurrent()) {
+          // FIX-11：任务已被服务端受理、转写费已产生，用户此时切走不能静默丢弃结果。
+          // 共享文案缓存退役后正文随本人任务直出，重试必成功——提示用户回原视频
+          // 重新提取即可（新任务按本人计一次转写费，不再依赖免费 claim 取回）。
+          if (saveAccountRef.current === extractionAccount) {
+            setWalletRevision((value) => value + 1);
             notify(
-              copyDeliveryError ??
-                "文案已提取，但「获取文案」未完成，暂未交付正文；请重新提取补齐（不会重扣转写费）。",
+              "文案已提取完成，但你已切换到其他来源，未写入当前草稿；回到原视频再点「提取文案」即可取回。",
             );
-            return;
           }
-          const sameSource =
-            currentDraft.projectId === projectId &&
-            (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId;
-          const currentScript = sameSource
-            ? currentDraft.script
-            : createDraft().script;
-          deliveredExtractionTasksRef.current.add(
-            JSON.stringify([extractionAccount, taskId]),
-          );
-          patchDraft({
-            projectId,
-            sourceId: assetId,
-            sourceAssetId: assetId,
-            scriptEdited: true,
-            script: {
-              ...currentScript,
-              original: text,
-              text: hasCopyResult(currentScript) ? currentScript.text : "",
-              resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
-              confirmed: false,
-            },
-          });
+          return;
+        }
+        const currentDraft = latestDraftRef.current;
+        if (!taskText.trim()) {
+          // 正文为空说明这次转写没有产出有效文本（如视频无语音），不能把空文案
+          // 写进草稿假装交付完成。
           navigate("copy", { returnTo: "workbench" });
-          setWalletRevision((value) => value + 1);
-          notify("文案已提取，请核对原文并选择二创方式。");
-        },
-      )
+          notify(
+            "文案提取完成，但转写结果为空；请确认视频包含有效语音后重新提取。",
+          );
+          return;
+        }
+        const text = taskText;
+        const sameSource =
+          currentDraft.projectId === projectId &&
+          (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId;
+        const currentScript = sameSource
+          ? currentDraft.script
+          : createDraft().script;
+        deliveredExtractionTasksRef.current.add(
+          JSON.stringify([extractionAccount, taskId]),
+        );
+        patchDraft({
+          projectId,
+          sourceId: assetId,
+          sourceAssetId: assetId,
+          scriptEdited: true,
+          script: {
+            ...currentScript,
+            original: text,
+            text: hasCopyResult(currentScript) ? currentScript.text : "",
+            resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
+            confirmed: false,
+          },
+        });
+        navigate("copy", { returnTo: "workbench" });
+        setWalletRevision((value) => value + 1);
+        notify("文案已提取，请核对原文并选择二创方式。");
+      })
       .catch((cause: unknown) => {
         extractingRef.current = false;
         endCopyExtractionProgress();
         if (!scopeStillCurrent()) return;
         setWalletRevision((value) => value + 1);
-        notify(
-          customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
-        );
-      });
-  };
-  /**
-   * 命中共享文案缓存后的统一回填（桌面 / Web 两条 claim-first 链路共用）：
-   * 命中时既没有导入项目也没有转写任务，只把文案填进草稿、不动来源归属。
-   */
-  const applyClaimedViralCopy = async (
-    text: string,
-    billing: ViralCopyBilling,
-    guard: { permissionGeneration: number; account: string; scope: string },
-    videoTitle?: string,
-  ) => {
-    const scopeStillCurrent = () =>
-      currentUserRoleRef.current !== "auditor" &&
-      permissionGenerationRef.current === guard.permissionGeneration &&
-      saveAccountRef.current === guard.account &&
-      JSON.stringify([
-        latestDraftRef.current.id,
-        latestDraftRef.current.projectId,
-        latestDraftRef.current.sourceId,
-        latestDraftRef.current.sourceAssetId,
-      ]) === guard.scope;
-    if (!scopeStillCurrent()) return;
-    // 命中共享缓存时既没有导入任务也没有项目，而文案工坊的改写与版本保存都以项目为
-    // 归属：缺项目就地补一个（与上传/导入链路同口径），否则正文已经到手也二创不了，
-    // 只会停在「当前文案缺少来源项目」。
-    let projectId = latestDraftRef.current.projectId;
-    if (!projectId) {
-      try {
-        const project = await createProject(
-          (videoTitle?.trim() || "爆款视频文案提取").slice(0, 120),
-        );
-        projectId = project.id;
-        setData((current) => ({
-          ...current,
-          projects: [
-            project,
-            ...current.projects.filter((item) => item.id !== project.id),
-          ],
-        }));
-      } catch (cause) {
-        // 建项目失败不能吞掉已经付费的正文：照常填入，用户至少能先核对原文。
-        if (scopeStillCurrent())
-          notify(
-            customerVisibleErrorMessage(
-              cause,
-              "创建文案项目失败，可稍后重试。",
-            ),
-          );
-      }
-    }
-    if (!scopeStillCurrent()) return;
-    // 建项目与填写正文必须同一次 patch：patchStudioDraft 换项目时会用空草稿覆盖
-    // script，分两步写会把刚拿到的原文擦掉。
-    const currentDraft = latestDraftRef.current;
-    const currentScript = currentDraft.script;
-    const patch: Partial<StudioDraft> = {
-      scriptEdited: true,
-      script: {
-        ...currentScript,
-        original: text,
-        text: hasCopyResult(currentScript) ? currentScript.text : "",
-        resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
-        confirmed: false,
-      },
-    };
-    if (projectId) patch.projectId = projectId;
-    patchDraft(patch);
-    navigate("copy", { returnTo: "workbench" });
-    // 「获取文案」计费（2026-10-08 口径）：命中缓存秒回同样按 viral_copy 扣费
-    // （同账号同视频只扣一次）；回执 charged>0 时刷新钱包余额展示。
-    if (billing.charged > 0) {
-      setWalletRevision((value) => value + 1);
-      notify("已提取文案并扣费，文案已填入，请核对后选择二创方式。");
-      return;
-    }
-    notify("已命中共享文案缓存，文案已填入，请核对后选择二创方式。");
-  };
-
-  /**
-   * 爆款文案提取（双端统一入口）：
-   * - 桌面端：本地抽音轨 → 上传 → 转写，内部先 claim（命中即秒回、不抽音轨）。
-   * - Web 端（无本地缓存）：先取共享文案——命中即秒回正文（按 viral_copy 扣费，
-   *   同账号同视频一次）、跳过整次服务端导入；
-   *   未命中回落 `onCacheMiss`（导入 → 转写 → claim 交付，转写费由转写链路承担）。
-   */
-  const extractViralCopy = (
-    video: {
-      title?: string;
-      platformKey?: string;
-      nativeId?: string;
-      playUrl?: string | null;
-    },
-    options?: { onCacheMiss?: () => void },
-  ) => {
-    if (review) {
-      notify("审核示例不调用真实接口。");
-      return;
-    }
-    if (currentUserRoleRef.current === "auditor") {
-      notify("当前账号为只读权限，不能提交生成。");
-      return;
-    }
-    if (extractingRef.current) {
-      // 同上：爆款提取占用期间静默返回会让按钮看起来失灵。
-      notify("文案提取任务进行中，请等待当前任务完成。");
-      return;
-    }
-    if (!video.platformKey || !video.nativeId) {
-      notify("该视频缺少可导入的平台标识");
-      return;
-    }
-    // 收窄后的常量：回调里再读 video 的属性，TS 不再保证非空。
-    const platformKey = video.platformKey;
-    const nativeId = video.nativeId;
-    const permissionGeneration = permissionGenerationRef.current;
-    const extractionAccount = currentUser.id;
-    // 结果回来时草稿可能已经换过来源：命中缓存的回填没有 projectId/assetId 可核对，
-    // 只能靠「点提取那一刻的草稿作用域」判断，否则会把 A 的文案填进 B 的草稿。
-    const extractionScope = JSON.stringify([
-      latestDraftRef.current.id,
-      latestDraftRef.current.projectId,
-      latestDraftRef.current.sourceId,
-      latestDraftRef.current.sourceAssetId,
-    ]);
-
-    const scopeStillCurrent = () => {
-      const draft = latestDraftRef.current;
-      return (
-        saveMountedRef.current &&
-        saveAccountRef.current === extractionAccount &&
-        permissionGenerationRef.current === permissionGeneration &&
-        currentUserRoleRef.current !== "auditor" &&
-        JSON.stringify([
-          draft.id,
-          draft.projectId,
-          draft.sourceId,
-          draft.sourceAssetId,
-        ]) === extractionScope
-      );
-    };
-
-    // 统一 claim-first（2026-11 爆款链路改造 WP3）：本地抽音轨上传链路已随
-    // POST /videos/copy 退役下线，桌面与 Web 同一动作——命中共享缓存即秒回正文
-    // （交付计费见 claim 回执），未命中交给调用方的服务端导入 → 转写链路
-    // （转写完成后再凭视频身份 claim 交付）。claim 404/异常一律如实报错，
-    // 不静默回落：公开爆款卡片才会走到这里，404 意味着真实下架而非缓存未命中。
-    const onCacheMiss = options?.onCacheMiss;
-    if (!onCacheMiss) {
-      notify("该视频暂不支持提取文案，请稍后重试。");
-      return;
-    }
-    extractingRef.current = true;
-    void claimViralCopy(platformKey as ViralPlatform, nativeId)
-      .then((claimed) => {
-        extractingRef.current = false;
-        if (!scopeStillCurrent()) return;
-        if (!claimed.text) {
-          // 未命中：本次分文未扣，走调用方的导入 → 转写链路。
-          onCacheMiss();
-          return;
-        }
-        applyClaimedViralCopy(
-          claimed.text,
-          claimed.billing,
-          {
-            permissionGeneration,
-            account: extractionAccount,
-            scope: extractionScope,
-          },
-          video.title,
-        );
-      })
-      .catch((cause: unknown) => {
-        extractingRef.current = false;
-        // 读不到计费口径（未定价 / 停用 / 网络失败）时继续导入会白花一次转写费：
-        // 如实提示，不做静默回落。
-        if (!scopeStillCurrent()) return;
-        if (
-          openWalletIfInsufficientCredits(cause, {
-            notify,
-            openWallet: () => openLive("wallet"),
-          })
-        )
-          return;
         notify(
           customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
         );
@@ -2594,7 +2300,6 @@ export function StudioWorkspace({
     discardSavedDraft,
     confirmFinalDraft,
     extractScriptFromUpload,
-    extractViralCopy,
     refresh,
   };
   const savedAtLabel = pendingRestore

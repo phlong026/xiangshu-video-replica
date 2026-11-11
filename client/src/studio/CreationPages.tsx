@@ -739,7 +739,9 @@ export function CopyPage() {
     if (tab === "history" && !review) refreshExtractions();
   }, [tab, review, refreshExtractions]);
   const reuseExtraction = (record: ViralCopyExtractionRecord) => {
-    if (readOnly || !record.text) return;
+    // 正文随本人任务直出后恒可复用（不再有「缓存归档正文过期」）；
+    // text 的 null 只是旧 schema 兼容位，空值按无正文兜底。
+    if (readOnly || !record.text?.trim()) return;
     const currentScript = state.draft.script;
     patchDraft({
       scriptEdited: true,
@@ -996,7 +998,7 @@ export function CopyPage() {
                     ? record.text.length > 120
                       ? `${record.text.slice(0, 120)}…`
                       : record.text
-                    : "正文已过期，可重新提取。"}
+                    : "暂无正文，可重新提取。"}
                 </p>
                 <Button
                   variant="outline"

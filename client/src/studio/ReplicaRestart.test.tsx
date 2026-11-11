@@ -125,7 +125,6 @@ function studio(overrides: Partial<StudioContextValue> = {}) {
     discardSavedDraft: vi.fn(),
     confirmFinalDraft: vi.fn(),
     extractScriptFromUpload: vi.fn(),
-    extractViralCopy: vi.fn(),
     refresh: vi.fn(),
     ...overrides,
   };
