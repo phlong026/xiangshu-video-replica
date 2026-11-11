@@ -725,13 +725,14 @@ class Pan123ProviderTester:
     REQUIRED_FIELDS = ("client_id", "client_secret", "uid", "sign_secret", "folder_id")
 
     def __init__(self, fallback: Any) -> None:
-        self._fallback = fallback
+        # 公开字段与其他 ProviderTester 一致（链组合测试逐层断言 .fallback）。
+        self.fallback = fallback
 
     def connection_test(self, provider: str, config: dict[str, str]) -> Any:
         from fastapi import HTTPException
 
         if provider != PAN123_PROVIDER:
-            return self._fallback.connection_test(provider, config)
+            return self.fallback.connection_test(provider, config)
         missing = [
             field for field in self.REQUIRED_FIELDS if not str(config.get(field, "")).strip()
         ]
@@ -759,4 +760,4 @@ class Pan123ProviderTester:
         return ProviderTestResult(status="ok", provider=provider, test_kind="connection")
 
     def paid_test(self, provider: str, config: dict[str, str]) -> Any:
-        return self._fallback.paid_test(provider, config)
+        return self.fallback.paid_test(provider, config)
