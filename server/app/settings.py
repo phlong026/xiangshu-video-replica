@@ -34,6 +34,9 @@ ProviderName = Literal[
     "douyidou",
     "ses",
     "yuanbao",
+    # 平台培训素材库唯一存储车道（2026-11-12 拍板）：123网盘 OpenAPI，
+    # 见 docs/培训素材123网盘存储方案-2026-11-12.md。
+    "pan123",
 ]
 
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
@@ -79,6 +82,9 @@ REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     # 邮件推送：客户绑定邮箱与找回密码的验证码。只用模板发信（内地地域不支持
     # 自由正文），模板变量约定见 app.email_delivery。
     "ses": ("secret_id", "secret_key", "from_address", "code_template_id"),
+    # 培训素材库存储（2026-11-12）：client_secret/sign_secret 命名含 "secret"，
+    # 命中 SECRET_FIELDS 子串掩码，无需显式登记。
+    "pan123": ("client_id", "client_secret", "uid", "sign_secret", "folder_id"),
 }
 DEFAULT_RUNTIME_SETTINGS: dict[str, int | str] = {
     "max_generation_count_per_batch": 4,
@@ -203,6 +209,19 @@ class SettingsRepository:
     def load_provider_config(self, provider: str) -> dict[str, str]:
         provider_name = normalize_provider(provider)
         return self._load_encrypted_config(provider_name)
+
+    def provider_config_version(self, provider: str) -> str:
+        """配置版本指纹（updated_at 微秒精度字符串，未配置返回空串）。
+
+        pan123 直链进程缓存以它为 key 的一部分：任何一次保存（含同账号轮换
+        密钥）都会改变版本，缓存自动失效（方案 §3.3）。
+        """
+        row = self.conn.execute(
+            "SELECT COALESCE(to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US'), '') "
+            "FROM provider_settings WHERE provider = %s",
+            (provider,),
+        ).fetchone()
+        return str(row[0]) if row else ""
 
     def load_wechat_native_config(self) -> dict[str, str]:
         return self._load_encrypted_config("wechat_native")
@@ -1112,6 +1131,67 @@ def remove_cos_lifecycle_rules(
         "status": "removed",
         "message": "已移除项目素材与成片的 180 天自动过期规则，按永久保存执行。",
     }
+
+
+PAN123_PROVIDER_NAME = "pan123"
+
+
+def enforce_pan123_config_guard(conn: BusinessConnection, incoming_config: dict[str, str]) -> None:
+    """pan123 配置保存护栏（control 与 settings_routes 两入口共用，方案 §3.4）。
+
+    统一互斥锁 ``audit:provider:pan123`` 在此获取——control 入口已持同键锁，
+    同事务重复获取幂等；legacy 入口此前无锁，由此补齐（r3-P1-1）。随后：
+    库内已有素材行且更换 client_id → 422 拒绝（素材绑定当前网盘账号）；
+    放行（含同账号轮换密钥）→ 同事务原子清除共享 token，旧账号 token 与新
+    配置永不并存，在途请求回写带旧 client_id 的行会被下次读取判弃（r2-P1-1）。
+    """
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("audit:provider:pan123",))
+    table = conn.execute("SELECT to_regclass('public.training_materials') IS NOT NULL").fetchone()
+    if table is not None and bool(table[0]):
+        has_rows = conn.execute("SELECT 1 FROM training_materials LIMIT 1").fetchone()
+        if has_rows is not None:
+            old_client = str(
+                SettingsRepository(conn).load_provider_config(PAN123_PROVIDER_NAME).get("client_id")
+            ).strip()
+            new_client = str(incoming_config.get("client_id") or "").strip()
+            if old_client and new_client and new_client != old_client:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "PAN123_ACCOUNT_BOUND",
+                        "message": (
+                            "已有素材绑定当前网盘账号，不支持更换；如确需迁移请先清空培训素材库。"
+                        ),
+                    },
+                )
+    state_table = conn.execute(
+        "SELECT to_regclass('public.provider_runtime_state') IS NOT NULL"
+    ).fetchone()
+    if state_table is not None and bool(state_table[0]):
+        conn.execute(
+            "DELETE FROM provider_runtime_state WHERE provider = %s AND state_key = 'token'",
+            (PAN123_PROVIDER_NAME,),
+        )
+
+
+def enable_pan123_direct_link_after_save(config: dict[str, str], version: str) -> dict[str, str]:
+    """保存 pan123 配置后为目标 folder 幂等开通直链空间；失败不阻断保存。
+
+    跟随 COS lifecycle 先例：调用点在配置保存事务内、失败仅记状态不入错误。
+    函数内导入 pan123_client——它反向依赖本模块的 Fernet 工具，模块级导入成环。
+    """
+    from app.pan123_client import Pan123Client
+
+    try:
+        client = Pan123Client(config, config_version=version)
+        client.enable_direct_link_folder()
+    except Exception as exc:  # noqa: BLE001 - 保存流程不受直链开通失败阻断
+        logger.warning("pan123 direct-link enable failed: %s", exc)
+        return {
+            "status": "failed",
+            "message": "直链空间开通失败；请检查配置后重新保存或用连接测试排查。",
+        }
+    return {"status": "ok", "message": "直链空间已就绪。"}
 
 
 def get_provider_tester() -> ProviderTester:
