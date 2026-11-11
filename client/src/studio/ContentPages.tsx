@@ -965,6 +965,7 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
     try {
       const fresh = await quoteReplicaPipeline(pipelineId);
       setQuote(fresh);
+      setQuoteError(null);
       setQuoteAgeMs(0);
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "报价刷新失败");
@@ -983,6 +984,7 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
       setPipelineId(null);
       setStatus(null);
       setQuote(null);
+      setQuoteError(null);
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "放弃失败");
     } finally {

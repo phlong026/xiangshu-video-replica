@@ -838,9 +838,12 @@ def drive_pipeline_once(conn: BusinessConnection, lease: rp.ReplicaPipelineLease
             # 引用会让 handler 永远观察旧失败任务直至预算耗尽。与 history
             # 追加合成为一次表达式（外层再包一层 jsonb_set）。
             inner = detail_expr or "COALESCE(stage_detail, '{}'::jsonb)"
+            # 断点来源只用无参的原始 stage_detail（评审 M8-r4#1）：含 %s 的
+            # inner 若插入两次会造成占位符多于参数（6 vs 5）的直接绑定错误。
             detail_expr = (
                 f"jsonb_set({inner}, '{{firstFrame}}', "
-                f"({inner} #> '{{firstFrame}}') - 'candidateTaskId' - 'sourceFrameTaskId', true)"
+                "(COALESCE(stage_detail, '{}'::jsonb) #> '{firstFrame}') "
+                "- 'candidateTaskId' - 'sourceFrameTaskId', true)"
             )
         for column in clear_columns:
             sets.append(f"{column} = NULL")

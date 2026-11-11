@@ -702,3 +702,56 @@ def test_character_selection_http_error_lands_failed(
         "SELECT status FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
     ).fetchone()
     assert row is not None and row["status"] == rp.STATUS_FAILED
+
+
+def test_first_frame_retry_with_column_and_history(
+    biz: BusinessConnection, _stub_domains: dict[str, Any]
+) -> None:
+    """首帧重试的真实危险组合（评审 M8-r4#1）：first_frame_task_id 列非空
+    （触发 history 追加）且 stage_detail 无 history 键（首次重试）——含参
+    jsonb 表达式与断点表达式必须合并正确，参数绑定数量一致。"""
+    pipeline_id = _seed_pipeline(
+        biz,
+        status=rp.STATUS_FIRST_FRAMING,
+        slot="ffhist",
+        stage_detail={
+            "sourceAssetId": "asset-1",
+            "shotCardVersionId": "shot-1",
+            "analysisVersionId": "ana-ver-1",
+            "firstFrame": {
+                "substage": "candidates",
+                "sourceFrameSelectionVersionId": "sfs-1",
+                "candidateTaskId": "ff-1",
+            },
+        },
+    )
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET first_frame_task_id = 'ff-1' WHERE id = %s",
+        (pipeline_id,),
+    )
+    _stub_domains["sub_status"] = {
+        ("first_frame_tasks", "ff-1"): (
+            "FAILED",
+            {
+                "error_code": "IMAGE_PROVIDER_TIMEOUT",
+                "error_message_redacted": "超时",
+                "retryable": 1,
+            },
+        )
+    }
+    lease = _acquire(biz, slot="ffhist")
+    assert stages.drive_pipeline_once(biz, lease) == "retrying"
+    row = biz.execute(
+        "SELECT first_frame_task_id, stage_retry_no, stage_detail FROM replica_pipeline_tasks "
+        "WHERE id = %s",
+        (pipeline_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["first_frame_task_id"] is None
+    assert int(row["stage_retry_no"]) == 1
+    detail = row["stage_detail"] if isinstance(row["stage_detail"], dict) else {}
+    assert detail.get("history") == ["ff-1"]
+    assert detail.get("sourceAssetId") == "asset-1"  # 原字段不丢
+    first_frame = detail.get("firstFrame", {})
+    assert "candidateTaskId" not in first_frame
+    assert first_frame.get("sourceFrameSelectionVersionId") == "sfs-1"
