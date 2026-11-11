@@ -243,6 +243,10 @@ def _customer_session(client: TestClient, route_state: str) -> str:
 ADMIN_WRITE_AUTHORITIES = {
     "get_admin_writer",
     "get_control_route_user",
+    # 2026-11-02 池饿死批二（86dfd136 重放）：get_control_route_user 的短事务
+    # 变体——认证语义与原依赖逐字一致，仅把连接占用压缩到解析瞬间，归属同一
+    # 管理写车道（sync 充值订单路由已切换到它）。
+    "get_control_route_user_short_tx",
     # B3 (2026-09-22 review): bulk exports are GET routes that carry a
     # write-level dependency — the gate follows the route's intent, not its
     # HTTP method, so the CSV dumps stay on this axis.
