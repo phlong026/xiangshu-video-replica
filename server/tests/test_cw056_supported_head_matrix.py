@@ -107,8 +107,11 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261016T1000_replica_prompt_tasks（长视频复刻提示词任务族）追加其上；
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
-# 列）追加其上，故链尾为该值。
-HEAD_REVISION = "20261102T0900_customer_session_last_seen"
+# 列）追加其上；20261101T1000_training_materials（培训素材库，网盘车道）/​
+# 20261112T0900_yuanbao_pan123_widen（provider 白名单放宽）/​
+# 20261112T0910_provider_runtime_state（共享 token 状态表）追加其上，
+# 故链尾为该值。
+HEAD_REVISION = "20261112T0910_provider_runtime_state"
 
 
 @pytest.mark.pg
