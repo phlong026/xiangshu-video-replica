@@ -42,17 +42,18 @@ APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 # 图像语义检查（人物识别源图、首帧复核）2026-09-26 起与视频拆解统一用
 # gemini-3.8-flash：业务确认两链路同用正式版 flash。此前单独留在 preview 名
 # 上是因为 2026-09-20 故障无证据指向模型名；现在任何默认槽位都不再使用
-# preview 名（曾发生过无预警下线）。
+# preview 名（曾发生过无预警下线）。2026-11-11 起该常量只服务图像链路：
+# 拆解才需要旗舰推理力，图像检查控成本，两者刻意分开（方案决策 D2）。
 APILIO_GEMINI_MODEL = "gemini-3.8-flash"
-# 视频拆解单独一个默认值：2026-09-20 线上拆解 100% 失败在上游 HTTP 400，
-# preview 模型疑似已下线，改用正式版。上游再次调整时，设置页的「视频分析
-# 模型」可直接覆盖这里，不必等下一次发版。
-APILIO_ANALYSIS_MODEL = "gemini-3.8-flash"
-# 主模型限流/下线时的默认替补。选 gemini-3.7-flash：与主模型同为 flash 系
-# 正式版（避开 2026-09-20 出过事的 preview 名），只落后主模型一个 minor 版本，
-# 作为主模型 429 时的第二条路径；实际可用性与配额隔离仍须线上探测。
-# 可用设置项 analysis_model_fallbacks 覆盖；换过默认主模型后请核对名单。
-APILIO_ANALYSIS_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.7-flash",)
+# 视频拆解模型：2026-11-11 起主用新一代 gemini-4-carbon（决策 D1，见
+# docs/视频拆解稳定性与准确率改造方案-2026-11-11.md），备选退回正式版 flash。
+# 生产切换以设置页 analysis_model 为第一手段（零发版可回滚），代码默认值随
+# 正式发版；上游再次调整时，设置页可直接覆盖，不必等下一次发版。
+APILIO_ANALYSIS_MODEL = "gemini-4-carbon"
+# 主模型限流/下线时的默认替补：gemini-3.8-flash，与图像链路同款正式版
+# （避开 2026-09-20 出过事的 preview 名）。可用设置项
+# analysis_model_fallbacks 覆盖；换过默认主模型后请核对名单。
+APILIO_ANALYSIS_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.8-flash",)
 MAX_ANALYSIS_FALLBACK_MODELS = 1
 # 限流切换前只留礼貌性停顿；是否有独立配额仍需真实账户验证。
 # 租约 10 分钟、单次调用上限 240s，因此最多只尝试一个备选。
@@ -312,6 +313,7 @@ class AnalysisProviderFailed(RuntimeError):
         failure_phase: str = RESPONSE_FAILURE_PHASE,
         retryable: bool = False,
         upstream_diagnostic: dict[str, Any] | None = None,
+        failover_note: str | None = None,
     ) -> None:
         super().__init__(message)
         self.http_status = http_status
@@ -321,6 +323,97 @@ class AnalysisProviderFailed(RuntimeError):
         # bounded reason) so the FAILED terminal state can persist *why* the
         # provider refused instead of only the status code.
         self.upstream_diagnostic = upstream_diagnostic
+        # 已尝试的模型/次数摘录。429 与网络类失败的对外文案会被
+        # ``analysis_provider_error`` 改写成固定话术，结构化保留这段摘录才能
+        # 追加而不是覆盖（方案 T7）。
+        self.failover_note = failover_note
+
+
+def _is_timeout_failure(exc: Exception) -> bool:
+    """区分网络超时与连接失败：超时不可自动重试，连接失败可以（决策 D5）。"""
+    if isinstance(exc, TimeoutError):
+        return True
+    # urllib 在部分路径把 socket 超时包进 URLError(reason=timeout)。
+    return isinstance(exc, URLError) and isinstance(getattr(exc, "reason", None), TimeoutError)
+
+
+# 视频入口的调用预算：从首次 provider 调用起算的截止时间 + 全局物理请求上限
+# + 同模型有界重试。只由视频任务工厂启用；优化器等文本入口保持「一次请求、
+# 直接按既有语义换道」的行为，避免隐式继承重试把它的租约吃满（方案 T14）。
+@dataclass(frozen=True)
+class VideoCallBudget:
+    attempt_budget_seconds: float
+    max_provider_calls: int = 4
+    max_retries_per_model: int = 2
+    retry_backoff_seconds: tuple[float, ...] = (2.0, 8.0)
+
+
+@dataclass
+class _BudgetTracker:
+    """一次视频任务尝试的调用预算状态；生命周期与单次 ``_complete_video`` 相同。
+
+    截止时间在首次构造时定格（≈ 任务租约剩余 − 落库缓冲），此后只减不增；
+    token 回退触发的第二次 ``_complete`` 共享同一 tracker，总次数与截止时间
+    因此不会被回退绕过。
+    """
+
+    budget: VideoCallBudget
+    deadline: float
+    calls_used: int = 0
+
+    def can_start(self, timeout_seconds: object) -> bool:
+        if self.calls_used >= self.budget.max_provider_calls:
+            return False
+        if not isinstance(timeout_seconds, int | float):
+            return True
+        return time.monotonic() + timeout_seconds <= self.deadline
+
+
+def _is_auto_retryable(failure: AnalysisProviderFailed) -> bool:
+    """同模型自动重试的白名单；换道与否仍由 ``_should_try_fallback`` 决定。"""
+    if failure.failure_phase == HTTP_FAILURE_PHASE:
+        status = failure.http_status
+        return status == 429 or (status is not None and status >= 500)
+    if failure.failure_phase == NETWORK_FAILURE_PHASE:
+        kind = (failure.upstream_diagnostic or {}).get("failure_kind")
+        return kind == "connect"
+    if failure.failure_phase == RESPONSE_FAILURE_PHASE:
+        return (failure.upstream_diagnostic or {}).get("reason") == "empty_completion"
+    return False
+
+
+# 拆解输出的 token 预算随源片时长线性放大、到上限封顶：分段越多输出越长，
+# 但镜头卡单段体量固定，20 秒以上长尾段数的边际增长已被上限覆盖（T0 实测
+# 用量定标后允许调整常量，见 docs 方案 T5）。
+ANALYSIS_MIN_MAX_TOKENS = 16000
+ANALYSIS_MAX_TOKENS_CAP = 32000
+ANALYSIS_MAX_TOKENS_PER_SECOND = 800
+
+
+def _analysis_max_tokens(duration_seconds: float) -> int:
+    return min(
+        ANALYSIS_MAX_TOKENS_CAP,
+        ANALYSIS_MIN_MAX_TOKENS + max(0, int(duration_seconds)) * ANALYSIS_MAX_TOKENS_PER_SECOND,
+    )
+
+
+# 上游拒绝输出预算（请求期 400）的特征词；与「输入超限」「无关 400」区分开，
+# 只有命中才允许把预算回退到保守值再试一次（方案 T5）。
+_OUTPUT_LIMIT_PATTERN = re.compile(
+    r"max[_ ]?tokens|output[_ ]?tokens?|token[_ ]?limit|context.{0,12}output", re.IGNORECASE
+)
+
+
+def _external_usage(usage: object) -> dict[str, int] | None:
+    """白名单读取 usage 数值字段；未知名段一律不外带（方案 T3/T7b）。"""
+    if not isinstance(usage, dict):
+        return None
+    picked: dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            picked[key] = value
+    return picked or None
 
 
 class ApilioChatTransport(Protocol):
@@ -409,17 +502,22 @@ class UrllibApilioChatTransport:
             # Only the exception class name is carried forward: the original reason can
             # embed the signed video URL or the request headers.
             reason = type(exc).__name__
+            timed_out = _is_timeout_failure(exc)
             logger.warning(
                 "%s Apilio video analysis request failed: %s", analysis_log_ref(), reason
             )
             raise AnalysisProviderFailed(
                 f"Apilio video analysis request failed ({reason})",
                 failure_phase=NETWORK_FAILURE_PHASE,
-                retryable=True,
+                # 超时意味着请求可能已被上游受理并计费，自动重发会叠加一次结果
+                # 不确定的付费调用（决策 D5）——只允许用户重新提交；连接类失败
+                # （DNS/拒绝/复位）请求没有到达对端，自动重试是安全的。
+                retryable=not timed_out,
                 upstream_diagnostic={
                     "http_status": None,
                     "failure_phase": NETWORK_FAILURE_PHASE,
                     "reason": reason,
+                    "failure_kind": "timeout" if timed_out else "connect",
                 },
             ) from exc
 
@@ -438,6 +536,7 @@ class ApilioGemini:
         fallback_models: Sequence[str] = (),
         transport: ApilioChatTransport | None = None,
         failover_pause: Callable[[float], None] | None = None,
+        video_call_budget: VideoCallBudget | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -454,6 +553,9 @@ class ApilioGemini:
         self.fallback_models = tuple(deduped)
         self.transport = transport or UrllibApilioChatTransport()
         self.failover_pause = failover_pause or time.sleep
+        # 仅视频任务工厂启用（方案 T14）：截止预算/有界重试/token 回退都不属于
+        # 文本入口（优化器显式传 None，行为与历史一致）。
+        self.video_call_budget = video_call_budget
 
     def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
         if not is_https_video_url(video_uri):
@@ -479,7 +581,7 @@ class ApilioGemini:
                 }
             ],
         }
-        text, raw = self._complete(payload)
+        text, raw = self._complete_video(payload, duration_seconds=duration_seconds)
         return ProviderResponse(text=text, raw=raw)
 
     def analyze_with_context(
@@ -521,11 +623,10 @@ class ApilioGemini:
             "{SCENE_BOUNDARY_GUIDANCE_JSON}",
             json.dumps(analysis_guidance or {}, ensure_ascii=False),
         )
-        text, raw = self._complete(
+        text, raw = self._complete_video(
             {
                 "model": self.model,
                 "temperature": 0,
-                "max_tokens": 16000,
                 "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": instruction},
@@ -538,7 +639,8 @@ class ApilioGemini:
                         ],
                     },
                 ],
-            }
+            },
+            duration_seconds=duration_seconds,
         )
         return ProviderResponse(text=text, raw=raw)
 
@@ -566,11 +668,10 @@ class ApilioGemini:
         info = dict(media_info or {})
         info.setdefault("duration_seconds", duration_seconds)
         instruction = instruction.replace("{MEDIA_INFO_JSON}", json.dumps(info, ensure_ascii=False))
-        text, raw = self._complete(
+        text, raw = self._complete_video(
             {
                 "model": self.model,
                 "temperature": 0,
-                "max_tokens": 16000,
                 "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": instruction},
@@ -582,42 +683,133 @@ class ApilioGemini:
                         ],
                     },
                 ],
-            }
+            },
+            duration_seconds=duration_seconds,
         )
         return ProviderResponse(text=text, raw=raw)
 
-    def _complete(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    def _complete_video(
+        self, payload: dict[str, Any], *, duration_seconds: float
+    ) -> tuple[str, dict[str, Any]]:
+        """视频入口统一走这里：动态输出预算 + 预算被上游拒绝时的单次回退（方案 T5）。
+
+        优化器等文本入口直接调 ``_complete``、自带 10000 预算，不经过本方法，
+        因此不会被动态预算或回退逻辑波及。
+        """
+        budget = _analysis_max_tokens(duration_seconds)
+        payload["max_tokens"] = budget
+        if self.video_call_budget is None:
+            # 无预算（历史行为/文本入口兜底）：仍然带动态预算，但不做回退。
+            return self._complete(payload)
+        tracker = _BudgetTracker(
+            budget=self.video_call_budget,
+            deadline=time.monotonic() + self.video_call_budget.attempt_budget_seconds,
+        )
+        try:
+            return self._complete(payload, tracker=tracker)
+        except AnalysisProviderFailed as exc:
+            reason = str((exc.upstream_diagnostic or {}).get("reason") or "")
+            if (
+                exc.http_status == 400
+                and budget > ANALYSIS_MIN_MAX_TOKENS
+                and _OUTPUT_LIMIT_PATTERN.search(reason)
+            ):
+                logger.warning(
+                    "%s 输出预算 %s 被上游拒绝，回退 %s 后重试一次",
+                    analysis_log_ref(),
+                    budget,
+                    ANALYSIS_MIN_MAX_TOKENS,
+                )
+                payload["max_tokens"] = ANALYSIS_MIN_MAX_TOKENS
+                return self._complete(payload, tracker=tracker)
+            raise
+
+    def _complete(
+        self,
+        payload: dict[str, Any],
+        *,
+        tracker: _BudgetTracker | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         """按「主模型 → 备选模型」顺序尝试，把限流/下线从任务失败降级为换道。
 
         只对 429 和上游明确报告模型不可用的 400/404 切换。网络超时可能
         已被上游受理，盲目换模型会重复一次结果不确定的付费调用。
+
+        传入 ``tracker``（仅视频入口）时额外获得：每次发起新请求前的截止
+        时间校验（剩余租约不足一次完整调用就停）、全局物理请求次数上限、
+        同模型有界重试（白名单类别见 ``_is_auto_retryable``）。执行顺序固定
+        为「同模型重试 → 换备选模型」；不传 tracker 时行为与历史完全一致。
         """
         models = (self.model, *self.fallback_models)
         last_failure: AnalysisProviderFailed | None = None
         attempted: list[str] = []
+        stop = False
         for index, model in enumerate(models):
             payload["model"] = model
             if last_failure is not None:
+                # 换道仍按既有语义：只有 429 / 明确下线才允许尝试备选模型。
+                if not _should_try_fallback(last_failure, model=models[index - 1]):
+                    break
+                logger.warning(
+                    "%s 视频拆解模型 %s 请求失败（phase=%s status=%s），切换备选模型 %s",
+                    analysis_log_ref(),
+                    models[index - 1],
+                    last_failure.failure_phase,
+                    last_failure.http_status if last_failure.http_status is not None else "-",
+                    model,
+                )
                 self.failover_pause(FAILOVER_RETRY_WAIT_SECONDS)
             attempted.append(model)
-            try:
-                # 每条调用日志记下本次实际使用的模型（命中备选时与主模型不同）。
-                with external_call_model(model):
-                    return self._complete_once(payload)
-            except AnalysisProviderFailed as exc:
-                last_failure = exc
-                if index < len(models) - 1 and _should_try_fallback(exc, model=model):
+            model_calls = 0
+            while True:
+                if tracker is not None and not tracker.can_start(
+                    getattr(self.transport, "timeout_seconds", None)
+                ):
                     logger.warning(
-                        "%s 视频拆解模型 %s 请求失败（phase=%s status=%s），切换备选模型 %s",
+                        "%s 任务调用预算已用尽（已发起 %s 次），停止后续视频拆解请求",
                         analysis_log_ref(),
-                        model,
-                        exc.failure_phase,
-                        exc.http_status if exc.http_status is not None else "-",
-                        models[index + 1],
+                        tracker.calls_used,
                     )
-                    continue
+                    stop = True
+                    break
+                if tracker is not None:
+                    tracker.calls_used += 1
+                model_calls += 1
+                try:
+                    # 每条调用日志记下本次实际使用的模型（命中备选时与主模型不同）。
+                    with external_call_model(model):
+                        return self._complete_once(payload)
+                except AnalysisProviderFailed as exc:
+                    last_failure = exc
+                    if (
+                        tracker is not None
+                        and model_calls <= tracker.budget.max_retries_per_model
+                        and _is_auto_retryable(exc)
+                    ):
+                        backoffs = tracker.budget.retry_backoff_seconds
+                        delay = backoffs[min(model_calls - 1, len(backoffs) - 1)]
+                        logger.warning(
+                            "%s 视频拆解模型 %s 第 %s 次请求失败（phase=%s status=%s reason=%s），"
+                            "%s 秒后同模型重试",
+                            analysis_log_ref(),
+                            model,
+                            model_calls,
+                            exc.failure_phase,
+                            exc.http_status if exc.http_status is not None else "-",
+                            (exc.upstream_diagnostic or {}).get("reason") or "-",
+                            delay,
+                        )
+                        self.failover_pause(delay)
+                        continue
+                    break
+            if stop:
                 break
-        assert last_failure is not None
+        if last_failure is None:
+            # 预算在首次请求前就耗尽：真实的预算永远大于单次超时，这里只是防御。
+            raise AnalysisProviderFailed(
+                "视频拆解调用预算不足，未发起请求。",
+                failure_phase=REQUEST_FAILURE_PHASE,
+            )
         if len(attempted) > 1:
             raise _with_failover_note(last_failure, attempted) from last_failure
         raise last_failure
@@ -634,7 +826,10 @@ class ApilioGemini:
         )
         try:
             response = json.loads(raw_body.decode("utf-8"))
-            content = response["choices"][0]["message"]["content"]
+            choice = response["choices"][0]
+            message = choice["message"]
+            content = message["content"]
+            finish_reason = choice.get("finish_reason")
         except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             logger.warning(
                 "%s Apilio Gemini response is not a readable completion: %s",
@@ -649,16 +844,57 @@ class ApilioGemini:
                     "reason": type(exc).__name__,
                 },
             ) from exc
+        # 终止原因先于正文可用性判定（方案 T2）：截断/安全拦截的正文哪怕存在
+        # 也不可信——半截 JSON 流到业务解析层只会变成笼统的「格式无效」，安全
+        # 拦截附带的正文则可能把拦截原因漏成一次「成功」。
+        reason_text = finish_reason.strip().lower() if isinstance(finish_reason, str) else ""
+        diagnostic_finish = finish_reason if isinstance(finish_reason, str) else None
+        if "length" in reason_text:
+            logger.warning(
+                "%s Apilio Gemini completion truncated (finish_reason=%s)",
+                analysis_log_ref(),
+                finish_reason,
+            )
+            raise AnalysisProviderFailed(
+                "拆解输出超出长度上限，已自动截断；请重试，若重复出现请联系管理员。",
+                upstream_diagnostic={
+                    "http_status": None,
+                    "failure_phase": RESPONSE_FAILURE_PHASE,
+                    "reason": "finish_reason_length",
+                    "finish_reason": diagnostic_finish,
+                },
+            )
+        if any(
+            marker in reason_text for marker in ("filter", "safety", "recitation", "prohibited")
+        ):
+            logger.warning(
+                "%s Apilio Gemini completion blocked (finish_reason=%s)",
+                analysis_log_ref(),
+                finish_reason,
+            )
+            raise AnalysisProviderFailed(
+                "该视频内容被上游安全策略拦截，无法拆解；请更换参考视频或联系管理员。",
+                upstream_diagnostic={
+                    "http_status": None,
+                    "failure_phase": RESPONSE_FAILURE_PHASE,
+                    "reason": "finish_reason_content_filter",
+                    "finish_reason": diagnostic_finish,
+                },
+            )
         if not isinstance(content, str) or not content.strip():
             logger.warning(
                 "%s Apilio Gemini completion carried no analysis content", analysis_log_ref()
             )
             raise AnalysisProviderFailed(
                 "视频拆解服务返回了空结果；请重试或更换参考视频。",
+                # 空结果属于「正常结束但内容不可用」，预算内可同模型重试（T4）；
+                # 截断/拦截两类才不可重试。
+                retryable=True,
                 upstream_diagnostic={
                     "http_status": None,
                     "failure_phase": RESPONSE_FAILURE_PHASE,
                     "reason": "empty_completion",
+                    "finish_reason": diagnostic_finish,
                 },
             )
         return content, {
@@ -666,6 +902,10 @@ class ApilioGemini:
             # 溯源记实际产出结果的模型：命中备选时下游记录、对账与排障都以它为准。
             "model": payload["model"],
             "response_id": response.get("id") if isinstance(response.get("id"), str) else None,
+            # 成功元数据（方案 T3）：终止原因与白名单 usage 数值，供失败统计
+            # 与对账使用；未知名段一律不外带。
+            "finish_reason": diagnostic_finish,
+            "usage": _external_usage(response.get("usage")),
         }
 
 
@@ -692,12 +932,15 @@ def _with_failover_note(
     attempted_models: Sequence[str],
 ) -> AnalysisProviderFailed:
     """给最终失败附上已尝试的模型名单，让失败卡片和日志能回答「换过模型吗」。"""
+    note = f"已自动依次尝试模型 {'、'.join(attempted_models)}，均未成功"
     return AnalysisProviderFailed(
-        f"{failure}（已自动依次尝试模型 {'、'.join(attempted_models)}，均未成功）",
+        f"{failure}（{note}）",
         http_status=failure.http_status,
         failure_phase=failure.failure_phase,
         retryable=failure.retryable,
         upstream_diagnostic=failure.upstream_diagnostic,
+        # 429/网络类失败对外文案会被固定话术改写，结构化保留这段摘录以便追加。
+        failover_note=note,
     )
 
 

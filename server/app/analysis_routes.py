@@ -23,6 +23,7 @@ from app.analysis import (
     ApilioGemini,
     FakeGemini,
     VideoAnalysisProvider,
+    VideoCallBudget,
     analysis_task_context,
     analyze_video,
     create_analysis_version,
@@ -80,17 +81,29 @@ logger = logging.getLogger(__name__)
 # analysable instead of being rejected as an invalid request.
 MAX_ANALYSIS_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERANCE_SECONDS
 ANALYSIS_TASK_LEASE_MINUTES = 10
+# 拆解任务调用预算（方案 T4/T6）：租约 10 分钟 − 预处理与落库缓冲。预算在
+# 发起每个 provider 请求前校验，重试、换道、token 回退都被同一截止线约束；
+# 满额超时连烧两次后剩余预算已不足以再发起任何完整调用，任务转为失败。
+ANALYSIS_CALL_BUDGET_SECONDS = ANALYSIS_TASK_LEASE_MINUTES * 60 - 90
+
+
+def analysis_call_budget() -> VideoCallBudget:
+    """主拆解链路每次任务尝试的调用预算；由任务工厂在领取租约后注入。"""
+    return VideoCallBudget(attempt_budget_seconds=ANALYSIS_CALL_BUDGET_SECONDS)
 
 
 def get_video_analysis_provider(
     conn: Database,
     *,
     transport: ApilioChatTransport | None = None,
+    video_call_budget: VideoCallBudget | None = None,
 ) -> VideoAnalysisProvider:
     """构建视频分析 provider。
 
     ``transport`` 供长视频任务族注入更长的调用超时（180 秒源片单次调用可到
-    十分钟以上）；拆解链路不传，维持 240 秒默认。
+    十分钟以上）；拆解链路不传，维持 240 秒默认。``video_call_budget`` 启用
+    截止预算与有界重试，仅视频任务工厂传入；提示词优化器等文本入口不传，
+    保持一次请求、按既有语义换道的历史行为（方案 T14）。
     """
     has_saved_apilio_config = (
         conn.execute(
@@ -142,6 +155,7 @@ def get_video_analysis_provider(
         # APILIO_ANALYSIS_FALLBACK_MODELS，设置项可整组覆盖。
         fallback_models=parse_analysis_fallback_models(config.get("analysis_model_fallbacks")),
         transport=transport,
+        video_call_budget=video_call_budget,
     )
 
 
@@ -931,7 +945,9 @@ def prepare_analysis_task(
                 "retryable": True,
             },
         )
-    resolved_provider = provider or get_video_analysis_provider(conn)
+    resolved_provider = provider or get_video_analysis_provider(
+        conn, video_call_budget=analysis_call_budget()
+    )
     asset_uri = str(row["storage_uri"])
     video_uri = asset_uri
     if resolved_provider.requires_https_video_url:
@@ -1417,6 +1433,10 @@ def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
         # reason; collapsing them into one sentence hid the real cause from the
         # UI, from ``error_message_redacted`` and from support alike.
         message = str(failure).strip() or "视频拆解失败，请稍后重新拆解。"
+    # 429/网络分支的固定话术会覆盖原始 message，重试/换道的摘录在这里以追加
+    # 方式保留（方案 T7）；其余分支的 message 已含摘录，去重避免重复。
+    if failure.failover_note and failure.failover_note not in message:
+        message = f"{message}（{failure.failover_note}）"
     return HTTPException(
         status_code=status_code,
         detail={
@@ -1445,6 +1465,28 @@ def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> Busines
     return row
 
 
+def external_version_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """对外输出前的供应商名中性化（方案 T7b / 决策 D7）。
+
+    供应商名只允许存在于内部存储与内部日志；``provider_response_ref`` 会随
+    版本 payload 原样返回 API 且客户端可读，序列化时把 provider 值映射为中性
+    标识。字段名与结构保持不变，客户端读取面不受影响；内部存储值不动。
+    """
+    ref = payload.get("provider_response_ref")
+    if not isinstance(ref, dict):
+        return payload
+    raw = ref.get("raw")
+    if not isinstance(raw, dict) or not isinstance(raw.get("provider"), str):
+        return payload
+    return {
+        **payload,
+        "provider_response_ref": {
+            **ref,
+            "raw": {**raw, "provider": "analysis_gateway"},
+        },
+    }
+
+
 def version_response(row: BusinessRow) -> VersionResponse:
     return VersionResponse(
         id=str(row["id"]),
@@ -1452,7 +1494,7 @@ def version_response(row: BusinessRow) -> VersionResponse:
         asset_id=None if row["asset_id"] is None else str(row["asset_id"]),
         kind=str(row["kind"]),
         version_number=int(row["version_number"]),
-        payload=json.loads(str(row["payload_json"])),
+        payload=external_version_payload(json.loads(str(row["payload_json"]))),
         created_by_user_id=None
         if row["created_by_user_id"] is None
         else str(row["created_by_user_id"]),
