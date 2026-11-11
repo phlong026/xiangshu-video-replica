@@ -265,7 +265,6 @@ def _run_audio_lease(
                 lease=lease,
                 result=result,
                 audio_deleted=work.audio_deleted,
-                from_cache=work.from_cache,
             )
     except Exception as exc:
         with connection() as conn:

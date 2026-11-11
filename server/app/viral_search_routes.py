@@ -25,9 +25,8 @@ from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
-from app.script_from_audio import cached_transcript, cached_transcripts
 from app.usage_billing import finish_source
-from app.viral_routes import ViralVideoItem, viral_copy_purchased
+from app.viral_routes import ViralVideoItem
 from app.viral_search import (
     SEARCH_SERVICE,
     archive_search_covers_bounded,
@@ -127,13 +126,11 @@ ViralSearchSourceClientDep = Annotated[
 def _search_item(
     video: ViralVideo,
     *,
-    has_copy: bool,
     is_favorite: bool = False,
     availability: ViralAvailability = "available",
 ) -> ViralVideoItem:
     item = ViralVideoItem(
         **video.to_client_dict(),
-        hasCopy=has_copy,
         isFavorite=is_favorite,
         availability=availability,
     )
@@ -292,9 +289,6 @@ def search_viral_videos(
                     (SEARCH_SERVICE, source_id, actor.id),
                 ).fetchone()[0]
             )
-            hits = cached_transcripts(
-                conn, [(video.platform, video.video_id) for video in enriched]
-            )
             video_ids = [video.video_id for video in enriched]
             favorite_ids = favorite_viral_video_ids(
                 conn, user_id=actor.id, platform=payload.platform, video_ids=video_ids
@@ -306,7 +300,6 @@ def search_viral_videos(
         items=[
             _search_item(
                 video,
-                has_copy=(video.platform, video.video_id) in hits,
                 is_favorite=video.video_id in favorite_ids,
                 availability=availability_by_id.get(video.video_id, "available"),
             )
@@ -316,14 +309,6 @@ def search_viral_videos(
         hasMore=page.has_more,
         billing=ViralSearchBilling(charged=charged, unit=SERVICES["viral_search"].unit),
     )
-
-
-class ViralCopyStatusResponse(BaseModel):
-    # 共享缓存里有没有这条视频的文案：true = 现在获取即可秒回，false = 要先转写。
-    available: bool
-    updatedAt: str | None
-    # 本付费账号是否已为这条视频付过「获取文案」费：true 时再取不重复扣费。
-    purchased: bool
 
 
 class ViralDiscoveryItem(BaseModel):
@@ -338,35 +323,6 @@ class ViralDiscoveriesResponse(BaseModel):
     date: str
     total: int
     items: list[ViralDiscoveryItem]
-
-
-@router.get("/search/copy", response_model=ViralCopyStatusResponse)
-def get_viral_search_copy(
-    conn: Database,
-    actor: AuthenticatedUser,
-    videoId: Annotated[str, Query(min_length=1, max_length=512)],
-    platform: Literal["douyin", "wechat_channels"] = "douyin",
-) -> ViralCopyStatusResponse:
-    """只读文案状态：有没有、什么时候写的、本账号是不是已经买过.
-
-    **不下发正文**：文案是零售内容，正文只能从 ``POST /videos/copy/claim`` 取，扣费
-    与交付在同一处发生。本端点不触发下载/上传/ASR，也不计费；旧客户端拿到的
-    ``text`` 变成 null 会按「未命中」重走一次提取，由上传链路计费，不会白拿。
-    """
-    hit = cached_transcript(conn, platform=platform, video_id=videoId)
-    purchased = viral_copy_purchased(conn, user_id=actor.id, platform=platform, video_id=videoId)
-    from app.usage_billing import resolve_wallet_owner
-    from app.viral_routes import require_customer_viral_access, viral_copy_producer_wallet
-
-    if not purchased and viral_copy_producer_wallet(
-        conn, platform=platform, video_id=videoId
-    ) != resolve_wallet_owner(conn, actor.id):
-        require_customer_viral_access(conn, actor=actor, platform=platform, video_id=videoId)
-    return ViralCopyStatusResponse(
-        available=hit is not None,
-        updatedAt=hit.updated_at if hit is not None else None,
-        purchased=purchased,
-    )
 
 
 @router.get("/search/discoveries", response_model=ViralDiscoveriesResponse)
@@ -386,10 +342,6 @@ def list_viral_search_discoveries(
             },
         )
     discoveries = list_viral_discoveries(conn, user_id=actor.id, search_date=resolved_date)
-    hits = cached_transcripts(
-        conn,
-        [(item.platform, item.video_id) for item in discoveries if item.video is not None],
-    )
     return ViralDiscoveriesResponse(
         date=resolved_date,
         total=len(discoveries),
@@ -400,7 +352,7 @@ def list_viral_search_discoveries(
                 keyword=item.keyword,
                 searchedAt=item.searched_at,
                 video=(
-                    _search_item(item.video, has_copy=(item.platform, item.video_id) in hits)
+                    _search_item(item.video)
                     if item.video is not None
                     else None
                 ),

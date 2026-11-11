@@ -64,6 +64,8 @@ def record_customer_read(
     platform: str,
     video_id: str,
     user_id: str,
+    # 2026-11-11 共享缓存退役：kind='copy'（claim 交付事件）停写，生产代码
+    # 只传 'detail'；参数保留 Literal 以兼容历史数据口径。
     kind: Literal["detail", "copy"],
 ) -> None:
     # 管理员/审核账号的检查不能污染客户表现；授权重复读取仍是新的实际读取请求。
