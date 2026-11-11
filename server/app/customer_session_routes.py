@@ -109,24 +109,12 @@ from app.customer_session_service import (
 )
 from app.db_pg import get_pg_pool, pg_transaction
 from app.ops_metrics import get_or_create_request_id
-from app.security_rate_limit import (
-    DIMENSION_CUSTOMER_PREAUTH_IP,
-    DIMENSION_LOGIN_ACCOUNT,
-    DIMENSION_LOGIN_IP,
-    client_ip_from_request,
-    consume_rate_limit,
-    customer_preauth_ip_limit,
-    login_account_limit,
-    login_ip_limit,
-    rate_limit_window_seconds,
-)
 
 logger = logging.getLogger(__name__)
 
 REQUEST_ID_HEADER = "X-Request-Id"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REPLAY_HEADER = "X-Idempotent-Replay"
-RETRY_AFTER_HEADER = "Retry-After"
 
 LOGIN_OPERATION = "session_login"
 SWITCH_OPERATION = "session_switch"
@@ -192,21 +180,6 @@ def _require_pg() -> None:
             "SESSION_SERVICE_UNAVAILABLE",
             "Customer sessions require the PostgreSQL runtime.",
         ) from exc
-
-
-def _consume_customer_preauth(request: Request) -> None:
-    with pg_transaction() as conn:
-        decision = consume_rate_limit(
-            conn,
-            dimension=DIMENSION_CUSTOMER_PREAUTH_IP,
-            identifier=client_ip_from_request(request),
-            limit=customer_preauth_ip_limit(),
-            window_seconds=rate_limit_window_seconds(),
-        )
-    if not decision.allowed:
-        blocked = _http(429, "RATE_LIMITED", "Too many customer session requests.")
-        blocked.headers = {RETRY_AFTER_HEADER: str(decision.retry_after_seconds)}
-        raise blocked
 
 
 def _transaction_now(conn: psycopg.Connection) -> datetime:
@@ -543,13 +516,12 @@ def _establish_session_route(
             "Session keys are not configured; customer sessions are refused.",
         ) from None
 
-    # Replay probe *before* the rate limiter (the activation-route T15 review
-    # P2 rule): the sealed 201 is the proof of the completed submission, and
-    # a legitimate retry — the client lost the response of an
-    # already-successful login/switch — must replay without spending any
-    # login:ip budget; charging retries would lock a legal user out of their
-    # own cached response after a few network retries. The probe is read-only
-    # and scoped to the presented credential's digest.
+    # Replay probe *before* the business transaction (the activation-route
+    # T15 review P2 rule): the sealed 201 is the proof of the completed
+    # submission, and a legitimate retry — the client lost the response of an
+    # already-successful login/switch — must replay the cached response
+    # instead of re-driving the state machine. The probe is read-only and
+    # scoped to the presented credential's digest.
     with pg_transaction() as conn:
         found = _find_envelope(
             conn,
@@ -573,40 +545,10 @@ def _establish_session_route(
             response.status_code = replay_status
             return replayed
 
-    # IP-dimension rate limit (T15 shared counters, a separate transaction —
-    # the spent budget is never refunded). Login and switch draw the *same*
-    # login:ip budget: a switch is a login-shaped attempt, and the limiter
-    # must not be bypassable by switching instead.
-    client_ip = client_ip_from_request(request)
-    with pg_transaction() as conn:
-        ip_decision = consume_rate_limit(
-            conn,
-            dimension=DIMENSION_LOGIN_IP,
-            identifier=client_ip,
-            limit=login_ip_limit(),
-            window_seconds=rate_limit_window_seconds(),
-        )
-        account_decision = consume_rate_limit(
-            conn,
-            dimension=DIMENSION_LOGIN_ACCOUNT,
-            identifier=scope_candidates[0],
-            limit=login_account_limit(),
-            window_seconds=rate_limit_window_seconds(),
-        )
-        known_device = True
-        if not ip_decision.allowed:
-            try:
-                known_device = lookup_device_credential(conn, device_token).device is not None
-            except ActivationKeyError:
-                known_device = False
-    if not account_decision.allowed or (not ip_decision.allowed and not known_device):
-        retry_after = max(
-            ip_decision.retry_after_seconds,
-            account_decision.retry_after_seconds,
-        )
-        blocked = _http(429, "RATE_LIMITED", "Too many login attempts from this address.")
-        blocked.headers = {RETRY_AFTER_HEADER: str(retry_after)}
-        raise blocked
+    # 登录/切换通道不设限流预算：设备凭据是 256-bit 不可猜令牌，没有爆破面；
+    # 而冷启动恢复、静默重登与显式切换都走这条通道——扣预算只会把正常用户
+    # 锁在门外（2026-11-02「登录频繁/自动退出」工单根因之一）。防爆破预算
+    # 保留在密码通道的失败路径上（customer_auth_routes）。
 
     # The business transaction: authenticate, gate the code status, take the
     # envelope, drive the state machine, seal the response — one commit.
@@ -792,7 +734,6 @@ def switch(body: LoginRequest, request: Request, response: Response) -> LoginRes
 def heartbeat(request: Request) -> HeartbeatResponse:
     """Renew the session lease (epoch untouched)."""
     _require_pg()
-    _consume_customer_preauth(request)
 
     session_token = _bearer_token(request)
     if session_token is None:
@@ -843,7 +784,6 @@ def heartbeat(request: Request) -> HeartbeatResponse:
 def logout(request: Request, response: Response) -> None:
     """Pull the lease into the past and append the LOGOUT event."""
     _require_pg()
-    _consume_customer_preauth(request)
 
     idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
     if not idempotency_key:
