@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261111T1000_replica_pipeline_tasks"
+      "20261112T1000_replica_pipeline_awaiting_since"
     ],
     "parents": {
       "001_core": null,
@@ -197,9 +197,10 @@
       "20261016T1000_replica_prompt_tasks": "20261014T1200_admin_role_templates",
       "20261101T1000_video_long_tier": "20261016T1000_replica_prompt_tasks",
       "20261102T0900_customer_session_last_seen": "20261101T1000_video_long_tier",
-      "20261111T1000_replica_pipeline_tasks": "20261102T0900_customer_session_last_seen"
+      "20261111T1000_replica_pipeline_tasks": "20261102T0900_customer_session_last_seen",
+      "20261112T1000_replica_pipeline_awaiting_since": "20261111T1000_replica_pipeline_tasks"
     },
-    "revision_count": 178
+    "revision_count": 179
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -925,6 +926,10 @@
     "20261111T1000_replica_pipeline_tasks": {
       "file": "versions/20261111T1000_replica_pipeline_tasks.py",
       "sha256": "04bfd63992def616f3fd914b1434bf483a26ea9a189beb84dae935e664ce7ac5"
+    },
+    "20261112T1000_replica_pipeline_awaiting_since": {
+      "file": "versions/20261112T1000_replica_pipeline_awaiting_since.py",
+      "sha256": "31e47969ff4a6849597042d1d4e6c2215ac18a4ac07333a2b2456b0500c3f510"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

@@ -229,6 +229,7 @@ def test_advance_follows_transition_table_and_rejects_illegal(biz: BusinessConne
             next_status=rp.STATUS_IMPORTING,
             next_stage=rp.STAGE_IMPORT,
             sub_task_id="imp-1",
+            sub_task_column="import_task_id",
         ),
     )
     row = biz.execute(

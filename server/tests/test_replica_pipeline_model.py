@@ -59,6 +59,7 @@ _EXPECTED_COLUMNS: frozenset[str] = frozenset(
         "batch_id",
         "quote_token",
         "quote_snapshot",
+        "awaiting_since",
         "stage_detail",
         "created_at",
         "updated_at",
@@ -70,6 +71,7 @@ _EXPECTED_COLUMNS: frozenset[str] = frozenset(
 # 时间列 timestamptz、JSON 列 jsonb：类型契约落在数据库上（m1-r1#1）。
 _TIMESTAMPTZ_COLUMNS: frozenset[str] = frozenset(
     {
+        "awaiting_since",
         "suspended_at",
         "locked_until",
         "next_poll_at",

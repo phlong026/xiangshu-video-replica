@@ -333,7 +333,8 @@ class AdvanceDecision:
     kind: str  # "completed" | "waiting" | "failed"
     next_status: str | None = None
     next_stage: str | None = None
-    sub_task_id: str | None = None  # 该阶段子任务 id（回填进 *_task_id 列）
+    sub_task_id: str | None = None  # 该阶段产出的子任务/版本 id
+    sub_task_column: str | None = None  # 回填列名（产出阶段的列，非进入阶段）
     failure_reason: str = ""
     failure_code: str = ""
     retryable: bool = False
@@ -466,6 +467,7 @@ def advance_status(
         "status = %s",
         "updated_at = now()",
         "next_poll_at = now()",
+        "stage_retry_no = 0",  # 阶段推进重置业务重试预算（评审 A-r2#9）
         "locked_by = NULL",
         "locked_until = NULL",
     ]
@@ -473,9 +475,10 @@ def advance_status(
     if decision.next_stage:
         updates.insert(1, "stage = %s")
         params.append(decision.next_stage)
-    if decision.sub_task_id is not None and decision.next_stage:
-        column = _SUB_TASK_COLUMN.get(decision.next_stage)
-        if column is not None:
+    if decision.sub_task_id is not None:
+        column = decision.sub_task_column
+        # 严格白名单防止列名注入（AdvanceDecision 由本模块构造，仍不信任字面量）。
+        if column is not None and column in _SUB_TASK_COLUMNS:
             updates.insert(2, f"{column} = COALESCE({column}, %s)")
             params.append(decision.sub_task_id)
     params.extend([lease.id, lease.attempt, lease.worker_id])
@@ -488,14 +491,17 @@ def advance_status(
     _assert_lease_write_applied(moved)
 
 
-_SUB_TASK_COLUMN: dict[str, str] = {
-    STAGE_IMPORT: "import_task_id",
-    STAGE_ANALYZE: "analysis_task_id",
-    STAGE_SCRIPT: "script_version_id",
-    STAGE_FIRST_FRAME: "first_frame_task_id",
-    STAGE_COMPOSE: "prompt_version_id",
-    STAGE_GENERATE: "batch_id",
-}
+# 子任务/版本引用可回填列的白名单（列名来自本文件常量，SQL 拼接安全）。
+_SUB_TASK_COLUMNS: frozenset[str] = frozenset(
+    {
+        "import_task_id",
+        "analysis_task_id",
+        "script_version_id",
+        "first_frame_task_id",
+        "prompt_version_id",
+        "batch_id",
+    }
+)
 
 
 def settle_failure(
