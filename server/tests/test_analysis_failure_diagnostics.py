@@ -212,7 +212,8 @@ def test_provider_logs_carry_the_analysis_task_reference(
                 transport.post("https://api.apilio.ai/v1/chat/completions", headers={}, body=b"{}")
 
     assert "task=t-1 project=p-1 asset=a-1" in caplog.text
-    assert "HTTP status 400" in caplog.text
+    assert "HTTP 状态 400" in caplog.text
+    assert "Apilio" not in caplog.text
 
 
 def test_provider_logs_outside_a_task_context_stay_labelled(

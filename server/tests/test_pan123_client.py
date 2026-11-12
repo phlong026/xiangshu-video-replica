@@ -510,7 +510,7 @@ def test_connection_probe_errors_do_not_expose_supplier_or_upstream_message(monk
 async def test_failed_upload_removes_temporary_file(monkeypatch, tmp_path, fail_at):
     from types import SimpleNamespace
 
-    from fastapi import HTTPException, Response, UploadFile
+    from fastapi import HTTPException, Request, Response, UploadFile
     from starlette.datastructures import Headers
 
     from app import training_material_routes as routes
@@ -532,9 +532,17 @@ async def test_failed_upload_removes_temporary_file(monkeypatch, tmp_path, fail_
         filename="test.mp4",
         headers=Headers({"content-type": "video/mp4"}),
     )
-    with pytest.raises(HTTPException):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/control/training-materials",
+            "headers": [(b"idempotency-key", b"temporary-file-cleanup")],
+        }
+    )
+    with pytest.raises(HTTPException) as caught:
         await routes.create_training_material(
-            None,
+            request,
             Response(),
             SimpleNamespace(user_id="test-user"),
             upload,
@@ -543,6 +551,7 @@ async def test_failed_upload_removes_temporary_file(monkeypatch, tmp_path, fail_
             confirm=True,
             reason="测试",
         )
+    assert caught.value.status_code == 503
     assert list(tmp_path.iterdir()) == []
 
 
