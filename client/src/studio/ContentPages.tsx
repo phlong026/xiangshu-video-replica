@@ -9,7 +9,6 @@ import type {
   ViralVideoItem,
 } from "../api";
 import {
-  bulkUpdateMaterials,
   cancelReplicaPipeline,
   confirmReplicaPipeline,
   createMaterialUploadIntent,
@@ -17,7 +16,6 @@ import {
   createViralImportTask,
   downloadMaterialAsset,
   downloadVideoToFile,
-  evictMaterialCachedPreview,
   fetchReplicaPipeline,
   fetchViralVideoMedia,
   fetchViralVideoSource,
@@ -25,13 +23,9 @@ import {
   getAssetDownloadUrl,
   getStudioDraft,
   getViralImportTask,
-  hideMaterial,
   initiateReplicaPipeline,
-  listTrainingMaterials,
-  listMaterialGroups,
-  listMaterials,
-  listMaterialTags,
   listReplicaPipelineCharacters,
+  listTrainingMaterials,
   listViralFavorites,
   listViralVideos,
   newViralSearchKey,
@@ -112,7 +106,6 @@ import {
 } from "./viralImport";
 import "./content.css";
 
-// biome-ignore lint/correctness/noUnusedVariables: review 模式的精选分类列表在用
 const categoryTabs = ["全部", "建房预算", "户型设计", "施工避坑", "庭院案例"];
 
 /** MATERIAL-PERF-A（P0-1）：分页按钮窗口化——始终含首末页与当前页 ±1，
