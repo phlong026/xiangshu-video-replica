@@ -10,7 +10,7 @@
 from alembic import op
 
 revision = "20261111T1000_uncertain_auto_reopen"
-down_revision = "20261102T0900_customer_session_last_seen"
+down_revision = "20261112T1100_replica_pipeline_switch"
 branch_labels = None
 depends_on = None
 
