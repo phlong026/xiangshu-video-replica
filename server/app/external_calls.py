@@ -57,6 +57,10 @@ _SECRET_KEYS = frozenset(
         "sign",
         "sig",
         "signature",
+        # 123网盘直链防盗链参数（expire-rand-uid-md5 拼串）：持有即可访问直链，
+        # 敏感等级与 sign 相同。出现于 URL 查询与 downloadUrl JSON 字段两条路径。
+        "auth_key",
+        "authkey",
         "token",
         "access_token",
         "refresh_token",
