@@ -1396,14 +1396,6 @@ function ViralCard({
         </h3>
         <ViralStatisticsNote video={video} />
         <div className="viral-card-tags">
-          {video.hasCopy && (
-            <span
-              className="viral-card-copy"
-              title="文案已提取过，可在文案工坊直接复用"
-            >
-              已有文案
-            </span>
-          )}
           {video.tags?.slice(0, 6).map((tag) => (
             <span key={tag} title={`#${tag}`}>
               #{tag}
@@ -2413,7 +2405,6 @@ export function ViralDetailPage() {
     patchState,
     updateData,
     extractScriptFromUpload,
-    extractViralCopy,
   } = useStudio();
   const accountId = user.id;
   const selectedVideo = state.selectedVideoId
@@ -2532,7 +2523,7 @@ export function ViralDetailPage() {
     beginReplicateRef.current();
   }, [state.viralReplicateIntent, video, notify, patchState]);
   // 卡片「提取文案」直达：与复刻意图同款即焚消费，复用下方 requestExtract
-  // 的双端分流（桌面本地抽音轨 / Web claim-first 回落服务端导入）。
+  // 的服务端导入 → 转写链路。
   useEffect(() => {
     if (!state.viralExtractIntent || !video) return;
     patchState({ viralExtractIntent: false });
@@ -2594,36 +2585,17 @@ export function ViralDetailPage() {
       sourceId: task.sourceAssetId,
       sourceAssetId: task.sourceAssetId,
     });
-    // Web 降级链路（本地无缓存，素材由服务端导入）：同样带上视频身份，转写完成后
-    // 走一次「获取文案」取正文（计费以服务端 claim 回执为准）。
-    // 没有平台标识就没法关联文案，只能按普通转写处理（这类条目本就进不了爆款列表）。
-    const copyClaim =
-      video.platformKey && video.nativeId
-        ? { platformKey: video.platformKey, nativeId: video.nativeId }
-        : undefined;
-    extractScriptFromUpload(
-      task.projectId,
-      task.sourceAssetId,
-      undefined,
-      copyClaim,
-    );
+    // 服务端导入链路：正文随本人转写任务直出（共享文案缓存已退役），
+    // 不再需要携带视频身份回「获取文案」取正文。
+    extractScriptFromUpload(task.projectId, task.sourceAssetId);
     navigate("copy", {
       selectedVideoId: video.id,
       returnTo: "viral-detail",
     });
   };
-  // 统一 claim-first（2026-11 爆款链路改造 WP3）：本地抽音轨上传已随
-  // POST /videos/copy 退役，桌面与 Web 同一动作——先取共享文案，命中即秒回并
-  // 跳过整次导入；未命中回落服务端导入 → 转写链路。详情页视频必然来自已发布
-  // 的公开列表，claim 不会因可见性 404。
+  // 提取文案统一走服务端导入 → 转写：每个用户各自转写各自计费，
+  // 不再先查共享文案缓存分流。
   const requestExtract = () => {
-    if (video.platformKey && video.nativeId) {
-      // 未命中时留在本页等导入进度，不提前跳转：导入完成后由 goExtract 导航。
-      extractViralCopy(video, {
-        onCacheMiss: () => void start(video, "copy", goExtract),
-      });
-      return;
-    }
     void start(video, "copy", goExtract);
   };
   // 卡片「提取文案」意图的晚绑定入口（定义在 early return 之后，ref 保序）。

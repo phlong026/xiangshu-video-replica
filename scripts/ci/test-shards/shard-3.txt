@@ -43,7 +43,7 @@ server/tests/test_simple_character_source_normalization.py
 server/tests/test_storage.py
 server/tests/test_t29_sub_account_token_ledger.py
 server/tests/test_usage_billing.py
-server/tests/test_viral_audio_shared_cache_pg.py
+server/tests/test_viral_copy_simplify_pg.py
 server/tests/test_viral_media.py
 server/tests/test_wallet_billing_service.py
 server/tests/test_wallet_pricing_breakdown.py

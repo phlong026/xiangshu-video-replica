@@ -640,10 +640,11 @@ def read_viral_import_task(
 def extract_viral_video_copy() -> NoReturn:
     """客户端音轨上传已退役（2026-11 爆款链路改造 WP2）：提取文案统一走服务端导入转写.
 
-    保留路由壳返回 410 引导旧桌面客户端升级，而不是裸 404；文案与交付计费的
-    唯一口径仍是 ``POST /videos/copy/claim``。上传受理原语（register_viral_copy_source
-    与 viral_copy_uploads）保留在原模块，服务存量凭据回收与历史任务夹具，生产
-    代码不再触达。
+    保留路由壳返回 410 引导旧桌面客户端升级，而不是裸 404。2026-11-11 极简化
+    之后文案正文随本人转写任务 ``result.text`` 直接下发（claim 交付已退役为
+    410 壳），本端点不再参与计费。上传受理原语（register_viral_copy_source
+    与 viral_copy_uploads）保留在原模块，服务存量凭据回收与历史任务夹具，
+    生产代码不再触达。
     """
     raise HTTPException(
         status_code=410,

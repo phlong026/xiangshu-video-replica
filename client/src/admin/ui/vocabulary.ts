@@ -30,7 +30,6 @@ export const CONTENT_FUNNEL_LABELS: LabelMap = {
   prepared: "素材就绪",
   homepage: "首页展示",
   detail: "客户打开详情",
-  copy: "获取文案",
 };
 
 export const ACTIVATION_CODE_STATUS_LABELS: LabelMap = {

@@ -163,8 +163,6 @@ export type StudioVideo = {
   likeDisplay?: string | null;
   tags?: string[];
   hasPlayableAudio?: boolean;
-  /** 共享文案缓存命中：卡片可展示「已有文案」角标。 */
-  hasCopy?: boolean;
   /** 「查看详情」已购买：同账号同视频只扣一次，卡片据此免报价。 */
   detailCharged?: boolean;
   /** 爆款源视频时长（毫秒）：详情页按时长分流复刻入口（≤15s 才可复刻）。 */
@@ -432,32 +430,11 @@ export type StudioContextValue = {
   /** 确认终稿：云端保存成功后置 confirmed；项目已有分镜时再同步项目脚本。 */
   confirmFinalDraft: () => void;
   /** 上传来源视频 → 提取文案（script-from-audio）→ 回填草稿并跳文案工坊。
-   * 爆款来源额外带 `copyClaim`（视频的平台与原生 ID）：转写完成后凭它回获取接口
-   * 取正文（计费以服务端 claim 回执为准）；转写费落在 ASR 科目。 */
+   * 正文随本人任务直出（2026-11-11 共享文案缓存退役）；转写费落在 ASR 科目。 */
   extractScriptFromUpload: (
     projectId?: string,
     assetId?: string,
     preparedTaskId?: string,
-    copyClaim?: { platformKey: string; nativeId: string },
-  ) => void;
-  /**
-   * 爆款文案提取（双端统一入口）：
-   * - 桌面端：本地抽音轨 → 上传 → 转写 → 回填；共享缓存命中则直接填入（内部先 claim）。
-   * - Web 端（无本地缓存）：先取共享文案——命中即秒回填入、跳过整次导入
-   *   （交付免费）；未命中回落 `onCacheMiss`（导入 → 转写 → claim 交付）。
-   */
-  extractViralCopy: (
-    video: {
-      /** 命中共享缓存时要补建文案项目，用它作项目名（缺省回落到固定名）。 */
-      title?: string;
-      platformKey?: string;
-      nativeId?: string;
-      playUrl?: string | null;
-    },
-    options?: {
-      /** Web 端专用：共享缓存未命中时的回落链路（服务端导入 → 转写）。 */
-      onCacheMiss?: () => void;
-    },
   ) => void;
   refresh: () => void;
 };

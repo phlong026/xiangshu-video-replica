@@ -307,7 +307,6 @@ function studio(
     discardSavedDraft: vi.fn(),
     confirmFinalDraft: vi.fn(),
     extractScriptFromUpload: vi.fn(),
-    extractViralCopy: vi.fn(),
     refresh: vi.fn(),
     ...overrides,
   };

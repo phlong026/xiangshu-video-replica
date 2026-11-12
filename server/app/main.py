@@ -35,6 +35,7 @@ from app.admin_search_routes import router as admin_search_router
 from app.admin_session_routes import router as admin_session_router
 from app.admin_support_ticket_routes import router as support_ticket_router
 from app.admin_team_routes import router as admin_team_router
+from app.admin_uncertain_auto_reopen_routes import router as uncertain_auto_reopen_router
 from app.admin_worker_observation_routes import router as worker_observation_router
 from app.analysis_routes import router as analysis_router
 from app.announcement_routes import router as announcement_router
@@ -407,6 +408,7 @@ app.include_router(admin_dashboard_router)
 app.include_router(admin_search_router)
 app.include_router(admin_customer_router)
 app.include_router(customer_ops_params_router)
+app.include_router(uncertain_auto_reopen_router)
 app.include_router(customer_lifecycle_router)
 app.include_router(admin_customer_benefit_router)
 app.include_router(admin_customer_annotation_router)

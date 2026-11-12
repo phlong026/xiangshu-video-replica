@@ -226,12 +226,6 @@ function studio(
     discardSavedDraft: vi.fn(),
     confirmFinalDraft: vi.fn(),
     extractScriptFromUpload: vi.fn(),
-    extractViralCopy: vi.fn(
-      (_video: unknown, options?: { onCacheMiss?: () => void }) => {
-        // 默认模拟「共享缓存未命中」：回落导入 → 转写链路，与既有用例预期一致。
-        options?.onCacheMiss?.();
-      },
-    ),
     refresh: vi.fn(),
     ...overrides,
   };
@@ -1232,8 +1226,6 @@ describe("V1.4 工作台新版首页布局", () => {
     expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
       "project-home",
       "asset-home",
-      undefined,
-      { platformKey: "douyin", nativeId: "native-home" },
     );
   });
 

@@ -19,12 +19,12 @@ def content_overview(
     counts = conn.execute(
         f"WITH cohort AS ({cohort}) SELECT "
         + ",".join(f"count(*) FILTER(WHERE {condition})" for condition in STAGES.values())
-        + ",count(*) FILTER(WHERE copy AND NOT detail) FROM cohort",
+        + " FROM cohort",
         tuple(cohort_params),
     ).fetchone()
     steps = []
     previous = None
-    for index, name in enumerate(("本期采集", "素材就绪", "首页展示", "客户打开详情", "获取文案")):
+    for index, name in enumerate(("本期采集", "素材就绪", "首页展示", "客户打开详情")):
         count = int(counts[index])
         steps.append(
             {
@@ -131,7 +131,6 @@ def content_overview(
         "historyNote": "采集来源和实际读取从起计时点记录；更早的批次、读取次数无法还原。",
         "funnel": steps,
         "sourcesByKind": [{"sourceKind": str(r[0]), "videos": int(r[1])} for r in sources_by_kind],
-        "directCopyWithoutDetail": int(counts[5]),
         "finance": {
             "knownRevenueFen": known_revenue,
             "unknownRevenueCount": unknown_revenue,

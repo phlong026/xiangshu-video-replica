@@ -35,14 +35,13 @@ def write_viral_metadata_snapshot(
     storage: StorageAdapter,
     video: ViralVideo,
     *,
-    copy_text: str | None = None,
-    copy_updated_at: str | None = None,
     pushed_at: str | None = None,
 ) -> str:
     """把视频元数据快照写进主存储，返回对象 key.
 
     快照是媒体对象的附属说明，不是数据真源：文案后续回填、统计刷新都只落
-    数据库，快照只反映推送（或转存）那一刻的状态。
+    数据库，快照只反映推送（或转存）那一刻的状态。2026-11-11 共享缓存退役，
+    快照不再携带共享文案字段。
     """
     snapshot: dict[str, Any] = {
         "snapshotVersion": 1,
@@ -65,9 +64,6 @@ def write_viral_metadata_snapshot(
         "likeDisplay": video.like_display,
         "tags": list(video.tags),
         "native": dict(video.native),
-        "copy": (
-            {"text": copy_text, "updatedAt": copy_updated_at} if copy_text is not None else None
-        ),
         "pushedAt": pushed_at,
     }
     payload = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")

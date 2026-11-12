@@ -348,20 +348,13 @@ def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video
                 update_viral_cover(
                     conn, platform=lease.platform, video_id=video_id, cover_key=cover.cover_key
                 )
-            # 元数据快照与媒体对象同批落存储（生产线 #48 批次）：附上已回填文案
-            # （若共享缓存已有），供追溯与排查；数据库仍是唯一真源。
-            from app.script_from_audio import cached_transcript
+            # 元数据快照与媒体对象同批落存储（生产线 #48 批次）；数据库仍是唯一
+            # 真源。2026-11-11 共享缓存退役后快照不再携带共享文案字段。
             from app.viral_push import write_viral_metadata_snapshot
 
-            hit = cached_transcript(conn, platform=lease.platform, video_id=video_id)
             refreshed = get_viral_video(conn, platform=lease.platform, video_id=video_id)
             if refreshed is not None:
-                write_viral_metadata_snapshot(
-                    storage,
-                    refreshed,
-                    copy_text=None if hit is None else hit.result.text,
-                    copy_updated_at=None if hit is None else str(hit.updated_at or "") or None,
-                )
+                write_viral_metadata_snapshot(storage, refreshed)
             # 单条转存与批量转存同样标记素材就绪（ADM-C 批次）：此前只有批量路径
             # 记录，单条准备的素材在漏斗"素材就绪"阶段永久缺失。
             record_content_stage(conn, platform=lease.platform, video_id=video_id, stage="prepared")

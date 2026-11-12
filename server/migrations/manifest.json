@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261112T1100_replica_pipeline_switch"
+      "20261111T1000_uncertain_auto_reopen"
     ],
     "parents": {
       "001_core": null,
@@ -198,10 +198,11 @@
       "20261101T1000_video_long_tier": "20261016T1000_replica_prompt_tasks",
       "20261102T0900_customer_session_last_seen": "20261101T1000_video_long_tier",
       "20261111T1000_replica_pipeline_tasks": "20261102T0900_customer_session_last_seen",
+      "20261111T1000_uncertain_auto_reopen": "20261112T1100_replica_pipeline_switch",
       "20261112T1000_replica_pipeline_awaiting_since": "20261111T1000_replica_pipeline_tasks",
       "20261112T1100_replica_pipeline_switch": "20261112T1000_replica_pipeline_awaiting_since"
     },
-    "revision_count": 180
+    "revision_count": 181
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -927,6 +928,10 @@
     "20261111T1000_replica_pipeline_tasks": {
       "file": "versions/20261111T1000_replica_pipeline_tasks.py",
       "sha256": "04bfd63992def616f3fd914b1434bf483a26ea9a189beb84dae935e664ce7ac5"
+    },
+    "20261111T1000_uncertain_auto_reopen": {
+      "file": "versions/20261111T1000_uncertain_auto_reopen.py",
+      "sha256": "200fd7c349fa9a335c479ebe96923357efe84d35346ac56cde171f85dbde77c2"
     },
     "20261112T1000_replica_pipeline_awaiting_since": {
       "file": "versions/20261112T1000_replica_pipeline_awaiting_since.py",

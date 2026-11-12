@@ -146,7 +146,8 @@ export const BILLING_SERVICE_NAMES: Record<string, string> = {
   viral_search_refresh: "爆款视频刷新",
   viral_statistics: "爆款视频互动统计",
   viral_detail: "爆款视频详情",
-  viral_copy: "爆款视频文案",
+  // 2026-11-11 共享文案缓存退役：viral_copy 科目停收新账，历史审计行仍会出现。
+  viral_copy: "爆款视频文案（已停用）",
   link_resolution: "链接解析",
   prompt_optimize: "提示词 AI 优化",
   avatar_clone: "口播分身创建",

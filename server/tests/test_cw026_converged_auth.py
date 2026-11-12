@@ -708,10 +708,13 @@ def _expand_routes(app: object) -> list[tuple[str, str, tuple[str, ...]]]:
 def classify(method: str, path: str, deps: tuple[str, ...]) -> str:
     if not path.startswith("/api/"):
         return "PUBLIC_INFRA"
-    if method == "POST" and path == "/api/viral/videos/copy":
-        # 2026-11 爆款链路改造：客户端音轨上传退役为 410 壳——无依赖、不触库
-        # 的墓碑路由，任何请求一律 410 引导升级（保留路由是为了旧桌面客户端
-        # 拿到明确错误码而不是裸 404）。
+    if method == "POST" and path in (
+        "/api/viral/videos/copy",
+        "/api/viral/videos/copy/claim",
+    ):
+        # 2026-11 爆款链路改造：客户端音轨上传与 claim 交付先后退役为 410 壳——
+        # 无依赖、不触库的墓碑路由，任何请求一律 410 引导升级（保留路由是为了
+        # 旧桌面客户端拿到明确错误码而不是裸 404）。
         return "RETIRED_ENDPOINT"
     # get_current_user_short_tx：认证语义与 get_current_user 相同的短事务变体
     # （2026-11-02 池饿死事故后为分钟级上传路由引入），归同一读车道。

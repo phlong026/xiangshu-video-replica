@@ -133,10 +133,7 @@ const live = vi.hoisted(() => ({
       text: "",
     }),
   ),
-  extractViralCopy: vi.fn(),
   awaitScriptFromAudioTask: vi.fn(),
-  // 爆款正文交付与计费点：默认未命中，具体用例再覆盖。
-  claimExtractedViralCopy: vi.fn(async (): Promise<string | null> => null),
 }));
 vi.mock("./live", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -146,16 +143,7 @@ vi.mock("./live", async (importOriginal) => ({
 // 视频生成（C2）：只覆盖新引入的四个 api 出口，其余保持原模块行为，
 // 避免既有用例（不触发这些函数）受 mock 影响。
 const api = vi.hoisted(() => ({
-  // Web 端 claim-first 的交付计费点：默认「未命中」，具体用例再覆盖。
-  claimViralCopy: vi.fn(),
   createViralImportTask: vi.fn(),
-  // 命中共享缓存且草稿没有项目时客户端就地补建项目；默认给一条可用回执。
-  createProject: vi.fn(async (name: string) => ({
-    id: "project-claimed-copy",
-    owner_user_id: "review-user",
-    name,
-    status: "ACTIVE",
-  })),
   completeMaterialUpload: vi.fn(),
   createMaterialUploadIntent: vi.fn(),
   customerGetWallet: vi.fn(),
@@ -782,13 +770,6 @@ describe("V1.4 workspace integration", () => {
     live.loadLatestScriptFromUpload.mockResolvedValue(null);
     live.loadProjectDraft.mockReset();
     api.createViralImportTask.mockReset();
-    api.claimViralCopy.mockReset();
-    // Web claim-first 默认未命中：既有用例继续走导入 → 转写链路。
-    api.claimViralCopy.mockResolvedValue({
-      text: null,
-      updatedAt: null,
-      billing: { charged: 0, unit: "call", deduped: false, billable: true },
-    });
     live.loadViralVideos.mockResolvedValue({ videos: [], errors: [] });
     api.customerGetWallet.mockReset();
     api.getWallet.mockReset();
@@ -2439,9 +2420,8 @@ describe("V1.4 workspace integration", () => {
           "copy",
           expect.any(String),
         );
-        // 工作台两端统一直接服务端导入（WP3）：不前置 claim——新链接尚无 owner
-        // 旁路，claim 只会 404；命中共享缓存由入队秒回承担，交付走转写完成后的 claim。
-        expect(api.claimViralCopy).not.toHaveBeenCalled();
+        // 工作台两端统一直接服务端导入：正文随本人转写任务直出，不再有
+        // claim 旁路（共享文案缓存已退役）。
         expect(await screen.findByLabelText("来源原文")).toHaveValue(
           "新来源的提取结果",
         );
@@ -2449,11 +2429,11 @@ describe("V1.4 workspace integration", () => {
       },
     );
 
-    it("工作台提取文案命中共享缓存：入队秒回任务，交付走完成后的 claim", async () => {
+    it("工作台爆款提取：入队后转写任务直出正文并回填", async () => {
       const source = {
         ...createReviewData().videos[0],
         id: "cached-viral",
-        title: "已有文案的爆款",
+        title: "自带转写正文的爆款",
         homepageFeatured: true,
         platformKey: "douyin" as const,
         nativeId: "cached-native",
@@ -2467,7 +2447,6 @@ describe("V1.4 workspace integration", () => {
         errors: [],
       });
       live.loadCloudDraft.mockResolvedValue(undefined);
-      // 入队时服务端共享缓存命中：导入任务秒回 SUCCEEDED，正文不在任务接口下发。
       api.createViralImportTask.mockResolvedValue({
         taskId: "cached-import",
         status: "SUCCEEDED",
@@ -2476,15 +2455,8 @@ describe("V1.4 workspace integration", () => {
         canTranscribe: true,
       });
       live.extractScriptFromUpload.mockResolvedValue({
-        // mock 工厂签名是 { text: string }；空串表示正文不下发，额外的
-        // viralSource/copyClaimRequired 字段运行时照常驱动 claim 分支。
-        text: "",
-        taskId: "cached-import",
-        status: "SUCCEEDED",
-        viralSource: { platform: "douyin", videoId: "cached-native" },
-        copyClaimRequired: true,
-      } as unknown as { text: string });
-      live.claimExtractedViralCopy.mockResolvedValue("共享缓存里的文案");
+        text: "任务直出的转写正文",
+      });
       render(
         <StudioWorkspace
           currentUser={reviewUser}
@@ -2492,7 +2464,9 @@ describe("V1.4 workspace integration", () => {
         />,
       );
       fireEvent.click(
-        await screen.findByRole("button", { name: "提取文案：已有文案的爆款" }),
+        await screen.findByRole("button", {
+          name: "提取文案：自带转写正文的爆款",
+        }),
       );
       await waitFor(() =>
         expect(api.createViralImportTask).toHaveBeenCalledWith(
@@ -2502,16 +2476,15 @@ describe("V1.4 workspace integration", () => {
           expect.any(String),
         ),
       );
-      // 工作台不前置 claim（WP3 统一）；交付点是转写完成后的 claimExtractedViralCopy。
+      // 正文随本人任务直出：转写完成即回填，无需 claim 交付。
       await waitFor(() =>
-        expect(live.claimExtractedViralCopy).toHaveBeenCalledWith(
-          "douyin",
-          "cached-native",
-          "cached-import",
+        expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
+          "cached-project",
+          "cached-asset",
         ),
       );
       expect(await screen.findByLabelText("来源原文")).toHaveValue(
-        "共享缓存里的文案",
+        "任务直出的转写正文",
       );
     });
 
@@ -2790,183 +2763,19 @@ describe("V1.4 workspace integration", () => {
       );
     });
 
-    it.each([false, true])(
-      "同事件换来源后桌面缓存%s回填并保存",
-      async (delayed) => {
-        extractionProbe.desktop = true;
-        live.loadStudioData.mockResolvedValue(emptyStudioData);
-        live.loadCloudDraft.mockResolvedValue(undefined);
-        let complete!: (value: unknown) => void;
-        const claimed = {
-          text: "新视频原文",
-          updatedAt: "t",
-          billing: {
-            charged: 0,
-            unit: "call",
-            deduped: false,
-            billable: false,
-          },
-        };
-        api.claimViralCopy.mockImplementation(() =>
-          delayed
-            ? new Promise((resolve) => {
-                complete = resolve;
-              })
-            : Promise.resolve(claimed),
-        );
-        render(
-          <StudioWorkspace
-            currentUser={reviewUser}
-            initialState={createState("workbench")}
-          />,
-        );
-        await waitFor(() => expect(extractionProbe.current).not.toBeNull());
-        act(() => {
-          currentExtractionContext().patchDraft({ sourceId: "viral-new" });
-          currentExtractionContext().extractViralCopy(
-            { platformKey: "douyin", nativeId: "new" },
-            { onCacheMiss: () => undefined },
-          );
-        });
-        if (delayed) await act(async () => complete(claimed));
-        expect(await screen.findByLabelText("来源原文")).toHaveValue(
-          "新视频原文",
-        );
-        await waitFor(
-          () =>
-            expect(live.persistCloudDraft).toHaveBeenCalledWith(
-              expect.objectContaining({
-                sourceId: "viral-new",
-                script: expect.objectContaining({ original: "新视频原文" }),
-              }),
-              undefined,
-            ),
-          { timeout: 4000 },
-        );
-        expect(api.claimViralCopy).toHaveBeenCalledTimes(1);
-      },
-    );
-
-    // 命中共享缓存既没有导入任务也没有项目，而文案工坊的改写/保存版本都以项目为归属：
-    // 不补项目，用户拿得到原文却二创不了，只会停在「当前文案缺少来源项目」。
-    it("命中共享缓存且草稿没有项目时就地补建项目并落回正文", async () => {
-      extractionProbe.desktop = true;
-      live.loadStudioData.mockResolvedValue(emptyStudioData);
-      live.loadCloudDraft.mockResolvedValue(undefined);
-      api.claimViralCopy.mockResolvedValue({
-        text: "缓存命中的原文",
-        updatedAt: "t",
-        billing: { charged: 0, unit: "call", deduped: false, billable: false },
-      });
-      render(
-        <StudioWorkspace
-          currentUser={reviewUser}
-          initialState={createState("workbench")}
-        />,
-      );
-      await waitFor(() => expect(extractionProbe.current).not.toBeNull());
-      await act(async () => {
-        currentExtractionContext().patchDraft({ sourceId: "viral-claimed" });
-        currentExtractionContext().extractViralCopy(
-          {
-            title: "乡墅案例",
-            platformKey: "douyin",
-            nativeId: "claimed",
-          },
-          { onCacheMiss: () => undefined },
-        );
-      });
-
-      await waitFor(() =>
-        expect(api.createProject).toHaveBeenCalledWith("乡墅案例"),
-      );
-      await waitFor(() =>
-        expect(currentExtractionContext().state.draft.projectId).toBe(
-          "project-claimed-copy",
-        ),
-      );
-      expect(currentExtractionContext().state.draft.script.original).toBe(
-        "缓存命中的原文",
-      );
-      expect(await screen.findByLabelText("来源原文")).toHaveValue(
-        "缓存命中的原文",
-      );
-      expect(screen.queryByText(/缺少来源项目/)).toBeNull();
-    });
-
-    it.each(["cache", "error"])(
-      "快速换源后忽略旧 claim %s 响应",
-      async (kind) => {
-        extractionProbe.desktop = true;
-        live.loadStudioData.mockResolvedValue(emptyStudioData);
-        live.loadCloudDraft.mockResolvedValue(undefined);
-        let complete!: (value: unknown) => void;
-        let fail!: (cause: Error) => void;
-        api.claimViralCopy.mockImplementation(
-          () =>
-            new Promise((resolve, reject) => {
-              complete = resolve;
-              fail = reject;
-            }),
-        );
-        render(
-          <StudioWorkspace
-            currentUser={reviewUser}
-            initialState={createState("workbench")}
-          />,
-        );
-        act(() => {
-          currentExtractionContext().patchDraft({ sourceId: "viral-a" });
-          currentExtractionContext().extractViralCopy(
-            { platformKey: "douyin", nativeId: "a" },
-            { onCacheMiss: () => undefined },
-          );
-        });
-        act(() =>
-          currentExtractionContext().patchDraft({ sourceId: "viral-b" }),
-        );
-        await act(async () =>
-          kind === "error"
-            ? fail(new Error("旧源失败"))
-            : complete({
-                text: "A原文",
-                updatedAt: "t",
-                billing: {
-                  charged: 0,
-                  unit: "call",
-                  deduped: false,
-                  billable: false,
-                },
-              }),
-        );
-        expect(currentExtractionContext().state.draft.sourceId).toBe("viral-b");
-        expect(currentExtractionContext().state.draft.script.original).not.toBe(
-          "A原文",
-        );
-        expect(screen.queryByText("旧源失败")).not.toBeInTheDocument();
-        expect(live.awaitScriptFromAudioTask).not.toHaveBeenCalled();
-      },
-    );
-
-    it("共享任务身份领取一次并防恢复路径重复领取", async () => {
-      extractionProbe.desktop = true;
+    it("任务直出正文一次交付，恢复链路不重复回填", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
       live.awaitScriptFromAudioTask.mockResolvedValue({
-        text: null,
+        text: "任务直出的正文",
         taskId: "owned",
-        viralSource: { platform: "douyin", videoId: "new" },
-        copyClaimRequired: true,
       });
       live.loadLatestScriptFromUpload.mockResolvedValue({
         id: "owned",
         status: "SUCCEEDED",
         sourceAssetId: "asset-new",
-        result: { text: null },
-        copyClaimRequired: true,
-        viralSource: { platform: "douyin", videoId: "new" },
+        result: { text: "任务直出的正文" },
       });
-      live.claimExtractedViralCopy.mockResolvedValue("已领取正文");
       render(
         <StudioWorkspace
           currentUser={reviewUser}
@@ -2979,7 +2788,7 @@ describe("V1.4 workspace integration", () => {
           projectId: "project-new",
           sourceAssetId: "asset-new",
         });
-        // 统一链路（WP3）后 task 回执来自服务端导入转写，入口与上传链路同通道。
+        // preparedTaskId 通道：任务回执来自服务端导入转写，入口与上传链路同通道。
         currentExtractionContext().extractScriptFromUpload(
           "project-new",
           "asset-new",
@@ -2987,77 +2796,23 @@ describe("V1.4 workspace integration", () => {
         );
       });
       expect(await screen.findByLabelText("来源原文")).toHaveValue(
-        "已领取正文",
-      );
-      expect(live.claimExtractedViralCopy).toHaveBeenCalledExactlyOnceWith(
-        "douyin",
-        "new",
-        "owned",
+        "任务直出的正文",
       );
       expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+      // 主链已交付：恢复链路读到同一任务时按交付幂等键跳过，不再重复回填。
+      expect(screen.queryByText(/文案提取已完成，已恢复到当前草稿/)).toBeNull();
     });
 
-    it.each([false, true])(
-      "旧任务晚完成%s不领取或污染新来源",
-      async (privateText) => {
-        live.loadStudioData.mockResolvedValue(emptyStudioData);
-        live.loadCloudDraft.mockResolvedValue(undefined);
-        let complete!: (value: unknown) => void;
-        live.awaitScriptFromAudioTask.mockImplementation(
-          () =>
-            new Promise((resolve) => {
-              complete = resolve;
-            }),
-        );
-        render(
-          <StudioWorkspace
-            currentUser={reviewUser}
-            initialState={createState("workbench")}
-          />,
-        );
-        act(() => {
-          currentExtractionContext().patchDraft({
-            projectId: "a",
-            sourceId: "a-asset",
-            sourceAssetId: "a-asset",
-          });
-          currentExtractionContext().extractScriptFromUpload(
-            "a",
-            "a-asset",
-            "a-task",
-          );
-        });
-        act(() =>
-          currentExtractionContext().patchDraft({
-            sourceId: "b",
-            sourceAssetId: "b",
-            projectId: "b",
-          }),
-        );
-        await act(async () =>
-          complete({
-            text: privateText ? "私有A原文" : null,
-            taskId: "a-task",
-            viralSource: { platform: "douyin", videoId: "a" },
-            copyClaimRequired: !privateText,
-          }),
-        );
-        expect(live.claimExtractedViralCopy).not.toHaveBeenCalled();
-        expect(currentExtractionContext().state.draft.sourceId).toBe("b");
-        expect(currentExtractionContext().state.draft.script.original).not.toBe(
-          "私有A原文",
-        );
-      },
-    );
-
-    it("私有任务正文直接交付，不领取共享文案", async () => {
+    it("旧任务晚完成不污染新来源，并提示回原视频取回（FIX-11）", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
-      live.awaitScriptFromAudioTask.mockResolvedValue({
-        text: "仅本人任务正文",
-        taskId: "private-owned",
-        copyClaimRequired: false,
-      });
+      let complete!: (value: unknown) => void;
+      live.awaitScriptFromAudioTask.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
       render(
         <StudioWorkspace
           currentUser={reviewUser}
@@ -3066,179 +2821,53 @@ describe("V1.4 workspace integration", () => {
       );
       act(() => {
         currentExtractionContext().patchDraft({
-          projectId: "private-project",
-          sourceId: "private-asset",
-          sourceAssetId: "private-asset",
+          projectId: "a",
+          sourceId: "a-asset",
+          sourceAssetId: "a-asset",
         });
         currentExtractionContext().extractScriptFromUpload(
-          "private-project",
-          "private-asset",
-          "private-owned",
-          { platformKey: "douyin", nativeId: "old-video" },
+          "a",
+          "a-asset",
+          "a-task",
         );
       });
-      expect(await screen.findByLabelText("来源原文")).toHaveValue(
-        "仅本人任务正文",
+      act(() =>
+        currentExtractionContext().patchDraft({
+          sourceId: "b",
+          sourceAssetId: "b",
+          projectId: "b",
+        }),
       );
-      expect(live.claimExtractedViralCopy).not.toHaveBeenCalled();
-    });
-
-    it.each(["miss", "error"])(
-      "Web旧来源%s不再导入或弹错误",
-      async (outcome) => {
-        live.loadStudioData.mockResolvedValue(emptyStudioData);
-        live.loadCloudDraft.mockResolvedValue(undefined);
-        let complete!: (value: unknown) => void;
-        let reject!: (value: Error) => void;
-        api.claimViralCopy.mockImplementation(
-          () =>
-            new Promise((resolve, fail) => {
-              complete = resolve;
-              reject = fail;
-            }),
-        );
-        const fallback = vi.fn();
-        render(
-          <StudioWorkspace
-            currentUser={reviewUser}
-            initialState={createState("workbench")}
-          />,
-        );
-        act(() => {
-          currentExtractionContext().patchDraft({ sourceId: "a" });
-          currentExtractionContext().extractViralCopy(
-            { platformKey: "douyin", nativeId: "a" },
-            { onCacheMiss: fallback },
-          );
-        });
-        act(() => currentExtractionContext().patchDraft({ sourceId: "b" }));
-        await act(async () =>
-          outcome === "miss"
-            ? complete({ text: null })
-            : reject(new Error("旧Web来源错误")),
-        );
-        expect(fallback).not.toHaveBeenCalled();
-        expect(screen.queryByText("旧Web来源错误")).not.toBeInTheDocument();
-      },
-    );
-
-    it("恢复爆款提取任务时正文按 claim 取回并回填", async () => {
-      live.loadStudioData.mockResolvedValue(emptyStudioData);
-      live.loadCloudDraft.mockResolvedValue(undefined);
-      // 服务端门禁后的爆款任务：正文为 null，仅带视频身份。
-      live.loadLatestScriptFromUpload.mockResolvedValueOnce({
-        id: "asr-viral",
-        status: "SUCCEEDED",
-        result: { text: null },
-        sourceAssetId: "asset-1",
-        copyClaimRequired: true,
-        viralSource: { platform: "douyin", videoId: "v-native-1" },
-      });
-      live.claimExtractedViralCopy.mockResolvedValueOnce(
-        "claim 回执取回的爆款文案",
+      await act(async () => complete({ text: "私有A原文", taskId: "a-task" }));
+      expect(currentExtractionContext().state.draft.sourceId).toBe("b");
+      expect(currentExtractionContext().state.draft.script.original).not.toBe(
+        "私有A原文",
       );
-      const state = createState("workbench");
-      state.draft.projectId = "project-1";
-      state.draft.sourceAssetId = "asset-1";
-      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
-
+      // 正文随本人任务直出：切走不丢结果，提示用户回原视频重新提取取回。
       expect(
-        await screen.findByText(/文案提取已完成.*恢复到当前草稿/),
+        await screen.findByText(/回到原视频再点「提取文案」即可取回/),
       ).toBeInTheDocument();
-      expect(live.claimExtractedViralCopy).toHaveBeenCalledWith(
-        "douyin",
-        "v-native-1",
-        "asr-viral",
-      );
-      fireEvent.click(screen.getByRole("button", { name: "文案工坊" }));
-      expect(screen.getByLabelText("来源原文")).toHaveValue(
-        "claim 回执取回的爆款文案",
-      );
     });
 
-    it("T44：claim 挂起期间的新二创不被旧快照覆盖，回填只补来源原文", async () => {
+    it("恢复任务正文为空时不回填草稿也不误报交付", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
+      // 转写结果为空（如视频无有效语音）：不能把空文案当交付写进草稿。
       live.loadLatestScriptFromUpload.mockResolvedValueOnce({
-        id: "asr-viral-t44",
+        id: "asr-empty",
         status: "SUCCEEDED",
-        result: { text: null },
+        result: { text: "" },
         sourceAssetId: "asset-1",
-        copyClaimRequired: true,
-        viralSource: { platform: "douyin", videoId: "v-native-t44" },
       });
-      // claim 挂起：模拟服务端领取慢，等待期间用户开始写自己的二创。
-      let resolveClaim!: (value: string) => void;
-      live.claimExtractedViralCopy.mockImplementationOnce(
-        () =>
-          new Promise<string>((resolve) => {
-            resolveClaim = resolve;
-          }),
-      );
       const state = createState("workbench");
       state.draft.projectId = "project-1";
       state.draft.sourceAssetId = "asset-1";
       render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
 
-      // 等待 claim 真正发起（恢复轮询命中 SUCCEEDED 任务后才会调 claim）。
       await waitFor(() =>
-        expect(live.claimExtractedViralCopy).toHaveBeenCalledTimes(1),
+        expect(live.loadLatestScriptFromUpload).toHaveBeenCalled(),
       );
-      // 挂起期间用户切到文案工坊，输入新的二创。
-      await openCopyPage();
-      fireEvent.change(screen.getByLabelText("二创文案"), {
-        target: { value: "等待期间写的新二创" },
-      });
-      await act(async () => resolveClaim("claim 回执的爆款原文"));
-
-      // 新二创保留（不被旧快照基线覆盖），来源原文补回，业务结果按 manual。
-      expect(screen.getByLabelText("二创文案")).toHaveValue(
-        "等待期间写的新二创",
-      );
-      expect(screen.getByLabelText("来源原文")).toHaveValue(
-        "claim 回执的爆款原文",
-      );
-      expect(
-        await screen.findByText(/已保留你的编辑并补回来源原文/),
-      ).toBeInTheDocument();
-      await waitFor(
-        () => {
-          expect(live.persistCloudDraft).toHaveBeenCalledWith(
-            expect.objectContaining({
-              script: expect.objectContaining({
-                text: "等待期间写的新二创",
-                original: "claim 回执的爆款原文",
-              }),
-            }),
-            undefined,
-          );
-        },
-        { timeout: 4000 },
-      );
-    });
-
-    it("恢复爆款任务时获取未完成则不回填正文并提示补齐", async () => {
-      live.loadStudioData.mockResolvedValue(emptyStudioData);
-      live.loadCloudDraft.mockResolvedValue(undefined);
-      live.loadLatestScriptFromUpload.mockResolvedValueOnce({
-        id: "asr-viral-miss",
-        status: "SUCCEEDED",
-        result: { text: null },
-        sourceAssetId: "asset-1",
-        copyClaimRequired: true,
-        viralSource: { platform: "douyin", videoId: "v-native-2" },
-      });
-      // claim 未命中（返回 null）：正文拿不到，不能把空文案写进草稿。
-      live.claimExtractedViralCopy.mockResolvedValueOnce(null);
-      const state = createState("workbench");
-      state.draft.projectId = "project-1";
-      state.draft.sourceAssetId = "asset-1";
-      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
-
-      expect(
-        await screen.findByText(/还未完成「获取」结算/),
-      ).toBeInTheDocument();
-      // 正文没拿到就不算交付：不出现「已恢复」提示，也不写进草稿。
+      // 空正文不算交付：不出现「已恢复」提示，也不写进草稿。
       expect(screen.queryByText(/文案提取已完成，已恢复到当前草稿/)).toBeNull();
       expect(live.persistCloudDraft).not.toHaveBeenCalled();
     });
