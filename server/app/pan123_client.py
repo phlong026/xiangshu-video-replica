@@ -89,8 +89,13 @@ class Pan123TokenState:
 
 
 def sanitize_remote_name(name: str) -> str:
-    """把本地文件名清洗成 123 网盘接受的上传名（官方 ≤255 字符、禁字符集）。"""
-    base = Path(name).name
+    """把本地文件名清洗成 123 网盘接受的上传名（官方 ≤255 字符、禁字符集）。
+
+    路径剥离必须跨平台一致：``Path().name`` 的分隔符语义随 OS 变化（Windows
+    剥 ``/`` 与 ``\\``，POSIX 只剥 ``/``），会让同一文件名在开发机与 Linux
+    服务器产出不同的远端名——显式按两种分隔符切分。
+    """
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
     cleaned = _REMOTE_NAME_FORBIDDEN.sub("_", base).strip()
     if not cleaned:
         # 官方要求非全空格；清洗后为空（纯禁字符/纯空白）兜底为固定名。
