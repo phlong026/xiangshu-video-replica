@@ -108,7 +108,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
 # 列）追加其上，故链尾为该值。
-HEAD_REVISION = "20261112T1100_replica_pipeline_switch"
+HEAD_REVISION = "20261111T1000_uncertain_auto_reopen"
 
 
 @pytest.mark.pg
