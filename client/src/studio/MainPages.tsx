@@ -469,12 +469,9 @@ export function WorkbenchPage() {
       });
       refresh();
       if (purpose === "copy") {
-        // 爆款链路带上视频身份：转写完成后凭它回「获取文案」取正文（交付免费），
-        // 与爆款列表入口（ContentPages goExtract）同口径。
-        extractScriptFromUpload(task.projectId, task.sourceAssetId, undefined, {
-          platformKey: video.platformKey,
-          nativeId: video.nativeId,
-        });
+        // 正文随本人转写任务直出（共享文案缓存已退役），与爆款列表入口
+        // （ContentPages goExtract）同口径，不再携带视频身份回「获取文案」。
+        extractScriptFromUpload(task.projectId, task.sourceAssetId);
       } else {
         navigate("replica", {
           selectedVideoId: video.id,

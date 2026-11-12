@@ -456,12 +456,6 @@ function studio(
     discardSavedDraft: vi.fn(),
     confirmFinalDraft: vi.fn(),
     extractScriptFromUpload: vi.fn(),
-    extractViralCopy: vi.fn(
-      (_video: unknown, options?: { onCacheMiss?: () => void }) => {
-        // 默认模拟「共享缓存未命中」：回落导入 → 转写链路，与既有用例预期一致。
-        options?.onCacheMiss?.();
-      },
-    ),
     refresh: vi.fn(),
     ...overrides,
   };
@@ -1095,8 +1089,6 @@ describe("V1.4 内容与运营页面", () => {
       expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
         "project-1",
         "asset-1",
-        undefined,
-        { platformKey: "douyin", nativeId: "favorite-native-1" },
       ),
     );
     expect(createViralImportTask).toHaveBeenCalledWith(
@@ -1147,8 +1139,6 @@ describe("V1.4 内容与运营页面", () => {
       expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
         "project-1",
         "asset-1",
-        undefined,
-        { platformKey: "douyin", nativeId: "native-dy-1" },
       );
     });
     expect(value.navigate).toHaveBeenCalledWith("copy", {
@@ -1346,8 +1336,6 @@ describe("V1.4 内容与运营页面", () => {
       expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
         "audio-project",
         "audio-asset",
-        undefined,
-        { platformKey: "douyin", nativeId: "native-dy-1" },
       ),
     );
     expect(createViralImportTask).toHaveBeenCalledWith(
@@ -1554,7 +1542,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.notify).toHaveBeenCalledWith("积分不足，本次需要 6 积分。");
   });
 
-  it("爆款详情提取文案统一 claim-first：桌面与 Web 同一动作（WP3）", () => {
+  it("爆款详情提取文案直连服务端导入：桌面与 Web 同一动作", () => {
     viralCacheBridge.cacheAvailable.mockReturnValue(true);
     const value = studio({
       review: false,
@@ -1569,35 +1557,13 @@ describe("V1.4 内容与运营页面", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
 
-    // 本地抽音轨上传已退役：桌面与 Web 都是 claim-first，未命中回落服务端导入。
-    expect(value.extractViralCopy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        platformKey: "douyin",
-        nativeId: "native-dy-1",
-      }),
-      expect.objectContaining({ onCacheMiss: expect.any(Function) }),
+    // 共享文案缓存退役：不再前置查缓存，直接走服务端导入 → 转写。
+    expect(createViralImportTask).toHaveBeenCalledWith(
+      "douyin",
+      "native-dy-1",
+      "copy",
+      expect.any(String),
     );
-  });
-
-  it("命中共享文案缓存的卡片展示已有文案角标", async () => {
-    const base = studio({ review: false });
-    listViralVideos.mockResolvedValue({
-      platform: "douyin",
-      sort: "hot",
-      categories: ["建房预算"],
-      items: [{ ...viralItem(1), hasCopy: true }],
-      fetchedAt: "2026-09-07T12:00:00Z",
-      hasMore: false,
-      nextCursor: null,
-      total: 1,
-    });
-    const value = studio({
-      review: false,
-      data: { ...base.data, videos: [] },
-    });
-    render(<StatefulViralPage value={value} />);
-
-    expect(await screen.findByText("已有文案")).toBeInTheDocument();
   });
 
   it("查看详情免费：卡片不再报价，也不再有已查看角标（2026-10-06 拍板）", async () => {

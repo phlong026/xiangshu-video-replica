@@ -237,49 +237,6 @@ def test_mark_and_list_viral_discoveries_dedup_per_day(route_state: str) -> None
         assert len(other_day) == 1
 
 
-def test_cached_transcript_and_batch_lookup(route_state: str) -> None:
-    """共享文案缓存只读查询：单条 / 批量 / 未命中 / 脏 JSON 一律安全."""
-    from app.asr import TranscriptResult
-    from app.script_from_audio import cached_transcript, cached_transcripts
-
-    payload = json.dumps(
-        {
-            "text": "农村自建房避坑指南",
-            "duration_sec": 15.0,
-            "language": "zh",
-            "archive": {"platform": "douyin", "video_id": "v-1", "sha256": "a" * 64},
-        },
-        ensure_ascii=False,
-    )
-    with psycopg.connect(route_state) as raw:
-        raw.execute("DELETE FROM viral_script_cache WHERE video_id IN ('v-1', 'v-broken')")
-        raw.execute(
-            "INSERT INTO viral_script_cache (platform, video_id, result_json) "
-            "VALUES ('douyin', 'v-1', %s), ('douyin', 'v-broken', 'not-json')",
-            (payload,),
-        )
-        raw.commit()
-        conn = BusinessConnection.postgres(raw)
-        hit = cached_transcript(conn, platform="douyin", video_id="v-1")
-        assert hit is not None
-        assert hit.result == TranscriptResult("农村自建房避坑指南", 15.0, "zh")
-        assert "T" in hit.updated_at  # ISO 时间串（GET /api/viral/search/copy 的 updatedAt）
-        assert cached_transcript(conn, platform="douyin", video_id="v-404") is None
-        assert cached_transcript(conn, platform="douyin", video_id="v-broken") is None
-        batch = cached_transcripts(
-            conn,
-            [
-                ("douyin", "v-1"),
-                ("douyin", "v-404"),
-                ("douyin", "v-1"),
-                ("wechat_channels", "v-1"),
-            ],
-        )
-        assert set(batch) == {("douyin", "v-1")}
-        assert batch[("douyin", "v-1")].result.text == "农村自建房避坑指南"
-        assert cached_transcripts(conn, []) == {}
-
-
 class _SearchStub:
     """搜索数据源桩：只实现两个搜索面（duck typing 满足 ViralSourceClient 用法）."""
 
@@ -617,7 +574,7 @@ def test_search_requires_valid_idempotency_key(search_client) -> None:
     assert response.json()["detail"]["code"] == "VIRAL_SEARCH_IDEMPOTENCY_KEY_REQUIRED"
 
 
-def test_search_charges_persists_and_flags_copy(search_client, route_state, monkeypatch) -> None:
+def test_search_charges_and_persists(search_client, route_state, monkeypatch) -> None:
     """一次搜索：外呼 + 封面归档 + 内容池/发现落库 + 按次计费一次."""
     _patch_search_infra(monkeypatch)
     _use_search_stub(search_client, _SearchStub())
@@ -631,7 +588,6 @@ def test_search_charges_persists_and_flags_copy(search_client, route_state, monk
             "VALUES('viral_search',true,3) ON CONFLICT (service) "
             "DO UPDATE SET enabled=true, unit_credits=3"
         )
-        raw.execute("DELETE FROM viral_script_cache WHERE platform='douyin' AND video_id='v-1'")
     response = search_client.post(
         "/api/viral/search",
         headers={**headers, "Idempotency-Key": "search-flow-1"},
@@ -640,7 +596,6 @@ def test_search_charges_persists_and_flags_copy(search_client, route_state, monk
     assert response.status_code == 200, response.text
     body = response.json()
     assert [item["videoId"] for item in body["items"]] == ["v-1"]
-    assert body["items"][0]["hasCopy"] is False
     assert body["billing"] == {"charged": 3, "unit": "call"}
     assert body["hasMore"] is False and body["cursor"] is None
     with psycopg.connect(route_state) as raw:
@@ -670,46 +625,6 @@ def test_search_charges_persists_and_flags_copy(search_client, route_state, monk
                 "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
             ).fetchone()
         ) == (47, 0)
-
-
-def test_search_flags_has_copy_on_cache_hit(search_client, route_state, monkeypatch) -> None:
-    """共享文案缓存命中 → hasCopy=True；``hasCopy`` 是信息性标记，计费照常
-    （原用 0 价种子凑 charged=0 的写法随「0 价=未定价」守卫（评审 M-1）作废）."""
-    _patch_search_infra(monkeypatch)
-    _use_search_stub(search_client, _SearchStub())
-    headers, uid = account(search_client, "search_copy")
-    payload = json.dumps(
-        {
-            "text": "已有文案",
-            "duration_sec": 12.0,
-            "archive": {"platform": "douyin", "video_id": "v-1", "sha256": "a" * 64},
-        },
-        ensure_ascii=False,
-    )
-    with psycopg.connect(route_state) as raw:
-        raw.execute(
-            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
-        )
-        raw.execute(
-            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
-            "VALUES('viral_search',true,3) ON CONFLICT (service) "
-            "DO UPDATE SET enabled=true, unit_credits=3"
-        )
-        raw.execute(
-            "INSERT INTO viral_script_cache (platform, video_id, result_json) "
-            "VALUES ('douyin', 'v-1', %s) ON CONFLICT (platform, video_id) "
-            "DO UPDATE SET result_json=excluded.result_json",
-            (payload,),
-        )
-    response = search_client.post(
-        "/api/viral/search",
-        headers={**headers, "Idempotency-Key": "search-copy-1"},
-        json={"keyword": "农村建房", "platform": "douyin"},
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["items"][0]["hasCopy"] is True
-    assert body["billing"] == {"charged": 3, "unit": "call"}
 
 
 def test_search_upstream_failure_refunds_and_fails_closed(
@@ -1406,50 +1321,8 @@ def _patch_refresh_infra(monkeypatch) -> None:
     )
 
 
-# Task 9: 文案与发现读接口（GET /api/viral/search/copy + GET /api/viral/search/discoveries）
-
-
-def test_copy_returns_cached_transcript_and_null_on_miss(search_client, route_state) -> None:
-    """GET /search/copy：只回「有没有 / 买没买过」（只读、免费），绝不下发正文."""
-    headers, uid = account(search_client, "copy_read")
-    payload = json.dumps(
-        {
-            "text": "已缓存文案",
-            "duration_sec": 12.0,
-            "archive": {
-                "platform": "douyin",
-                "video_id": "v-copy-1",
-                "sha256": "a" * 64,
-                "storage_uri": "local://viral/v-copy-1.mp4",
-            },
-        },
-        ensure_ascii=False,
-    )
-    with psycopg.connect(route_state) as raw:
-        _seed_source_video(raw, uid, platform="douyin", video_id="v-copy-1")
-        raw.execute(
-            "INSERT INTO viral_script_cache (platform, video_id, result_json) "
-            "VALUES ('douyin', 'v-copy-1', %s) ON CONFLICT (platform, video_id) "
-            "DO UPDATE SET result_json=excluded.result_json",
-            (payload,),
-        )
-    hit = search_client.get(
-        "/api/viral/search/copy",
-        headers=headers,
-        params={"platform": "douyin", "videoId": "v-copy-1"},
-    )
-    assert hit.status_code == 200, hit.text
-    assert hit.json()["available"] is True
-    assert hit.json()["updatedAt"]
-    assert hit.json()["purchased"] is False
-    # 正文是零售内容，只能从计费端点 POST /videos/copy/claim 取。
-    assert "text" not in hit.json()
-    miss = search_client.get(
-        "/api/viral/search/copy",
-        headers=headers,
-        params={"platform": "douyin", "videoId": "v-copy-absent"},
-    )
-    assert miss.status_code == 404, miss.text
+# Task 9: 发现读接口（GET /api/viral/search/discoveries；GET /search/copy 已随
+# 共享文案缓存退役删除，2026-11-11）
 
 
 def test_discoveries_list_today_and_validate_date(search_client, route_state) -> None:
@@ -1503,7 +1376,8 @@ def test_discoveries_list_today_and_validate_date(search_client, route_state) ->
     assert body["total"] == 2
     assert [item["videoId"] for item in body["items"]] == ["doc-disc-1", "v-not-stored"]
     assert body["items"][0]["video"]["title"] == "视频号样本"
-    assert body["items"][0]["video"]["hasCopy"] is False
+    # hasCopy 已随共享文案缓存退役从响应移除（2026-11-11）。
+    assert "hasCopy" not in body["items"][0]["video"]
     assert body["items"][1]["video"] is None
     empty = search_client.get(
         "/api/viral/search/discoveries", headers=headers, params={"date": "2000-01-01"}
@@ -1733,71 +1607,6 @@ def test_source_releases_reservation_when_upstream_omits_decode_key(
             ).fetchone()[0]
             == "FAILED"
         )
-
-
-def test_content_pool_list_flags_copy_hits(source_client, route_state) -> None:
-    """浏览列表同样回填 hasCopy：与搜索接口口径一致，无需先搜一次才知道."""
-    from dataclasses import replace
-
-    from app.viral_store import upsert_viral_videos
-
-    headers, _uid = account(source_client, "pool_hascopy")
-    payload = json.dumps(
-        {
-            "text": "池内已有文案",
-            "duration_sec": 15.0,
-            "archive": {
-                "platform": "douyin",
-                "video_id": "v-pool-copy",
-                "sha256": "a" * 64,
-                "storage_uri": "local://media/viral/copy.mp4",
-            },
-        },
-        ensure_ascii=False,
-    )
-    with psycopg.connect(route_state) as raw:
-        raw.execute(
-            "INSERT INTO viral_script_cache (platform, video_id, result_json) "
-            "VALUES ('douyin', 'v-pool-copy', %s) ON CONFLICT (platform, video_id) "
-            "DO UPDATE SET result_json=excluded.result_json",
-            (payload,),
-        )
-        upsert_viral_videos(
-            BusinessConnection.postgres(raw),
-            [replace(_viral_seed(video_id="v-pool-copy"))],
-        )
-        upsert_viral_videos(
-            BusinessConnection.postgres(raw),
-            [replace(_viral_seed(video_id="v-pool-plain"))],
-        )
-        # 列表只展示「最近 7 天发布、已入集且云端归档完成」的视频
-        # （viral_store 的窗口 + _PUBLISHED_SQL 过滤），种子数据必须补齐
-        # 归档状态才会出现在响应里。
-        raw.execute(
-            "INSERT INTO viral_media_preparations "
-            "(id, platform, video_id, media_kind, status, storage_uri) VALUES "
-            "('mp-copy', 'douyin', 'v-pool-copy', 'video', 'SUCCEEDED',"
-            " 'local://media/viral/copy.mp4'), "
-            "('mp-plain', 'douyin', 'v-pool-plain', 'video', 'SUCCEEDED',"
-            " 'local://media/viral/plain.mp4') "
-            "ON CONFLICT (platform, video_id, media_kind) DO UPDATE SET "
-            "status='SUCCEEDED', storage_uri=excluded.storage_uri"
-        )
-        raw.execute(
-            "UPDATE viral_videos SET published_at=%s, collection_published=1, "
-            "cover_key='viral/covers/douyin/' || video_id "
-            "WHERE video_id IN ('v-pool-copy', 'v-pool-plain')",
-            (int(datetime.now(UTC).timestamp()),),
-        )
-    response = source_client.get(
-        "/api/viral/videos",
-        headers=headers,
-        params={"platform": "douyin", "sort": "hot", "limit": 50},
-    )
-    assert response.status_code == 200, response.text
-    flags = {item["videoId"]: item["hasCopy"] for item in response.json()["items"]}
-    assert flags["v-pool-copy"] is True
-    assert flags["v-pool-plain"] is False
 
 
 def test_source_rejects_unpriced_service_before_reserving(source_client, route_state) -> None:

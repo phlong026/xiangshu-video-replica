@@ -31,7 +31,6 @@ it("同批次漏斗不使用库存；未知收支和历史不伪装为零", asyn
                   conversion: 0.5,
                 },
               ],
-              directCopyWithoutDetail: 0,
               finance: {
                 knownRevenueFen: 100,
                 unknownRevenueCount: 1,
@@ -123,7 +122,6 @@ it("全来源口径：来源分布可见；关键词空态有引导；客户搜�
                 { sourceKind: "customer_import", videos: 2 },
                 { sourceKind: "collection", videos: 1 },
               ],
-              directCopyWithoutDetail: 0,
               finance: {
                 knownRevenueFen: 0,
                 unknownRevenueCount: 0,

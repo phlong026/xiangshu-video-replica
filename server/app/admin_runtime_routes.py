@@ -2049,8 +2049,6 @@ def read_viral_video_business_details(
 ) -> dict[str, object]:
     from urllib.parse import urlsplit
 
-    from app.script_from_audio import cached_transcript
-
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         row = conn.execute(
@@ -2089,7 +2087,6 @@ def read_viral_video_business_details(
                 kind,
                 {"status": "NOT_STARTED", "ready": False, "errorCode": None, "updatedAt": None},
             )
-        copy = cached_transcript(conn, platform=platform, video_id=video_id)
         native_row = conn.execute(
             "SELECT native_json FROM viral_videos WHERE platform=%s AND video_id=%s",
             (platform, video_id),
@@ -2146,7 +2143,8 @@ def read_viral_video_business_details(
         "video": item,
         "business": business,
         "media": media,
-        "copy": {"text": copy.result.text, "updatedAt": copy.updated_at} if copy else None,
+        # 2026-11-11 共享缓存退役：copy 字段（共享文案正文）不再下发。
+        "copy": None,
         "sourceDescription": (native.get("source_description") or None)
         if isinstance(native.get("source_description"), str)
         else None,

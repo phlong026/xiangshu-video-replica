@@ -38,7 +38,6 @@ export function ViralVideoBusinessDetails({
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
   const generation = useRef(0);
   const { platform, video_id } = video;
   useEffect(() => {
@@ -87,11 +86,6 @@ export function ViralVideoBusinessDetails({
               </dd>
             </div>
           </dl>
-          {details.media.audio.ready && !details.media.video.ready && (
-            <p className="admin-hint">
-              音频已缓存，可以复用提取文案；视频尚未准备，暂时不能播放。播放时只需另行准备视频。
-            </p>
-          )}
           <h4 className="admin-viral-drawer__section">客户使用与收入</h4>
           <p className="admin-hint">
             {details.business.window}。{details.business.countingRule}
@@ -100,10 +94,6 @@ export function ViralVideoBusinessDetails({
             <div>
               <dt>详情授权账号</dt>
               <dd>{details.business.detailAccounts}</dd>
-            </div>
-            <div>
-              <dt>文案授权账号</dt>
-              <dd>{details.business.copyAccounts}</dd>
             </div>
             <div>
               <dt>当前收藏</dt>
@@ -184,8 +174,7 @@ export function ViralVideoBusinessDetails({
                     </button>
                   ) : null}
                   <p>
-                    {customer.detailAuthorized ? "已授权详情" : "未授权详情"} ·{" "}
-                    {customer.copyAuthorized ? "已授权文案" : "未授权文案"}
+                    {customer.detailAuthorized ? "已授权详情" : "未授权详情"}
                   </p>
                   <p>
                     {customer.chargedCredits} 积分 · 收入{" "}
@@ -208,44 +197,6 @@ export function ViralVideoBusinessDetails({
               onPageChange={setOffset}
             />
           </details>
-          <h4 className="admin-viral-drawer__section">来源与文案</h4>
-          <p>来源关键词：{details.sourceKeywords.join("、") || "历史未记录"}</p>
-          {details.originalUrl ? (
-            <a href={details.originalUrl} target="_blank" rel="noreferrer">
-              打开原始分享页
-            </a>
-          ) : (
-            <p className="admin-hint">原始分享页：暂无已记录链接。</p>
-          )}
-          {details.sourceDescription && (
-            <details>
-              <summary>平台原始描述</summary>
-              <p className="admin-viral-copy">{details.sourceDescription}</p>
-            </details>
-          )}
-          {details.copy ? (
-            <>
-              <p className="admin-viral-copy">{details.copy.text}</p>
-              <p className="admin-hint">
-                文案缓存更新于 {formatDateTime(details.copy.updatedAt)}
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  void navigator.clipboard
-                    .writeText(details.copy?.text ?? "")
-                    .then(() => setCopied(true))
-                    .catch(() => setError("复制失败，请选择文案手动复制。"));
-                }}
-              >
-                {copied ? "已复制" : "复制文案"}
-              </button>
-            </>
-          ) : (
-            <p className="admin-hint">
-              暂无共享文案；读取详情不会触发转写或下载视频。
-            </p>
-          )}
           <details>
             <summary>同作者其他视频（{details.relatedVideos.length}）</summary>
             {details.relatedVideos.map((related) => (

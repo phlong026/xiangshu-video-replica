@@ -3822,7 +3822,7 @@ export async function listCollectedViralVideos(options: {
   status?: CollectedViralStatus;
   category?: string;
   uncategorized?: boolean;
-  cohortStage?: "collected" | "prepared" | "homepage" | "detail" | "copy";
+  cohortStage?: "collected" | "prepared" | "homepage" | "detail";
   collectedFrom?: string;
   collectedTo?: string;
   attention?: "missing_cover" | "unknown_statistics";
@@ -4023,7 +4023,7 @@ export type ViralContentOverview = {
   cohortRule: string;
   historyNote: string;
   funnel: Array<{
-    stage: "collected" | "prepared" | "homepage" | "detail" | "copy";
+    stage: "collected" | "prepared" | "homepage" | "detail";
     name: string;
     count: number;
     conversion: number | null;
@@ -4033,7 +4033,6 @@ export type ViralContentOverview = {
     sourceKind: string;
     videos: number;
   }>;
-  directCopyWithoutDetail: number;
   finance: {
     knownRevenueFen: number;
     unknownRevenueCount: number;

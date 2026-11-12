@@ -3,7 +3,7 @@
 Revision ID: 20261112T1200_merge_training_pan123_pipeline
 Down revisions:
   - 20261112T0910_provider_runtime_state（培训素材域：网盘车道/白名单放宽/共享 token）
-  - 20261112T1100_replica_pipeline_switch（复刻管线域，已随 PR #117 发布）
+  - 20261111T1000_uncertain_auto_reopen（复刻管线域链尾，含 PR #117/#118 迁移）
 
 两条线都从 20261102T0900_customer_session_last_seen 分叉：培训侧经
 20261101T1000_training_materials → 0900_widen → 0910；管线侧经
@@ -15,7 +15,7 @@ Down revisions:
 revision = "20261112T1200_merge_training_pan123_pipeline"
 down_revision = (
     "20261112T0910_provider_runtime_state",
-    "20261112T1100_replica_pipeline_switch",
+    "20261111T1000_uncertain_auto_reopen",
 )
 branch_labels = None
 depends_on = None

@@ -41,7 +41,6 @@ export function CustomerWelcomePage({ onLogin }: { onLogin(): void }) {
       discardSavedDraft: onLogin,
       confirmFinalDraft: onLogin,
       extractScriptFromUpload: onLogin,
-      extractViralCopy: onLogin,
       refresh: onLogin,
     }),
     [onLogin],
