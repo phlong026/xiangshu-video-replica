@@ -7,6 +7,11 @@
 任务 result_json——原始上传
 没有镜头卡版本，无法写生成门禁管制的 ``/projects/{id}/scripts``，文案
 工坊从任务结果取文本回填草稿，终稿发布仍走唯一的显式脚本版本路径。
+
+2026-11-11 极简化改造：共享文案缓存（viral_script_cache）整体退役——
+每个用户提取文案各自转写、各自付费，正文随自己的任务 result_json 直接
+下发；``request_json.viral_source`` 仅作为内容经营报表的爆款身份归因
+保留（来自服务端导入任务关联，不参与任何资格判定）。
 """
 
 from __future__ import annotations
@@ -14,9 +19,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,7 +57,6 @@ logger = logging.getLogger("app.script_from_audio")
 
 SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES = 20
 SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES = 2_000_000_000
-_TRANSCRIPT_LOOKUP_CHUNK = 100
 _DOWNLOAD_INTENT_EXPIRES = timedelta(minutes=30)
 
 
@@ -67,21 +70,11 @@ class ScriptFromAudioRequest(BaseModel):
 class ScriptFromAudioResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # 爆款链路的正文不在任务接口下发（copy_claim_required=True 时恒为 null）：
-    # 交付与计费统一走「获取文案」claim 回执，堵住「读任务即免费用文案」的旁路
-    # （设计 §5.4-1）。普通上传任务不受影响，text 始终有值。
+    # 2026-11-11 极简化：共享文案缓存退役后任务即本人付费转写的唯一交付点，
+    # 正文恒随任务下发（不再有「爆款任务置空等 claim」的口径）。
     text: str | None = None
     duration_sec: float | None = None
     language: str | None = None
-
-
-class ScriptFromAudioViralSource(BaseModel):
-    """任务关联的爆款视频身份；客户端凭它回「获取文案」接口取正文."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    platform: str
-    video_id: str
 
 
 class ScriptFromAudioTaskResponse(BaseModel):
@@ -93,11 +86,6 @@ class ScriptFromAudioTaskResponse(BaseModel):
     status: str
     attempt: int
     result: ScriptFromAudioResult | None
-    viral_source: ScriptFromAudioViralSource | None = None
-    # True = 正文只按 claim 回执下发，客户端在任务成功后调
-    # POST /api/viral/videos/copy/claim（转写者本人免费，非转写者首次获取扣一次，
-    # 复看免费；口径见 viral_routes.charge_viral_copy）。
-    copy_claim_required: bool = False
     error_code: str | None
     error_message: str | None
     retryable: bool
@@ -107,26 +95,31 @@ class ScriptFromAudioTaskResponse(BaseModel):
     completed_at: str | None
 
 
-def _row_viral_source(row: BusinessRow) -> tuple[str, str] | None:
-    """任务入队时服务端核验并写入的爆款身份；客户端自报的元数据不算数."""
+def _legacy_cache_artifact(row: BusinessRow) -> bool:
+    """2026-11-11 之前「共享缓存命中秒回」任务：正文来自别人的转写、本人未付 ASR.
+
+    旧报告层用 claim 交付闸门向本人收交付费；claim 端点已退役为 410，若仍让
+    这类任务的正文随响应直出，等于对未付费产出开放免费正文（Codex S 级评审
+    阻塞 2）。凭据标记是旧入队时才写入的 ``viral_archive_sha256``——新链路
+    只写 viral_source 归因，因此该标记是精确的历史判别位。
+    """
     try:
         payload = json.loads(str(row["request_json"] or "{}"))
     except (ValueError, TypeError):
-        return None
-    source = payload.get("viral_source")
-    if isinstance(source, (list, tuple)) and len(source) == 2:
-        return str(source[0]), str(source[1])
-    return None
+        return False
+    return isinstance(payload, dict) and "viral_archive_sha256" in payload
 
 
 def script_from_audio_task_response(row: BusinessRow) -> ScriptFromAudioTaskResponse:
-    viral_source = _row_viral_source(row)
     result_json = row["result_json"]
     result: ScriptFromAudioResult | None = None
     if result_json is not None:
         payload = json.loads(str(result_json))
+        # 历史缓存命中任务的正文不下发（见 _legacy_cache_artifact）：重新提取
+        # 会走新链路、按本人真实转写计费。
+        text = None if _legacy_cache_artifact(row) else str(payload.get("text", ""))
         result = ScriptFromAudioResult(
-            text=None if viral_source is not None else str(payload.get("text", "")),
+            text=text,
             duration_sec=(
                 None if payload.get("duration_sec") is None else float(payload["duration_sec"])
             ),
@@ -139,12 +132,6 @@ def script_from_audio_task_response(row: BusinessRow) -> ScriptFromAudioTaskResp
         status=str(row["status"]),
         attempt=int(row["attempt"]),
         result=result,
-        viral_source=(
-            None
-            if viral_source is None
-            else ScriptFromAudioViralSource(platform=viral_source[0], video_id=viral_source[1])
-        ),
-        copy_claim_required=viral_source is not None,
         error_code=None if row["error_code"] is None else str(row["error_code"]),
         error_message=(
             None if row["error_message_redacted"] is None else str(row["error_message_redacted"])
@@ -179,405 +166,12 @@ class PreparedScriptFromAudio:
     audio_object_key: str
     provider_task_id: str | None = None
     audio_deleted: bool = False
-    cached_result: TranscriptResult | None = None
-    # True = 结果直接来自共享缓存（没有真实转写发生），完成阶段不结算转写费。
-    from_cache: bool = False
     source_sha256: str | None = None
     source_size: int | None = None
 
 
-class ScriptCachePending(Exception):
-    """Another durable task owns this video's one upstream transcription."""
-
-
-def _viral_media_kind(asset_kind: str) -> str:
-    """资产 kind → 共享归档形态：reference_audio 对应 audio 归档，其余按视频."""
-    return "audio" if asset_kind == "reference_audio" else "video"
-
-
-def _credential_archive_kind(value: object) -> str:
-    """凭据形态：新凭据带 kind；旧凭据只有视频资产能写入共享缓存，回溯按 video."""
-    if isinstance(value, str) and value in ("audio", "video"):
-        return value
-    return "video"
-
-
-def _credential_archive_is_current(
-    conn: BusinessConnection,
-    source: tuple[str, str],
-    kind: str,
-    storage_uri: object,
-) -> bool:
-    """给定形态的当前归档与给定 URI 是否同一版本；该形态归档缺失时不判过期.
-
-    音频与视频是同一条视频的两个独立归档形态：音频凭据只对 audio 归档负责，
-    不会被并存的视频重归档误伤，反之亦然。任一形态被重新归档（换源/换版本）
-    时，指向旧对象的凭据即过期。
-    """
-    current = conn.execute(
-        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
-        "AND media_kind=%s AND status='SUCCEEDED'",
-        (*source, kind),
-    ).fetchone()
-    if current is None:
-        return True
-    return bool(storage_uri) and str(storage_uri) == str(current["storage_uri"])
-
-
-def _viral_source(conn: BusinessConnection, asset: BusinessRow) -> tuple[str, str] | None:
-    # 客户端上传音轨与独立解析音频不能证明原视频口播身份；服务端归档的原视频
-    # 与上游音频（链接解析直下的音轨，经全局内容对象背书）都可以成为跨用户
-    # 共享的生产者——正文属于视频本身，不绑定音频/视频形态。
-    row = conn.execute(
-        "SELECT i.platform,i.video_id FROM viral_import_tasks i "
-        "JOIN content_objects c ON c.id=%s AND c.sha256=%s AND c.size_bytes=%s "
-        "AND c.scope='global' "
-        "WHERE i.source_asset_id=%s AND i.project_id=%s AND i.status='SUCCEEDED' "
-        "AND %s IN ('reference_video','reference_audio') "
-        "ORDER BY i.created_at,i.id LIMIT 1",
-        (
-            asset["content_object_id"],
-            asset["sha256"],
-            asset["size_bytes"],
-            asset["id"],
-            asset["project_id"],
-            asset["kind"],
-        ),
-    ).fetchone()
-    if row is None:
-        return None
-    source = (str(row["platform"]), str(row["video_id"]))
-    asset_media_kind = _viral_media_kind(str(asset["kind"]))
-    cached = conn.execute(
-        "SELECT t.request_json,c.result_json FROM viral_script_cache c "
-        "LEFT JOIN script_from_audio_tasks t "
-        "ON t.id=c.producer_task_id WHERE c.platform=%s AND c.video_id=%s",
-        source,
-    ).fetchone()
-    if cached is not None:
-        try:
-            request_json = json.loads(str(cached["request_json"] or "{}"))
-            archive = json.loads(str(cached["result_json"] or "{}")).get("archive", {})
-        except (ValueError, TypeError, AttributeError):
-            return None
-        credential_kind = _credential_archive_kind(
-            request_json.get("viral_archive_kind", archive.get("kind"))
-        )
-        fingerprint = request_json.get("viral_archive_sha256")
-        if fingerprint is None:
-            fingerprint = archive.get("sha256")
-        credential_uri = request_json.get("viral_archive_uri") or archive.get("storage_uri")
-        # 同形态重归档不是同一版本：凭据与资产同为音频（或同为视频）时字节指纹
-        # 必须一致，新版本先按私有成果交付；跨形态不比指纹（音频↔视频是同一视频
-        # 的两个载体）。已有凭据时还要求凭据所指的归档仍是当前版本——缓存行刚
-        # 创建（尚无凭据）时没有可比对的凭据，只做下方资产自身的新鲜度校验。
-        if fingerprint is not None:
-            if credential_kind == asset_media_kind and str(fingerprint) != str(asset["sha256"]):
-                return None
-            if not _credential_archive_is_current(conn, source, credential_kind, credential_uri):
-                return None
-    if not _credential_archive_is_current(
-        conn, source, asset_media_kind, str(asset["storage_uri"])
-    ):
-        return None
-    return source
-
-
-def _cached_transcript(raw: object) -> TranscriptResult | None:
-    if raw is None:
-        return None
-    try:
-        value = json.loads(str(raw))
-        text = value["text"]
-        duration = float(value["duration_sec"])
-        if (
-            not isinstance(text, str)
-            or not text.strip()
-            or not math.isfinite(duration)
-            or duration <= 0
-        ):
-            return None
-        return TranscriptResult(text, duration, value.get("language"))
-    except (ValueError, TypeError, KeyError):
-        return None
-
-
-@dataclass(frozen=True)
-class CachedTranscriptHit:
-    """共享文案缓存命中：转写结果 + 最近写入时间（GET /api/viral/search/copy 的 updatedAt）."""
-
-    result: TranscriptResult
-    updated_at: str
-
-
 def _iso_updated_at(value: object) -> str:
     return value.isoformat() if isinstance(value, datetime) else str(value)
-
-
-def _verified_cache_result(raw: object, source: tuple[str, str]) -> TranscriptResult | None:
-    """共享正文必须带服务端写入的归档版本凭据，错配或旧无凭据正文只保留不交付。"""
-    if raw is None:
-        return None
-    try:
-        value = json.loads(str(raw))
-        archive = value.get("archive", {})
-        digest = archive.get("sha256", "")
-        if (archive.get("platform"), archive.get("video_id")) != source:
-            return None
-        if archive.get("kind") is not None and archive.get("kind") not in ("audio", "video"):
-            return None
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(c not in "0123456789abcdef" for c in digest)
-        ):
-            return None
-    except (ValueError, TypeError, AttributeError):
-        return None
-    return _cached_transcript(raw)
-
-
-def _cache_archive_is_current(
-    conn: BusinessConnection, raw: object, source: tuple[str, str]
-) -> bool:
-    # 同一平台 ID 重新归档后不能交付旧版本的正文；归档缺失不会撤销个人已受理成果。
-    # 凭据只对它自己形态的归档负责：音频正文不被并存的视频重归档误伤，反之亦然。
-    try:
-        archive = json.loads(str(raw)).get("archive", {})
-    except (ValueError, TypeError, AttributeError):
-        return False
-    return _credential_archive_is_current(
-        conn, source, _credential_archive_kind(archive.get("kind")), archive.get("storage_uri")
-    )
-
-
-def cached_transcript(
-    conn: BusinessConnection, *, platform: str, video_id: str
-) -> CachedTranscriptHit | None:
-    """只读查询共享文案缓存；未命中或内容非法返回 None. 不加锁、不转写、不计费."""
-    row = conn.execute(
-        "SELECT result_json, updated_at FROM viral_script_cache WHERE platform=%s AND video_id=%s",
-        (platform, video_id),
-    ).fetchone()
-    if row is None:
-        return None
-    result = _verified_cache_result(row["result_json"], (platform, video_id))
-    if result is None or not _cache_archive_is_current(
-        conn, row["result_json"], (platform, video_id)
-    ):
-        return None
-    return CachedTranscriptHit(result=result, updated_at=_iso_updated_at(row["updated_at"]))
-
-
-def cached_transcripts(
-    conn: BusinessConnection, refs: Sequence[tuple[str, str]]
-) -> dict[tuple[str, str], CachedTranscriptHit]:
-    """批量只读查询（搜索结果回填 hasCopy）；去重后分块 OR 查询，未命中不入结果."""
-    unique = list(dict.fromkeys(refs))
-    hits: dict[tuple[str, str], CachedTranscriptHit] = {}
-    for start in range(0, len(unique), _TRANSCRIPT_LOOKUP_CHUNK):
-        chunk = unique[start : start + _TRANSCRIPT_LOOKUP_CHUNK]
-        clause = " OR ".join(["(platform=%s AND video_id=%s)"] * len(chunk))
-        params: list[str] = []
-        for platform, video_id in chunk:
-            params.extend((platform, video_id))
-        rows = conn.execute(
-            f"SELECT platform, video_id, result_json, updated_at FROM viral_script_cache "
-            f"WHERE {clause}",  # noqa: S608 - 占位符模板拼接，值仍走参数化
-            tuple(params),
-        ).fetchall()
-        for row in rows:
-            result = _verified_cache_result(
-                row["result_json"], (str(row["platform"]), str(row["video_id"]))
-            )
-            if result is None or not _cache_archive_is_current(
-                conn, row["result_json"], (str(row["platform"]), str(row["video_id"]))
-            ):
-                continue
-            hits[(str(row["platform"]), str(row["video_id"]))] = CachedTranscriptHit(
-                result=result, updated_at=_iso_updated_at(row["updated_at"])
-            )
-    return hits
-
-
-def _historical_transcripts(
-    conn: BusinessConnection, source: tuple[str, str], *, exclude: str | None = None
-) -> list[BusinessRow]:
-    # One snapshot for successes and in-flight work: a legacy worker completing
-    # between two separate queries must not become invisible to both queries.
-    return cast(
-        list[BusinessRow],
-        conn.execute(
-            "SELECT t.id,t.status,t.provider_started_at,t.result_json "
-            "FROM script_from_audio_tasks t "
-            "JOIN viral_import_tasks i ON i.source_asset_id=t.source_asset_id "
-            "AND i.project_id=t.project_id JOIN assets a ON a.id=t.source_asset_id "
-            "WHERE i.platform=%s AND i.video_id=%s AND i.status='SUCCEEDED' "
-            "AND a.kind IN ('reference_video','reference_audio') "
-            "AND a.content_object_id IS NOT NULL "
-            "AND COALESCE(t.error_code,'')<>'SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED' "
-            "AND (t.status IN "
-            "('PENDING','RUNNING','SUBMISSION_UNCERTAIN','SUCCEEDED') "
-            "OR t.provider_started_at IS NOT NULL) "
-            "AND (%s::text IS NULL OR (t.id<>%s AND NOT (t.request_json::jsonb ? 'viral_source'))) "
-            "ORDER BY CASE WHEN t.provider_started_at IS NOT NULL "
-            "OR t.status='SUBMISSION_UNCERTAIN' THEN 0 ELSE 1 END,t.created_at,t.id",
-            (*source, exclude, exclude),
-        ).fetchall(),
-    )
-
-
-def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> BusinessRow:
-    inserted = conn.execute(
-        "INSERT INTO viral_script_cache(platform,video_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
-        source,
-    )
-    cache = cast(
-        BusinessRow,
-        conn.execute(
-            "SELECT * FROM viral_script_cache WHERE platform=%s AND video_id=%s FOR UPDATE",
-            source,
-        ).fetchone(),
-    )
-    producer = conn.execute(
-        "SELECT status,provider_started_at,error_code FROM script_from_audio_tasks WHERE id=%s",
-        (cache["producer_task_id"],),
-    ).fetchone()
-    if cache["result_json"] is None and (
-        inserted.rowcount == 1
-        or (
-            producer is not None
-            and producer["status"] == "FAILED"
-            and (
-                producer["provider_started_at"] is None
-                or producer["error_code"] == "SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED"
-            )
-        )
-    ):
-        previous = _historical_transcripts(
-            conn, source, exclude=None if inserted.rowcount == 1 else str(cache["producer_task_id"])
-        )
-        chosen = next(
-            (
-                old
-                for old in previous
-                if old["status"] == "SUCCEEDED"
-                and _cached_transcript(old["result_json"]) is not None
-            ),
-            None,
-        )
-        if chosen is None:
-            chosen = next((old for old in previous if old["status"] != "SUCCEEDED"), None)
-        if chosen is not None:
-            cache = cast(
-                BusinessRow,
-                conn.execute(
-                    "UPDATE viral_script_cache SET producer_task_id=%s,result_json=%s,"
-                    "updated_at=now() "
-                    "WHERE platform=%s AND video_id=%s RETURNING *",
-                    (
-                        chosen["id"],
-                        chosen["result_json"] if chosen["status"] == "SUCCEEDED" else None,
-                        *source,
-                    ),
-                ).fetchone(),
-            )
-    if cache["result_json"] is None and cache["producer_task_id"] is not None:
-        previous_result = conn.execute(
-            "SELECT result_json FROM script_from_audio_tasks WHERE id=%s AND status='SUCCEEDED'",
-            (cache["producer_task_id"],),
-        ).fetchone()
-        if previous_result is not None and _cached_transcript(previous_result["result_json"]):
-            cache = cast(
-                BusinessRow,
-                conn.execute(
-                    "UPDATE viral_script_cache SET result_json=%s,updated_at=now() "
-                    "WHERE platform=%s AND video_id=%s RETURNING *",
-                    (previous_result["result_json"], *source),
-                ).fetchone(),
-            )
-    if (
-        cache["result_json"] is not None
-        and _verified_cache_result(cache["result_json"], source) is None
-    ):
-        proof = conn.execute(
-            "SELECT a.kind,a.sha256,a.storage_uri FROM script_from_audio_tasks t "
-            "JOIN assets a ON a.id=t.source_asset_id AND a.project_id=t.project_id "
-            "JOIN content_objects c ON c.id=a.content_object_id AND c.sha256=a.sha256 "
-            "AND c.size_bytes=a.size_bytes AND c.scope='global' "
-            "JOIN viral_import_tasks i ON i.source_asset_id=a.id AND i.project_id=a.project_id "
-            "WHERE t.id=%s AND a.kind IN ('reference_video','reference_audio') "
-            "AND i.platform=%s AND i.video_id=%s AND i.status='SUCCEEDED'",
-            (cache["producer_task_id"], *source),
-        ).fetchone()
-        if proof is not None:
-            value = json.loads(str(cache["result_json"]))
-            # 已带不同来源凭据视为错配，不能覆盖其证据重新认证。
-            if "archive" not in value:
-                value["archive"] = {
-                    "platform": source[0],
-                    "video_id": source[1],
-                    "kind": _viral_media_kind(str(proof["kind"])),
-                    "sha256": str(proof["sha256"]),
-                    "storage_uri": str(proof["storage_uri"]),
-                }
-                cache = cast(
-                    BusinessRow,
-                    conn.execute(
-                        "UPDATE viral_script_cache SET result_json=%s "
-                        "WHERE platform=%s AND video_id=%s RETURNING *",
-                        (json.dumps(value, ensure_ascii=False), *source),
-                    ).fetchone(),
-                )
-    return cache
-
-
-def _cache_producer_state(conn: BusinessConnection, cache: BusinessRow) -> str:
-    if (
-        cache["result_json"] is not None
-        and _verified_cache_result(
-            cache["result_json"], (str(cache["platform"]), str(cache["video_id"]))
-        )
-        is None
-    ):
-        return "UNCERTAIN"
-    if cache["producer_task_id"] is None:
-        return "AVAILABLE"
-    producer = conn.execute(
-        "SELECT status,provider_started_at,error_code FROM script_from_audio_tasks WHERE id=%s",
-        (cache["producer_task_id"],),
-    ).fetchone()
-    # A missing producer may have been deleted while a paid request was in
-    # flight. Its disappearance must never authorize another submission.
-    if producer is None:
-        return "UNCERTAIN"
-    if producer["status"] == "FAILED" and (
-        producer["provider_started_at"] is None
-        or producer["error_code"] == "SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED"
-    ):
-        if any(
-            old["status"] != "SUCCEEDED" or _cached_transcript(old["result_json"])
-            for old in _historical_transcripts(
-                conn,
-                (str(cache["platform"]), str(cache["video_id"])),
-                exclude=str(cache["producer_task_id"]),
-            )
-        ):
-            # Rebind on the next locked lookup if the producer failed after the
-            # lookup above. Never overlook another pre-upgrade in-flight task.
-            return "WAITING"
-        return "AVAILABLE"
-    if producer["status"] in {"PENDING", "RUNNING"}:
-        return "WAITING"
-    return "UNCERTAIN"
-
-
-def _cache_uncertain() -> Exception:
-    return script_from_audio_error(
-        409,
-        "SCRIPT_FROM_AUDIO_CACHE_UNCERTAIN",
-        "该视频上次转写结果尚未确认，请联系管理员核实后再提取。",
-    )
 
 
 def script_from_audio_error(status_code: int, code: str, message: str) -> Exception:
@@ -647,7 +241,6 @@ def enqueue_script_from_audio_task(
             "来源视频不存在或已删除，请重新上传。",
         )
     _validate_source(asset)
-    viral_source = _viral_source(conn, asset)
     request_payload: dict[str, object] = {"source_asset_id": source_asset_id}
     request_hash = hashlib.sha256(
         json.dumps(
@@ -672,15 +265,14 @@ def enqueue_script_from_audio_task(
                 "提取内容已经变化，请重新提交。",
             )
         return cast(BusinessRow, replay)
-    if viral_source is None:
-        source_task = private_source_task(
-            conn,
-            owner_user_id=str(getattr(actor, "id")),
-            sha256=str(asset["sha256"]),
-            size_bytes=int(asset["size_bytes"]),
-        )
-        if source_task is not None:
-            return source_task
+    source_task = private_source_task(
+        conn,
+        owner_user_id=str(getattr(actor, "id")),
+        sha256=str(asset["sha256"]),
+        size_bytes=int(asset["size_bytes"]),
+    )
+    if source_task is not None:
+        return source_task
     active = conn.execute(
         """
         SELECT * FROM script_from_audio_tasks
@@ -690,7 +282,7 @@ def enqueue_script_from_audio_task(
         (project_id,),
     ).fetchone()
     if active is not None:
-        if str(active["request_hash"]) != request_hash or viral_source is not None:
+        if str(active["request_hash"]) != request_hash:
             raise script_from_audio_error(
                 409,
                 "SCRIPT_FROM_AUDIO_ALREADY_RUNNING",
@@ -698,36 +290,21 @@ def enqueue_script_from_audio_task(
             )
         return cast(BusinessRow, active)
 
-    cache = _lock_script_cache(conn, viral_source) if viral_source else None
-    if cache is not None and _viral_source(conn, asset) != viral_source:
-        cache = None
-        viral_source = None
-        # 共享资格在锁内被历史回溯改判为私有时（如凭据指向旧版本资产），必须
-        # 补跑与首次私有路径相同的内容指纹门禁：跳过它会让同一音轨绕开
-        # 「未知提交禁止重发」的保护，对 SUBMISSION_UNCERTAIN 重复预留并
-        # 提交 ASR（Codex S 级评审 P1）。
-        demoted_task = private_source_task(
-            conn,
-            owner_user_id=str(getattr(actor, "id")),
-            sha256=str(asset["sha256"]),
-            size_bytes=int(asset["size_bytes"]),
-        )
-        if demoted_task is not None:
-            return demoted_task
-    cached = (
-        _verified_cache_result(cache["result_json"], viral_source)
-        if cache is not None and viral_source is not None
-        else None
-    )
-    if cache is not None:
-        if cached is None and _cache_producer_state(conn, cache) == "UNCERTAIN":
-            raise _cache_uncertain()
-        request_payload["viral_source"] = [cache["platform"], cache["video_id"]]
-        request_payload["viral_archive_sha256"] = str(asset["sha256"])
-        request_payload["viral_archive_uri"] = str(asset["storage_uri"])
-        request_payload["viral_archive_kind"] = _viral_media_kind(str(asset["kind"]))
-    if cached is None and (cache is None or _cache_producer_state(conn, cache) == "AVAILABLE"):
-        _configured_asr(conn)
+    _configured_asr(conn)
+    # 归因：内容经营报表按爆款身份聚合 ASR 收入/成本（viral_content_overview）。
+    # 只作记录，不参与任何资格与计费判定；身份来自服务端导入任务关联，
+    # 客户端自报的元数据不算数（2026-11-11 共享缓存退役后仅存的 viral_source）。
+    attribution = conn.execute(
+        "SELECT i.platform,i.video_id FROM viral_import_tasks i "
+        "WHERE i.source_asset_id=%s AND i.project_id=%s AND i.status='SUCCEEDED' "
+        "ORDER BY i.created_at,i.id LIMIT 1",
+        (source_asset_id, project_id),
+    ).fetchone()
+    if attribution is not None:
+        request_payload["viral_source"] = [
+            str(attribution["platform"]),
+            str(attribution["video_id"]),
+        ]
 
     task_id = str(uuid4())
     conn.execute(
@@ -776,46 +353,23 @@ def enqueue_script_from_audio_task(
         raise script_from_audio_error(
             409, "SCRIPT_FROM_AUDIO_ENQUEUE_CONFLICT", "该项目已有不同来源的提取任务，请等待完成。"
         )
-    if viral_source is not None and str(row["idempotency_key"]) != idempotency_key:
-        raise script_from_audio_error(
-            409, "SCRIPT_FROM_AUDIO_ALREADY_RUNNING", "该项目已有文案提取任务在进行，请等待完成。"
-        )
     if str(row["id"]) != task_id:
         return cast(BusinessRow, row)
     from app.permissions import write_audit
 
-    cache_hit = cached is not None
-    # 2026-10-08 拍板（翻转原 test_cw030「命中照收」口径）：转写费只跟真实转写走，
-    # 命中共享缓存意味着没有转写发生——不预留也不结算 asr。任务仅作为「文案已就绪」
-    # 的凭据，正文与交付费由 claim 按文案生产者判定（生产者免费、非生产者首提收费）。
-    if not cache_hit:
-        from app.usage_billing import accept_operation
+    # 每个用户为真实转写付自己的 ASR 按秒费（2026-11-11 极简化：无共享缓存，
+    # 不再有「命中免费/交付费」口径）。
+    from app.usage_billing import accept_operation
 
-        metadata = json.loads(str(asset["metadata_json"] or "{}"))
-        duration = metadata.get("duration_seconds") or metadata.get("duration_sec") or 0
-        accept_operation(
-            conn,
-            user_id=actor.id,  # type: ignore[attr-defined]
-            service="asr",
-            source_id=str(row["id"]),
-            units=duration,
-        )
-    if cache is not None and viral_source is not None:
-        if cache_hit:
-            conn.execute(
-                "UPDATE script_from_audio_tasks SET status='SUCCEEDED',result_json=%s,"
-                "completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-                (cache["result_json"], row["id"]),
-            )
-            row = conn.execute(
-                "SELECT * FROM script_from_audio_tasks WHERE id=%s", (row["id"],)
-            ).fetchone()
-        elif _cache_producer_state(conn, cache) == "AVAILABLE":
-            conn.execute(
-                "UPDATE viral_script_cache SET producer_task_id=%s,updated_at=now() "
-                "WHERE platform=%s AND video_id=%s",
-                (row["id"], *viral_source),
-            )
+    metadata = json.loads(str(asset["metadata_json"] or "{}"))
+    duration = metadata.get("duration_seconds") or metadata.get("duration_sec") or 0
+    accept_operation(
+        conn,
+        user_id=actor.id,  # type: ignore[attr-defined]
+        service="asr",
+        source_id=str(row["id"]),
+        units=duration,
+    )
     write_audit(
         conn,
         actor=actor,  # type: ignore[arg-type]
@@ -825,7 +379,7 @@ def enqueue_script_from_audio_task(
         metadata={
             "project_id": project_id,
             "request_hash": request_hash,
-            "cache_hit": cached is not None,
+            "viral_attribution": attribution is not None,
         },
     )
     return cast(BusinessRow, row)
@@ -890,34 +444,8 @@ def _validate_source(asset: BusinessRow) -> None:
 
 
 def _verified_task_payload(conn: BusinessConnection, row: BusinessRow) -> dict[str, object]:
+    """任务载荷直接解析；``viral_source`` 仅是内容经营报表的归因记录（服务端写入）."""
     payload: dict[str, object] = json.loads(str(row["request_json"]))
-    source = payload.get("viral_source")
-    if not isinstance(source, list) or len(source) != 2 or payload.get("viral_archive_sha256"):
-        return payload
-    # 升级时已有未完成任务仍可能来自旧客户端音轨闸门；不能让旧任务继续污染共享。
-    asset = conn.execute(
-        "SELECT * FROM assets WHERE id=%s AND project_id=%s",
-        (row["source_asset_id"], row["project_id"]),
-    ).fetchone()
-    trusted = None if asset is None else _viral_source(conn, asset)
-    if trusted == (str(source[0]), str(source[1])) and asset is not None:
-        payload["viral_archive_sha256"] = str(asset["sha256"])
-        payload["viral_archive_uri"] = str(asset["storage_uri"])
-        payload["viral_archive_kind"] = _viral_media_kind(str(asset["kind"]))
-    else:
-        del payload["viral_source"]
-        conn.execute(
-            "UPDATE viral_script_cache SET producer_task_id=NULL WHERE platform=%s AND video_id=%s "
-            "AND producer_task_id=%s AND result_json IS NULL",
-            (*source, row["id"]),
-        )
-    changed = conn.execute(
-        "UPDATE script_from_audio_tasks SET request_json=%s WHERE id=%s AND status='RUNNING' "
-        "AND locked_by=%s AND attempt=%s AND locked_until::timestamptz>now()",
-        (json.dumps(payload, ensure_ascii=False), row["id"], row["locked_by"], row["attempt"]),
-    )
-    if changed.rowcount != 1:
-        raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
     return payload
 
 
@@ -930,37 +458,6 @@ def prepare_script_from_audio_task(
     row = _require_leased_task(conn, lease)
     payload = _verified_task_payload(conn, row)
     asset_id = str(payload.get("source_asset_id", ""))
-    source = cast(list[str] | None, payload.get("viral_source"))
-    if source is not None:
-        cache = _lock_script_cache(conn, (str(source[0]), str(source[1])))
-        cached = _verified_cache_result(cache["result_json"], (str(source[0]), str(source[1])))
-        if cached is not None:
-            conn.commit()
-            return PreparedScriptFromAudio(
-                task_id=lease.id,
-                project_id=lease.project_id,
-                asset_id=asset_id,
-                object_key="",
-                storage=storage,
-                asr=None,
-                ffmpeg_path="",
-                ffprobe_path=None,
-                audio_object_key="",
-                cached_result=cached,
-                from_cache=True,
-            )
-        if cache["producer_task_id"] != lease.id:
-            state = _cache_producer_state(conn, cache)
-            if state == "WAITING":
-                raise ScriptCachePending()
-            if state != "AVAILABLE":
-                raise _cache_uncertain()
-            conn.execute(
-                "UPDATE viral_script_cache SET producer_task_id=%s,updated_at=now() "
-                "WHERE platform=%s AND video_id=%s",
-                (lease.id, *source),
-            )
-        conn.commit()
     if row["provider_task_id"] is not None:
         return PreparedScriptFromAudio(
             task_id=lease.id,
@@ -1082,8 +579,6 @@ def perform_script_from_audio_task(
     heartbeat: Callable[[], None] | None = None,
 ) -> TranscriptResult:
     """Known receipts resume without another upload/POST; pending work retains its audio."""
-    if work.cached_result is not None:
-        return work.cached_result
     if work.asr is None:
         raise AsrProviderError("转写服务暂不可用。")
     keep_audio = False
@@ -1171,7 +666,6 @@ def complete_script_from_audio_task(
     lease: ScriptFromAudioTaskLease,
     result: TranscriptResult,
     audio_deleted: bool = False,
-    from_cache: bool = False,
 ) -> None:
     now = _time_text(datetime.now(UTC))
     result_payload: dict[str, object] = {
@@ -1179,23 +673,9 @@ def complete_script_from_audio_task(
         "duration_sec": result.duration_sec,
         "language": result.language,
     }
-    row = _require_leased_task(conn, lease)
-    request_payload = _verified_task_payload(conn, row)
-    source = cast(list[str] | None, request_payload.get("viral_source"))
-    archive_digest = request_payload.get("viral_archive_sha256")
-    if source is not None and archive_digest is not None:
-        result_payload["archive"] = {
-            "platform": str(source[0]),
-            "video_id": str(source[1]),
-            # 凭据形态随来源资产：音频/视频是同一视频的两个归档载体，
-            # 交付侧按 kind 对应校验，跨形态正文不再被误判过期。
-            "kind": _credential_archive_kind(request_payload.get("viral_archive_kind")),
-            "sha256": str(archive_digest),
-            "storage_uri": request_payload.get("viral_archive_uri"),
-        }
+    # 租约守卫：不在持锁状态即抛 SCRIPT_FROM_AUDIO_LEASE_LOST。
+    _require_leased_task(conn, lease)
     result_json = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
-    if source is not None and _cached_transcript(result_json) is None:
-        raise AsrProviderError("转写结果缺少有效文案或时长，请联系管理员核实。")
     updated = conn.execute(
         """
         UPDATE script_from_audio_tasks
@@ -1219,39 +699,27 @@ def complete_script_from_audio_task(
     )
     if updated.rowcount != 1:
         raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
-    if source is not None:
-        conn.execute(
-            "UPDATE viral_script_cache SET result_json=%s,updated_at=now() "
-            "WHERE platform=%s AND video_id=%s AND producer_task_id=%s AND result_json IS NULL",
-            (result_json, *source, lease.id),
-        )
     from app.usage_billing import complete_source_attempt, finish_source
 
-    if from_cache:
-        # 2026-10-08 拍板：worker 期命中别人的转写结果（并发等待者）同样没有真实
-        # 转写发生——按 0 结算原路释放预留，文案交付与计费走 claim 的生产者判定。
-        # 不留 PENDING 计费单，reconcile 不会把它再按时长兜底结算。
-        finish_source(conn, lease.id, units=0, succeeded=True)
+    complete_source_attempt(conn, lease.id, usage=result.duration_sec)
+    if result.duration_sec is not None:
+        finish_source(conn, lease.id, units=result.duration_sec, succeeded=True)
     else:
-        complete_source_attempt(conn, lease.id, usage=result.duration_sec)
-        if result.duration_sec is not None:
-            finish_source(conn, lease.id, units=result.duration_sec, succeeded=True)
-        else:
-            # 供应商没回时长的成功结果按预留预算结算：文案已经交付，绝不能
-            # 把计费单留在 PENDING（交付未扣费，且对账器按「SUCCEEDED 且有
-            # 时长」过滤，永远兜不到这一行）。
-            budget = conn.execute(
-                "SELECT budget_units FROM billing_operations WHERE source_id=%s AND service='asr' "
-                "ORDER BY billing_round DESC LIMIT 1",
-                (lease.id,),
-            ).fetchone()
-            if budget is None or budget[0] is None:
-                raise script_from_audio_error(
-                    503,
-                    "SCRIPT_FROM_AUDIO_BILLING_MISSING",
-                    "转写计费单缺失，请联系管理员核实。",
-                )
-            finish_source(conn, lease.id, units=budget[0], succeeded=True)
+        # 供应商没回时长的成功结果按预留预算结算：文案已经交付，绝不能
+        # 把计费单留在 PENDING（交付未扣费，且对账器按「SUCCEEDED 且有
+        # 时长」过滤，永远兜不到这一行）。
+        budget = conn.execute(
+            "SELECT budget_units FROM billing_operations WHERE source_id=%s AND service='asr' "
+            "ORDER BY billing_round DESC LIMIT 1",
+            (lease.id,),
+        ).fetchone()
+        if budget is None or budget[0] is None:
+            raise script_from_audio_error(
+                503,
+                "SCRIPT_FROM_AUDIO_BILLING_MISSING",
+                "转写计费单缺失，请联系管理员核实。",
+            )
+        finish_source(conn, lease.id, units=budget[0], succeeded=True)
     conn.commit()
 
 
@@ -1275,20 +743,7 @@ def fail_script_from_audio_task(
     has_receipt = row["provider_task_id"] is not None
     retryable = 1 if not submission_started else 0
     next_attempt_at = None
-    if isinstance(cause, ScriptCachePending):
-        status = "PENDING"
-        code = "SCRIPT_FROM_AUDIO_CACHE_WAITING"
-        retryable = 0
-        next_attempt_at = _time_text(datetime.now(UTC) + timedelta(seconds=10))
-    elif (
-        isinstance(cause, HTTPException)
-        and isinstance(cause.detail, dict)
-        and cause.detail.get("code") == "SCRIPT_FROM_AUDIO_CACHE_UNCERTAIN"
-    ):
-        status = "FAILED"
-        code = "SCRIPT_FROM_AUDIO_CACHE_UNCERTAIN"
-        retryable = 0
-    elif has_receipt and (
+    if has_receipt and (
         isinstance(cause, AsrTaskPending)
         or (isinstance(cause, HTTPException) and cause.status_code == 503)
     ):
@@ -1378,8 +833,6 @@ def latest_script_from_audio_task(
 
 
 def _redacted_message(cause: Exception) -> str:
-    if isinstance(cause, ScriptCachePending):
-        return "该视频文案正在提取，完成后自动返回，请稍候。"
     if isinstance(cause, AsrProviderError):
         return str(cause)
     if isinstance(cause, HTTPException):

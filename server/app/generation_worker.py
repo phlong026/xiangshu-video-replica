@@ -265,7 +265,6 @@ def _run_audio_lease(
                 lease=lease,
                 result=result,
                 audio_deleted=work.audio_deleted,
-                from_cache=work.from_cache,
             )
     except Exception as exc:
         with connection() as conn:
@@ -1292,6 +1291,26 @@ def run_pg_worker_once(
 
                     enqueue_stuck_billing_operations(reconcile_conn)
                     process_reconciliation_items(reconcile_conn)
+                    # UNCERTAIN 自动处置（2026-11-11 极简化 WP-C）：超阈值的转写/改写
+                    # 不确定任务自动重开新一轮计费（先收口旧轮防双扣，逐候选
+                    # SAVEPOINT 隔离），与主扫描共用节流和 advisory lock。
+                    from app.uncertain_auto_reopen import (
+                        read_uncertain_auto_reopen_params,
+                        reopen_uncertain_script_from_audio_tasks,
+                        reopen_uncertain_script_rewrite_tasks,
+                    )
+
+                    params = read_uncertain_auto_reopen_params(reconcile_conn)
+                    reopen_uncertain_script_from_audio_tasks(
+                        reconcile_conn,
+                        threshold_minutes=params["threshold_minutes"],
+                        max_reopens=params["max_reopens"],
+                    )
+                    reopen_uncertain_script_rewrite_tasks(
+                        reconcile_conn,
+                        threshold_minutes=params["threshold_minutes"],
+                        max_reopens=params["max_reopens"],
+                    )
         processed_round = False
         from app.prompt_optimizer import run_prompt_task
 

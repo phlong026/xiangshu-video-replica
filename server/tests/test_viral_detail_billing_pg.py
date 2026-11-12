@@ -3,6 +3,10 @@
 TEST-PG：复用 test_customer_pricing 的夹具链（cw076_registration_test 专属库，
 module 级建库 → alembic head → 每用例 TRUNCATE wallets/users）。去重台账复用
 ``billing_operations`` 既有的唯一键与索引，因此本模块不覆盖新迁移。
+
+2026-11-11 极简化：获取文案（viral_copy）交付计费整体退役，原「获取文案」段
+（claim/并发首提/提取记录/状态只读）随之删除；文案语义回归见
+test_viral_copy_simplify_pg.py。本文件只保留详情计费与公开端点可见性守卫。
 """
 
 # Imported pytest fixtures are injected by parameter name.
@@ -25,8 +29,6 @@ from app.db_portable import BusinessConnection
 from app.usage_billing import accept_operation, finish_source
 
 _DETAIL_SERVICE = "viral_detail"
-_COPY_SERVICE = "viral_copy"
-_COPY_TEXT = "别人转写好的共享文案"
 
 
 @pytest.fixture()
@@ -37,15 +39,6 @@ def detail_client(client):
     client.app.include_router(viral_routes_router)
     yield client
     client.app.dependency_overrides.clear()
-
-
-@pytest.fixture()
-def copy_client(detail_client):
-    """文案状态读接口在 viral_search_routes 里，需要再挂一个路由。"""
-    from app.viral_search_routes import router as viral_search_router
-
-    detail_client.app.include_router(viral_search_router)
-    yield detail_client
 
 
 def _publish_ready(raw, *, platform: str, video_id: str) -> None:
@@ -420,7 +413,7 @@ def test_cache_reclaim_returns_server_side_truth(detail_client, route_state) -> 
         )
 
 
-# ---------------------------------------------------------------- 获取文案（viral_copy）
+# ---------------------------------------------------------------- 可见性守卫（公开端点组）
 
 
 def _seed_copy_video(
@@ -429,11 +422,8 @@ def _seed_copy_video(
     *,
     platform: str = "douyin",
     video_id: str,
-    tariff: int | None = 2,
-    visibility: str | None = None,
-    cached: bool = True,
 ) -> None:
-    """一条可获取文案的视频：内容池有行 + 账号有钱 + 共享缓存里有结果."""
+    """内容池里的一条已就绪视频（可见性守卫用例只依赖它存在且有钱）."""
     raw.execute(
         "INSERT INTO viral_videos (platform, video_id, title, author, native_json) "
         "VALUES (%s, %s, 'T', 'A', '{}') ON CONFLICT (platform, video_id) "
@@ -444,365 +434,7 @@ def _seed_copy_video(
     raw.execute(
         "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
     )
-    raw.execute("DELETE FROM billing_tariffs WHERE service=%s", (_COPY_SERVICE,))
-    if tariff is not None:
-        raw.execute(
-            "INSERT INTO billing_tariffs(service,enabled,unit_credits) VALUES(%s,true,%s)",
-            (_COPY_SERVICE, tariff),
-        )
-    if cached:
-        raw.execute(
-            "INSERT INTO viral_script_cache (platform, video_id, result_json) "
-            "VALUES (%s, %s, %s) ON CONFLICT (platform, video_id) DO UPDATE "
-            "SET result_json=excluded.result_json",
-            (
-                platform,
-                video_id,
-                json.dumps(
-                    {
-                        "text": _COPY_TEXT,
-                        "duration_sec": 12.0,
-                        "archive": {
-                            "platform": platform,
-                            "video_id": video_id,
-                            "sha256": "a" * 64,
-                            "storage_uri": f"local://viral/{platform}/{video_id}.mp4",
-                        },
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-        )
-    else:
-        raw.execute(
-            "DELETE FROM viral_script_cache WHERE platform=%s AND video_id=%s",
-            (platform, video_id),
-        )
-    if visibility is not None:
-        raw.execute(
-            "INSERT INTO viral_video_visibility (platform, video_id, status, reason) "
-            "VALUES (%s, %s, %s, 'copy-test') ON CONFLICT (platform, video_id) "
-            "DO UPDATE SET status = excluded.status",
-            (platform, video_id, visibility),
-        )
     raw.commit()
-
-
-def _claim_copy(http_client, headers, *, platform: str = "douyin", video_id: str):
-    return http_client.post(
-        "/api/viral/videos/copy/claim",
-        headers=headers,
-        json={"platform": platform, "videoId": video_id},
-    )
-
-
-def _copy_operations(raw, source_id: str) -> list[tuple[str, int]]:
-    rows = raw.execute(
-        "SELECT state, charged_credits FROM billing_operations "
-        "WHERE service=%s AND source_id=%s ORDER BY billing_round",
-        (_COPY_SERVICE, source_id),
-    ).fetchall()
-    return [(str(row[0]), int(row[1])) for row in rows]
-
-
-def test_viral_copy_service_registered_in_billing_catalog() -> None:
-    """viral_copy 科目：call/platform/viral，可客户收费、复用 viral_extract 折扣接口."""
-    from app.billing_catalog import (
-        INTERFACE_KEYS,
-        SERVICE_INTERFACE,
-        SERVICES,
-        interface_for_service,
-    )
-
-    service = SERVICES["viral_copy"]
-    assert service.name == "爆款视频文案"
-    assert service.unit == "call"
-    # 文案在共享缓存里，复用别人的转写结果没有按次供应商成本，provider 记平台本身。
-    assert service.provider == "platform"
-    assert service.module == "viral"
-    assert service.customer_charge_allowed is True
-    assert interface_for_service("viral_copy") == "viral_extract"
-    assert SERVICE_INTERFACE["viral_copy"] in INTERFACE_KEYS
-
-
-def test_copy_claim_charges_once_then_replays_free(detail_client, route_state) -> None:
-    """复用共享缓存同样付费：首次扣一次「获取文案」，再次获取只复用购买."""
-    headers, uid = account(detail_client, "copy_first")
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id="v-copy-first")
-    first = _claim_copy(detail_client, headers, video_id="v-copy-first")
-    assert first.status_code == 200, first.text
-    body = first.json()
-    assert body["text"] == _COPY_TEXT
-    assert body["updatedAt"]
-    assert body["billing"] == {
-        "charged": 2,
-        "unit": "call",
-        "deduped": False,
-        "billable": True,
-    }
-    replay = _claim_copy(detail_client, headers, video_id="v-copy-first")
-    assert replay.status_code == 200, replay.text
-    # 秒回的是别人的转写结果，但正文本身仍是零售内容：第二次只复用购买，不再扣费。
-    assert replay.json()["text"] == _COPY_TEXT
-    assert replay.json()["billing"] == {
-        "charged": 0,
-        "unit": "call",
-        "deduped": True,
-        "billable": True,
-    }
-    with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (48, 0)
-        assert _copy_operations(raw, f"viral-copy:{uid}:douyin:v-copy-first") == [("SUCCEEDED", 2)]
-
-
-def test_copy_extractions_lists_own_claim_history(detail_client, route_state) -> None:
-    """提取记录：按用户回放领取历史（新→旧），正文回源共享缓存；只看自己的."""
-    headers, uid = account(detail_client, "copy_history")
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id="v-copy-hist-a")
-        _seed_copy_video(raw, uid, video_id="v-copy-hist-b")
-    first = _claim_copy(detail_client, headers, video_id="v-copy-hist-a")
-    assert first.status_code == 200, first.text
-    second = _claim_copy(detail_client, headers, video_id="v-copy-hist-b")
-    assert second.status_code == 200, second.text
-
-    listing = detail_client.get("/api/viral/videos/copy/extractions", headers=headers)
-    assert listing.status_code == 200, listing.text
-    items = listing.json()["items"]
-    assert [item["videoId"] for item in items][:2] == [
-        "v-copy-hist-b",
-        "v-copy-hist-a",
-    ]
-    assert items[0]["platform"] == "douyin"
-    assert items[0]["times"] == 1
-    assert items[0]["text"] == _COPY_TEXT
-    assert items[0]["title"] == "T"
-    assert items[0]["lastExtractedAt"]
-
-    # 未领取过的账号记录为空；重复领取不产生重复条目（只加次数）。
-    other_headers, _other_uid = account(detail_client, "copy_history_other")
-    other = detail_client.get("/api/viral/videos/copy/extractions", headers=other_headers)
-    assert other.status_code == 200, other.text
-    assert other.json()["items"] == []
-    replay = _claim_copy(detail_client, headers, video_id="v-copy-hist-a")
-    assert replay.status_code == 200, replay.text
-    again = detail_client.get("/api/viral/videos/copy/extractions", headers=headers)
-    rows = again.json()["items"]
-    assert len(rows) == 2
-    # 重领把 hist-a 的最近交付时间推到最新，排序随之置顶，次数 +1。
-    assert rows[0]["videoId"] == "v-copy-hist-a"
-    assert rows[0]["times"] == 2
-    assert rows[1]["videoId"] == "v-copy-hist-b"
-    assert rows[1]["times"] == 1
-
-
-def test_copy_claim_miss_delivers_nothing_and_costs_nothing(detail_client, route_state) -> None:
-    """未命中共享缓存：如实回 null 且分文不扣——没有交付就没有收费."""
-    headers, uid = account(detail_client, "copy_miss")
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id="v-copy-miss", cached=False)
-    response = _claim_copy(detail_client, headers, video_id="v-copy-miss")
-    assert response.status_code == 200, response.text
-    assert response.json() == {
-        "text": None,
-        "updatedAt": None,
-        "billing": {"charged": 0, "unit": "call", "deduped": False, "billable": True},
-    }
-    with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (50, 0)
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE user_id=%s AND service=%s",
-                (uid, _COPY_SERVICE),
-            ).fetchone()[0]
-            == 0
-        )
-
-
-def test_copy_claim_is_fail_closed_without_tariff(detail_client, route_state) -> None:
-    """资费未配置 → 503 且不交付、不扣费（与搜索/详情同一 fail-closed 口径）."""
-    headers, uid = account(detail_client, "copy_unpriced")
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id="v-copy-unpriced", tariff=None)
-    response = _claim_copy(detail_client, headers, video_id="v-copy-unpriced")
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "VIRAL_COPY_UNPRICED"
-    assert "尚未配置" in response.json()["detail"]["message"]
-    with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (50, 0)
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE user_id=%s AND service=%s",
-                (uid, _COPY_SERVICE),
-            ).fetchone()[0]
-            == 0
-        )
-
-
-def test_new_copy_claim_unavailable_content_is_denied_without_charge(
-    detail_client, route_state
-) -> None:
-    """未买过的下架文案不能因缓存存在而公开交付."""
-    headers, uid = account(detail_client, "copy_gone")
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id="v-copy-gone", visibility="UNAVAILABLE")
-    response = _claim_copy(detail_client, headers, video_id="v-copy-gone")
-    assert response.status_code == 404, response.text
-    with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (50, 0)
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE user_id=%s AND service=%s",
-                (uid, _COPY_SERVICE),
-            ).fetchone()[0]
-            == 0
-        )
-
-
-def test_copy_purchase_is_shared_across_sub_account(detail_client, route_state) -> None:
-    """去重键是付费账号而不是操作者：子账号买过，母账号再取不再扣费."""
-    master_headers, master_id = account(detail_client, "copy_master")
-    child_headers, child_id = account(detail_client, "copy_child")
-    with psycopg.connect(route_state) as raw:
-        raw.execute(
-            "UPDATE users SET account_type='SUB', parent_user_id=%s WHERE id=%s",
-            (master_id, child_id),
-        )
-        raw.execute(
-            "UPDATE wallets SET available_credits=0, reserved_credits=0 WHERE user_id=%s",
-            (child_id,),
-        )
-        _seed_copy_video(raw, master_id, video_id="v-copy-shared")
-    child_claim = _claim_copy(detail_client, child_headers, video_id="v-copy-shared")
-    assert child_claim.status_code == 200, child_claim.text
-    assert child_claim.json()["billing"]["charged"] == 2
-    master_claim = _claim_copy(detail_client, master_headers, video_id="v-copy-shared")
-    assert master_claim.status_code == 200, master_claim.text
-    assert master_claim.json()["billing"] == {
-        "charged": 0,
-        "unit": "call",
-        "deduped": True,
-        "billable": True,
-    }
-    with psycopg.connect(route_state) as raw:
-        # 扣的是母账号钱包；子账号自己的余额保持为 0。
-        assert _wallet(raw, master_id) == (48, 0)
-        assert _wallet(raw, child_id) == (0, 0)
-        assert _copy_operations(raw, f"viral-copy:{master_id}:douyin:v-copy-shared") == [
-            ("SUCCEEDED", 2)
-        ]
-
-
-def test_concurrent_sub_account_copy_claims_charge_once(detail_client, route_state) -> None:
-    """FIX-14：同一母账号下两个子账号并发首提，只能扣一次。
-
-    计费行按操作者唯一、早先的锁也按操作者加，两个子账号会各自通过「未购买」判断。
-    这里用两条真实 PG 连接复现并发：A 扣费后不提交，B 必须等 A 提交再看到「已购买」。
-    """
-    import threading
-    import time
-
-    from app.auth import CurrentUser
-    from app.viral_routes import charge_viral_copy
-
-    master_headers, master_id = account(detail_client, "copy_race_master")
-    _first_headers, first_id = account(detail_client, "copy_race_a")
-    _second_headers, second_id = account(detail_client, "copy_race_b")
-    with psycopg.connect(route_state) as raw:
-        for child in (first_id, second_id):
-            raw.execute(
-                "UPDATE users SET account_type='SUB', parent_user_id=%s WHERE id=%s",
-                (master_id, child),
-            )
-        _seed_copy_video(raw, master_id, video_id="v-copy-race")
-    del master_headers
-
-    def actor(uid: str) -> CurrentUser:
-        return CurrentUser(id=uid, username=uid, display_name=uid, role="customer")
-
-    results: dict[str, tuple[int, bool]] = {}
-    with psycopg.connect(route_state) as first_raw:
-        first = BusinessConnection.postgres(first_raw)
-        results["first"] = charge_viral_copy(
-            first, actor=actor(first_id), platform="douyin", video_id="v-copy-race"
-        )
-
-        def second_claim() -> None:
-            with psycopg.connect(route_state) as second_raw:
-                results["second"] = charge_viral_copy(
-                    BusinessConnection.postgres(second_raw),
-                    actor=actor(second_id),
-                    platform="douyin",
-                    video_id="v-copy-race",
-                )
-
-        worker = threading.Thread(target=second_claim)
-        worker.start()
-        time.sleep(0.5)
-        # A 尚未提交：B 必须被同一把钱包主人锁挡住。
-        assert worker.is_alive()
-        first_raw.commit()
-        worker.join(timeout=10)
-    assert results["first"] == (2, False)
-    assert results["second"] == (0, True)
-    with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, master_id) == (48, 0)
-
-
-def test_copy_claim_rejects_unknown_video_and_platform_without_charge(
-    detail_client, route_state
-) -> None:
-    """读不到内容的请求不产生费用：缺视频 404、平台非法 400，钱包与台账都不动."""
-    headers, uid = account(detail_client, "copy_missing")
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id="v-copy-known")
-    missing = _claim_copy(detail_client, headers, video_id="v-copy-absent")
-    assert missing.status_code == 404
-    assert missing.json()["detail"]["code"] == "VIRAL_VIDEO_NOT_FOUND"
-    invalid = _claim_copy(detail_client, headers, platform="kuaishou", video_id="v-copy-known")
-    assert invalid.status_code == 400
-    assert invalid.json()["detail"]["code"] == "VIRAL_PLATFORM_INVALID"
-    with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (50, 0)
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE user_id=%s AND service=%s",
-                (uid, _COPY_SERVICE),
-            ).fetchone()[0]
-            == 0
-        )
-
-
-def test_copy_status_never_leaks_text_and_reports_purchase(copy_client, route_state) -> None:
-    """只读状态只回答「有没有 / 买没买过」：正文必须走计费端点，本端点不计费."""
-    headers, uid = account(copy_client, "copy_status")
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id="v-copy-status")
-    params = {"platform": "douyin", "videoId": "v-copy-status"}
-    before = copy_client.get("/api/viral/search/copy", headers=headers, params=params)
-    assert before.status_code == 200, before.text
-    assert before.json()["available"] is True
-    assert before.json()["updatedAt"]
-    assert before.json()["purchased"] is False
-    # 正文绝不由只读端点下发：拿到它就没有任何交付计费点了。
-    assert "text" not in before.json()
-    assert (
-        _claim_copy(copy_client, headers, video_id="v-copy-status").json()["billing"]["charged"]
-        == 2
-    )
-    after = copy_client.get("/api/viral/search/copy", headers=headers, params=params)
-    assert after.json()["purchased"] is True
-    miss = copy_client.get(
-        "/api/viral/search/copy",
-        headers=headers,
-        params={"platform": "douyin", "videoId": "v-copy-unknown"},
-    )
-    assert miss.status_code == 404, miss.text
-    with psycopg.connect(route_state) as raw:
-        # 读状态分文不取：台账里只该有 claim 留下的那一行。
-        assert _wallet(raw, uid) == (48, 0)
-        assert _copy_operations(raw, f"viral-copy:{uid}:douyin:v-copy-status") == [("SUCCEEDED", 2)]
 
 
 def test_http_unpublished_detail_denies_both_accounts_without_billing(detail_client, route_state):
@@ -912,11 +544,12 @@ def test_http_visibility_decisions_match_for_two_accounts(detail_client, route_s
 
 @pytest.mark.parametrize(
     "endpoint",
-    ["source", "media", "cover", "download", "favorite", "statistics", "copy", "copy_status"],
+    ["source", "media", "cover", "download", "favorite", "statistics"],
 )
 def test_http_known_id_cannot_bypass_unpublished_guard(
-    copy_client, route_state, monkeypatch, endpoint
+    detail_client, route_state, monkeypatch, endpoint
 ):
+    """已知 videoId 不能绕过未发布守卫；claim/copy_status 端点已退役不再入列."""
     import time
 
     from cryptography.fernet import Fernet
@@ -926,8 +559,8 @@ def test_http_known_id_cannot_bypass_unpublished_guard(
 
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
 
-    headers_a, uid_a = account(copy_client, f"known_owner_{endpoint}")
-    headers_b, uid_b = account(copy_client, f"known_other_{endpoint}")
+    headers_a, uid_a = account(detail_client, f"known_owner_{endpoint}")
+    headers_b, uid_b = account(detail_client, f"known_other_{endpoint}")
     platform, video_id = "wechat_channels", f"known-{endpoint}"
     key = f"viral/{platform}/{video_id}.mp4"
     storage = FakeStorageAdapter(provider="fake", bucket="visibility-test")
@@ -954,19 +587,20 @@ def test_http_known_id_cannot_bypass_unpublished_guard(
     for headers, uid in ((headers_a, uid_a), (headers_b, uid_b)):
         headers = {**headers, "Idempotency-Key": f"known-{endpoint}-{uid}"}
         payload = {"platform": platform, "videoId": video_id}
-        if endpoint in ("source", "media", "copy"):
-            path = "copy/claim" if endpoint == "copy" else endpoint
-            result = copy_client.post(f"/api/viral/videos/{path}", headers=headers, json=payload)
+        if endpoint in ("source", "media"):
+            result = detail_client.post(
+                f"/api/viral/videos/{endpoint}", headers=headers, json=payload
+            )
         elif endpoint == "cover":
-            result = copy_client.get(f"/api/viral/covers/{platform}/{video_id}", headers=headers)
+            result = detail_client.get(f"/api/viral/covers/{platform}/{video_id}", headers=headers)
         elif endpoint == "favorite":
-            result = copy_client.put(f"/api/viral/favorites/{platform}/{video_id}", headers=headers)
+            result = detail_client.put(
+                f"/api/viral/favorites/{platform}/{video_id}", headers=headers
+            )
         elif endpoint == "statistics":
-            result = copy_client.post(
+            result = detail_client.post(
                 "/api/viral/videos/statistics", headers=headers, json={"videoIds": [video_id]}
             )
-        elif endpoint == "copy_status":
-            result = copy_client.get("/api/viral/search/copy", headers=headers, params=payload)
         else:
             expires = str(int(time.time()) + 300)
             signature = local_download_signature(
@@ -977,7 +611,7 @@ def test_http_known_id_cannot_bypass_unpublished_guard(
                 session_epoch="viral",
                 secret=viral_routes.settings_encryption_key(),
             )
-            result = copy_client.get(
+            result = detail_client.get(
                 "/api/viral/videos/media/file",
                 headers=headers,
                 params={"key": key, "expires": expires, "user_id": uid, "sig": signature},
@@ -1001,83 +635,6 @@ def test_http_known_id_cannot_bypass_unpublished_guard(
                 ).fetchone()[0]
                 == 0
             )
-
-
-def test_http_deleted_source_task_copy_is_owner_only_and_never_reopens_detail(
-    copy_client, route_state
-):
-    headers_a, uid_a = account(copy_client, "task_copy_owner")
-    headers_b, uid_b = account(copy_client, "task_copy_other")
-    video_id, task_id = "accepted-private-copy", "accepted-private-copy-task"
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid_a, video_id=video_id)
-        raw.execute("UPDATE viral_videos SET deleted_at=now() WHERE video_id=%s", (video_id,))
-        raw.execute(
-            "INSERT INTO projects(id,name,owner_user_id) VALUES(%s,'private task',%s)",
-            (task_id, uid_a),
-        )
-        raw.execute(
-            "INSERT INTO script_from_audio_tasks(id,project_id,source_asset_id,created_by_user_id,"
-            "idempotency_key,request_hash,request_json,result_json,status) "
-            "VALUES(%s,%s,'private-audio',%s,%s,'hash',%s,%s,'SUCCEEDED')",
-            (
-                task_id,
-                task_id,
-                uid_a,
-                task_id,
-                json.dumps({"viral_source": ["douyin", video_id]}),
-                json.dumps({"text": "已受理任务的私有正文"}),
-            ),
-        )
-        before = {uid: _wallet(raw, uid) for uid in (uid_a, uid_b)}
-    payload = {"platform": "douyin", "videoId": video_id, "taskId": task_id}
-    denied = copy_client.post("/api/viral/videos/copy/claim", headers=headers_b, json=payload)
-    assert denied.status_code == 404, denied.text
-    for _ in range(2):
-        delivered = copy_client.post(
-            "/api/viral/videos/copy/claim", headers=headers_a, json=payload
-        )
-        assert delivered.status_code == 200, delivered.text
-        assert delivered.json()["text"] == "已受理任务的私有正文"
-        assert delivered.json()["billing"]["charged"] == 0
-    for headers in (headers_a, headers_b):
-        assert (
-            copy_client.get(f"/api/viral/videos/douyin/{video_id}", headers=headers).status_code
-            == 404
-        )
-        assert _open_detail(copy_client, headers, video_id=video_id).status_code == 404
-        assert _claim_copy(copy_client, headers, video_id=video_id).status_code == 404
-    with psycopg.connect(route_state) as raw:
-        assert {uid: _wallet(raw, uid) for uid in (uid_a, uid_b)} == before
-
-
-def test_http_purchased_copy_survives_hide_without_public_detail(copy_client, route_state):
-    headers_a, uid_a = account(copy_client, "old_copy_buyer")
-    headers_b, uid_b = account(copy_client, "old_copy_other")
-    video_id = "historical-purchase"
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid_a, video_id=video_id)
-    purchase = _claim_copy(copy_client, headers_a, video_id=video_id)
-    assert purchase.status_code == 200 and purchase.json()["billing"]["charged"] == 2
-    with psycopg.connect(route_state) as raw:
-        raw.execute(
-            "INSERT INTO viral_video_visibility(platform,video_id,status) "
-            "VALUES('douyin',%s,'HIDDEN')",
-            (video_id,),
-        )
-        before = {uid: _wallet(raw, uid) for uid in (uid_a, uid_b)}
-    repeated = _claim_copy(copy_client, headers_a, video_id=video_id)
-    assert repeated.status_code == 200 and repeated.json()["text"] == _COPY_TEXT
-    assert repeated.json()["billing"]["charged"] == 0
-    assert _claim_copy(copy_client, headers_b, video_id=video_id).status_code == 404
-    for headers in (headers_a, headers_b):
-        assert (
-            copy_client.get(f"/api/viral/videos/douyin/{video_id}", headers=headers).status_code
-            == 404
-        )
-        assert _open_detail(copy_client, headers, video_id=video_id).status_code == 404
-    with psycopg.connect(route_state) as raw:
-        assert {uid: _wallet(raw, uid) for uid in (uid_a, uid_b)} == before
 
 
 @pytest.mark.parametrize("state", ["public", "private", "withdrawn", "admin_preview"])
@@ -1158,60 +715,6 @@ def test_http_signed_download_rechecks_current_visibility_and_cover_is_public_on
     assert cover.status_code == (200 if state == "public" else 404), cover.text
     if state == "public":
         assert cover.content == b"isolated-cover"
-
-
-def test_http_copy_waiting_for_billing_lock_rechecks_withdrawal(copy_client, route_state):
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-
-    headers, uid = account(copy_client, "copy_lock_withdraw")
-    video_id = "copy-lock-withdraw"
-    with psycopg.connect(route_state) as raw:
-        _seed_copy_video(raw, uid, video_id=video_id)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with psycopg.connect(route_state) as blocker:
-            # 计费锁主体已改为「钱包主人」（FIX-14）：阻塞点必须与生产代码同一把锁，
-            # 否则请求不会在权限复检之前排队，这个竞态就没被真正覆盖。
-            blocker.execute(
-                "SELECT pg_advisory_xact_lock(hashtext(%s))",
-                ("billing:wallet-owner:viral-copy:" + uid,),
-            )
-            future = executor.submit(_claim_copy, copy_client, headers, video_id=video_id)
-            deadline = time.monotonic() + 5
-            waiting = False
-            with psycopg.connect(route_state, autocommit=True) as observer:
-                while time.monotonic() < deadline:
-                    waiting = bool(
-                        observer.execute(
-                            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
-                            "WHERE datname=current_database() "
-                            "AND wait_event_type='Lock' "
-                            "AND query LIKE 'SELECT pg_advisory_xact_lock%%')"
-                        ).fetchone()[0]
-                    )
-                    if waiting:
-                        break
-                    time.sleep(0.02)
-            # 撤回与解锁同一提交；后续收费读取必须看到新的可见状态。
-            blocker.execute(
-                "INSERT INTO viral_video_visibility(platform,video_id,status) "
-                "VALUES('douyin',%s,'HIDDEN')",
-                (video_id,),
-            )
-        response = future.result(timeout=5)
-        assert waiting, "请求未实际进入数据库锁等待，不能证明竞态已覆盖"
-    assert response.status_code == 404, response.text
-    with psycopg.connect(route_state) as raw:
-        assert _wallet(raw, uid) == (50, 0)
-        assert _copy_operations(raw, f"viral-copy:{uid}:douyin:{video_id}") == []
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM wallet_transactions WHERE user_id=%s "
-                "AND type IN ('RESERVE','SETTLE')",
-                (uid,),
-            ).fetchone()[0]
-            == 0
-        )
 
 
 def test_http_source_withdrawn_during_external_call_releases_reservation(

@@ -3,7 +3,6 @@ import {
   type CurrentUser,
   cancelGenerationBatch,
   cancelOralTask,
-  claimViralCopy,
   completeVideoUpload,
   createGenerationBatch,
   createGenerationResultPreviewUrl,
@@ -66,7 +65,6 @@ import {
   saveStudioDraft,
   saveStudioSavedScript,
   uploadReferenceVideo,
-  type ViralPlatform,
   type ViralVideoItem,
   verifyPublishAccount,
 } from "../api";
@@ -1295,7 +1293,6 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     homepageStartsAt: item.homepageStartsAt ?? null,
     homepageEndsAt: item.homepageEndsAt ?? null,
     hasPlayableAudio: item.hasPlayableAudio,
-    hasCopy: item.hasCopy === true,
     detailCharged: item.detailCharged === true,
     playUrl: item.playUrl,
   };
@@ -1830,14 +1827,12 @@ export async function loadPersonAssets(
 }
 
 /** 提取文案管线（script-from-audio）：提交任务 → 每 2 秒轮询 → 终态返回。
- * 成功返回转写结果；爆款任务的正文为 null——服务端任务接口不下发正文，调用方要凭
- * 任务的 viral_source 回「获取文案」claim 取（那里才是交付点，计费见 charge_viral_copy）。失败抛出带
- * 服务端文案的 Error（含 SUBMISSION_UNCERTAIN）。 */
+ * 成功即返回转写正文——正文随本人任务直出（2026-11-11 共享文案缓存退役），
+ * 不再有「爆款任务置空等 claim」的口径。失败抛出带服务端文案的 Error
+ * （含 SUBMISSION_UNCERTAIN）。 */
 export type ScriptExtractionResult = {
-  text: string | null;
+  text: string;
   taskId: string;
-  viralSource?: { platform: string; videoId: string };
-  copyClaimRequired: boolean;
 };
 
 export async function extractScriptFromUpload(
@@ -1852,8 +1847,7 @@ export async function extractScriptFromUpload(
   return awaitScriptFromAudioTask(submitted.id);
 }
 
-/** 轮询既有提取任务直到终态（2s × 150 = 5 分钟上限，长音频异步转写兜底）。
- * 爆款任务成功时 text 为 null（正文按 claim 回执下发），见 extractScriptFromUpload。 */
+/** 轮询既有提取任务直到终态（2s × 150 = 5 分钟上限，长音频异步转写兜底）。 */
 export async function awaitScriptFromAudioTask(
   taskId: string,
 ): Promise<ScriptExtractionResult> {
@@ -1863,15 +1857,8 @@ export async function awaitScriptFromAudioTask(
     const task = await getScriptFromAudioTask(taskId);
     if (task.status === "SUCCEEDED" && task.result) {
       return {
-        text: task.result.text ?? null,
+        text: task.result.text ?? "",
         taskId: task.id,
-        viralSource: task.viral_source
-          ? {
-              platform: task.viral_source.platform,
-              videoId: task.viral_source.video_id,
-            }
-          : undefined,
-        copyClaimRequired: task.copy_claim_required ?? false,
       };
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
@@ -1885,25 +1872,6 @@ export async function awaitScriptFromAudioTask(
   throw new Error("文案仍在后台提取，请返回文案工坊恢复本次任务。");
 }
 
-/**
- * 转写完成后取回文案：爆款任务的交付点（计费以服务端 claim 回执为准，2026-10-08 口径）.
- *
- * 他已为这次转写付过 ASR 按秒费用，交付本身不再另收「获取文案」费。未命中缓存或
- * 获取失败返回 null——服务端任务接口不下发正文，调用方提示用户重新提取补齐。
- */
-export async function claimExtractedViralCopy(
-  platformKey: string,
-  nativeId: string,
-  taskId?: string,
-): Promise<string | null> {
-  const claimed = await claimViralCopy(
-    platformKey as ViralPlatform,
-    nativeId,
-    taskId,
-  );
-  return claimed.text;
-}
-
 export async function loadLatestScriptFromUpload(projectId: string) {
   const task = await getLatestScriptFromAudioTask(projectId);
   return task
@@ -1913,14 +1881,6 @@ export async function loadLatestScriptFromUpload(projectId: string) {
         result: task.result,
         errorMessage: task.error_message ?? undefined,
         sourceAssetId: task.source_asset_id ?? undefined,
-        // 爆款任务正文按 claim 下发：恢复轮询要凭这份身份回「获取文案」取正文。
-        viralSource: task.viral_source
-          ? {
-              platform: task.viral_source.platform,
-              videoId: task.viral_source.video_id,
-            }
-          : undefined,
-        copyClaimRequired: task.copy_claim_required ?? false,
       }
     : null;
 }

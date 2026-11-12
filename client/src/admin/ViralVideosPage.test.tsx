@@ -185,7 +185,7 @@ it("分类目录覆盖当前页之外，未分类和批次筛选准确请求并�
   const onScopeChange = vi.fn();
   render(
     <ViralVideosPage
-      initialListQuery="cohortStage=copy&collectedFrom=2026-09-01&collectedTo=2026-09-30&platform=wechat_channels"
+      initialListQuery="cohortStage=detail&collectedFrom=2026-09-01&collectedTo=2026-09-30&platform=wechat_channels"
       onScopeChange={onScopeChange}
     />,
   );
@@ -199,7 +199,7 @@ it("分类目录覆盖当前页之外，未分类和批次筛选准确请求并�
       fetchMock.mock.calls.some(
         ([url]) =>
           url.includes("uncategorized=true") &&
-          url.includes("cohort_stage=copy") &&
+          url.includes("cohort_stage=detail") &&
           url.includes("collected_from=2026-09-01"),
       ),
     ).toBe(true),

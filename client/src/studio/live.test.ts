@@ -72,8 +72,6 @@ const api = vi.hoisted(() => ({
   resolveMaterials: vi.fn(),
   uploadMaterial: vi.fn(),
   uploadReferenceVideo: vi.fn(),
-  fetchViralCopy: vi.fn(),
-  claimViralCopy: vi.fn(),
 }));
 
 vi.mock("../api", () => api);
@@ -2131,8 +2129,6 @@ describe("提取文案任务绑定", () => {
       await expect(result).resolves.toEqual({
         text: "本次转写",
         taskId: "audio-owned",
-        viralSource: undefined,
-        copyClaimRequired: false,
       });
       expect(api.getScriptFromAudioTask).toHaveBeenCalledWith("audio-owned");
       expect(api.getLatestScriptFromAudioTask).not.toHaveBeenCalled();
@@ -2140,48 +2136,44 @@ describe("提取文案任务绑定", () => {
       vi.useRealTimers();
     }
   });
-  it("爆款任务成功时轮询返回 null 正文，由调用方凭 claim 回执交付", async () => {
+  it("爆款任务成功时正文随任务直出，不再等待 claim 交付", async () => {
     vi.useFakeTimers();
     try {
       api.createScriptFromAudioTask.mockResolvedValue({ id: "audio-gated" });
       api.getScriptFromAudioTask.mockResolvedValue({
         id: "audio-gated",
         status: "SUCCEEDED",
-        result: { text: null, duration_sec: 12.5, language: "zh" },
-        copy_claim_required: true,
-        viral_source: { platform: "douyin", video_id: "v-1" },
+        result: {
+          text: "爆款视频的转写正文",
+          duration_sec: 12.5,
+          language: "zh",
+        },
       });
       const result = live.awaitScriptFromAudioTask("audio-gated");
       await vi.advanceTimersByTimeAsync(2000);
       await expect(result).resolves.toEqual({
-        text: null,
+        text: "爆款视频的转写正文",
         taskId: "audio-gated",
-        viralSource: { platform: "douyin", videoId: "v-1" },
-        copyClaimRequired: true,
       });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("latest 恢复映射携带爆款身份与 claim 门禁标记", async () => {
+  it("latest 恢复映射保留来源资产与任务结果", async () => {
     api.getLatestScriptFromAudioTask.mockResolvedValue({
       id: "audio-viral",
       status: "SUCCEEDED",
-      result: { text: null },
+      result: { text: "恢复直出的正文" },
       source_asset_id: "asset-a",
-      copy_claim_required: true,
-      viral_source: { platform: "douyin", video_id: "v-9" },
     });
     await expect(live.loadLatestScriptFromUpload("project-a")).resolves.toEqual(
       {
         id: "audio-viral",
         status: "SUCCEEDED",
-        result: { text: null },
+        result: { text: "恢复直出的正文" },
         errorMessage: undefined,
         sourceAssetId: "asset-a",
-        viralSource: { platform: "douyin", videoId: "v-9" },
-        copyClaimRequired: true,
       },
     );
   });
@@ -2200,9 +2192,6 @@ describe("提取文案任务绑定", () => {
         result: null,
         errorMessage: "音轨错误",
         sourceAssetId: "asset-a",
-        // 爆款任务正文按 claim 下发：恢复映射要带上视频身份与门禁标记。
-        viralSource: undefined,
-        copyClaimRequired: false,
       },
     );
   });
@@ -2690,46 +2679,5 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
       analysisTaskId: "analysis-dedup",
       analysisTaskStatus: "PENDING",
     });
-  });
-});
-
-describe("claimExtractedViralCopy（转写完成后的交付点，交付免费）", () => {
-  beforeEach(() => {
-    api.claimViralCopy.mockReset();
-  });
-
-  it("命中共享缓存时返正文（交付不扣费，计费回执仅为兼容字段）", async () => {
-    api.claimViralCopy.mockResolvedValue({
-      text: "刚转写好的文案",
-      updatedAt: "t",
-      billing: { charged: 0, unit: "call", deduped: false, billable: false },
-    });
-    await expect(live.claimExtractedViralCopy("douyin", "v-1")).resolves.toBe(
-      "刚转写好的文案",
-    );
-    expect(api.claimViralCopy).toHaveBeenCalledWith("douyin", "v-1", undefined);
-  });
-
-  it("凭个人任务领取时保留 taskId，不另建转写任务", async () => {
-    api.claimViralCopy.mockResolvedValue({ text: "个人已付费成果" });
-    await expect(
-      live.claimExtractedViralCopy("douyin", "removed", "owned-task"),
-    ).resolves.toBe("个人已付费成果");
-    expect(api.claimViralCopy).toHaveBeenCalledWith(
-      "douyin",
-      "removed",
-      "owned-task",
-    );
-  });
-
-  it("缓存尚未写入时返回 null，让调用方以任务结果兜底", async () => {
-    api.claimViralCopy.mockResolvedValue({
-      text: null,
-      updatedAt: null,
-      billing: { charged: 0, unit: "call", deduped: false, billable: false },
-    });
-    await expect(
-      live.claimExtractedViralCopy("douyin", "v-1"),
-    ).resolves.toBeNull();
   });
 });

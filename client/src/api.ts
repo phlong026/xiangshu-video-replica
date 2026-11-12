@@ -8277,8 +8277,6 @@ export type ViralVideoItem = {
   likeDisplay: string | null;
   tags: string[];
   hasPlayableAudio: boolean;
-  /** 共享文案缓存命中：该视频的文案已被提取过（信息性标记，不计费）。 */
-  hasCopy?: boolean;
   /** 「查看详情」已购买：同一付费账号同一条视频只扣一次，卡片据此免报价。 */
   detailCharged?: boolean;
   /** 源平台播放地址；真实列表播放统一由服务端媒体管线转存后使用。 */
@@ -8344,23 +8342,6 @@ export type ViralDetailBilling = {
 export type ViralDetailViewResponse = {
   item: ViralVideoItem;
   billing: ViralDetailBilling;
-};
-
-/** 「获取文案」的计费回执（服务端权威值，客户端只展示）。 */
-export type ViralCopyBilling = {
-  charged: number;
-  unit: string;
-  /** 同一条视频对同一个付费账号只扣一次：true 表示复用既有购买、本次未扣费。 */
-  deduped: boolean;
-  /** 已下架 / 不可用的内容不计费，供界面区分「已购买」与「本次不计费」。 */
-  billable: boolean;
-};
-
-export type ViralCopyClaimResponse = {
-  /** 未命中共享缓存时为 null：这次没有交付，也没有扣费。 */
-  text: string | null;
-  updatedAt: string | null;
-  billing: ViralCopyBilling;
 };
 
 export type ViralListOptions = {
@@ -8771,41 +8752,6 @@ export function fetchViralVideoSource(
   );
 }
 
-/** 共享文案的只读状态（`GET /api/viral/search/copy`）：不含正文。 */
-export type ViralCopyStatus = {
-  /** 共享缓存里有没有这条视频的文案：true = 现在获取即可秒回。 */
-  available: boolean;
-  updatedAt: string | null;
-  /** 反映该付费账号是否已为这条详情付过费（查看详情已于 2026-10-13 起免费，仅历史购买会置位）。 */
-  purchased: boolean;
-};
-
-/**
- * 只读文案状态：有没有、什么时候写的、历史购买标记。
- *
- * 不下发正文——正文要走 `claimViralCopy`（交付侧）。本端点不计费，
- * 失败也不该拦住后续操作。
- */
-export function fetchViralCopy(
-  platform: ViralPlatform,
-  videoId: string,
-): Promise<ViralCopyStatus> {
-  const query = new URLSearchParams({ platform, videoId });
-  return requestApiJson<ViralCopyStatus>(
-    `/api/viral/search/copy?${query.toString()}`,
-    "读取文案状态失败",
-    {},
-    VIRAL_LIST_TIMEOUT_MS,
-  );
-}
-
-/**
- * 获取共享文案：命中缓存即返回正文。计费口径（2026-10-08）：转写者本人取自己的产出免费、
- * 已购复看免费，非转写者首次获取按 viral_copy 科目扣一次（服务端 charge_viral_copy 为准）.
- *
- * 同一账号同一条视频只扣一次：复看时 charged=0 且 deduped=true。未命中返回
- * `text=null` 且分文不扣，调用方再走本地抽音轨转写（那一步按秒计 ASR 费）。
- */
 /** 提取记录条目：文案工坊「提取记录」页签的数据行（新→旧，最多 50 条）。 */
 export type ViralCopyExtractionRecord = {
   platform: string;
@@ -8813,13 +8759,16 @@ export type ViralCopyExtractionRecord = {
   title: string;
   lastExtractedAt: string;
   times: number;
+  /** 正文来自本人最近一次成功任务的 result_json，恒可复用；类型保留 null
+   * 兼容旧 schema，实际为空时界面按「暂无正文」兜底展示。 */
   text: string | null;
   updatedAt: string | null;
 };
 
 /**
- * 我的文案提取记录：每次成功领取正文都会留痕（viral_content_usage_events 的
- * copy 交付事件），正文实时回源共享缓存；缓存归档后 text 为 null（时间与次数保留）。
+ * 我的文案提取记录（2026-11-11 极简化）：数据源换成本人 script_from_audio_tasks
+ * 的 SUCCEEDED 流水按视频聚合——自己的转写结果永远可复用，不再有「缓存已归档
+ * 正文过期」的口径。
  */
 export function fetchViralCopyExtractions(): Promise<{
   items: ViralCopyExtractionRecord[];
@@ -8828,26 +8777,6 @@ export function fetchViralCopyExtractions(): Promise<{
     "/api/viral/videos/copy/extractions",
     "读取提取记录失败",
     {},
-    VIRAL_LIST_TIMEOUT_MS,
-  );
-}
-
-export function claimViralCopy(
-  platform: ViralPlatform,
-  videoId: string,
-  taskId?: string,
-): Promise<ViralCopyClaimResponse> {
-  return requestApiJson<ViralCopyClaimResponse>(
-    "/api/viral/videos/copy/claim",
-    "获取文案失败",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        platform,
-        videoId,
-        ...(taskId ? { taskId } : {}),
-      }),
-    },
     VIRAL_LIST_TIMEOUT_MS,
   );
 }

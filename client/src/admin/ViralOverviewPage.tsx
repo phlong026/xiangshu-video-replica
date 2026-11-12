@@ -162,9 +162,7 @@ export function ViralOverviewPage({
             <p className="admin-hint">{business.cohortRule}</p>
             <p className="admin-hint">
               {business.historyNote} 起计：
-              {formatDateTime(business.measurementStartedAt)}
-              。直接获取文案但未记录详情读取：{business.directCopyWithoutDetail}{" "}
-              条。
+              {formatDateTime(business.measurementStartedAt)}。
             </p>
           </RuleNote>
           <h3>爆款业务收支 · 同一区间全部平台</h3>
