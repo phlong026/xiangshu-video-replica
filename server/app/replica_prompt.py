@@ -68,6 +68,8 @@ DEFAULT_PROVIDER_TIMEOUT_SECONDS = 900.0
 # 调用，长任务因此天然是「单次调用」；只有快速失败（限流/连接类）才会在预算
 # 内获得同模型重试。env 超时上限同口径收口。
 REPLICA_PROMPT_CALL_BUDGET_SECONDS = REPLICA_PROMPT_TASK_LEASE_MINUTES * 60 - 120
+# 为配置读取与请求准备预留时间；超时不能恰好占满调用预算。
+REPLICA_PROMPT_PREPARATION_RESERVE_SECONDS = 120.0
 # 签名 URL 必须活过整个 provider 调用；拆解链路的 15 分钟在长任务上不够。
 REPLICA_PROMPT_URL_EXPIRES_MINUTES = 30
 
@@ -79,7 +81,7 @@ ERROR_FAILED = "REPLICA_PROMPT_WORKER_FAILED"
 def provider_timeout_seconds() -> float:
     """长任务 provider 调用超时；默认 900 秒，环境变量可覆盖（配置惯例 *_ENV）.
 
-    超时上限收口到调用预算：env 配得再大也不能突破租约。
+    超时上限扣除请求准备缓冲：env 配得再大也不能占满调用预算。
     """
     raw = (os.environ.get(REPLICA_PROMPT_TIMEOUT_ENV) or "").strip()
     if not raw:
@@ -89,7 +91,10 @@ def provider_timeout_seconds() -> float:
     except ValueError:
         logger.warning("invalid %s=%r; falling back to default", REPLICA_PROMPT_TIMEOUT_ENV, raw)
         return DEFAULT_PROVIDER_TIMEOUT_SECONDS
-    return min(max(timeout, 60.0), REPLICA_PROMPT_CALL_BUDGET_SECONDS)
+    return min(
+        max(timeout, 60.0),
+        REPLICA_PROMPT_CALL_BUDGET_SECONDS - REPLICA_PROMPT_PREPARATION_RESERVE_SECONDS,
+    )
 
 
 def build_long_video_provider(conn: Database) -> VideoAnalysisProvider:
