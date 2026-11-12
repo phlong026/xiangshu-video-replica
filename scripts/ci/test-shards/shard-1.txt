@@ -43,7 +43,7 @@ server/tests/test_replica_pipeline_confirm.py
 server/tests/test_replica_pipeline_stages.py
 server/tests/test_signed_thumbnail_grant.py
 server/tests/test_sub_account_schema.py
-server/tests/test_viral_audio_shared_cache_pg.py
+server/tests/test_viral_copy_simplify_pg.py
 server/tests/test_viral_search_pg.py
 server/tests/test_wallet_pricing_breakdown.py
 server/tests/test_wallet_pricing_breakdown_pg.py

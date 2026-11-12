@@ -108,7 +108,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
 # 列）追加其上，故链尾为该值。
-HEAD_REVISION = "20261111T1000_uncertain_auto_reopen"
+HEAD_REVISION = "20261112T1200_merge_training_pan123_pipeline"
 
 
 @pytest.mark.pg
@@ -434,16 +434,16 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 故 columns +1、check_constraints +1，表名集与其余计数不变；digest 在空库
 # →新 head 的 PG16 探针库（cw056_probe）重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 401,
-    "columns": 1553,
+    "check_constraints": 408,
+    "columns": 1575,
     "foreign_keys": 221,
     "identity_columns": 0,
-    "jsonb_columns": 15,
+    "jsonb_columns": 16,
     "partial_indexes": 48,
-    "primary_keys": 136,
+    "primary_keys": 138,
     "sequences": 8,
-    "tables": 136,
-    "timestamptz_columns": 126,
+    "tables": 138,
+    "timestamptz_columns": 130,
     "triggers": 61,
     "unique_constraints": 44,
 }
@@ -549,6 +549,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "project_main_characters",
     "projects",
     "prompt_optimization_receipts",
+    "provider_runtime_state",
     "provider_settings",
     "publish_accounts",
     "publish_browser_accounts",
@@ -569,6 +570,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "studio_drafts",
     "studio_material_preferences",
     "studio_notification_preferences",
+    "training_materials",
     "studio_saved_scripts",
     "sub_account_permissions",
     "sub_account_quotas",
@@ -705,7 +707,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "d62486c40b04bd29b1b9d620b66b8c4c2dd0810a95f6bd77623e351d421785d8"
+HEAD_SCHEMA_DIGEST = "7788846ef63af0c63bedd13270e98afa22925f552fa130ef9f3f69b350fb3e3f"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
@@ -943,6 +945,13 @@ def test_migration_chain_has_single_head_with_registered_merge() -> None:
         if isinstance(rev.down_revision, tuple)
     ]
     assert branch_points == [
+        (
+            "20261112T1200_merge_training_pan123_pipeline",
+            (
+                "20261112T0910_provider_runtime_state",
+                "20261111T1000_uncertain_auto_reopen",
+            ),
+        ),
         (
             "20261002T1015_merge_oral_compatibility_alerts",
             (
