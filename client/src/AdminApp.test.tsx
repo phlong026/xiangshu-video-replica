@@ -973,13 +973,16 @@ describe("AdminApp", () => {
     expect(saveCall?.[1]?.body).toBe(
       JSON.stringify({
         // analysis_model / analysis_model_fallbacks 是可选项，留空分别表示
-        // 回落到服务端默认模型与内置替补名单；管理端与客户端共用
+        // 回落到服务端默认模型与内置替补名单；replica_prompt_model(_fallbacks)
+        // 是长视频链路的同构可选键（方案 D9）。管理端与客户端共用
         // SettingsPanel 的表单定义，因此两处都会带上这些键。
         config: {
           api_key: SERVICE_KEY_TEXT,
           analysis_api_key: "",
           analysis_model: "",
           analysis_model_fallbacks: "",
+          replica_prompt_model: "",
+          replica_prompt_model_fallbacks: "",
         },
         confirm: true,
         reason: "更新 apilio 服务配置",

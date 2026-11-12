@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -26,6 +27,7 @@ from app.analysis import (
     AnalysisProviderFailed,
     UrllibApilioChatTransport,
     VideoAnalysisProvider,
+    VideoCallBudget,
     analysis_task_context,
     insert_version,
     parse_replica_prompt_payload,
@@ -62,6 +64,10 @@ MAX_TASK_DURATION_SECONDS = (
 REPLICA_PROMPT_TASK_LEASE_MINUTES = 25
 REPLICA_PROMPT_TIMEOUT_ENV = "VIDEO_REPLICA_REPLICA_PROMPT_TIMEOUT_SECONDS"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 900.0
+# 调用预算 = 租约 − 落库缓冲（方案 T6）：满额超时后剩余预算不足以发起第二次
+# 调用，长任务因此天然是「单次调用」；只有快速失败（限流/连接类）才会在预算
+# 内获得同模型重试。env 超时上限同口径收口。
+REPLICA_PROMPT_CALL_BUDGET_SECONDS = REPLICA_PROMPT_TASK_LEASE_MINUTES * 60 - 120
 # 签名 URL 必须活过整个 provider 调用；拆解链路的 15 分钟在长任务上不够。
 REPLICA_PROMPT_URL_EXPIRES_MINUTES = 30
 
@@ -71,7 +77,10 @@ ERROR_FAILED = "REPLICA_PROMPT_WORKER_FAILED"
 
 
 def provider_timeout_seconds() -> float:
-    """长任务 provider 调用超时；默认 900 秒，环境变量可覆盖（配置惯例 *_ENV）."""
+    """长任务 provider 调用超时；默认 900 秒，环境变量可覆盖（配置惯例 *_ENV）.
+
+    超时上限收口到调用预算：env 配得再大也不能突破租约。
+    """
     raw = (os.environ.get(REPLICA_PROMPT_TIMEOUT_ENV) or "").strip()
     if not raw:
         return DEFAULT_PROVIDER_TIMEOUT_SECONDS
@@ -80,14 +89,22 @@ def provider_timeout_seconds() -> float:
     except ValueError:
         logger.warning("invalid %s=%r; falling back to default", REPLICA_PROMPT_TIMEOUT_ENV, raw)
         return DEFAULT_PROVIDER_TIMEOUT_SECONDS
-    return max(timeout, 60.0)
+    return min(max(timeout, 60.0), REPLICA_PROMPT_CALL_BUDGET_SECONDS)
 
 
 def build_long_video_provider(conn: Database) -> VideoAnalysisProvider:
-    """与拆解同一套 apilio 配置，仅注入更长的调用超时."""
+    """长视频专用路由（方案 D9）：出厂 4-carbon（快且零断连），备选退 flash.
+
+    与分镜主链路共享 apilio 凭据与切镜候选线索，但模型独立——可用可选设置
+    键 replica_prompt_model / replica_prompt_model_fallbacks 覆盖（留空走出厂值）。
+    """
     return get_video_analysis_provider(
         conn,
         transport=UrllibApilioChatTransport(timeout_seconds=provider_timeout_seconds()),
+        video_call_budget=VideoCallBudget(
+            attempt_deadline=time.monotonic() + REPLICA_PROMPT_CALL_BUDGET_SECONDS,
+        ),
+        lane="replica_prompt",
     )
 
 
@@ -337,7 +354,9 @@ def perform_replica_prompt_task(
             )
         if on_provider_result is not None:
             on_provider_result()
-        return parse_replica_prompt_payload(response.text)
+        # 透传服务端已验证的媒体信息：禁词硬拒绝与画幅/时长软警告都以它为准
+        # （方案 T10），不让模型自报的媒体事实参与校验。
+        return parse_replica_prompt_payload(response.text, media_info=work.media_info)
 
 
 def complete_replica_prompt_task(

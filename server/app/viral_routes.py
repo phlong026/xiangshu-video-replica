@@ -26,6 +26,7 @@ from app.auth import AuthenticatedUser, Database
 from app.billing_catalog import SERVICES
 from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
+from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
@@ -257,10 +258,17 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def get_viral_source_client(conn: Database) -> ViralSourceClient | None:
-    """数据源客户端依赖入口（测试可通过 dependency_overrides 替换）."""
+def get_viral_source_client() -> ViralSourceClient | None:
+    """数据源客户端依赖入口（测试可通过 dependency_overrides 替换）.
+
+    配置读取**自开短事务**，读毕即提交归还连接。此前依赖声明 ``conn: Database``，
+    请求级事务会被拖到响应发完才结束——``/videos/source`` 这类随后要做上游外呼的
+    路由，外呼期间连接停在 idle-in-transaction，被 idle_in_transaction_session_
+    timeout(60s) 击杀，上游一慢池(max=8)就被并发借空（2026-11-02 生产池饿死事故）。
+    """
     try:
-        return viral_source_client_from_settings(conn)
+        with pg_transaction() as pg_conn:
+            return viral_source_client_from_settings(BusinessConnection.postgres(pg_conn))
     except ViralSourceUnavailable:
         return None
 
@@ -821,7 +829,6 @@ def _browser_playable_url(intent_url: str, user_id: str) -> str:
 
 @router.get("/covers/{platform}/{video_id:path}")
 def get_viral_cover(
-    conn: Database,
     platform: str,
     video_id: Annotated[str, Path(min_length=1, max_length=256)],
 ) -> Response:
@@ -829,20 +836,27 @@ def get_viral_cover(
 
     无需登录：封面本身是公开内容，对象 key 由路由参数确定性派生，
     不接受任意 key。视频号 ID 是可含斜杠的 opaque ID，必须与库中记录精确匹配。
+
+    DB 读走**短事务**（可见性判定 + 存储配置），COS head/get 不持任何事务：
+    封面是列表页高频加载的点，慢存储若发生在请求级事务里会整批吃 60s 击杀
+    （2026-11-02 生产池饿死事故）。
     """
     if platform not in _STORED_PLATFORMS or not video_id:
         raise HTTPException(status_code=404, detail={"code": "OBJECT_NOT_FOUND"})
-    video = get_viral_video(conn, platform=platform, video_id=video_id)
-    if (
-        video is None
-        or not is_customer_visible_viral_video(
+    with pg_transaction() as pg_conn:
+        conn = BusinessConnection.postgres(pg_conn)
+        video = get_viral_video(conn, platform=platform, video_id=video_id)
+        visible = is_customer_visible_viral_video(
             conn, platform=platform, video_id=video_id, user_id=""
         )
+        storage = get_media_storage(conn)
+    if (
+        video is None
+        or not visible
         or "\\" in video_id
         or any(part in {".", ".."} for part in video_id.split("/"))
     ):
         raise HTTPException(status_code=404, detail={"code": "OBJECT_NOT_FOUND"})
-    storage = get_media_storage(conn)
     key = viral_cover_key(platform, video_id)
     try:
         stored = storage.head_object(key)
@@ -863,7 +877,6 @@ def get_viral_cover(
 
 @router.get("/videos/media/file")
 def download_viral_media_file(
-    conn: Database,
     key: Annotated[str, Query(min_length=1)],
     expires: Annotated[str, Query(min_length=1, max_length=20)],
     user_id: Annotated[str, Query(min_length=1)],
@@ -886,7 +899,8 @@ def download_viral_media_file(
     )
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail={"code": "VIRAL_MEDIA_FORBIDDEN"})
-    storage = get_media_storage(conn)
+    with pg_transaction() as pg_conn:
+        storage = get_media_storage(BusinessConnection.postgres(pg_conn))
     try:
         stored = storage.head_object(key)
         if stored is None:
@@ -899,27 +913,35 @@ def download_viral_media_file(
         ) from None
     # 签名允许无身份头播放，但不能让撤回后的旧签名继续暴露客户素材。
     # 管理端预览同用此路由，仍保留在职管理员审核未发布素材的权限。
-    principal = conn.execute("SELECT role,is_active FROM users WHERE id=%s", (user_id,)).fetchone()
-    source = conn.execute(
-        "SELECT p.platform,p.video_id FROM viral_media_preparations p "
-        "JOIN viral_videos v ON v.platform=p.platform AND v.video_id=p.video_id "
-        "WHERE p.storage_uri=%s AND p.status='SUCCEEDED' AND v.deleted_at IS NULL",
-        (stored.uri,),
-    ).fetchone()
-    if (
-        principal is None
-        or not principal["is_active"]
-        or source is None
-        or (
-            principal["role"] not in {"admin", "auditor"}
-            and not is_customer_visible_viral_video(
-                conn,
-                platform=str(source["platform"]),
-                video_id=str(source["video_id"]),
-                user_id=user_id,
+    # 授权判定走**短事务**并先于流式回源提交：StreamingResponse 的字节流可以
+    # 拖几分钟（客户端下载速度决定），请求级事务若横跨它必然被 60s 护栏击杀，
+    # 下载中断且池连接被借空（2026-11-02 生产池饿死事故的最重路径）。
+    with pg_transaction() as pg_conn:
+        conn = BusinessConnection.postgres(pg_conn)
+        principal = conn.execute(
+            "SELECT role,is_active FROM users WHERE id=%s", (user_id,)
+        ).fetchone()
+        source = conn.execute(
+            "SELECT p.platform,p.video_id FROM viral_media_preparations p "
+            "JOIN viral_videos v ON v.platform=p.platform AND v.video_id=p.video_id "
+            "WHERE p.storage_uri=%s AND p.status='SUCCEEDED' AND v.deleted_at IS NULL",
+            (stored.uri,),
+        ).fetchone()
+        authorized = (
+            principal is not None
+            and bool(principal["is_active"])
+            and source is not None
+            and (
+                principal["role"] in {"admin", "auditor"}
+                or is_customer_visible_viral_video(
+                    conn,
+                    platform=str(source["platform"]),
+                    video_id=str(source["video_id"]),
+                    user_id=user_id,
+                )
             )
         )
-    ):
+    if not authorized:
         raise HTTPException(status_code=404, detail={"code": "OBJECT_NOT_FOUND"})
     start, end, is_partial = _requested_byte_range(range_header, stored.size)
     content_length = end - start + 1

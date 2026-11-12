@@ -108,7 +108,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
 # 列）追加其上，故链尾为该值。
-HEAD_REVISION = "20261111T1000_uncertain_auto_reopen"
+HEAD_REVISION = "20261112T1100_replica_pipeline_switch"
 
 
 @pytest.mark.pg
@@ -434,18 +434,23 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 故 columns +1、check_constraints +1，表名集与其余计数不变；digest 在空库
 # →新 head 的 PG16 探针库（cw056_probe）重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
+<<<<<<< HEAD
     "check_constraints": 400,
     "columns": 1520,
+=======
+    "check_constraints": 399,
+    "columns": 1549,
+>>>>>>> main
     "foreign_keys": 221,
     "identity_columns": 0,
-    "jsonb_columns": 13,
-    "partial_indexes": 45,
-    "primary_keys": 135,
+    "jsonb_columns": 15,
+    "partial_indexes": 48,
+    "primary_keys": 136,
     "sequences": 8,
-    "tables": 135,
-    "timestamptz_columns": 118,
+    "tables": 136,
+    "timestamptz_columns": 126,
     "triggers": 61,
-    "unique_constraints": 43,
+    "unique_constraints": 44,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -554,6 +559,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "publish_browser_accounts",
     "publish_browser_logins",
     "publish_records",
+    "replica_pipeline_tasks",
     "replica_prompt_tasks",
     "recharge_orders",
     "recharge_packages",
@@ -704,7 +710,11 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
+<<<<<<< HEAD
 HEAD_SCHEMA_DIGEST = "1acdc0a2cb19afae2803ae27c618199a6738b430d966de32889df6411ef13ab1"
+=======
+HEAD_SCHEMA_DIGEST = "564c248c2417ed22de0075ab39d42ebace8e33eb2143f36c2eb5436bd3d98173"
+>>>>>>> main
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
