@@ -584,7 +584,7 @@ def _update_control_provider_settings_business(
     if provider_name == PAN123_PROVIDER_NAME:
         # 跟随 cos lifecycle 先例：保存事务内幂等开通直链空间，失败不阻断。
         direct_link = enable_pan123_direct_link_after_save(
-            merged, repo.provider_config_version(PAN123_PROVIDER_NAME)
+            merged, repo.provider_config_version(PAN123_PROVIDER_NAME), connection=conn
         )
         write_audit(
             conn,

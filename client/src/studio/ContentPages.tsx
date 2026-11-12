@@ -2746,6 +2746,7 @@ export function MaterialsPage() {
   // 取链，媒体在卡片内取链。直链过期由媒体 error 事件触发重签一次（§5.2）。
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState("");
+  const renewedMedia = useRef(new Set<string>());
   const [docPreview, setDocPreview] =
     useState<TrainingMaterialPublicItem | null>(null);
 
@@ -2777,9 +2778,10 @@ export function MaterialsPage() {
 
   async function ensurePreviewUrl(
     item: TrainingMaterialPublicItem,
+    forceRefresh = false,
   ): Promise<string | null> {
     const cached = previewUrls[item.id];
-    if (cached) return cached;
+    if (cached && !forceRefresh) return cached;
     try {
       setBusyId(item.id);
       const url = await trainingMaterialDownloadUrl(item.id);
@@ -2795,11 +2797,15 @@ export function MaterialsPage() {
 
   // 媒体加载/播放失败多半是直链过期：清缓存重签一次（有界，不做循环重试）。
   async function resignOnMediaError(item: TrainingMaterialPublicItem) {
-    setPreviewUrls((current) => {
-      const { [item.id]: _stale, ...rest } = current;
-      return rest;
-    });
-    await ensurePreviewUrl(item);
+    if (renewedMedia.current.has(item.id)) return;
+    renewedMedia.current.add(item.id);
+    await ensurePreviewUrl(item, true);
+  }
+
+  function reloadPreview(item: TrainingMaterialPublicItem) {
+    // 用户主动重试开启新一轮，自动重签每轮仍只允许一次。
+    renewedMedia.current.delete(item.id);
+    void ensurePreviewUrl(item, true);
   }
 
   async function openDocPreview(item: TrainingMaterialPublicItem) {
@@ -2908,7 +2914,11 @@ export function MaterialsPage() {
                   />
                 ) : item.kind === "audio" && url ? (
                   // biome-ignore lint/a11y/useMediaCaption: 平台培训音频不提供字幕轨。
-                  <audio controls src={url} />
+                  <audio
+                    controls
+                    src={url}
+                    onError={() => void resignOnMediaError(item)}
+                  />
                 ) : (
                   <div className="content-asset__quick">
                     <span className="studio-status">{item.kind_label}</span>
@@ -2933,7 +2943,7 @@ export function MaterialsPage() {
                       <button
                         type="button"
                         disabled={busyId === item.id}
-                        onClick={() => void ensurePreviewUrl(item)}
+                        onClick={() => reloadPreview(item)}
                       >
                         {url ? "重新加载" : "播放"}
                       </button>
@@ -2941,7 +2951,7 @@ export function MaterialsPage() {
                       <button
                         type="button"
                         disabled={busyId === item.id}
-                        onClick={() => void ensurePreviewUrl(item)}
+                        onClick={() => reloadPreview(item)}
                       >
                         {url ? "重新加载" : "查看"}
                       </button>

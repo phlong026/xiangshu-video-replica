@@ -1171,25 +1171,31 @@ def enforce_pan123_config_guard(conn: BusinessConnection, incoming_config: dict[
         "SELECT to_regclass('public.provider_runtime_state') IS NOT NULL"
     ).fetchone()
     if state_table is not None and bool(state_table[0]):
+        # 与单飞颁发保持 token 锁 → 行锁的顺序，避免删除后再等颁发锁。
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("pan123:token",))
         conn.execute(
             "DELETE FROM provider_runtime_state WHERE provider = %s AND state_key = 'token'",
             (PAN123_PROVIDER_NAME,),
         )
 
 
-def enable_pan123_direct_link_after_save(config: dict[str, str], version: str) -> dict[str, str]:
+def enable_pan123_direct_link_after_save(
+    config: dict[str, str], version: str, *, connection: BusinessConnection
+) -> dict[str, str]:
     """保存 pan123 配置后为目标 folder 幂等开通直链空间；失败不阻断保存。
 
     跟随 COS lifecycle 先例：调用点在配置保存事务内、失败仅记状态不入错误。
     函数内导入 pan123_client——它反向依赖本模块的 Fernet 工具，模块级导入成环。
     """
-    from app.pan123_client import Pan123Client
+    from app.pan123_client import Pan123Client, SharedTokenStore
 
     try:
-        client = Pan123Client(config, config_version=version)
+        client = Pan123Client(
+            config, config_version=version, shared_token=SharedTokenStore(connection=connection)
+        )
         client.enable_direct_link_folder()
-    except Exception as exc:  # noqa: BLE001 - 保存流程不受直链开通失败阻断
-        logger.warning("pan123 direct-link enable failed: %s", exc)
+    except Exception:  # noqa: BLE001 - 保存流程不受直链开通失败阻断
+        logger.warning("training storage direct-link enable failed")
         return {
             "status": "failed",
             "message": "直链空间开通失败；请检查配置后重新保存或用连接测试排查。",

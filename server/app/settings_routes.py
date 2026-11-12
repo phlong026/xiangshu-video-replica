@@ -152,7 +152,7 @@ def update_provider_settings(
 
     if provider_name == PAN123_PROVIDER_NAME:
         direct_link = enable_pan123_direct_link_after_save(
-            incoming_config, repo.provider_config_version(PAN123_PROVIDER_NAME)
+            incoming_config, repo.provider_config_version(PAN123_PROVIDER_NAME), connection=conn
         )
         write_audit_log(
             conn,

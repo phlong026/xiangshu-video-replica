@@ -4488,4 +4488,27 @@ describe("全自动复刻入口（M8 v1）", () => {
     expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
     failedRecovery.unmount();
   });
+  it("renews an expired training preview once without reusing the captured URL", async () => {
+    useStudio.mockReturnValue(studio());
+    trainingMaterialDownloadUrl
+      .mockResolvedValueOnce("https://signed/old")
+      .mockResolvedValueOnce("https://signed/new");
+    const view = render(<MaterialsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "播放" }));
+    await waitFor(() =>
+      expect(view.container.querySelector("video")).toHaveAttribute(
+        "src",
+        "https://signed/old",
+      ),
+    );
+    fireEvent.error(view.container.querySelector("video") as HTMLVideoElement);
+    await waitFor(() =>
+      expect(view.container.querySelector("video")).toHaveAttribute(
+        "src",
+        "https://signed/new",
+      ),
+    );
+    fireEvent.error(view.container.querySelector("video") as HTMLVideoElement);
+    expect(trainingMaterialDownloadUrl).toHaveBeenCalledTimes(2);
+  });
 });

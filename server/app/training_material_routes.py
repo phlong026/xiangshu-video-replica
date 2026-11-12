@@ -501,110 +501,112 @@ async def create_training_material(
     object_key = f"training-materials/{material_id}/{safe_name}"
     remote_name = f"{material_id}-{safe_name}"
 
-    # 事务 A：解析存储车道并记录配置指纹（业务提交时复核，方案 §3.4）。
-    storage, config_version = get_training_material_storage()
     try:
-        uploaded = await run_in_threadpool(
-            storage.put_file, remote_name, tmp_path, content_type=content_type
-        )
-    except RuntimeError as exc:
-        raise _http(
-            503, "TRAINING_MATERIAL_STORAGE_FAILED", "素材上传通道暂不可用，请稍后重试。"
-        ) from exc
-
-    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        # 统一互斥锁 + 配置指纹复核（方案 §3.4，评审 r3-P1-1）：上传期间配置被
-        # 换（换号/换密钥）则拒绝入库，避免留下绑定旧账号的素材行。
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (PAN123_CONFIG_LOCK_KEY,))
-        repo = SettingsRepository(BusinessConnection.postgres(conn))
-        current_version = repo.provider_config_version(PAN123_PROVIDER_NAME)
-        if current_version != config_version:
-            raise _http(
-                503,
-                "TRAINING_MATERIAL_CONFIG_CHANGED",
-                "存储配置在本次上传期间发生变化，素材未入库；请重新上传。",
+        # 事务 A：解析存储车道并记录配置指纹（业务提交时复核，方案 §3.4）。
+        storage, config_version = get_training_material_storage()
+        try:
+            uploaded = await run_in_threadpool(
+                storage.put_file, remote_name, tmp_path, content_type=content_type
             )
-        conn.execute(
-            "INSERT INTO training_materials (id, title, description, kind, object_key, "
-            "remote_file_id, content_type, file_suffix, size_bytes, sha256, tags, "
-            "sort_order, visible, created_by_user_id) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",
-            (
-                material_id,
-                clean_title,
-                description.strip(),
-                kind,
-                object_key,
-                str(uploaded.file_id),
-                content_type,
-                normalized_suffix,
-                total,
-                sha256,
-                json.dumps(normalized_tags, ensure_ascii=False),
-                sort_order,
-                1 if visible else 0,
-                actor.user_id,
-            ),
-        )
-        conn.execute(
-            "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, "
-            "entity_id, metadata_json) VALUES (%s,%s,'training_material.create',"
-            "'training_material',%s,%s)",
-            (
-                str(uuid.uuid4()),
-                actor.user_id,
-                material_id,
-                json.dumps(
-                    {
-                        "title": clean_title,
-                        "kind": kind,
-                        "tags": normalized_tags,
-                        "size_bytes": total,
-                        "sha256": sha256,
-                        "remote_file_id": str(uploaded.file_id),
-                        "reason": reason.strip(),
-                        "request_id": request_id,
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ),
-        )
-        return {"id": material_id, "request_id": request_id}
+        except RuntimeError as exc:
+            raise _http(
+                503, "TRAINING_MATERIAL_STORAGE_FAILED", "素材上传通道暂不可用，请稍后重试。"
+            ) from exc
 
-    try:
-        contract = TrainingMaterialCreateContract(
-            title=clean_title,
-            description=description.strip(),
-            tags=normalized_tags,
-            sort_order=sort_order,
-            visible=visible,
-            sha256=sha256,
-            size_bytes=total,
-            file_suffix=normalized_suffix,
-            content_type=content_type,
-            confirm=confirm,
-            reason=reason,
-        )
-        return _write_with_idempotency(
-            request,
-            response,
-            actor,
-            contract,
-            business,
-            success_status=201,
-            unavailable_code=_UNAVAILABLE_CODE,
-            unavailable_message=_UNAVAILABLE_MESSAGE,
-        )
-    except Exception:
-        # 业务失败（含指纹复核拒绝）：网盘侧留下无引用文件（唯一远端名，无污染），
-        # 按运维口径记日志人工清理，本期不做自动 GC（方案 §7.5）。
-        logger.warning(
-            "training material upload not persisted; orphan remote file file_id=%s material_id=%s",
-            uploaded.file_id,
-            material_id,
-        )
-        raise
+        def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+            # 统一互斥锁 + 配置指纹复核（方案 §3.4，评审 r3-P1-1）：上传期间配置被
+            # 换（换号/换密钥）则拒绝入库，避免留下绑定旧账号的素材行。
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (PAN123_CONFIG_LOCK_KEY,))
+            repo = SettingsRepository(BusinessConnection.postgres(conn))
+            current_version = repo.provider_config_version(PAN123_PROVIDER_NAME)
+            if current_version != config_version:
+                raise _http(
+                    503,
+                    "TRAINING_MATERIAL_CONFIG_CHANGED",
+                    "存储配置在本次上传期间发生变化，素材未入库；请重新上传。",
+                )
+            conn.execute(
+                "INSERT INTO training_materials (id, title, description, kind, object_key, "
+                "remote_file_id, content_type, file_suffix, size_bytes, sha256, tags, "
+                "sort_order, visible, created_by_user_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",
+                (
+                    material_id,
+                    clean_title,
+                    description.strip(),
+                    kind,
+                    object_key,
+                    str(uploaded.file_id),
+                    content_type,
+                    normalized_suffix,
+                    total,
+                    sha256,
+                    json.dumps(normalized_tags, ensure_ascii=False),
+                    sort_order,
+                    1 if visible else 0,
+                    actor.user_id,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, "
+                "entity_id, metadata_json) VALUES (%s,%s,'training_material.create',"
+                "'training_material',%s,%s)",
+                (
+                    str(uuid.uuid4()),
+                    actor.user_id,
+                    material_id,
+                    json.dumps(
+                        {
+                            "title": clean_title,
+                            "kind": kind,
+                            "tags": normalized_tags,
+                            "size_bytes": total,
+                            "sha256": sha256,
+                            "remote_file_id": str(uploaded.file_id),
+                            "reason": reason.strip(),
+                            "request_id": request_id,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+            return {"id": material_id, "request_id": request_id}
+
+        try:
+            contract = TrainingMaterialCreateContract(
+                title=clean_title,
+                description=description.strip(),
+                tags=normalized_tags,
+                sort_order=sort_order,
+                visible=visible,
+                sha256=sha256,
+                size_bytes=total,
+                file_suffix=normalized_suffix,
+                content_type=content_type,
+                confirm=confirm,
+                reason=reason,
+            )
+            return _write_with_idempotency(
+                request,
+                response,
+                actor,
+                contract,
+                business,
+                success_status=201,
+                unavailable_code=_UNAVAILABLE_CODE,
+                unavailable_message=_UNAVAILABLE_MESSAGE,
+            )
+        except Exception:
+            # 业务失败（含指纹复核拒绝）：网盘侧留下无引用文件（唯一远端名，无污染），
+            # 按运维口径记日志人工清理，本期不做自动 GC（方案 §7.5）。
+            logger.warning(
+                "training material upload not persisted; "
+                "orphan remote file file_id=%s material_id=%s",
+                uploaded.file_id,
+                material_id,
+            )
+            raise
     finally:
         tmp_path.unlink(missing_ok=True)
 

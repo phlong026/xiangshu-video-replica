@@ -113,7 +113,16 @@ class FakeTokenStore:
             return None
         return state
 
-    def mint_single_flight(self, client_id: str, mint: Callable[[], object]) -> object:
+    def mint_single_flight(
+        self, client_id: str, mint: Callable[[], object], *, rejected_token: str | None = None
+    ) -> object:
+        shared = self.read_shared(client_id)
+        if (
+            shared is not None
+            and shared.expires_at > int(time.time()) + 60
+            and shared.access_token != rejected_token
+        ):
+            return shared
         self.mint_calls += 1
         minted = mint()
         self.shared = minted
@@ -392,3 +401,166 @@ def test_probe_fails_when_hotlink_not_enforced() -> None:
     client, _store = _make_client(opener)
     with pytest.raises(Pan123Unavailable, match="防盗链未生效"):
         client.probe()
+
+
+@pytest.mark.parametrize("shared_token", ["rejected", "already-refreshed"])
+def test_rejected_shared_token_is_replaced_under_lock(monkeypatch, shared_token):
+    from app import db_pg, db_portable
+    from app.pan123_client import Pan123TokenState, SharedTokenStore
+
+    class PlainCipher:
+        def encrypt(self, value):
+            return value
+
+        def decrypt(self, value):
+            return value
+
+    class Connection:
+        def __init__(self):
+            self.statements = []
+            self.row = {
+                "encrypted_value": json.dumps(
+                    {
+                        "client_id": "cid-1",
+                        "access_token": shared_token,
+                        "expires_at": int(time.time()) + 3600,
+                    }
+                )
+            }
+
+        def execute(self, sql, params):
+            self.statements.append(sql)
+            if sql.startswith("INSERT"):
+                self.row = {"encrypted_value": params[1]}
+            return self
+
+        def fetchone(self):
+            return self.row
+
+    conn = Connection()
+
+    @contextmanager
+    def transaction():
+        yield conn
+
+    monkeypatch.setattr(db_pg, "pg_transaction", transaction)
+    monkeypatch.setattr(db_portable.BusinessConnection, "postgres", lambda value: value)
+    store = SharedTokenStore(fernet=PlainCipher())
+    minted = []
+
+    def mint():
+        minted.append(True)
+        return Pan123TokenState("cid-1", "fresh", int(time.time()) + 3600)
+
+    result = store.mint_single_flight("cid-1", mint, rejected_token="rejected")
+    assert "pg_advisory_xact_lock" in conn.statements[0]
+    assert result.access_token == ("fresh" if shared_token == "rejected" else shared_token)
+    assert len(minted) == (1 if shared_token == "rejected" else 0)
+
+
+def test_direct_link_enablement_uses_the_save_connection(monkeypatch):
+    from app import pan123_client, settings
+
+    conn = object()
+    observed = []
+
+    class Client:
+        def __init__(self, config, *, config_version, shared_token):
+            observed.append(shared_token._connection)
+
+        def enable_direct_link_folder(self):
+            pass
+
+    monkeypatch.setattr(pan123_client, "Pan123Client", Client)
+    monkeypatch.setattr(pan123_client, "fernet_from_environment", lambda: object())
+    assert (
+        settings.enable_pan123_direct_link_after_save(CONFIG, "v1", connection=conn)["status"]
+        == "ok"
+    )
+    assert observed == [conn]
+
+
+def test_connection_probe_errors_do_not_expose_supplier_or_upstream_message(monkeypatch):
+    from fastapi import HTTPException
+
+    from app import pan123_client
+    from app.pan123_client import Pan123ProviderTester
+
+    tester = Pan123ProviderTester(fallback=None)
+    with pytest.raises(HTTPException) as incomplete:
+        tester.connection_test("pan123", {})
+    assert "123" not in incomplete.value.detail["message"]
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def probe(self):
+            raise Pan123Unavailable("123 upstream private detail")
+
+    monkeypatch.setattr(pan123_client, "Pan123Client", Client)
+    with pytest.raises(HTTPException) as failed:
+        tester.connection_test("pan123", CONFIG)
+    assert "123" not in failed.value.detail["message"]
+    assert "private detail" not in failed.value.detail["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_at", ["resolve", "upload"])
+async def test_failed_upload_removes_temporary_file(monkeypatch, tmp_path, fail_at):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException, Response, UploadFile
+    from starlette.datastructures import Headers
+
+    from app import training_material_routes as routes
+
+    monkeypatch.setattr(routes.tempfile, "tempdir", str(tmp_path))
+
+    class Storage:
+        def put_file(self, *args, **kwargs):
+            raise RuntimeError("upload unavailable")
+
+    def resolve():
+        if fail_at == "resolve":
+            raise HTTPException(status_code=503)
+        return Storage(), "v1"
+
+    monkeypatch.setattr(routes, "get_training_material_storage", resolve)
+    upload = UploadFile(
+        file=io.BytesIO(b"test video"),
+        filename="test.mp4",
+        headers=Headers({"content-type": "video/mp4"}),
+    )
+    with pytest.raises(HTTPException):
+        await routes.create_training_material(
+            None,
+            Response(),
+            SimpleNamespace(user_id="test-user"),
+            upload,
+            title="测试",
+            tags='["入门"]',
+            confirm=True,
+            reason="测试",
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_shared_store_reuses_save_transaction_without_borrowing_connection(monkeypatch):
+    from app import db_pg
+    from app.pan123_client import SharedTokenStore
+
+    def unexpected_transaction():
+        raise AssertionError("configuration save must not borrow a second connection")
+
+    class Connection:
+        def execute(self, query, params):
+            return self
+
+        def fetchone(self):
+            return None
+
+    monkeypatch.setattr(db_pg, "pg_transaction", unexpected_transaction)
+    store = SharedTokenStore(fernet=object(), connection=Connection())
+    assert store.read_shared("cid-1") is None
+    store.clear_shared()

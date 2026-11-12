@@ -32,7 +32,8 @@ import re
 import secrets
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import md5
 from pathlib import Path
@@ -42,6 +43,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 from urllib.request import Request
 from uuid import uuid4
 
+from app.db_portable import BusinessConnection
 from app.external_calls import external_call_context, recorded_urlopen
 from app.settings import SettingsDecryptError, fernet_from_environment
 
@@ -145,7 +147,8 @@ class SharedTokenStore:
     ``pan123:token`` 事务级 advisory lock 串行，保证全局同时只活跃一个 token。
     """
 
-    def __init__(self, fernet: Any = None) -> None:
+    def __init__(self, fernet: Any = None, *, connection: BusinessConnection | None = None) -> None:
+        self._connection = connection
         self._fernet = fernet or fernet_from_environment()
         self._memory: Pan123TokenState | None = None
 
@@ -169,48 +172,49 @@ class SharedTokenStore:
 
     # -- DB 共享 -----------------------------------------------------------
 
-    def read_shared(self, client_id: str) -> Pan123TokenState | None:
+    @contextmanager
+    def _transaction(self) -> Iterator[BusinessConnection]:
+        # 配置保存已持有 token 行锁，复用同一事务，不能再借连接等待自己。
+        if self._connection is not None:
+            yield self._connection
+            return
         from app.db_pg import pg_transaction
-        from app.db_portable import BusinessConnection
 
         with pg_transaction() as pg:
-            row = (
-                BusinessConnection.postgres(pg)
-                .execute(
-                    "SELECT encrypted_value FROM provider_runtime_state "
-                    "WHERE provider = %s AND state_key = 'token'",
-                    (PAN123_PROVIDER,),
-                )
-                .fetchone()
-            )
+            yield BusinessConnection.postgres(pg)
+
+    def read_shared(self, client_id: str) -> Pan123TokenState | None:
+        with self._transaction() as business:
+            row = business.execute(
+                "SELECT encrypted_value FROM provider_runtime_state "
+                "WHERE provider = %s AND state_key = 'token'",
+                (PAN123_PROVIDER,),
+            ).fetchone()
         return self._decode_row(row, client_id)
 
     def clear_shared(self) -> None:
         """配置切换时原子清除共享 token（与护栏同事务调用，r2-P1-1）。"""
-        from app.db_pg import pg_transaction
-        from app.db_portable import BusinessConnection
-
-        with pg_transaction() as pg:
-            BusinessConnection.postgres(pg).execute(
+        with self._transaction() as business:
+            business.execute(
                 "DELETE FROM provider_runtime_state WHERE provider = %s AND state_key = 'token'",
                 (PAN123_PROVIDER,),
             )
         self.invalidate()
 
     def mint_single_flight(
-        self, client_id: str, mint: Callable[[], Pan123TokenState]
+        self,
+        client_id: str,
+        mint: Callable[[], Pan123TokenState],
+        *,
+        rejected_token: str | None = None,
     ) -> Pan123TokenState:
         """单飞颁发：advisory lock 事务串行，锁内复查共享行，避免并发多颁。
 
         HTTP 颁发调用发生在持锁事务内——竞争者等待的正是颁发本身，锁随事务
         释放；同一事务内读写共享行，不另开池连接。
         """
-        from app.db_pg import pg_transaction
-        from app.db_portable import BusinessConnection
-
         now = int(time.time())
-        with pg_transaction() as pg:
-            business = BusinessConnection.postgres(pg)
+        with self._transaction() as business:
             business.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{PAN123_PROVIDER}:token",)
             )
@@ -220,7 +224,11 @@ class SharedTokenStore:
                 (PAN123_PROVIDER,),
             ).fetchone()
             shared = self._decode_row(row, client_id)
-            if shared is not None and shared.expires_at > now + 60:
+            if (
+                shared is not None
+                and shared.expires_at > now + 60
+                and shared.access_token != rejected_token
+            ):
                 self.cache(shared)
                 return shared
             minted = mint()
@@ -278,7 +286,7 @@ class Pan123Client:
         self._sign_secret = str(config.get("sign_secret", "")).strip()
         folder_raw = str(config.get("folder_id", "")).strip()
         if not (self._client_id and self._client_secret and self._uid and self._sign_secret):
-            raise Pan123ConfigError("123网盘配置不完整。")
+            raise Pan123ConfigError("素材存储通道配置不完整。")
         self._folder_id = int(folder_raw) if folder_raw else 0
         self._config_version = config_version
         self._tokens = shared_token or SharedTokenStore()
@@ -321,36 +329,34 @@ class Pan123Client:
         except HTTPError as exc:
             raise self._from_http_status(exc.code, endpoint) from exc
         except (TimeoutError, URLError, OSError) as exc:
-            raise Pan123Unavailable(f"123网盘服务不可用（{endpoint}）。") from exc
+            raise Pan123Unavailable(f"素材存储通道服务不可用（{endpoint}）。") from exc
         try:
             payload = json.loads(body)
         except (ValueError, UnicodeError) as exc:
-            raise Pan123Unavailable(f"123网盘响应不是有效 JSON（{endpoint}）。") from exc
+            raise Pan123Unavailable(f"素材存储通道响应不是有效 JSON（{endpoint}）。") from exc
         if not isinstance(payload, dict):
-            raise Pan123Unavailable(f"123网盘响应形状异常（{endpoint}）。")
+            raise Pan123Unavailable(f"素材存储通道响应形状异常（{endpoint}）。")
         code = int(payload.get("code") or 0)
         if code == 0:
             return payload
         if code == 401:
-            raise Pan123AuthError("123网盘访问令牌无效。")
+            raise Pan123AuthError("素材存储通道访问令牌无效。")
         if code == 429:
-            raise Pan123Unavailable("123网盘请求过于频繁，请稍后重试。")
+            raise Pan123Unavailable("素材存储通道请求过于频繁，请稍后重试。")
         if code == 5066:
-            raise Pan123FileMissing("123网盘文件不存在。")
-        raise Pan123Unavailable(
-            f"123网盘接口失败（{endpoint}）：{str(payload.get('message'))[:200]}"
-        )
+            raise Pan123FileMissing("素材存储通道文件不存在。")
+        raise Pan123Unavailable(f"素材存储通道接口失败（错误码 {code}）。")
 
     def _from_http_status(self, status: int, endpoint: str) -> RuntimeError:
         if status == 401:
-            return Pan123AuthError("123网盘访问令牌无效。")
+            return Pan123AuthError("素材存储通道访问令牌无效。")
         if status == 429:
-            return Pan123Unavailable("123网盘请求过于频繁，请稍后重试。")
-        return Pan123Unavailable(f"123网盘服务不可用（{endpoint}，HTTP {status}）。")
+            return Pan123Unavailable("素材存储通道请求过于频繁，请稍后重试。")
+        return Pan123Unavailable(f"素材存储通道服务不可用（{endpoint}，HTTP {status}）。")
 
-    def _token(self, *, force_refresh: bool = False) -> str:
+    def _token(self, *, rejected_token: str | None = None) -> str:
         client_id = self._client_id
-        if not force_refresh:
+        if rejected_token is None:
             cached = self._tokens.cached_for(client_id)
             if cached is not None:
                 return cached.access_token
@@ -360,7 +366,9 @@ class Pan123Client:
                 return shared.access_token
         # 单飞颁发在 store 内完成（advisory lock 事务 + 锁内复查共享行）；
         # client 不直接触 DB，测试注入 fake store 即可离线运行。
-        minted = self._tokens.mint_single_flight(client_id, self._mint_token)
+        minted = self._tokens.mint_single_flight(
+            client_id, self._mint_token, rejected_token=rejected_token
+        )
         self._tokens.cache(minted)
         return minted.access_token
 
@@ -377,7 +385,7 @@ class Pan123Client:
         payload = self._call_json(request, endpoint="api/v1/access_token")
         data = payload.get("data")
         if not isinstance(data, dict) or not data.get("accessToken"):
-            raise Pan123AuthError("123网盘未返回访问令牌。")
+            raise Pan123AuthError("素材存储通道未返回访问令牌。")
         return Pan123TokenState(
             client_id=self._client_id,
             access_token=str(data["accessToken"]),
@@ -403,7 +411,7 @@ class Pan123Client:
             return self._call_json(request, endpoint=endpoint, read_limit=read_limit)
         except Pan123AuthError:
             self._tokens.invalidate()
-            token = self._token(force_refresh=True)
+            token = self._token(rejected_token=token)
             retry = Request(
                 url,
                 data=data,
@@ -426,7 +434,7 @@ class Pan123Client:
         if isinstance(domain_data, list) and domain_data:
             domain = str(domain_data[0]).rstrip("/")
         if not domain:
-            raise Pan123Unavailable("123网盘未返回可用的上传域名。")
+            raise Pan123Unavailable("素材存储通道未返回可用的上传域名。")
 
         create_payload = self._authorized_request(
             f"{PAN123_BASE_URL}/upload/v2/file/create",
@@ -442,11 +450,11 @@ class Pan123Client:
             endpoint="upload/v2/file/create",
         ).get("data")
         if not isinstance(create_payload, dict):
-            raise Pan123Unavailable("123网盘创建上传任务响应异常。")
+            raise Pan123Unavailable("素材存储通道创建上传任务响应异常。")
         if create_payload.get("reuse"):
             file_id = int(create_payload.get("fileId") or create_payload.get("fileID") or 0)
             if not file_id:
-                raise Pan123Unavailable("123网盘秒传响应缺少文件ID。")
+                raise Pan123Unavailable("素材存储通道秒传响应缺少文件ID。")
             return Pan123File(file_id=file_id, size=size)
 
         preupload_id = str(create_payload.get("preuploadID") or "")
@@ -460,7 +468,7 @@ class Pan123Client:
             # 来源——缺失时回退，不因单字段缺席整体失败。
             server = domain
         if not preupload_id or slice_size <= 0 or not server:
-            raise Pan123Unavailable("123网盘创建上传任务响应不完整。")
+            raise Pan123Unavailable("素材存储通道创建上传任务响应不完整。")
 
         with path.open("rb") as handle:
             slice_no = 0
@@ -490,7 +498,7 @@ class Pan123Client:
         complete_data = self._poll_upload_complete(preupload_id)
         file_id = int(complete_data.get("fileID") or complete_data.get("fileId") or 0)
         if not file_id:
-            raise Pan123Unavailable("123网盘上传完成响应缺少文件ID。")
+            raise Pan123Unavailable("素材存储通道上传完成响应缺少文件ID。")
         return Pan123File(file_id=file_id, size=size)
 
     def _poll_upload_complete(self, preupload_id: str) -> dict[str, Any]:
@@ -504,7 +512,7 @@ class Pan123Client:
             if isinstance(payload, dict) and payload.get("completed"):
                 return payload
             time.sleep(_UPLOAD_POLL_INTERVAL_SECONDS)
-        raise Pan123Unavailable("123网盘上传确认超时，请稍后重试。")
+        raise Pan123Unavailable("素材存储通道上传确认超时，请稍后重试。")
 
     # -- 直链与诊断 ---------------------------------------------------------
 
@@ -522,7 +530,7 @@ class Pan123Client:
             endpoint="api/v1/direct-link/url",
         ).get("data")
         if not isinstance(payload, dict) or not payload.get("url"):
-            raise Pan123Unavailable("123网盘未返回直链。")
+            raise Pan123Unavailable("素材存储通道未返回直链。")
         signed, expire = signed_direct_link(
             str(payload["url"]),
             self._uid,
@@ -540,7 +548,7 @@ class Pan123Client:
             endpoint="api/v1/file/download_info",
         ).get("data")
         if not isinstance(payload, dict) or not payload.get("downloadUrl"):
-            raise Pan123Unavailable("123网盘未返回下载地址。")
+            raise Pan123Unavailable("素材存储通道未返回下载地址。")
         return str(payload["downloadUrl"])
 
     def enable_direct_link_folder(self) -> None:
@@ -608,10 +616,12 @@ class Pan123Client:
                 )
         except (HTTPError, URLError, TimeoutError, OSError):
             if expect_success:
-                raise Pan123Unavailable("123网盘直链读取失败（防盗链签名可能不匹配）。")
+                raise Pan123Unavailable("素材存储通道直链读取失败（防盗链签名可能不匹配）。")
             return
         if not expect_success:
-            raise Pan123Unavailable("123网盘防盗链未生效：非法签名仍可读取，请核对直链鉴权配置。")
+            raise Pan123Unavailable(
+                "素材存储通道防盗链未生效：非法签名仍可读取，请核对直链鉴权配置。"
+            )
 
 
 class Pan123Storage:
@@ -746,7 +756,7 @@ class Pan123ProviderTester:
                 status_code=422,
                 detail={
                     "code": "PAN123_SETTINGS_INCOMPLETE",
-                    "message": "123网盘配置不完整，请补齐全部字段后再测试。",
+                    "message": "素材存储通道配置不完整，请补齐全部字段后再测试。",
                 },
             )
         client = Pan123Client(config, config_version="connection-test")
@@ -757,7 +767,7 @@ class Pan123ProviderTester:
                 status_code=503,
                 detail={
                     "code": "PAN123_CONNECTION_TEST_FAILED",
-                    "message": str(exc) or "123网盘连接测试未通过，请检查配置。",
+                    "message": "素材存储通道连接测试未通过，请检查配置。",
                 },
             ) from exc
         from app.settings import ProviderTestResult
