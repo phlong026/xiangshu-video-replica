@@ -4135,7 +4135,8 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
         "/api/control/viral/videos",
         headers=headers,
         params={
-            "cohort_stage": "copy",
+            # 2026-11-11 极简化：copy 漏斗段已砍，改用 detail 段验证历史过滤
+            "cohort_stage": "detail",
             "collected_from": overview["from"],
             "collected_to": overview["to"],
         },
