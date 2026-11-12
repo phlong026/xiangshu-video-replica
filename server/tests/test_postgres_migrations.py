@@ -61,7 +61,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 20260930T1100（告警推送防打扰去重表）继续追加其上，20260930T1400（注册赠送
 # 积分单行配置表）追加在其后，故链尾为 20260930T1400_registration_bonus_settings。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20261102T0900_customer_session_last_seen"
+HEAD_REVISION = "20261111T1000_uncertain_auto_reopen"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

@@ -95,13 +95,31 @@ class ScriptFromAudioTaskResponse(BaseModel):
     completed_at: str | None
 
 
+def _legacy_cache_artifact(row: BusinessRow) -> bool:
+    """2026-11-11 之前「共享缓存命中秒回」任务：正文来自别人的转写、本人未付 ASR.
+
+    旧报告层用 claim 交付闸门向本人收交付费；claim 端点已退役为 410，若仍让
+    这类任务的正文随响应直出，等于对未付费产出开放免费正文（Codex S 级评审
+    阻塞 2）。凭据标记是旧入队时才写入的 ``viral_archive_sha256``——新链路
+    只写 viral_source 归因，因此该标记是精确的历史判别位。
+    """
+    try:
+        payload = json.loads(str(row["request_json"] or "{}"))
+    except (ValueError, TypeError):
+        return False
+    return isinstance(payload, dict) and "viral_archive_sha256" in payload
+
+
 def script_from_audio_task_response(row: BusinessRow) -> ScriptFromAudioTaskResponse:
     result_json = row["result_json"]
     result: ScriptFromAudioResult | None = None
     if result_json is not None:
         payload = json.loads(str(result_json))
+        # 历史缓存命中任务的正文不下发（见 _legacy_cache_artifact）：重新提取
+        # 会走新链路、按本人真实转写计费。
+        text = None if _legacy_cache_artifact(row) else str(payload.get("text", ""))
         result = ScriptFromAudioResult(
-            text=str(payload.get("text", "")),
+            text=text,
             duration_sec=(
                 None if payload.get("duration_sec") is None else float(payload["duration_sec"])
             ),

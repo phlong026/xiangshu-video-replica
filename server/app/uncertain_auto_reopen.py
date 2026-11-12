@@ -124,7 +124,7 @@ def _reopen_one(
     table: str,
     audit_entity: str,
     service: str,
-    units: int,
+    units: float,
     reset_sql: str,
     reset_params: tuple[object, ...],
     max_reopens: int,
@@ -206,7 +206,9 @@ _ASR_RESET_SQL = (
 
 _REWRITE_RESET_SQL = (
     "UPDATE script_rewrite_tasks SET status='PENDING',"
-    "provider_started_at=NULL,provider_task_id=NULL,completed_at=NULL,"
+    # script_rewrite_tasks 没有 provider_task_id 列（DeepSeek 无回执复用），
+    # 只复位本表真实存在的字段（Codex S 级评审阻塞 1）。
+    "provider_started_at=NULL,completed_at=NULL,"
     "result_json=NULL,error_code=NULL,error_message_redacted=NULL,"
     "retryable=0,locked_by=NULL,locked_until=NULL,"
     "reopen_count=reopen_count+1,updated_at=now() "
@@ -283,8 +285,12 @@ def reopen_uncertain_script_from_audio_tasks(
     return outcome
 
 
-def _asset_duration_units(conn: BusinessConnection, *, task_id: str) -> int:
-    """重开按资产时长重新预留（与首次受理同一口径；0 会被受理拒绝则跳过）."""
+def _asset_duration_units(conn: BusinessConnection, *, task_id: str) -> float:
+    """重开按资产时长重新预留（与首次受理同一口径；0 会被受理拒绝则跳过）.
+
+    保留原始精度（不截断小数秒）：首次受理直接用 metadata 里的时长，若这里
+    int() 截断，付费秒数会少算（12.8s 首受理 26 分、重开仅 24 分，Codex 阻塞 3）。
+    """
     row = conn.execute(
         "SELECT a.metadata_json FROM script_from_audio_tasks t "
         "JOIN assets a ON a.id=t.source_asset_id AND a.project_id=t.project_id "
@@ -292,12 +298,12 @@ def _asset_duration_units(conn: BusinessConnection, *, task_id: str) -> int:
         (task_id,),
     ).fetchone()
     if row is None:
-        return 0
+        return 0.0
     try:
         metadata = json.loads(str(row["metadata_json"] or "{}"))
     except (ValueError, TypeError):
-        return 0
-    return int(metadata.get("duration_seconds") or metadata.get("duration_sec") or 0)
+        return 0.0
+    return float(metadata.get("duration_seconds") or metadata.get("duration_sec") or 0)
 
 
 def reopen_uncertain_script_rewrite_tasks(

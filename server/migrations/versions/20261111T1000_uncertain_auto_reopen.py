@@ -32,12 +32,10 @@ def upgrade() -> None:
         "(uncertain_auto_reopen_max BETWEEN 0 AND 10)"
     )
     op.execute(
-        "ALTER TABLE script_from_audio_tasks ADD COLUMN reopen_count "
-        "INTEGER NOT NULL DEFAULT 0"
+        "ALTER TABLE script_from_audio_tasks ADD COLUMN reopen_count INTEGER NOT NULL DEFAULT 0"
     )
     op.execute(
-        "ALTER TABLE script_rewrite_tasks ADD COLUMN reopen_count "
-        "INTEGER NOT NULL DEFAULT 0"
+        "ALTER TABLE script_rewrite_tasks ADD COLUMN reopen_count INTEGER NOT NULL DEFAULT 0"
     )
 
 

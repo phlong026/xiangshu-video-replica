@@ -524,17 +524,6 @@ def test_reopen_leaves_single_settled_round(pg_state: str, monkeypatch: pytest.M
     assert _wallet(pg_state, "simplify-ledger") == (976, 0)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "生产缺陷（WP-C 引入，待主会话处置）：script_rewrite_tasks 表没有 "
-        "provider_task_id 列（048 建表无此列，后续迁移也未加），而 "
-        "app/uncertain_auto_reopen.py 的 _REWRITE_RESET_SQL 引用了它——重开的"
-        "字段复位必然 UndefinedColumn，SAVEPOINT 回滚后走 deferred 分支，改写"
-        "任务永远重不开（reopen_count 不增长、也不会落 EXHAUSTED）。本用例固定"
-        "「与转写对称」的预期契约；生产修掉多余字段后本用例应转绿并移除标记。"
-    ),
-)
 def test_rewrite_uncertain_auto_reopen_symmetry(pg_state: str) -> None:
     """改写任务与转写同一套自动重开：units=1 计费、封顶耗尽落 FAILED."""
     from app.uncertain_auto_reopen import reopen_uncertain_script_rewrite_tasks
@@ -683,3 +672,185 @@ def test_zero_threshold_disables_auto_reopen(
             "error_code='TEST_NEUTRALIZED' WHERE id=%s",
             (task_id,),
         )
+
+
+def test_legacy_cache_hit_task_never_leaks_free_text(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """历史「缓存命中秒回」任务不下发正文，也不进提取记录（Codex 阻塞 2）.
+
+    旧链路在共享缓存命中时不收 ASR 费，正文靠 claim 闸门收费后才交付；claim
+    已退役为 410。若这类任务的 request_json 带 ``viral_archive_sha256`` 的
+    正文仍随响应直出，等于对未付费产出开放免费正文。
+    """
+    from app.script_from_audio import script_from_audio_task_response
+    from app.viral_routes import list_viral_copy_extractions
+
+    _seed_base(pg_state, ("legacy-owner",))
+    _seed_viral_video(pg_state, "legacy-hit-1")
+    _seed_shared_import(
+        pg_state,
+        "legacy-owner",
+        project_id="proj-legacy",
+        asset_id="asset-legacy",
+        video_id="legacy-hit-1",
+    )
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "INSERT INTO script_from_audio_tasks ("
+            "id, project_id, source_asset_id, created_by_user_id, idempotency_key,"
+            " request_hash, request_json, status, result_json, completed_at)"
+            " VALUES ('legacy-task', 'proj-legacy', 'asset-legacy', 'legacy-owner',"
+            " 'ik-legacy', 'rh-legacy', %s, 'SUCCEEDED', %s, now()::text)",
+            (
+                json.dumps(
+                    {
+                        "source_asset_id": "asset-legacy",
+                        "viral_source": ["douyin", "legacy-hit-1"],
+                        "viral_archive_sha256": "a" * 64,
+                        "viral_archive_uri": "fake://simplify/video-source.mp4",
+                        "viral_archive_kind": "video",
+                    }
+                ),
+                json.dumps({"text": "旧共享缓存的正文", "duration_sec": 12.0, "language": "zh"}),
+            ),
+        )
+        row = pg.execute("SELECT * FROM script_from_audio_tasks WHERE id='legacy-task'").fetchone()
+    assert row is not None
+    response = script_from_audio_task_response(row)
+    assert response.result is not None
+    assert response.result.text is None
+    # 提取记录同样不展示这条（未付费正文不得经由历史接口回流）。
+    with _pg(pg_state) as pg:
+        items = list_viral_copy_extractions(pg, CurrentUser("legacy-owner", "u", "u", "customer"))
+    assert all(item.videoId != "legacy-hit-1" for item in items.items)
+
+
+def test_reopen_defers_on_insufficient_credits_without_state_change(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """余额不足时重开只延期不留痕：状态保持 UNCERTAIN、计数不增、落 deferred 审计.
+
+    accept_operation 对预留>0 且余额不足抛 402；扫掠必须只回滚本候选的
+    SAVEPOINT 并延期（locked_until 顶到阈值处），下一轮再试（Codex 阻塞 2）。
+    """
+    from app.uncertain_auto_reopen import reopen_uncertain_script_from_audio_tasks
+
+    _audio_fixture(pg_state, monkeypatch, ("insufficient-owner",))
+    _seed_viral_video(pg_state, "defer-1")
+    _seed_shared_import(
+        pg_state,
+        "insufficient-owner",
+        project_id="proj-defer",
+        asset_id="asset-defer",
+        video_id="defer-1",
+    )
+    task = _enqueue(
+        pg_state,
+        "insufficient-owner",
+        project_id="proj-defer",
+        asset_id="asset-defer",
+        key="ik-defer",
+    )
+    task_id = str(task["id"])
+    _mark_uncertain(pg_state, task_id)
+    # 模拟「对账已按失败释放旧轮 + 钱包被别的消费掏空」：用既有结算 API 正确
+    # 释放（手动 UPDATE 会撞 billing_operations 的 CHECK 约束），再清零余额。
+    from app.usage_billing import finish_source
+
+    with psycopg.connect(pg_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        finish_source(conn, task_id, units=0, succeeded=False)
+        conn.commit()
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "UPDATE wallets SET available_credits=0,reserved_credits=0 WHERE user_id=%s",
+            ("insufficient-owner",),
+        )
+    # reopen 走真实事务：上下文管理器退出即提交（try/finally close 会回滚扫掠）。
+    with psycopg.connect(pg_state, row_factory=dict_row) as conn:
+        result = reopen_uncertain_script_from_audio_tasks(
+            BusinessConnection.postgres(conn), threshold_minutes=30, max_reopens=2
+        )
+    assert result["deferred"] == 1
+    assert result["reopened"] == 0
+    row = _task_row(pg_state, task_id)
+    assert str(row["status"]) == "SUBMISSION_UNCERTAIN"
+    assert int(row["reopen_count"]) == 0
+    assert row["locked_until"] is not None
+    with _pg(pg_state) as pg:
+        deferred = pg.execute(
+            "SELECT count(*) AS hits FROM audit_logs "
+            "WHERE action='asr.auto_reopen_deferred' AND entity_id=%s",
+            (task_id,),
+        ).fetchone()
+    assert int(deferred["hits"]) == 1
+    # 收尾中和，避免延期时间窗影响后续用例的扫掠候选集。
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "UPDATE script_from_audio_tasks SET status='FAILED',"
+            "error_code='TEST_NEUTRALIZED' WHERE id=%s",
+            (task_id,),
+        )
+
+
+def test_reopen_closes_stale_attempts_as_unknown(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧轮未收口的供应商调用按 UNKNOWN 收口——不虚构成本，也绝不记成零成本.
+
+    Codex 阻塞 1 的回归：重开前必须把该任务全部 PENDING 计费单按失败释放，
+    关联的 PENDING attempt 置 UNKNOWN（cost_fen 留 NULL），否则遗留旧轮会按
+    新任务的 SUCCEEDED 再结算一次（双扣）。
+    """
+    from app.uncertain_auto_reopen import reopen_uncertain_script_from_audio_tasks
+
+    _audio_fixture(pg_state, monkeypatch, ("unknown-attempt-owner",))
+    _seed_viral_video(pg_state, "unknown-attempt-1")
+    _seed_shared_import(
+        pg_state,
+        "unknown-attempt-owner",
+        project_id="proj-unknown",
+        asset_id="asset-unknown",
+        video_id="unknown-attempt-1",
+    )
+    task = _enqueue(
+        pg_state,
+        "unknown-attempt-owner",
+        project_id="proj-unknown",
+        asset_id="asset-unknown",
+        key="ik-unknown",
+    )
+    task_id = str(task["id"])
+    _mark_uncertain(pg_state, task_id)
+    # 直插一条 PENDING attempt 构造「旧轮未收口的供应商调用」：重开必须把它
+    # 置 UNKNOWN（cost_fen 留 NULL 不虚构成本），而不是记成零成本。
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "INSERT INTO billing_attempts("
+            "id, operation_id, attempt_key, service, provider, unit, unit_cost_fen) "
+            "SELECT 'stale-attempt', id, 'stale-key', 'asr', 'fake', 'second', 1 "
+            "FROM billing_operations WHERE service='asr' AND source_id=%s",
+            (task_id,),
+        )
+    # reopen 走真实事务：上下文管理器退出即提交。
+    with psycopg.connect(pg_state, row_factory=dict_row) as conn:
+        result = reopen_uncertain_script_from_audio_tasks(
+            BusinessConnection.postgres(conn), threshold_minutes=30, max_reopens=2
+        )
+    assert result["reopened"] == 1
+    with _pg(pg_state) as pg:
+        attempts = pg.execute(
+            "SELECT a.state, a.cost_fen FROM billing_attempts a "
+            "JOIN billing_operations o ON o.id=a.operation_id "
+            "WHERE o.source_id=%s",
+            (task_id,),
+        ).fetchall()
+    # 旧轮的 attempt 已被 UNKNOWN 收口，且没有杜撰成本。
+    stale = [a for a in attempts if a["state"] == "UNKNOWN"]
+    assert stale, attempts
+    assert all(a["cost_fen"] is None for a in stale)
+    # 单轮结算防线：旧轮计费单全部失败释放、新轮 PENDING 恰好 1 条。
+    rounds = _asr_rounds(pg_state, task_id)
+    assert sum(1 for _, state, _ in rounds if state == "PENDING") == 1
+    assert all(state != "SUCCEEDED" for _, state, _ in rounds)

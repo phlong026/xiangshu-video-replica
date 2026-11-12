@@ -1042,41 +1042,42 @@ def list_viral_copy_extractions(
     聚合）；正文从任务自身 result_json 直取——自己的转写结果永远可复用，
     不再有「缓存已归档正文过期」的口径。无爆款身份的普通上传任务不进此列表。
     """
+    # 历史缓存命中任务的正文是别人转写、本人未付 ASR 的产物（旧 claim 闸门
+    # 已退役为 410），不进入个人提取记录，否则等于对未付费产出开放免费正文
+    # （Codex S 级评审阻塞 2）。
+    legacy_artifact = "NOT (t.request_json::jsonb ? 'viral_archive_sha256')"
+    # 两条查询取代逐视频回源（原 N+1 最多 51 次 SQL，Codex 评审建议 2）：
+    # ①聚合出每视频的最新任务 id；②按 id 批量取正文。
     rows = conn.execute(
         "SELECT i.platform, i.video_id, COUNT(t.id) AS times, "
         "MAX(t.updated_at) AS last_at, "
         "COALESCE(MAX(v.title), '') AS title, "
-        "COUNT(t.result_json) AS with_text "
+        "(array_agg(t.id ORDER BY t.updated_at DESC, t.id DESC))[1] AS latest_task_id "
         "FROM script_from_audio_tasks t "
         "JOIN viral_import_tasks i ON i.source_asset_id=t.source_asset_id "
         "AND i.project_id=t.project_id AND i.status='SUCCEEDED' "
         "LEFT JOIN viral_videos v ON v.platform=i.platform AND v.video_id=i.video_id "
         "AND v.deleted_at IS NULL "
         "WHERE t.created_by_user_id=%s AND t.status='SUCCEEDED' "
-        "AND t.result_json IS NOT NULL "
+        "AND t.result_json IS NOT NULL AND " + legacy_artifact + " "
         "GROUP BY i.platform, i.video_id ORDER BY 4 DESC LIMIT 50",
         (actor.id,),
     ).fetchall()
-    items: list[ViralCopyExtractionRecord] = []
-    for row in rows:
-        latest = conn.execute(
-            "SELECT t.result_json, t.updated_at FROM script_from_audio_tasks t "
-            "JOIN viral_import_tasks i ON i.source_asset_id=t.source_asset_id "
-            "AND i.project_id=t.project_id AND i.status='SUCCEEDED' "
-            "WHERE t.created_by_user_id=%s AND t.status='SUCCEEDED' "
-            "AND t.result_json IS NOT NULL "
-            "AND i.platform=%s AND i.video_id=%s "
-            "ORDER BY t.updated_at DESC, t.id DESC LIMIT 1",
-            (actor.id, str(row["platform"]), str(row["video_id"])),
-        ).fetchone()
-        text = None
-        updated_at = None
-        if latest is not None:
+    latest_ids = [str(row["latest_task_id"]) for row in rows]
+    latest_texts: dict[str, tuple[str | None, str | None]] = {}
+    if latest_ids:
+        for latest in conn.execute(
+            "SELECT id, result_json, updated_at FROM script_from_audio_tasks WHERE id = ANY(%s)",
+            (latest_ids,),
+        ).fetchall():
             try:
                 text = str(json.loads(str(latest["result_json"])).get("text", "")) or None
             except (ValueError, TypeError):
                 text = None
-            updated_at = _iso_updated_at(latest["updated_at"])
+            latest_texts[str(latest["id"])] = (text, _iso_updated_at(latest["updated_at"]))
+    items: list[ViralCopyExtractionRecord] = []
+    for row in rows:
+        text, updated_at = latest_texts.get(str(row["latest_task_id"]), (None, None))
         items.append(
             ViralCopyExtractionRecord(
                 platform=str(row["platform"]),
