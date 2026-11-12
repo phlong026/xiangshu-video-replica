@@ -962,7 +962,7 @@
     },
     "20261112T1200_merge_training_pan123_pipeline": {
       "file": "versions/20261112T1200_merge_training_pan123_pipeline.py",
-      "sha256": "b16b7e52eb24c9d2748b8928e24257a0964d46aecf112a5fe9880f23a7fdbd14"
+      "sha256": "bd7a7fbf8bf34b41d86de88c03061e1947d6d1b286bb8caebbbc8e74a2d10fcd"
     }
   },
   "task": "MIGRATION-GUARD-20260912"
