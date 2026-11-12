@@ -4352,142 +4352,159 @@ describe("V1.4 内容与运营页面", () => {
 });
 
 describe("全自动复刻入口（M8 v1）", () => {
-  it.each(["庭院案例", "管理员上传"])("%s 详情保留任务恢复与复刻入口", async (category) => {
-    const nativeId = "replica-native-1";
-    const base = studio();
-    const value = studio({
-      review: false,
-      state: { ...base.state, selectedVideoId: `douyin-${nativeId}` },
-      data: {
-        ...base.data,
-        videos: [
-          {
-            id: `douyin-${nativeId}`,
-            title: "全自动复刻样例",
-            author: "乡墅作者",
-            platform: "抖音",
-            category,
-            poster: "",
-            duration: "00:08",
-            durationMs: 8_000,
-            likes: 123,
-            comments: 4,
-            shares: 5,
-            collections: 6,
-            description: "",
-            platformKey: "douyin",
-            nativeId,
-          },
+  beforeEach(() => {
+    vi.clearAllMocks();
+    findActiveReplicaPipeline.mockResolvedValue({ pipelineId: null });
+    fetchReplicaPipeline.mockReset();
+  });
+
+  it.each(["庭院案例", "管理员上传"])(
+    "%s 详情保留任务恢复与复刻入口",
+    async (category) => {
+      const nativeId = "replica-native-1";
+      const base = studio();
+      const value = studio({
+        review: false,
+        state: { ...base.state, selectedVideoId: `douyin-${nativeId}` },
+        data: {
+          ...base.data,
+          videos: [
+            {
+              id: `douyin-${nativeId}`,
+              title: "全自动复刻样例",
+              author: "乡墅作者",
+              platform: "抖音",
+              category,
+              poster: "",
+              duration: "00:08",
+              durationMs: 8_000,
+              likes: 123,
+              comments: 4,
+              shares: 5,
+              collections: 6,
+              description: "",
+              platformKey: "douyin",
+              nativeId,
+            },
+          ],
+        },
+      });
+      openViralVideoDetail.mockResolvedValue(
+        viralDetailView({
+          platform: "douyin",
+          videoId: nativeId,
+          category,
+          title: "全自动复刻样例",
+          author: "乡墅作者",
+          authorAvatar: null,
+          verified: false,
+          coverUrl: null,
+          durationMs: 8_000,
+          likes: 123,
+          comments: 4,
+          shares: 5,
+          collects: 6,
+          publishedAt: 1_788_600_000,
+          publishedDisplay: "1天前",
+          likeDisplay: "123",
+          tags: ["庭院"],
+          hasPlayableAudio: true,
+          playUrl: null,
+          isFavorite: false,
+          availability: "available",
+        }),
+      );
+      vi.mocked(listReplicaPipelineCharacters).mockResolvedValue({
+        characters: [
+          { characterVersionId: "cv-1", name: "主角", versionNumber: 1 },
         ],
-      },
-    });
-    openViralVideoDetail.mockResolvedValue(
-      viralDetailView({
-        platform: "douyin",
-        videoId: nativeId,
-        category,
-        title: "全自动复刻样例",
-        author: "乡墅作者",
-        authorAvatar: null,
-        verified: false,
-        coverUrl: null,
-        durationMs: 8_000,
-        likes: 123,
-        comments: 4,
-        shares: 5,
-        collects: 6,
-        publishedAt: 1_788_600_000,
-        publishedDisplay: "1天前",
-        likeDisplay: "123",
-        tags: ["庭院"],
-        hasPlayableAudio: true,
-        playUrl: null,
-        isFavorite: false,
-        availability: "available",
-      }),
-    );
-    vi.mocked(listReplicaPipelineCharacters).mockResolvedValue({
-      characters: [
-        { characterVersionId: "cv-1", name: "主角", versionNumber: 1 },
-      ],
-    });
-    vi.mocked(initiateReplicaPipeline).mockResolvedValue({
-      id: "rplc-1",
-      projectId: "p-1",
-      status: "ENQUEUED",
-      replay: false,
-    });
-    // 预处理费用披露确认（评审 M8-r1#1）：用户点「确定」后才发起。
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    useStudio.mockReturnValue(value);
-    const view = render(<ViralDetailPage />);
-    const entry = await screen.findByRole("button", { name: "全自动复刻" });
-    await waitFor(() => expect(entry).toBeEnabled());
-    if (category === "管理员上传") {
-      expect(screen.queryByRole("button", { name: "刷新资源（按次计费）" })).not.toBeInTheDocument();
-    } else {
-      expect(screen.getByRole("button", { name: "刷新资源（按次计费）" })).toBeInTheDocument();
-    }
-    fireEvent.click(entry);
-    expect(confirmSpy).toHaveBeenCalledOnce();
-    confirmSpy.mockRestore();
-    await waitFor(() => expect(initiateReplicaPipeline).toHaveBeenCalledOnce());
-    expect(vi.mocked(initiateReplicaPipeline).mock.calls[0]?.[0]).toMatchObject(
-      {
+      });
+      vi.mocked(initiateReplicaPipeline).mockResolvedValue({
+        id: "rplc-1",
+        projectId: "p-1",
+        status: "ENQUEUED",
+        replay: false,
+      });
+      // 预处理费用披露确认（评审 M8-r1#1）：用户点「确定」后才发起。
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+      useStudio.mockReturnValue(value);
+      const view = render(<ViralDetailPage />);
+      const entry = await screen.findByRole("button", { name: "全自动复刻" });
+      await waitFor(() => expect(entry).toBeEnabled());
+      if (category === "管理员上传") {
+        expect(
+          screen.queryByRole("button", { name: "刷新资源（按次计费）" }),
+        ).not.toBeInTheDocument();
+      } else {
+        expect(
+          screen.getByRole("button", { name: "刷新资源（按次计费）" }),
+        ).toBeInTheDocument();
+      }
+      fireEvent.click(entry);
+      expect(confirmSpy).toHaveBeenCalledOnce();
+      confirmSpy.mockRestore();
+      await waitFor(() =>
+        expect(initiateReplicaPipeline).toHaveBeenCalledOnce(),
+      );
+      expect(
+        vi.mocked(initiateReplicaPipeline).mock.calls[0]?.[0],
+      ).toMatchObject({
         platform: "douyin",
         videoId: nativeId,
         characterVersionId: "cv-1",
-      },
-    );
-    await waitFor(() =>
-      expect(screen.getByRole("status")).toHaveTextContent("全自动复刻"),
-    );
-    view.unmount();
-    vi.mocked(findActiveReplicaPipeline).mockResolvedValueOnce({
-      pipelineId: "rplc-1",
-    });
-    vi.mocked(fetchReplicaPipeline).mockResolvedValue({
-      id: "rplc-1",
-      projectId: "p-1",
-      platform: "douyin",
-      videoId: nativeId,
-      status: "ANALYZING",
-      stage: "analyze",
-      createdAt: "2026-11-12T00:00:00Z",
-      awaitingSince: null,
-    });
-    const resumed = render(<ViralDetailPage />);
-    await waitFor(() =>
-      expect(screen.getByRole("status")).toHaveTextContent("拆解分镜与文案"),
-    );
-    expect(findActiveReplicaPipeline).toHaveBeenLastCalledWith(
-      "douyin",
-      nativeId,
-    );
-    expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
-    resumed.unmount();
-    // 切换账号时卸载旧轮询，不能沿用上一账号的任务状态。
-    useStudio.mockReturnValue({
-      ...value,
-      user: { ...value.user, id: "another-user" },
-    });
-    vi.mocked(findActiveReplicaPipeline).mockRejectedValueOnce(
-      new Error("network"),
-    );
-    const failedRecovery = render(<ViralDetailPage />);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "已有复刻任务查询失败",
-    );
-    expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "重新检查任务" }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "全自动复刻" })).toBeEnabled(),
-    );
-    expect(screen.queryByRole("status")).toBeNull();
-    expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
-    failedRecovery.unmount();
-  });
+      });
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("全自动复刻"),
+      );
+      view.unmount();
+      vi.mocked(findActiveReplicaPipeline).mockResolvedValueOnce({
+        pipelineId: "rplc-1",
+      });
+      vi.mocked(fetchReplicaPipeline).mockResolvedValue({
+        id: "rplc-1",
+        projectId: "p-1",
+        platform: "douyin",
+        videoId: nativeId,
+        status: "ANALYZING",
+        stage: "analyze",
+        createdAt: "2026-11-12T00:00:00Z",
+        awaitingSince: null,
+      });
+      const resumed = render(<ViralDetailPage />);
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("拆解分镜与文案"),
+      );
+      expect(findActiveReplicaPipeline).toHaveBeenLastCalledWith(
+        "douyin",
+        nativeId,
+      );
+      expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+      resumed.unmount();
+      // 切换账号时卸载旧轮询，不能沿用上一账号的任务状态。
+      useStudio.mockReturnValue({
+        ...value,
+        user: { ...value.user, id: "another-user" },
+      });
+      vi.mocked(findActiveReplicaPipeline).mockRejectedValueOnce(
+        new Error("network"),
+      );
+      const failedRecovery = render(<ViralDetailPage />);
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "已有复刻任务查询失败",
+      );
+      expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "重新检查任务" }));
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "全自动复刻" }),
+        ).toBeEnabled(),
+      );
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
+      failedRecovery.unmount();
+    },
+  );
   it("renews an expired training preview once without reusing the captured URL", async () => {
     useStudio.mockReturnValue(studio());
     trainingMaterialDownloadUrl

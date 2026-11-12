@@ -359,6 +359,7 @@ def test_admin_upload_validation_idempotency_and_tags(
     # 缺写契约（无 confirm/reason 的裸 multipart）→ 400。
     merged = dict(headers)
     merged[IDEMPOTENCY_KEY_HEADER] = f"key-{uuid.uuid4()}"
+    uploads_before = len(storage.remote_names)
     assert (
         client.post(
             "/api/control/training-materials",
@@ -368,6 +369,7 @@ def test_admin_upload_validation_idempotency_and_tags(
         ).status_code
         == 400
     )
+    assert len(storage.remote_names) == uploads_before
 
     # 幂等重放：同键同请求 → 回放，不产生第二行、不再上传。
     replay_key = f"replay-{uuid.uuid4()}"

@@ -61,6 +61,7 @@ from app.admin_auth_routes import AdminReader, ContentWriter
 from app.admin_customer_routes import _write_with_idempotency
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
+from app.admin_write_contract import require_write_contract
 from app.auth import AuthenticatedUser, Database
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.db_portable import BusinessConnection
@@ -447,6 +448,8 @@ async def create_training_material(
 ) -> dict[str, object]:
     """上传：标签必填（JSON 数组）；远端名含 material_id 前缀全局唯一。"""
     del idempotency_key  # 由 write 契约从请求头读取，这里显式声明只为 OpenAPI 文档
+    # 确认与原因缺失时必须在上传副作用前拒绝，不能传完文件才校验。
+    require_write_contract(request, AdminWriteRequest(confirm=confirm, reason=reason))
     clean_title = title.strip()
     if not (1 <= len(clean_title) <= MAX_TITLE_CHARS):
         raise _http(422, "TRAINING_MATERIAL_VALIDATION_FAILED", "标题必填且不超过 120 字。")
