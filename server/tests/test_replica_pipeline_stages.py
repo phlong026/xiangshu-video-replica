@@ -827,3 +827,47 @@ def test_deadline_preserves_post_confirm_and_suspended_time(
         "SELECT status FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
     ).fetchone()
     assert row is not None and row["status"] == status
+
+
+@pytest.mark.parametrize("child_terminal", ["SUCCEEDED", "FAILED"])
+def test_expired_pipeline_drains_without_new_work_or_losing_reason(
+    biz: BusinessConnection, monkeypatch: pytest.MonkeyPatch, child_terminal: str
+) -> None:
+    biz.execute("DELETE FROM viral_import_tasks WHERE id='drain-import'")
+    pipeline_id = _seed_pipeline(biz, status=rp.STATUS_IMPORTING, slot="drain-expired")
+    biz.execute(
+        "INSERT INTO viral_import_tasks (id,owner_user_id,project_id,platform,video_id,purpose,"
+        "idempotency_key,request_hash,request_json,status) "
+        "VALUES ('drain-import','u-drain-expired','p-drain-expired','douyin','v1',"
+        "'replica','drain-import','h','{}','RUNNING')"
+    )
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET created_at=now()-interval '25 hours', "
+        "import_task_id='drain-import' WHERE id=%s",
+        (pipeline_id,),
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("收口期间不得创建新子任务")
+
+    for name in ("enqueue_viral_import_task", "enqueue_analysis_task", "enqueue_first_frame_task"):
+        monkeypatch.setattr(stages, name, forbidden)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot="drain-expired")) == "failed"
+    row = biz.execute(
+        "SELECT status,stage_detail FROM replica_pipeline_tasks WHERE id=%s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_DRAINING
+    original_detail = row["stage_detail"]
+    assert original_detail["failureCode"] == "REPLICA_PIPELINE_EXECUTION_EXPIRED"
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot="drain-expired")) == "waiting"
+    biz.execute(
+        "UPDATE viral_import_tasks SET status=%s WHERE id='drain-import'", (child_terminal,)
+    )
+    biz.execute("UPDATE replica_pipeline_tasks SET next_poll_at=now() WHERE id=%s", (pipeline_id,))
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot="drain-expired")) == "advanced"
+    row = biz.execute(
+        "SELECT status,stage_detail,finished_at FROM replica_pipeline_tasks WHERE id=%s",
+        (pipeline_id,),
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_FAILED
+    assert row["stage_detail"] == original_detail and row["finished_at"] is not None

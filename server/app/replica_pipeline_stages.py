@@ -135,6 +135,19 @@ def run_pipeline_stage(conn: BusinessConnection, lease: rp.ReplicaPipelineLease)
     """按当前状态分派阶段执行（调用方负责 set_next_poll / settle_failure）."""
     row = _load_row(conn, lease)
     status = str(row["status"])
+    if status == rp.STATUS_DRAINING:
+        # 只观察已经创建的子任务；未收口时不能重复失败迁移或再入队。
+        if rp._failure_exit_status(conn, lease.id) == rp.STATUS_DRAINING:
+            return WAITING
+        detail = _stage_detail(row)
+        rp.settle_failure(
+            conn,
+            lease,
+            code=str(detail.get("failureCode") or "REPLICA_PIPELINE_FAILED"),
+            message=str(detail.get("failureMessage") or "任务失败。"),
+            retryable=bool(detail.get("retryable", False)),
+        )
+        return ADVANCED
     if status == rp.STATUS_ENQUEUED:
         return _stage_enqueue_import(conn, lease, row)
     if status == rp.STATUS_IMPORTING:
