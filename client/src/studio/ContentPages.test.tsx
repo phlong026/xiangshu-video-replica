@@ -6628,7 +6628,7 @@ describe("V1.4 内容与运营页面", () => {
 });
 
 describe("全自动复刻入口（M8 v1）", () => {
-  it("详情页渲染入口按钮，点击后校验人物并调用发起接口", async () => {
+  it.each(["庭院案例", "管理员上传"])("%s 详情保留任务恢复与复刻入口", async (category) => {
     const nativeId = "replica-native-1";
     const base = studio();
     const value = studio({
@@ -6642,7 +6642,7 @@ describe("全自动复刻入口（M8 v1）", () => {
             title: "全自动复刻样例",
             author: "乡墅作者",
             platform: "抖音",
-            category: "庭院案例",
+            category,
             poster: "",
             duration: "00:08",
             durationMs: 8_000,
@@ -6661,7 +6661,7 @@ describe("全自动复刻入口（M8 v1）", () => {
       viralDetailView({
         platform: "douyin",
         videoId: nativeId,
-        category: "庭院案例",
+        category,
         title: "全自动复刻样例",
         author: "乡墅作者",
         authorAvatar: null,
@@ -6699,6 +6699,11 @@ describe("全自动复刻入口（M8 v1）", () => {
     const view = render(<ViralDetailPage />);
     const entry = await screen.findByRole("button", { name: "全自动复刻" });
     await waitFor(() => expect(entry).toBeEnabled());
+    if (category === "管理员上传") {
+      expect(screen.queryByRole("button", { name: "刷新资源（按次计费）" })).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByRole("button", { name: "刷新资源（按次计费）" })).toBeInTheDocument();
+    }
     fireEvent.click(entry);
     expect(confirmSpy).toHaveBeenCalledOnce();
     confirmSpy.mockRestore();

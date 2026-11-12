@@ -466,6 +466,7 @@ function updateViralStatistics(
 function viralStatisticsMissing(video: StudioVideo) {
   return (
     video.platformKey === "wechat_channels" &&
+    video.category !== "管理员上传" &&
     Boolean(video.nativeId) &&
     video.comments == null &&
     video.shares == null &&
@@ -509,6 +510,7 @@ function useViralStatistics(
     .filter(
       (video) =>
         video.platformKey === "wechat_channels" &&
+        video.category !== "管理员上传" &&
         video.nativeId &&
         !attemptedIds.current.has(video.nativeId),
     )
@@ -1353,7 +1355,7 @@ function ViralCard({
           // Web 端没有本地缓存：抖音走一次计费直链在新窗口打开；视频号
           // 归档后主存储里是解密后的明文 MP4，直接用自有签名链接下载，
           // 未归档（转存中/已回收）才引导桌面端。
-          if (platformKey === "douyin") {
+          if (platformKey === "douyin" && video.category !== "管理员上传") {
             const source = await fetchViralVideoSource(platformKey, nativeId);
             window.open(source.fullUrl, "_blank", "noopener");
             notify("已开始下载，请在新窗口完成保存");
@@ -1367,9 +1369,7 @@ function ViralCard({
               window.open(media.url, "_blank", "noopener");
               notify("已开始下载，请在新窗口完成保存");
             } catch {
-              notify(
-                "视频号素材尚未转存到云端，请使用桌面客户端下载或稍后重试",
-              );
+              notify("视频素材尚未准备完成，请使用桌面客户端下载或稍后重试");
             }
           }
           return;
@@ -2851,17 +2851,19 @@ export function ViralDetailPage() {
                 />
               </div>
             )}
-            {!review && video.platformKey === "douyin" && (
-              <div className="content-detail-action">
-                <Button
-                  variant="quiet"
-                  disabled={refreshBusy}
-                  onClick={beginRefresh}
-                >
-                  {refreshBusy ? "刷新中…" : "刷新资源（按次计费）"}
-                </Button>
-              </div>
-            )}
+            {!review &&
+              video.platformKey === "douyin" &&
+              video.category !== "管理员上传" && (
+                <div className="content-detail-action">
+                  <Button
+                    variant="quiet"
+                    disabled={refreshBusy}
+                    onClick={beginRefresh}
+                  >
+                    {refreshBusy ? "刷新中…" : "刷新资源（按次计费）"}
+                  </Button>
+                </div>
+              )}
             <div className="content-detail-action">
               <ViralFavoriteButton
                 video={video}

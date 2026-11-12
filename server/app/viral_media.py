@@ -674,7 +674,7 @@ class ViralMediaPipeline:
                 raise ViralMediaError("该视频暂无可用的媒体地址")
             if video.audio_url:
                 return "audio", "audio/mpeg"
-            if video.play_url:
+            if video.play_url or self._cached_only:
                 return "video", "video/mp4"
             raise ViralMediaError("该视频暂无可用的媒体地址")
         if video.platform == PLATFORM_WECHAT:

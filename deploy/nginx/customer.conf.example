@@ -154,6 +154,10 @@ server {
         proxy_next_upstream_tries 2;
         proxy_request_buffering off;
         proxy_read_timeout 300s;
+        # 管理员上传含有界转码，沿用父级代理与鉴权头，仅延长这个入口的等待。
+        location = /api/control/viral/uploads {
+            proxy_read_timeout 900s;
+        }
         # 网关自答错误页的 CORS 回显（见文件头 map 说明）：值为空时不输出，
         # 正常响应与上游真实错误不受影响。
         add_header Access-Control-Allow-Origin $gateway_cors_origin always;
