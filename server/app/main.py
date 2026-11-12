@@ -87,6 +87,7 @@ from app.rbac_routes import router as rbac_router
 from app.recharge_package_routes import router as recharge_package_router
 from app.recharge_routes import router as recharge_router
 from app.registration_bonus_routes import router as registration_bonus_router
+from app.replica_pipeline_routes import router as replica_pipeline_router
 from app.replica_prompt_routes import router as replica_prompt_router
 from app.script_from_audio_routes import router as script_from_audio_router
 from app.settings import SettingsUnavailableError
@@ -425,6 +426,7 @@ app.include_router(admin_alerts_router)
 app.include_router(customer_pricing_router)
 app.include_router(itemized_billing_router)
 app.include_router(billing_viral_router)
+app.include_router(replica_pipeline_router)
 app.include_router(account_admin_router)
 app.include_router(account_migration_router)
 app.include_router(credit_conversion_router)

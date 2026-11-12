@@ -420,6 +420,9 @@ export function LongReplicaPage() {
           ? result.payload.spoken_script
           : [],
         replica_prompt: String(result.payload.replica_prompt ?? ""),
+        warnings: Array.isArray(result.payload.warnings)
+          ? result.payload.warnings
+          : [],
       }
     : null;
 
@@ -500,6 +503,15 @@ export function LongReplicaPage() {
 
         {stage === "ready" && payload ? (
           <div className="long-replica-results">
+            {payload.warnings?.length ? (
+              <Panel className="long-replica-warnings">
+                <ul role="status">
+                  {payload.warnings.map((warning) => (
+                    <li key={warning.code}>{warning.message}</li>
+                  ))}
+                </ul>
+              </Panel>
+            ) : null}
             <CopyBlock
               emptyHint="本次拆解没有产出复刻提示词。"
               text={payload.replica_prompt}

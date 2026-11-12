@@ -2282,7 +2282,15 @@ def confirm_first_frame(
     actor: CurrentUser,
     allow_unverified: bool = False,
     first_frame_candidates_version_id: str | None = None,
+    review_mode: str = "HUMAN_CONFIRMATION",
+    quality_override: bool = False,
 ) -> BusinessRow:
+    """记录首帧选定.
+
+    ``review_mode`` 如实记录选定来源（方案评审 r2#2）：人工确认仍为默认
+    ``HUMAN_CONFIRMATION``；全自动复刻编排器传 ``AUTO_PIPELINE``——自动确认
+    必须在调用前已强制质检通过，本参数不改变任何校验，只改变审计来源。
+    """
     require_not_auditor(
         conn,
         actor=actor,
@@ -2339,8 +2347,14 @@ def confirm_first_frame(
         "first_frame_candidates_version_id": str(candidate_version["id"]),
         "first_frame_asset_id": first_frame_asset_id,
     }
-    selection_payload["review_mode"] = "HUMAN_CONFIRMATION"
+    selection_payload["review_mode"] = review_mode
     selection_payload["reviewed_by_user_id"] = actor.id
+    if quality_override:
+        # 显式授权无质检（生成域既有语义：quality_override 允许无质检证据的
+        # 选定通过编译前置，见 generation 的 FIRST_FRAME_QUALITY_NOT_VERIFIED
+        # 三选一）。全自动链路在候选无质检结果时必须显式传此标记——
+        # review_mode=AUTO_PIPELINE 不构成人工确认，不能冒充（评审 A-r2#2）。
+        selection_payload["quality_override"] = True
     row = insert_version(
         conn,
         project_id=project_id,

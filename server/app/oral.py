@@ -2232,8 +2232,12 @@ def delete_avatar_clone(
         entity_type="oral_avatar",
         entity_id=avatar_id,
     )
+    # 首读即取行锁：创建任务路径对 oral_avatars 同样用 FOR UPDATE 串行化。
+    # 守卫若在锁外求值，创建方可在「守卫通过」与「UPDATE 取锁」之间提交任务，
+    # 结果是用已删分身建任务（CI 的 delete/create 竞态用例会间歇抓到）。
     row = conn.execute(
-        "SELECT * FROM oral_avatars WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL",
+        "SELECT * FROM oral_avatars WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL "
+        "FOR UPDATE",
         (avatar_id, actor.id),
     ).fetchone()
     if row is None:
@@ -2290,8 +2294,10 @@ def delete_voice_clone(
         entity_type="oral_voice",
         entity_id=voice_id,
     )
+    # 首读即取行锁：理由同 delete_avatar_clone（与创建任务的 FOR UPDATE 串行化）。
     row = conn.execute(
-        "SELECT * FROM oral_voices WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL",
+        "SELECT * FROM oral_voices WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL "
+        "FOR UPDATE",
         (voice_id, actor.id),
     ).fetchone()
     if row is None:

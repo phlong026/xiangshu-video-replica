@@ -12,14 +12,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import Database
 from app.billing_catalog import SERVICES
 from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
+from app.db_pg import pg_transaction
+from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.usage_billing import finish_source
-from app.viral_search import archive_search_covers
+from app.viral_search import archive_search_covers_bounded
 from app.viral_search_routes import require_priced_viral_service
 from app.viral_store import get_viral_video, update_viral_cover, upsert_viral_videos
 from app.viral_tikhub import (
@@ -53,10 +54,17 @@ class ViralSearchRefreshResponse(BaseModel):
 REFRESH_SERVICE = "viral_search_refresh"
 
 
-def get_viral_search_refresh_source_client(conn: Database) -> ViralSourceClient | None:
-    """数据源客户端依赖入口（测试可通过 dependency_overrides 替换）."""
+def get_viral_search_refresh_source_client() -> ViralSourceClient | None:
+    """数据源客户端依赖入口（测试可通过 dependency_overrides 替换）.
+
+    配置读取**自开短事务**，读毕即提交归还连接。此前依赖声明 ``conn: Database``，
+    请求级事务会横跨随后 ``douyin_refresh`` 外呼（上游慢时单次可达 138s+），连接
+    停在 idle-in-transaction 被 60s 护栏击杀、池被并发借空（2026-11-02 生产池饿死
+    事故的元凶模式之一）。
+    """
     try:
-        return viral_source_client_from_settings(conn)
+        with pg_transaction() as pg_conn:
+            return viral_source_client_from_settings(BusinessConnection.postgres(pg_conn))
     except ViralSourceUnavailable:
         return None
 
@@ -246,9 +254,13 @@ def refresh_viral_video(
                         fail_conn, source_id, units=0, succeeded=False, service=REFRESH_SERVICE
                     )
         raise
-    # 封面归档并 upsert 视频数据
-    enriched = archive_search_covers(storage, [enriched_video])
-    updated_video = enriched[0]
+    # 封面归档并 upsert 视频数据。用限时版：无界版在源站图床挂起时会无限
+    # 拖住整个刷新结果落库；超时保留源站封面链接兜底（CoverEnricher 的
+    # 单条失败语义），刷新与计费结算不受影响。
+    try:
+        updated_video = archive_search_covers_bounded(storage, [enriched_video])[0]
+    except TimeoutError:
+        updated_video = enriched_video
     with db.write() as (conn, completed_actor):
         with conn:
             if completed_actor.id != actor.id:

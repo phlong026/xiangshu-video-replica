@@ -107,11 +107,8 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261016T1000_replica_prompt_tasks（长视频复刻提示词任务族）追加其上；
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
-# 列）追加其上；20261101T1000_training_materials（培训素材库，网盘车道）/​
-# 20261112T0900_yuanbao_pan123_widen（provider 白名单放宽）/​
-# 20261112T0910_provider_runtime_state（共享 token 状态表）追加其上，
-# 故链尾为该值。
-HEAD_REVISION = "20261112T0910_provider_runtime_state"
+# 列）追加其上，故链尾为该值。
+HEAD_REVISION = "20261112T1100_replica_pipeline_switch"
 
 
 @pytest.mark.pg
@@ -437,20 +434,18 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 故 columns +1、check_constraints +1，表名集与其余计数不变；digest 在空库
 # →新 head 的 PG16 探针库（cw056_probe）重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    # 20261112T0910_provider_runtime_state 实测：+training_materials 与
-    # +provider_runtime_state 两表（tags JSONB 列与 GIN、两表 PK/CHECK 各计入）。
-    "check_constraints": 405,
-    "columns": 1538,
+    "check_constraints": 399,
+    "columns": 1549,
     "foreign_keys": 221,
     "identity_columns": 0,
-    "jsonb_columns": 14,
-    "partial_indexes": 45,
-    "primary_keys": 137,
+    "jsonb_columns": 15,
+    "partial_indexes": 48,
+    "primary_keys": 136,
     "sequences": 8,
-    "tables": 137,
-    "timestamptz_columns": 122,
+    "tables": 136,
+    "timestamptz_columns": 126,
     "triggers": 61,
-    "unique_constraints": 43,
+    "unique_constraints": 44,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -554,12 +549,12 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "project_main_characters",
     "projects",
     "prompt_optimization_receipts",
-    "provider_runtime_state",
     "provider_settings",
     "publish_accounts",
     "publish_browser_accounts",
     "publish_browser_logins",
     "publish_records",
+    "replica_pipeline_tasks",
     "replica_prompt_tasks",
     "recharge_orders",
     "recharge_packages",
@@ -574,7 +569,6 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "studio_drafts",
     "studio_material_preferences",
     "studio_notification_preferences",
-    "training_materials",
     "studio_saved_scripts",
     "sub_account_permissions",
     "sub_account_quotas",
@@ -711,11 +705,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-# 随 20261112T0910_provider_runtime_state 重算（migration_manifest.py --print-schema，
-# 全新 PG16 探针库实测）；HEAD_SCHEMA_COUNTS 同步为 cw056 inventory 口径实测值。
-# cw056 inventory 口径实测（upgrade-to-head 后的全 schema inventory，
-# 含列/约束/索引/触发器/函数/序列文本），非 migration_manifest 口径。
-HEAD_SCHEMA_DIGEST = "bf2b8cf1a0eacc17534efaa575aafa14de4989d5790e24f44361b9c57de4cd89"
+HEAD_SCHEMA_DIGEST = "564c248c2417ed22de0075ab39d42ebace8e33eb2143f36c2eb5436bd3d98173"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

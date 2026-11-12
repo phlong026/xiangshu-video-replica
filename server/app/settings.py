@@ -525,6 +525,10 @@ def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> 
         from app.analysis import parse_analysis_fallback_models
 
         parse_analysis_fallback_models(config.get("analysis_model_fallbacks"))
+        # 长视频链路备选键（方案 D9）与主链路同一解析口径，保存即拒绝错配。
+        replica_fallbacks = (config.get("replica_prompt_model_fallbacks") or "").strip()
+        if replica_fallbacks:
+            parse_analysis_fallback_models(replica_fallbacks)
 
 
 def _validate_tikhub_backup_channel(config: dict[str, str]) -> None:

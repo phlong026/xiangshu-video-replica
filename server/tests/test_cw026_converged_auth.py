@@ -713,9 +713,13 @@ def classify(method: str, path: str, deps: tuple[str, ...]) -> str:
         # 的墓碑路由，任何请求一律 410 引导升级（保留路由是为了旧桌面客户端
         # 拿到明确错误码而不是裸 404）。
         return "RETIRED_ENDPOINT"
-    if "get_business_db" in deps and "get_current_user" in deps:
+    # get_current_user_short_tx：认证语义与 get_current_user 相同的短事务变体
+    # （2026-11-02 池饿死事故后为分钟级上传路由引入），归同一读车道。
+    if "get_business_db" in deps and (
+        "get_current_user" in deps or "get_current_user_short_tx" in deps
+    ):
         return "UNCLASSIFIED"  # a fenced write must not also take the read gate
-    if "get_current_user" in deps:
+    if "get_current_user" in deps or "get_current_user_short_tx" in deps:
         return "READ_OWNER"
     if "get_business_db" in deps:
         return "WRITE_FENCE"
