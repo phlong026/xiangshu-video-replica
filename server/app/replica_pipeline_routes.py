@@ -267,6 +267,28 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
     return quote_response
 
 
+@router.get("/replica-pipelines/active")
+def find_active_replica_pipeline(
+    platform: Literal["douyin", "xiaohongshu", "wechat_channels"],
+    video_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> dict[str, object]:
+    """从服务端恢复当前账号、当前视频的未完成任务，不信任本地缓存。"""
+    row = conn.execute(
+        """SELECT id FROM replica_pipeline_tasks
+           WHERE owner_user_id = %s AND platform = %s AND video_id = %s
+             AND status = ANY(%s) ORDER BY created_at DESC LIMIT 1""",
+        (
+            actor.id,
+            platform,
+            video_id,
+            sorted(rp.ACTIVE_STATUSES | {rp.STATUS_NEEDS_REVIEW_SETTLED}),
+        ),
+    ).fetchone()
+    return {"pipelineId": str(row["id"]) if row else None}
+
+
 @router.get("/replica-pipelines/{pipeline_id}")
 def read_replica_pipeline(
     pipeline_id: str, conn: Database, actor: AuthenticatedUser

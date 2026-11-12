@@ -755,3 +755,75 @@ def test_first_frame_retry_with_column_and_history(
     first_frame = detail.get("firstFrame", {})
     assert "candidateTaskId" not in first_frame
     assert first_frame.get("sourceFrameSelectionVersionId") == "sfs-1"
+
+
+@pytest.mark.parametrize("status", [rp.STATUS_ENQUEUED, rp.STATUS_IMPORTING])
+def test_import_rejection_settles_pipeline(
+    biz: BusinessConnection, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """确定性导入拒绝必须释放任务槽，恢复缺失导入引用时也走相同出口。"""
+    from app.viral_import import ViralImportError
+
+    pipeline_id = _seed_pipeline(biz, status=status, slot="import-rejected")
+
+    def reject(*args: Any, **kwargs: Any) -> None:
+        raise ViralImportError(
+            422, "VIRAL_IMPORT_DURATION_OUT_OF_RANGE", "素材时长不支持。", retryable=False
+        )
+
+    monkeypatch.setattr(stages, "enqueue_viral_import_task", reject)
+    lease = _acquire(biz, slot="import-rejected")
+    assert stages.drive_pipeline_once(biz, lease) == "failed"
+    row = biz.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_FAILED
+    assert row["stage_detail"]["failureCode"] == "VIRAL_IMPORT_DURATION_OUT_OF_RANGE"
+
+
+@pytest.mark.parametrize(
+    "status", [rp.STATUS_ENQUEUED, rp.STATUS_ANALYZING, rp.STATUS_FIRST_FRAMING]
+)
+def test_expired_pipeline_does_not_start_another_stage(
+    biz: BusinessConnection, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """生产驱动须先检查期限，不能先进入可能创建付费子任务的阶段。"""
+    pipeline_id = _seed_pipeline(biz, status=status, slot="expired-drive")
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET created_at = now() - interval '25 hours' WHERE id = %s",
+        (pipeline_id,),
+    )
+    lease = _acquire(biz, slot="expired-drive")
+
+    def forbidden(*args: Any, **kwargs: Any) -> stages.StageResult:
+        pytest.fail("超期任务不应执行下一阶段")
+
+    monkeypatch.setattr(stages, "run_pipeline_stage", forbidden)
+    assert stages.drive_pipeline_once(biz, lease) == "failed"
+    row = biz.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_FAILED
+    assert row["stage_detail"]["failureCode"] == "REPLICA_PIPELINE_EXECUTION_EXPIRED"
+
+
+@pytest.mark.parametrize(
+    ("status", "suspended_seconds"),
+    [(rp.STATUS_GENERATING, 0), (rp.STATUS_ENQUEUED, 7200)],
+)
+def test_deadline_preserves_post_confirm_and_suspended_time(
+    biz: BusinessConnection, monkeypatch: pytest.MonkeyPatch, status: str, suspended_seconds: int
+) -> None:
+    pipeline_id = _seed_pipeline(biz, status=status, slot="deadline-exempt")
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET created_at = now() - interval '25 hours', "
+        "suspended_seconds_total = %s WHERE id = %s",
+        (suspended_seconds, pipeline_id),
+    )
+    lease = _acquire(biz, slot="deadline-exempt")
+    monkeypatch.setattr(stages, "run_pipeline_stage", lambda *_: stages.WAITING)
+    assert stages.drive_pipeline_once(biz, lease) == "waiting"
+    row = biz.execute(
+        "SELECT status FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == status

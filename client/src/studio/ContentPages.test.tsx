@@ -53,6 +53,7 @@ const {
   getAssetDownloadUrl,
   initiateReplicaPipeline,
   fetchReplicaPipeline,
+  findActiveReplicaPipeline,
   listReplicaPipelineCharacters,
   getMaterialBatchPreviews,
   getMaterialCachedPreview,
@@ -78,6 +79,9 @@ const {
   openViralVideoDetail: vi.fn(),
   initiateReplicaPipeline: vi.fn(),
   fetchReplicaPipeline: vi.fn(),
+  findActiveReplicaPipeline: vi.fn(async () => ({
+    pipelineId: null as string | null,
+  })),
   listReplicaPipelineCharacters: vi.fn(),
   // 默认空报价表：卡片「查看详情」不显示积分（需要报价的用例自行打桩）。
   getWorkspacePricing: vi.fn(async () => ({
@@ -153,6 +157,7 @@ vi.mock("../api", () => ({
   openViralVideoDetail,
   initiateReplicaPipeline,
   fetchReplicaPipeline,
+  findActiveReplicaPipeline,
   listReplicaPipelineCharacters,
   confirmReplicaPipeline: vi.fn(),
   cancelReplicaPipeline: vi.fn(),
@@ -6693,6 +6698,7 @@ describe("全自动复刻入口（M8 v1）", () => {
     useStudio.mockReturnValue(value);
     const view = render(<ViralDetailPage />);
     const entry = await screen.findByRole("button", { name: "全自动复刻" });
+    await waitFor(() => expect(entry).toBeEnabled());
     fireEvent.click(entry);
     expect(confirmSpy).toHaveBeenCalledOnce();
     confirmSpy.mockRestore();
@@ -6704,6 +6710,53 @@ describe("全自动复刻入口（M8 v1）", () => {
         characterVersionId: "cv-1",
       },
     );
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("全自动复刻"),
+    );
     view.unmount();
+    vi.mocked(findActiveReplicaPipeline).mockResolvedValueOnce({
+      pipelineId: "rplc-1",
+    });
+    vi.mocked(fetchReplicaPipeline).mockResolvedValue({
+      id: "rplc-1",
+      projectId: "p-1",
+      platform: "douyin",
+      videoId: nativeId,
+      status: "ANALYZING",
+      stage: "analyze",
+      createdAt: "2026-11-12T00:00:00Z",
+      awaitingSince: null,
+    });
+    const resumed = render(<ViralDetailPage />);
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("拆解分镜与文案"),
+    );
+    expect(findActiveReplicaPipeline).toHaveBeenLastCalledWith(
+      "douyin",
+      nativeId,
+    );
+    expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+    resumed.unmount();
+    // 切换账号时卸载旧轮询，不能沿用上一账号的任务状态。
+    useStudio.mockReturnValue({
+      ...value,
+      user: { ...value.user, id: "another-user" },
+    });
+    vi.mocked(findActiveReplicaPipeline).mockRejectedValueOnce(
+      new Error("network"),
+    );
+    const failedRecovery = render(<ViralDetailPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "已有复刻任务查询失败",
+    );
+    expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "重新检查任务" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "全自动复刻" })).toBeEnabled(),
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
+    failedRecovery.unmount();
   });
 });

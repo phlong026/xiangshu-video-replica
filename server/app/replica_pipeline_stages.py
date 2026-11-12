@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import cast
 
 from app import replica_pipeline as rp
@@ -35,7 +36,7 @@ from app.generation import (
 from app.image_tasks import enqueue_first_frame_task
 from app.project_character_selection import choose_project_character_version
 from app.source_frames import confirm_source_frame, enqueue_source_frame_task
-from app.viral_import import ViralImportRequest, enqueue_viral_import_task
+from app.viral_import import ViralImportError, ViralImportRequest, enqueue_viral_import_task
 
 # 首帧候选数量：与前端 GenerateFirstFramesRequest 默认一致（1–3 上界）。
 _FIRST_FRAME_QUANTITY = 3
@@ -177,6 +178,8 @@ def _stage_enqueue_import(
     )
     try:
         task = enqueue_viral_import_task(conn, actor=actor, request=request, idempotency_key=key)
+    except ViralImportError as exc:
+        return _failed(str(exc.detail["code"]), str(exc.detail["message"]), retryable=exc.retryable)
     except IntegrityConstraintError:
         # 并发同键（另一个 worker 抢先入队）：按键找回在途任务继续。
         existing = conn.execute(
@@ -746,6 +749,8 @@ def _enqueue_import_again(conn: BusinessConnection, lease: rp.ReplicaPipelineLea
     )
     try:
         task = enqueue_viral_import_task(conn, actor=actor, request=request, idempotency_key=key)
+    except ViralImportError as exc:
+        return _failed(str(exc.detail["code"]), str(exc.detail["message"]), retryable=exc.retryable)
     except IntegrityConstraintError:
         existing = conn.execute(
             "SELECT * FROM viral_import_tasks WHERE owner_user_id = %s AND idempotency_key = %s",
@@ -805,6 +810,15 @@ def drive_pipeline_once(conn: BusinessConnection, lease: rp.ReplicaPipelineLease
         rp.mark_suspended(conn, lease.id)
         rp.release_lease(conn, lease)
         return "suspended"
+    # 执行新阶段前检查有效运行时长，避免过期任务继续产生预处理费用。
+    if rp.check_deadlines(conn, row, now=datetime.now(UTC)):
+        rp.settle_failure(
+            conn,
+            lease,
+            code="REPLICA_PIPELINE_EXECUTION_EXPIRED",
+            message="任务执行已超时，请重新发起。",
+        )
+        return "failed"
     result = run_pipeline_stage(conn, lease)
     if result.kind == "waiting":
         rp.set_next_poll(conn, lease, wait_failures=1)

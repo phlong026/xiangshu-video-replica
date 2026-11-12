@@ -9450,6 +9450,17 @@ export function initiateReplicaPipeline(input: {
   });
 }
 
+export function findActiveReplicaPipeline(
+  platform: string,
+  videoId: string,
+): Promise<{ pipelineId: string | null }> {
+  const query = new URLSearchParams({ platform, video_id: videoId });
+  return requestApiJson(
+    `/api/viral/replica-pipelines/active?${query}`,
+    "已有复刻任务查询失败",
+  );
+}
+
 export function fetchReplicaPipeline(
   pipelineId: string,
 ): Promise<ReplicaPipelineStatus> {

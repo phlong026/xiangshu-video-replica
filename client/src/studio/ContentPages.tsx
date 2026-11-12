@@ -31,6 +31,7 @@ import {
   fetchViralVideoMedia,
   fetchViralVideoSource,
   fetchViralVideoStatistics,
+  findActiveReplicaPipeline,
   getAssetDownloadUrl,
   getMaterialBatchPreviews,
   getMaterialCachedPreview,
@@ -850,6 +851,33 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
   // 幂等键按「尝试」生成（评审 M8-r1#6）：同一 busy 周期内网络重试复用，
   // 放弃/终态后清空，下一次点击是新尝试（不会重放原终态）。
   const attemptKeyRef = useRef<string | null>(null);
+  const [recovering, setRecovering] = useState(true);
+  const [recoveryError, setRecoveryError] = useState(false);
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 用户点击重试时重新执行恢复查询。
+  useEffect(() => {
+    let cancelled = false;
+    setRecovering(true);
+    setRecoveryError(false);
+    if (!video.platformKey || !video.nativeId) {
+      setRecovering(false);
+      return;
+    }
+    void findActiveReplicaPipeline(video.platformKey, video.nativeId)
+      .then((result) => {
+        if (!cancelled) setPipelineId(result.pipelineId);
+      })
+      .catch(() => {
+        if (!cancelled) setRecoveryError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setRecovering(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [video.platformKey, video.nativeId, recoveryAttempt]);
 
   useEffect(() => {
     if (!pipelineId) return;
@@ -993,8 +1021,21 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
   };
 
   if (!pipelineId) {
+    if (recoveryError) {
+      return (
+        <div role="alert">
+          已有复刻任务查询失败，请重试。
+          <Button
+            variant="outline"
+            onClick={() => setRecoveryAttempt((value) => value + 1)}
+          >
+            重新检查任务
+          </Button>
+        </div>
+      );
+    }
     return (
-      <Button disabled={busy} variant="outline" onClick={begin}>
+      <Button disabled={busy || recovering} variant="outline" onClick={begin}>
         {busy ? "准备中…" : "全自动复刻"}
       </Button>
     );
@@ -2804,7 +2845,10 @@ export function ViralDetailPage() {
             )}
             {canReplicaAuto && !review && (
               <div className="content-detail-action">
-                <ReplicaPipelineControl video={video} />
+                <ReplicaPipelineControl
+                  key={`${user.id}:${video.platformKey}:${video.nativeId}`}
+                  video={video}
+                />
               </div>
             )}
             {!review && video.platformKey === "douyin" && (
