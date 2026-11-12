@@ -4107,7 +4107,8 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
         == 422
     )
     overview = client.get("/api/control/viral/content-overview", headers=headers).json()
-    assert [s["count"] for s in overview["funnel"]] == [1, 1, 1, 1, 1]
+    # 2026-11-11 极简化：漏斗砍掉第 5 段「获取文案」（4 段），copy 事件停写
+    assert [s["count"] for s in overview["funnel"]] == [1, 1, 1, 1]
     assert overview["topVideos"][0]["requests"] == 2
     assert overview["finance"]["grossRate"] is None
     assert overview["measurementStartedAt"] and "无法还原" in overview["historyNote"]
