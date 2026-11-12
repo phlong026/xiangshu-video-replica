@@ -4147,10 +4147,10 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
         headers=headers,
         params={"platform": "wechat_channels"},
     ).json()
-    assert [step["count"] for step in platform_empty["funnel"]] == [0] * 5
+    assert [step["count"] for step in platform_empty["funnel"]] == [0] * 4
     assert (
         client.get(
-            "/api/control/viral/videos", headers=headers, params={"cohort_stage": "copy"}
+            "/api/control/viral/videos", headers=headers, params={"cohort_stage": "detail"}
         ).status_code
         == 422
     )
