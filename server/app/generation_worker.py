@@ -1263,6 +1263,9 @@ def run_pg_worker_once(
     if max_tasks is not None and max_tasks < 1:
         raise ValueError("max_tasks must be at least 1")
     _cleanup_audio_objects(_pg_audio_connection, storage)
+    # 全自动复刻维护扫描（评审 B-r2#2 接入运行路径）：过期确认 + 开关重开
+    # 后的挂起恢复。挂起行按设计不被领取，必须由独立扫描唤醒。
+    sweep_replica_pipelines(storage=storage)
     processed = 0
     from app.usage_billing import reconcile_operations
 
@@ -1293,6 +1296,23 @@ def run_pg_worker_once(
         from app.prompt_optimizer import run_prompt_task
 
         if run_prompt_task(_pg_audio_connection, worker_id=worker_id, storage=storage):
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        # 全自动复刻编排（评审 B-r3#2）：PG-only 域——每轮领取一条编排任务并
+        # 推进一个阶段（drive 内部按 status 分派 handler，等待/失败/推进收尾
+        # 全在 drive_pipeline_once 完成）。异常不拖垮 worker。
+        with pg_transaction() as raw_conn:
+            replica_lease = _acquire_replica_pipeline_lease(
+                BusinessConnection.postgres(raw_conn), worker_id=worker_id
+            )
+        if replica_lease is not None:
+            try:
+                with pg_transaction() as raw_conn:
+                    _drive_replica_pipeline(BusinessConnection.postgres(raw_conn), replica_lease)
+            except Exception as exc:  # noqa: BLE001 - 编排异常不得拖垮 worker
+                logger.warning("replica pipeline drive failed: %s", exc)
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
@@ -1998,6 +2018,64 @@ def run_pg_collection_once(*, worker_id: str, storage: StorageAdapter) -> int:
 # workers from fighting over the same row.
 CONTENT_RECLAIM_INTERVAL_SECONDS = 3600.0
 _last_content_reclaim_at = 0.0
+
+
+_REPLICA_PIPELINE_SWEEP_INTERVAL_SECONDS = 60.0
+_last_replica_pipeline_sweep_at = 0.0
+
+
+def _acquire_replica_pipeline_lease(conn: BusinessConnection, *, worker_id: str) -> object | None:
+    """领取一条全自动复刻编排任务（生产调用点，评审 B-r3#2）."""
+    from app.replica_pipeline import acquire_replica_pipeline
+
+    return acquire_replica_pipeline(conn, worker_id=worker_id)
+
+
+def _drive_replica_pipeline(conn: BusinessConnection, lease: object) -> str:
+    """推进一个阶段（生产调用点；测试可桩化）."""
+    from app.replica_pipeline_stages import drive_pipeline_once
+
+    return drive_pipeline_once(conn, lease)  # type: ignore[arg-type]
+
+
+def sweep_replica_pipelines(
+    *, storage: StorageAdapter, conn: BusinessConnection | None = None
+) -> dict[str, int]:
+    """全自动复刻维护扫描（每 worker 进程 60 秒节流；不阻塞任务路径）.
+
+    - expire：AWAIT_CONFIRM 超过 72h 确认窗口 → EXPIRED（恒跑）；
+    - resume：总开关开启时，把挂起行唤醒（清屏障、累计挂起时长、重轮询）——
+      关闭→挂起→重开→续跑 的运行链路由此闭环（评审 B-r1#2/B-r2#2）。
+    """
+    global _last_replica_pipeline_sweep_at
+    now = time.monotonic()
+    if now - _last_replica_pipeline_sweep_at < _REPLICA_PIPELINE_SWEEP_INTERVAL_SECONDS:
+        return {}
+    _last_replica_pipeline_sweep_at = now
+    from app import replica_pipeline as rp
+    from app.replica_pipeline_confirm import expire_pipelines, resume_suspended_pipelines
+
+    result = {"expired": 0, "resumed": 0}
+    try:
+        if conn is not None:
+            # 测试/嵌入式注入：调用方负责事务边界。
+            result["expired"] = expire_pipelines(conn)
+            if rp.pipeline_enabled(conn):
+                result["resumed"] = resume_suspended_pipelines(conn)
+        else:
+            with pg_transaction() as raw_conn:
+                own_conn = BusinessConnection.postgres(raw_conn)
+                result["expired"] = expire_pipelines(own_conn)
+                if rp.pipeline_enabled(own_conn):
+                    result["resumed"] = resume_suspended_pipelines(own_conn)
+    except Exception:  # noqa: BLE001 - 维护扫描失败绝不阻塞任务路径
+        logger.warning("replica pipeline sweep failed", exc_info=True)
+        return result
+    if result["expired"] or result["resumed"]:
+        logger.info(
+            "replica pipeline sweep expired=%s resumed=%s", result["expired"], result["resumed"]
+        )
+    return result
 
 
 def reclaim_expired_content_objects_throttled(storage: StorageAdapter) -> dict[str, int]:

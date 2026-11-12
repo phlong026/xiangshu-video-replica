@@ -17,7 +17,9 @@ import type {
 } from "../api";
 import {
   bulkUpdateMaterials,
+  cancelReplicaPipeline,
   clearMaterialCache,
+  confirmReplicaPipeline,
   createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
   createPublishRecord,
@@ -25,6 +27,7 @@ import {
   downloadMaterialAsset,
   downloadVideoToFile,
   evictMaterialCachedPreview,
+  fetchReplicaPipeline,
   fetchViralVideoMedia,
   fetchViralVideoSource,
   fetchViralVideoStatistics,
@@ -36,17 +39,23 @@ import {
   getStudioDraft,
   getViralImportTask,
   hideMaterial,
+  initiateReplicaPipeline,
   listMaterialGroups,
   listMaterials,
   listMaterialTags,
+  listReplicaPipelineCharacters,
   listViralFavorites,
   listViralVideos,
   newViralSearchKey,
   openViralVideoDetail,
   putMaterial,
+  quoteReplicaPipeline,
+  type ReplicaPipelineQuote,
+  type ReplicaPipelineStatus,
   refreshViralVideoResource,
   refreshViralVideoStatistics,
   removeViralFavorite,
+  replicaPipelineIdempotencyKey,
   resolveMaterials,
   saveStudioDraft,
   saveViralFavorite,
@@ -799,6 +808,280 @@ function ViralStatsRow({ video }: { video: StudioVideo }) {
           {value}
         </span>
       ))}
+    </div>
+  );
+}
+
+export const REPLICA_STAGE_LABELS: Record<string, string> = {
+  ENQUEUED: "排队中",
+  IMPORTING: "导入参考素材",
+  ANALYZING: "拆解分镜与文案",
+  SCRIPT_VERSIONING: "保存文案",
+  FIRST_FRAMING: "准备人物首帧",
+  COMPOSING: "合成最终提示词",
+  AWAIT_CONFIRM: "待确认费用",
+  GENERATING: "生成视频中",
+  NEEDS_REVIEW: "待核对",
+  NEEDS_REVIEW_SETTLED: "待核对（已收口）",
+  DRAINING: "收尾中",
+  DELIVERED: "已交付",
+  DELIVERED_PARTIAL: "已交付（部分）",
+  FAILED: "失败",
+  CANCELLED: "已放弃",
+  EXPIRED: "已过期",
+};
+
+/**
+ * 全自动复刻入口与状态控制（M8 v1）.
+ *
+ * 一键发起：导入→拆解→首帧→合成提示词全程自动；到达确认点显示预估积分，
+ * 用户确认后才建批次扣费（资金闸门在前端只做展示与确认，校验在服务端）。
+ * v1 简化（M8b 迭代）：人物候选自动取第一个（多人物选择弹层待做）、
+ * 300s 报价倒计时未做（过期确认会被服务端拒绝并要求重核价）。
+ */
+function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
+  const { notify, user } = useStudio();
+  const [pipelineId, setPipelineId] = useState<string | null>(null);
+  const [status, setStatus] = useState<ReplicaPipelineStatus | null>(null);
+  const [quote, setQuote] = useState<ReplicaPipelineQuote | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [quoteAgeMs, setQuoteAgeMs] = useState(0);
+  const [busy, setBusy] = useState(false);
+  // 幂等键按「尝试」生成（评审 M8-r1#6）：同一 busy 周期内网络重试复用，
+  // 放弃/终态后清空，下一次点击是新尝试（不会重放原终态）。
+  const attemptKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!pipelineId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await fetchReplicaPipeline(pipelineId);
+        if (cancelled) return;
+        setStatus(next);
+        // 报价不随轮询自动续发（评审 M8-r1#3）：进入待确认时取一次，
+        // 用户核对的是这一份；过期后由「重新核价」显式刷新。
+        if (next.status === "AWAIT_CONFIRM" && !quote) {
+          try {
+            const fresh = await quoteReplicaPipeline(pipelineId);
+            if (!cancelled) {
+              setQuote(fresh);
+              setQuoteError(null);
+              setQuoteAgeMs(0);
+            }
+          } catch (cause) {
+            // 报价失败不能静默（评审 M8-r3#4）：价格变化等错误要显式展示，
+            // 且「放弃」操作不依赖报价成功。
+            if (!cancelled) {
+              setQuoteError(
+                cause instanceof Error ? cause.message : "报价获取失败",
+              );
+            }
+          }
+        }
+      } catch {
+        // 轮询失败静默重试（页面离开由 cleanup 停止）。
+      }
+    };
+    void tick();
+    const timer = window.setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pipelineId, quote]);
+
+  // 报价 300 秒有效期：倒计时用于置灰确认。
+  useEffect(() => {
+    if (!quote) return;
+    const timer = window.setInterval(
+      () => setQuoteAgeMs((age) => age + 1000),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [quote]);
+
+  const begin = async () => {
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少平台标识，无法发起全自动复刻");
+      return;
+    }
+    // 预处理费用披露（评审 M8-r1#1）：拆解与首帧在确认点之前就会产生费用。
+    const acknowledged = window.confirm(
+      [
+        "全自动复刻说明：",
+        "1. 系统将自动完成：导入参考素材 → 拆解分镜与文案 → 生成 3 张首帧候选并选定 → 合成最终提示词。",
+        "2. 拆解与首帧生成会按现有计费口径产生费用（具体以账单为准），每个环节失败自动重试至多 2 次。",
+        "3. 提示词就绪后**不会自动扣费生成**：会先展示费用明细，需要你确认一次才开始生成视频。",
+        "是否继续？",
+      ].join("\n"),
+    );
+    if (!acknowledged) return;
+    setBusy(true);
+    try {
+      const { characters } = await listReplicaPipelineCharacters();
+      const character = characters[0];
+      if (!character) {
+        notify("请先在人物库创建一个可用角色后再使用全自动复刻");
+        return;
+      }
+      attemptKeyRef.current ??= `${replicaPipelineIdempotencyKey(user.id, video.platformKey, video.nativeId)}:${Date.now()}`;
+      const created = await initiateReplicaPipeline({
+        platform: video.platformKey,
+        videoId: video.nativeId,
+        characterVersionId: character.characterVersionId,
+        idempotencyKey: attemptKeyRef.current,
+      });
+      setPipelineId(created.id);
+      notify("全自动复刻已启动：完成后会请你确认费用再生成");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "全自动复刻发起失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmGeneration = async () => {
+    if (!pipelineId || !quote) return;
+    if (quoteAgeMs > 300_000) {
+      notify("报价已过期，请点击「重新核价」");
+      return;
+    }
+    setBusy(true);
+    try {
+      await confirmReplicaPipeline(pipelineId, quote);
+      notify("已确认，开始生成视频");
+      setQuote(null);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "确认失败，请刷新重试");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const requote = async () => {
+    if (!pipelineId) return;
+    setBusy(true);
+    try {
+      const fresh = await quoteReplicaPipeline(pipelineId);
+      setQuote(fresh);
+      setQuoteError(null);
+      setQuoteAgeMs(0);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "报价刷新失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const abandon = async () => {
+    if (!pipelineId) return;
+    setBusy(true);
+    try {
+      await cancelReplicaPipeline(pipelineId);
+      notify("已放弃全自动复刻（已产出内容保留在项目中）");
+      attemptKeyRef.current = null;
+      setPipelineId(null);
+      setStatus(null);
+      setQuote(null);
+      setQuoteError(null);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "放弃失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!pipelineId) {
+    return (
+      <Button disabled={busy} variant="outline" onClick={begin}>
+        {busy ? "准备中…" : "全自动复刻"}
+      </Button>
+    );
+  }
+  const label = status
+    ? (REPLICA_STAGE_LABELS[status.status] ?? status.status)
+    : "启动中…";
+  const quoteStale = quoteAgeMs > 300_000;
+  const fees = status?.feeSummary;
+  return (
+    <div className="replica-pipeline-panel">
+      <p role="status">全自动复刻：{label}</p>
+      {status?.status === "AWAIT_CONFIRM" ? (
+        <div className="replica-pipeline-review">
+          {status.promptText ? (
+            <details>
+              <summary>最终提示词（核对后确认）</summary>
+              <p>{status.promptText}</p>
+            </details>
+          ) : null}
+          {status.scriptText ? (
+            <details>
+              <summary>口播文案终稿</summary>
+              <p>{status.scriptText}</p>
+            </details>
+          ) : null}
+          {status.firstFrameAssetId ? (
+            <p className="admin-hint">首帧已选定（可在复刻页预览）</p>
+          ) : null}
+          {quote ? (
+            <p className="admin-hint">
+              费用：已结算 {fees?.settledCredits ?? 0} 积分 · 仍预占{" "}
+              {fees?.reservedCredits ?? 0} 积分 · 本次新增{" "}
+              {quote.estimatedCredits} 积分 （{quote.priceTier}，
+              {quote.durationSeconds} 秒）
+            </p>
+          ) : null}
+          {quoteError ? (
+            <p className="admin-hint" role="alert">
+              {quoteError}
+            </p>
+          ) : null}
+          <div className="replica-pipeline-actions">
+            <Button
+              disabled={busy || quoteStale || !quote}
+              variant="primary"
+              onClick={confirmGeneration}
+            >
+              {!quote
+                ? "正在获取报价…"
+                : quoteStale
+                  ? "报价已过期"
+                  : `确认并生成（预估 ${quote.estimatedCredits} 积分）`}
+            </Button>
+            <Button disabled={busy} variant="outline" onClick={requote}>
+              重新核价
+            </Button>
+            <Button disabled={busy} variant="quiet" onClick={abandon}>
+              放弃
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {status && ["FAILED", "CANCELLED", "EXPIRED"].includes(status.status) ? (
+        <div className="replica-pipeline-actions">
+          <p className="admin-hint">任务已结束，可在项目里转手动继续处理</p>
+          <Button
+            disabled={busy}
+            variant="outline"
+            onClick={() => {
+              // 重新发起 = 新尝试（评审 M8-r2#6/M8-r3#5）：换幂等键并清空
+              // 状态与报价，回到入口按钮；网络结果不确定时用户可先留在
+              // 本页重试原键（放弃路径亦会清键）。
+              attemptKeyRef.current = null;
+              setPipelineId(null);
+              setStatus(null);
+              setQuote(null);
+              setQuoteError(null);
+            }}
+          >
+            重新发起
+          </Button>
+        </div>
+      ) : null}
+      {status && ["DELIVERED", "DELIVERED_PARTIAL"].includes(status.status) ? (
+        <p className="admin-hint">成片已生成，可在任务中心查看与下载</p>
+      ) : null}
     </div>
   );
 }
@@ -2351,6 +2634,9 @@ export function ViralDetailPage() {
     typeof video.durationMs === "number" &&
     video.durationMs >= 4_000 &&
     video.durationMs <= 30_000;
+  // 全自动复刻单独门禁 4–15 秒（评审 M8-r2#2）：自动生成批次上限 15 秒，
+  // 16–30 秒走手动复刻分段，避免先收费拆解/首帧再必然失败。
+  const canReplicaAuto = canReplicate && (video.durationMs ?? 0) <= 15_000;
   const goReplica = (task: ViralImportTask) => {
     if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
       notify("该来源暂不支持视频复刻");
@@ -2542,6 +2828,11 @@ export function ViralDetailPage() {
                 >
                   {importState.status === "loading" ? "导入中…" : "去复刻"}
                 </Button>
+              </div>
+            )}
+            {canReplicaAuto && !review && (
+              <div className="content-detail-action">
+                <ReplicaPipelineControl video={video} />
               </div>
             )}
             {!review && video.platformKey === "douyin" && (

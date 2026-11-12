@@ -84,6 +84,21 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
     {
         "t13_customer_activation_test",
         "customer_v3_test",
+        # 全自动复刻编排器（replica_pipeline_tasks）数据层验证专用迁移库
+        # （test_replica_pipeline_model.py）：表结构/CHECK/三个调度集合谓词。
+        "rplc_pipeline_model_test",
+        # 编排驱动核心专用库（test_replica_pipeline_driver.py）：幂等受理/租约/
+        # 转换表/期限/挂起恢复的真库验证。
+        "rplc_pipeline_driver_test",
+        # 五阶段执行器专用库（test_replica_pipeline_stages.py）：阶段驱动/
+        # 首帧子步骤机/失败出口（域原语桩化，真库承载状态机）。
+        "rplc_pipeline_stages_test",
+        # 确认点与生成域映射专用库（test_replica_pipeline_confirm.py）：
+        # 指纹校验/cancel/expire/观察映射/接收入口。
+        "rplc_pipeline_confirm_test",
+        # 路由层专用库（test_replica_pipeline_routes.py）：端点注册/总开关/
+        # 人物预检归属链。
+        "rplc_pipeline_routes_test",
         # Existing business fixtures using W13 routine admin sessions.
         "t09_admin_session_test",
         "t12_admin_activation_test",

@@ -9434,3 +9434,136 @@ export async function getPublishSummary(): Promise<PublishSummary> {
     "读取发布统计失败",
   );
 }
+
+// ---------------------------------------------------------------- 全自动复刻（replica pipeline）
+
+export interface ReplicaPipelineCharacter {
+  characterVersionId: string;
+  name: string;
+  versionNumber: number;
+}
+
+export interface ReplicaPipelineQuote {
+  quoteToken: string;
+  maxCredits: number;
+  estimatedCredits: number;
+  priceTier: string;
+  durationSeconds: number;
+  fingerprint: string;
+}
+
+export interface ReplicaPipelineStatus {
+  id: string;
+  projectId: string;
+  platform: string;
+  videoId: string;
+  status: string;
+  stage: string;
+  createdAt: string;
+  awaitingSince: string | null;
+  stageDetail?: Record<string, unknown>;
+  promptVersionId?: string;
+  firstFrameAssetId?: string;
+  batchId?: string;
+  quoteReady?: boolean;
+  maxCredits?: number;
+  estimatedCredits?: number;
+  durationSeconds?: number;
+  fingerprint?: string;
+  promptText?: string;
+  scriptText?: string;
+  feeSummary?: {
+    settledCredits: number;
+    reservedCredits: number;
+    newCredits: number;
+  };
+}
+
+/** 发起幂等键：同一账号同一视频的全自动复刻动作复用同一键。 */
+export function replicaPipelineIdempotencyKey(
+  accountId: string,
+  platformKey: string,
+  nativeId: string,
+): string {
+  return `replica-pipeline:${accountId}:${platformKey}:${nativeId}`;
+}
+
+export function listReplicaPipelineCharacters(): Promise<{
+  characters: ReplicaPipelineCharacter[];
+}> {
+  return requestApiJson(
+    "/api/viral/replica-pipelines/characters",
+    "人物列表暂不可用",
+  );
+}
+
+export function initiateReplicaPipeline(input: {
+  platform: string;
+  videoId: string;
+  characterVersionId: string;
+  idempotencyKey: string;
+}): Promise<{
+  id: string;
+  projectId: string;
+  status: string;
+  replay: boolean;
+}> {
+  return requestApiJson("/api/viral/replica-pipelines", "全自动复刻发起失败", {
+    method: "POST",
+    headers: { "Idempotency-Key": input.idempotencyKey },
+    body: JSON.stringify({
+      platform: input.platform,
+      video_id: input.videoId,
+      character_version_id: input.characterVersionId,
+      idempotency_key: input.idempotencyKey,
+      preprocess_acknowledged: true,
+    }),
+  });
+}
+
+export function fetchReplicaPipeline(
+  pipelineId: string,
+): Promise<ReplicaPipelineStatus> {
+  return requestApiJson(
+    `/api/viral/replica-pipelines/${encodeURIComponent(pipelineId)}`,
+    "全自动复刻状态读取失败",
+  );
+}
+
+export function quoteReplicaPipeline(
+  pipelineId: string,
+): Promise<ReplicaPipelineQuote> {
+  return requestApiJson(
+    `/api/viral/replica-pipelines/${encodeURIComponent(pipelineId)}/quote`,
+    "报价获取失败",
+    { method: "POST" },
+  );
+}
+
+export function confirmReplicaPipeline(
+  pipelineId: string,
+  quote: ReplicaPipelineQuote,
+): Promise<{ pipelineId: string; batchId: string; status: string }> {
+  return requestApiJson(
+    `/api/viral/replica-pipelines/${encodeURIComponent(pipelineId)}/confirm`,
+    "确认生成失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        quote_token: quote.quoteToken,
+        max_credits: quote.maxCredits,
+        fingerprint: quote.fingerprint,
+      }),
+    },
+  );
+}
+
+export function cancelReplicaPipeline(
+  pipelineId: string,
+): Promise<{ status: string }> {
+  return requestApiJson(
+    `/api/viral/replica-pipelines/${encodeURIComponent(pipelineId)}/cancel`,
+    "放弃任务失败",
+    { method: "POST" },
+  );
+}
