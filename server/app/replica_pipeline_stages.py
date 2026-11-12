@@ -192,7 +192,8 @@ def _stage_enqueue_import(
     try:
         task = enqueue_viral_import_task(conn, actor=actor, request=request, idempotency_key=key)
     except ViralImportError as exc:
-        return _failed(str(exc.detail["code"]), str(exc.detail["message"]), retryable=exc.retryable)
+        detail = cast("dict[str, str]", exc.detail)
+        return _failed(detail["code"], detail["message"], retryable=exc.retryable)
     except IntegrityConstraintError:
         # 并发同键（另一个 worker 抢先入队）：按键找回在途任务继续。
         existing = conn.execute(
@@ -763,7 +764,8 @@ def _enqueue_import_again(conn: BusinessConnection, lease: rp.ReplicaPipelineLea
     try:
         task = enqueue_viral_import_task(conn, actor=actor, request=request, idempotency_key=key)
     except ViralImportError as exc:
-        return _failed(str(exc.detail["code"]), str(exc.detail["message"]), retryable=exc.retryable)
+        detail = cast("dict[str, str]", exc.detail)
+        return _failed(detail["code"], detail["message"], retryable=exc.retryable)
     except IntegrityConstraintError:
         existing = conn.execute(
             "SELECT * FROM viral_import_tasks WHERE owner_user_id = %s AND idempotency_key = %s",
