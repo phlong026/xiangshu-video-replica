@@ -722,7 +722,9 @@ def test_legacy_cache_hit_task_never_leaks_free_text(
     assert response.result.text is None
     # 提取记录同样不展示这条（未付费正文不得经由历史接口回流）。
     with _pg(pg_state) as pg:
-        items = list_viral_copy_extractions(pg, CurrentUser("legacy-owner", "u", "u", "customer"))
+        items = list_viral_copy_extractions(
+            BusinessConnection.postgres(pg), CurrentUser("legacy-owner", "u", "u", "customer")
+        )
     assert all(item.videoId != "legacy-hit-1" for item in items.items)
 
 
@@ -854,3 +856,151 @@ def test_reopen_closes_stale_attempts_as_unknown(
     rounds = _asr_rounds(pg_state, task_id)
     assert sum(1 for _, state, _ in rounds if state == "PENDING") == 1
     assert all(state != "SUCCEEDED" for _, state, _ in rounds)
+
+
+@pytest.mark.parametrize("entitlement", ["asr", "viral_copy", "failed", "other_owner", "pending"])
+def test_legacy_paid_text_survives_cache_retirement(pg_state: str, entitlement: str) -> None:
+    """归档指纹不是免费缓存凭据；只恢复有本人结算依据的旧正文。"""
+    from app.script_from_audio import script_from_audio_task_response
+    from app.usage_billing import accept_operation, finish_source
+    from app.viral_routes import list_viral_copy_extractions
+
+    owner = f"legacy-paid-{entitlement}"
+    other = f"other-{entitlement}"
+    task_id = f"task-{owner}"
+    video_id = f"video-{owner}"
+    _seed_base(pg_state, (owner, other))
+    _seed_viral_video(pg_state, video_id)
+    _seed_shared_import(
+        pg_state, owner, project_id=f"proj-{owner}", asset_id=f"asset-{owner}", video_id=video_id
+    )
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "INSERT INTO script_from_audio_tasks (id,project_id,source_asset_id,"
+            "created_by_user_id,idempotency_key,request_hash,request_json,status,result_json) "
+            "VALUES (%s,%s,%s,%s,%s,'hash',%s,'SUCCEEDED',%s)",
+            (
+                task_id,
+                f"proj-{owner}",
+                f"asset-{owner}",
+                owner,
+                task_id,
+                json.dumps(
+                    {"viral_source": ["douyin", video_id], "viral_archive_sha256": "a" * 64}
+                ),
+                json.dumps({"text": "本人已购买的历史正文"}),
+            ),
+        )
+        pg.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES ('viral_copy',true,2,1) ON CONFLICT (service) DO NOTHING"
+        )
+    with psycopg.connect(pg_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        service = "viral_copy" if entitlement == "viral_copy" else "asr"
+        source_id = f"viral-copy:{owner}:douyin:{video_id}" if service == "viral_copy" else task_id
+        accept_operation(
+            conn,
+            user_id=other if entitlement == "other_owner" else owner,
+            service=service,
+            source_id=source_id,
+            units=1,
+        )
+        if entitlement != "pending":
+            finish_source(
+                conn, source_id, units=1, succeeded=entitlement != "failed", service=service
+            )
+        row = conn.execute(
+            "SELECT * FROM script_from_audio_tasks WHERE id=%s", (task_id,)
+        ).fetchone()
+        assert row is not None
+        result = script_from_audio_task_response(row, conn=conn)
+        items = list_viral_copy_extractions(conn, CurrentUser(owner, owner, owner, "customer"))
+        entitled = entitlement in {"asr", "viral_copy"}
+        assert result.result is not None
+        assert result.result.text == ("本人已购买的历史正文" if entitled else None)
+        assert any(item.videoId == video_id for item in items.items) is entitled
+
+
+@pytest.mark.parametrize(
+    "purchase",
+    [
+        "own",
+        "shared_wallet",
+        "other_wallet",
+        "failed",
+        "pending",
+        "none",
+        "wrong_video",
+        "bad_digest",
+        "bad_kind",
+        "bad_duration",
+        "malformed",
+    ],
+)
+def test_legacy_direct_purchase_without_task(pg_state: str, purchase: str) -> None:
+    """旧直接购买不产生任务；读取事件不是权益，必须核验成功结算及钱包边界。"""
+    from app.usage_billing import accept_operation, finish_source
+    from app.viral_routes import list_viral_copy_extractions
+
+    user = f"direct-{purchase}"
+    payer = f"payer-{purchase}"
+    video = f"video-{user}"
+    _seed_base(pg_state, (user, payer))
+    cached = {
+        "text": "历史直接购买正文",
+        "duration_sec": 12,
+        "archive": {"platform": "douyin", "video_id": video, "sha256": "a" * 64, "kind": "audio"},
+    }
+    if purchase == "wrong_video":
+        cached["archive"]["video_id"] = "different-video"
+    if purchase == "bad_digest":
+        cached["archive"]["sha256"] = "invalid"
+    if purchase == "bad_kind":
+        cached["archive"]["kind"] = "invalid"
+    if purchase == "bad_duration":
+        cached["duration_sec"] = float("inf")
+    _seed_viral_video(pg_state, video)
+    with _pg(pg_state) as pg:
+        if purchase == "shared_wallet":
+            pg.execute(
+                "UPDATE users SET account_type='SUB', parent_user_id=%s WHERE id=%s", (payer, user)
+            )
+        pg.execute(
+            "INSERT INTO viral_content_usage_events(id,platform,video_id,user_id,kind) "
+            "VALUES (%s,'douyin',%s,%s,'copy')",
+            (user, video, user),
+        )
+        pg.execute(
+            "INSERT INTO viral_script_cache(platform,video_id,result_json) VALUES ('douyin',%s,%s)",
+            (video, "[]" if purchase == "malformed" else json.dumps(cached)),
+        )
+        pg.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES ('viral_copy',true,2,1) ON CONFLICT (service) DO NOTHING"
+        )
+    with psycopg.connect(pg_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        if purchase != "none":
+            buyer = payer if purchase in {"shared_wallet", "other_wallet"} else user
+            source = f"viral-copy:{buyer}:douyin:{video}"
+            accept_operation(conn, user_id=buyer, service="viral_copy", source_id=source, units=1)
+            if purchase != "pending":
+                finish_source(
+                    conn, source, units=1, succeeded=purchase != "failed", service="viral_copy"
+                )
+        items = list_viral_copy_extractions(conn, CurrentUser(user, user, user, "customer")).items
+        matches = [item for item in items if item.videoId == video]
+        if purchase not in {"other_wallet", "failed", "pending", "none"}:
+            assert len(matches) == 1
+            assert matches[0].text == (
+                "历史直接购买正文" if purchase in {"own", "shared_wallet"} else None
+            )
+        else:
+            assert matches == []
+        assert not any(
+            item.videoId == video
+            for item in list_viral_copy_extractions(
+                conn, CurrentUser(payer, payer, payer, "customer")
+            ).items
+        )

@@ -1,13 +1,12 @@
 """爆款任务接口契约回归：正文随任务直出 + 首页时钟窗口（2026-11-11 极简化后）.
 
 TEST-PG：复用 test_customer_pricing 的夹具链（module 级建库 → alembic head →
-每用例清理）。2026-11-11 共享文案缓存退役后，「任务接口对爆款任务脱敏正文、
-claim 是唯一交付口」的门禁口径整体作废：任务接口恒下发 result.text，响应不再
-有 viral_source / copy_claim_required 字段，claim 端点只余 410 壳（见
-test_viral_copy_simplify_pg.py）。本文件保留两类仍有效的契约：
+每用例清理）。新转写正文随任务返回；带旧归档标记的历史任务必须有
+成功 ASR 或旧交付结算才能读取正文。claim 端点退役，不撤销已购权益。
 
-- 首页展示下发服务端时钟与下一个窗口边界（数据时点一致性）；
-- 普通任务的正文直出（上传转写不属于爆款零售链路的口径不变）。
+- 首页展示下发服务端时钟与下一个窗口边界；
+- 普通任务正文直出，旧任务按权益返回，两个 GET 均保持项目权限隔离。
+
 """
 
 # Imported pytest fixtures are injected by parameter name.
@@ -127,7 +126,7 @@ def test_homepage_http_returns_server_clock_and_next_window_boundary(gate_client
 def test_plain_task_still_returns_text(gate_client, route_state) -> None:
     """普通上传任务不属于爆款零售链路：正文照常随任务接口下发.
 
-    2026-11-11 极简化后爆款任务同样直出正文，且响应里不再有
+    新生产爆款任务同样直出正文（历史共享任务仍校验权益），且响应里不再有
     viral_source / copy_claim_required 字段——本用例顺带固定住字段确实消失。
     """
     headers, uid = account(gate_client, "gate_plain")
@@ -149,3 +148,49 @@ def test_plain_task_still_returns_text(gate_client, route_state) -> None:
     assert "viral_source" not in latest
     assert "copy_claim_required" not in latest
     assert latest["result"]["text"] == _COPY_TEXT
+
+
+@pytest.mark.parametrize("paid", [True, False])
+def test_legacy_task_http_entitlement_and_project_isolation(gate_client, route_state, paid):
+    """真实登录后的两个读取口均保护旧成果，其他账号不得借已付费任务越权。"""
+    from app.db_portable import BusinessConnection
+    from app.usage_billing import accept_operation, finish_source
+
+    headers, uid = account(gate_client, "legacy_http_owner")
+    other_headers, _ = account(gate_client, "legacy_http_other")
+    task_id, project_id = "legacy-http-task", "legacy-http-project"
+    with psycopg.connect(route_state) as raw:
+        _seed_task(raw, uid, task_id=task_id, project_id=project_id)
+        raw.execute(
+            "UPDATE script_from_audio_tasks SET request_json=%s WHERE id=%s",
+            (
+                json.dumps(
+                    {
+                        "viral_archive_sha256": "a" * 64,
+                        "viral_source": ["douyin", "legacy-http-video"],
+                    }
+                ),
+                task_id,
+            ),
+        )
+        if paid:
+            raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+            raw.execute(
+                "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+                "VALUES ('asr',true,2,1) ON CONFLICT (service) DO UPDATE SET enabled=true"
+            )
+            conn = BusinessConnection.postgres(raw)
+            accept_operation(conn, user_id=uid, service="asr", source_id=task_id, units=1)
+            finish_source(conn, task_id, units=1, succeeded=True, service="asr")
+    for path in (
+        f"/api/script-from-audio-tasks/{task_id}",
+        f"/api/projects/{project_id}/script-from-audio-tasks/latest",
+    ):
+        response = gate_client.get(path, headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["text"] == (_COPY_TEXT if paid else None)
+        denied = gate_client.get(path, headers=other_headers)
+        # 项目权限以 404 隐藏资源存在性，不改成可枚举的 403。
+        assert denied.status_code == 404, denied.text
+        assert denied.json()["detail"]["code"] == "PROJECT_NOT_FOUND"
+        assert _COPY_TEXT not in denied.text
