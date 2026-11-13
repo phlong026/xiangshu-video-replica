@@ -133,6 +133,54 @@ def test_extract_thumbnail_produces_small_jpeg() -> None:
     assert len(thumb) < 200_000
 
 
+def make_av_test_video() -> bytes:
+    """生成 moov 位于文件尾且带音轨的 MP4（管理员上传封面回归夹具）."""
+    from app.media_tools import resolve_media_binary
+
+    with tempfile.TemporaryDirectory(prefix="matthumbs-av-") as directory:
+        media_path = Path(directory) / "source.mp4"
+        subprocess.run(
+            [
+                resolve_media_binary("ffmpeg"),
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=64x64:r=5:d=6",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=6",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+                str(media_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return media_path.read_bytes()
+
+
+def test_extract_thumbnail_falls_back_for_trailing_moov_mp4() -> None:
+    """moov 在文件尾且源超过 pipe 探测缓冲时，抽帧必须回退到文件路径.
+
+    回归背景（2026-11-13 本地全量门禁）：管理员上传在「无需转码」时把源字节
+    直接交给字节版抽帧，ffmpeg 读 pipe 报 partial file，接口误报
+    503 VIRAL_UPLOAD_COVER_FAILED；同一源按文件路径抽帧正常。
+    """
+    content = make_av_test_video()
+    assert content.find(b"moov") > len(content) // 2  # 夹具确实是尾置 moov
+    thumb = extract_thumbnail_jpeg(content)
+    assert thumb is not None
+    assert thumb.startswith(JPEG_MAGIC)
+
+
 def test_extract_thumbnail_supports_still_images() -> None:
     """MATERIAL-UX-02：图片素材（PNG/JPEG）复用同一抽帧（单帧缩放），
     输出 JPEG 缩略图——网格瓦片因此不必直拉原图."""

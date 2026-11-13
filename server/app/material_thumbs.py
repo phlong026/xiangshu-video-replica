@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -79,6 +80,10 @@ def extract_thumbnail_jpeg(
 
     ``max_width`` 非 None 时同时约束宽度（等比缩进 max_width×max_height 的
     框内，覆盖五视图等超宽合成图）；默认只限高，输出与既有视频链路一致。
+
+    MP4 的 moov 位于文件尾时 pipe 输入无法回退读取，源一旦超过 ffmpeg 的探测
+    缓冲会报 partial file；此时落临时文件按路径重试一次（同一源按路径可正常
+    抽帧）。不变量不变：失败只损失缩略图本身。
     """
     scale_filter = (
         f"scale=-2:min({max_height}\\,ih)"
@@ -95,11 +100,19 @@ def extract_thumbnail_jpeg(
             capture_output=True,
             timeout=60,
         )
+        if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8"):
+            return result.stdout
     except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass
+    try:
+        with tempfile.TemporaryDirectory(prefix="thumb-fallback-") as directory:
+            source = Path(directory) / "source.bin"
+            source.write_bytes(content)
+            return extract_thumbnail_jpeg_from_path(
+                source, max_height=max_height, max_width=max_width
+            )
+    except OSError:
         return None
-    if result.returncode != 0 or not result.stdout.startswith(b"\xff\xd8"):
-        return None
-    return result.stdout
 
 
 def extract_thumbnail_jpeg_from_path(
