@@ -458,6 +458,72 @@ def test_rejected_shared_token_is_replaced_under_lock(monkeypatch, shared_token)
     assert len(minted) == (1 if shared_token == "rejected" else 0)
 
 
+@pytest.mark.parametrize(
+    "stored_value", ["damaged", "rotated-key", "invalid-expiry", "missing-token"]
+)
+def test_invalid_shared_token_is_reissued_and_persisted(stored_value):
+    from cryptography.fernet import Fernet
+
+    from app.pan123_client import Pan123TokenState, SharedTokenStore
+
+    cipher = Fernet(Fernet.generate_key())
+    payload = {"client_id": "cid-1", "access_token": "old", "expires_at": "invalid"}
+    if stored_value == "missing-token":
+        payload = {"client_id": "cid-1", "expires_at": int(time.time()) + 3600}
+    encrypted = cipher.encrypt(json.dumps(payload).encode()).decode()
+    if stored_value == "damaged":
+        encrypted = "not-a-fernet-token"
+    elif stored_value == "rotated-key":
+        encrypted = Fernet(Fernet.generate_key()).encrypt(json.dumps(payload).encode()).decode()
+
+    class Connection:
+        row = {"encrypted_value": encrypted}
+
+        def execute(self, sql, params):
+            if sql.startswith("INSERT"):
+                self.row = {"encrypted_value": params[1]}
+            return self
+
+        def fetchone(self):
+            return self.row
+
+    conn = Connection()
+    store = SharedTokenStore(fernet=cipher, connection=conn)
+    fresh = Pan123TokenState("cid-1", "fresh", int(time.time()) + 3600)
+    assert store.read_shared("cid-1") is None
+    assert store.mint_single_flight("cid-1", lambda: fresh) == fresh
+    assert store.read_shared("cid-1") == fresh
+
+
+@pytest.mark.parametrize("expiry", [1700000000, "1700000000", "2023-11-15T06:13:20+08:00"])
+def test_token_response_accepts_epoch_and_timezone_expiry(monkeypatch, expiry):
+    client, _store = _make_client(FakeOpener())
+
+    def respond(request, *, endpoint):
+        assert request.get_header("Platform") == "open_platform"
+        assert json.loads(request.data) == {"clientID": "cid-1", "clientSecret": "sec-1"}
+        return {"code": 0, "data": {"accessToken": "fresh", "expiredAt": expiry}}
+
+    monkeypatch.setattr(client, "_call_json", respond)
+    token = client._mint_token()
+    assert token.access_token == "fresh"
+    assert token.expires_at == 1700000000
+
+
+@pytest.mark.parametrize("expiry", ["invalid", "2023-11-15T06:13:20", []])
+def test_token_response_rejects_invalid_expiry(monkeypatch, expiry):
+    from app.pan123_client import Pan123AuthError
+
+    client, _store = _make_client(FakeOpener())
+    monkeypatch.setattr(
+        client,
+        "_call_json",
+        lambda *args, **kwargs: {"data": {"accessToken": "fresh", "expiredAt": expiry}},
+    )
+    with pytest.raises(Pan123AuthError, match="到期时间"):
+        client._mint_token()
+
+
 def test_direct_link_enablement_uses_the_save_connection(monkeypatch):
     from app import pan123_client, settings
 

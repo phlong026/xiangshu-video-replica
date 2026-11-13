@@ -283,6 +283,7 @@ def _customer_token(client: TestClient) -> str:
 def test_admin_upload_validation_idempotency_and_tags(
     client: TestClient,
     app_under_test: tuple[FastAPI, FakePan123Storage, dict[str, str]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     storage = app_under_test[1]
     headers = _admin_session(client)
@@ -290,6 +291,12 @@ def test_admin_upload_validation_idempotency_and_tags(
     created = _upload_material(client, headers)
     assert created.status_code == 200, created.text
     material_id = created.json()["id"]
+    listing = client.get("/api/control/training-materials", headers=headers)
+    assert listing.status_code == 200, listing.text
+    assert (
+        next(item for item in listing.json()["items"] if item["id"] == material_id)["created_by"]
+        == "admin_u"
+    )
     # 远端名唯一（material_id 前缀）且已上报网盘替身。
     assert len(storage.remote_names) == 1
     assert storage.remote_names[0].endswith("-新手教学.mp4")
@@ -371,13 +378,17 @@ def test_admin_upload_validation_idempotency_and_tags(
     )
     assert len(storage.remote_names) == uploads_before
 
-    # 幂等重放：同键同请求 → 回放，不产生第二行、不再上传。
+    # 幂等重放不产生第二行，本次未引用的远端对象必须留下人工清理凭据。
     replay_key = f"replay-{uuid.uuid4()}"
     first = _upload_material(client, headers, title="重放用", idempotency_key=replay_key)
     assert first.status_code == 200
+    uploads_before = len(storage.remote_names)
+    caplog.clear()
     second = _upload_material(client, headers, title="重放用", idempotency_key=replay_key)
     assert second.status_code in (200, 201)
     assert second.headers.get("X-Idempotent-Replay") == "true"
+    assert len(storage.remote_names) == uploads_before + 1
+    assert f"orphan remote file file_id={storage._seq}" in caplog.text
     with psycopg.connect(_db_dsn(), autocommit=True) as conn:
         rows = conn.execute(
             "SELECT count(*) FROM training_materials WHERE title = '重放用'"

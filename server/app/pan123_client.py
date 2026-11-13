@@ -35,6 +35,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import md5
 from pathlib import Path
 from typing import Any
@@ -43,9 +44,11 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 from urllib.request import Request
 from uuid import uuid4
 
+from cryptography.fernet import InvalidToken
+
 from app.db_portable import BusinessConnection
 from app.external_calls import external_call_context, recorded_urlopen
-from app.settings import SettingsDecryptError, fernet_from_environment
+from app.settings import fernet_from_environment
 
 PAN123_PROVIDER = "pan123"
 PAN123_BASE_URL = "https://open-api.123pan.com"
@@ -256,16 +259,19 @@ class SharedTokenStore:
             return None
         try:
             payload = json.loads(self._fernet.decrypt(str(row["encrypted_value"])))
-        except (SettingsDecryptError, ValueError):
+            if not isinstance(payload, dict) or payload.get("client_id") != client_id:
+                return None
+            token = payload.get("access_token")
+            if not isinstance(token, str) or not token:
+                return None
+            return Pan123TokenState(
+                client_id=client_id,
+                access_token=token,
+                expires_at=int(payload.get("expires_at") or 0),
+            )
+        except (InvalidToken, ValueError, TypeError):
             # 解不开的历史行视同不存在：单飞会重新颁发并覆盖。
             return None
-        if not isinstance(payload, dict) or str(payload.get("client_id")) != client_id:
-            return None
-        return Pan123TokenState(
-            client_id=client_id,
-            access_token=str(payload.get("access_token")),
-            expires_at=int(payload.get("expires_at") or 0),
-        )
 
 
 class Pan123Client:
@@ -379,17 +385,28 @@ class Pan123Client:
         request = Request(
             f"{PAN123_BASE_URL}/api/v1/access_token",
             data=request_body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Platform": PAN123_PLATFORM_HEADER},
             method="POST",
         )
         payload = self._call_json(request, endpoint="api/v1/access_token")
         data = payload.get("data")
         if not isinstance(data, dict) or not data.get("accessToken"):
             raise Pan123AuthError("素材存储通道未返回访问令牌。")
+        expiry = data.get("expiredAt")
+        try:
+            if isinstance(expiry, str) and not expiry.isdecimal():
+                parsed = datetime.fromisoformat(expiry)
+                if parsed.tzinfo is None:
+                    raise ValueError("missing timezone")
+                expires_at = int(parsed.timestamp())
+            else:
+                expires_at = int(int(time.time()) + 30 * 24 * 3600 if expiry is None else expiry)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise Pan123AuthError("素材存储通道未返回有效的令牌到期时间。") from exc
         return Pan123TokenState(
             client_id=self._client_id,
             access_token=str(data["accessToken"]),
-            expires_at=int(data.get("expiredAt") or (int(time.time()) + 30 * 24 * 3600)),
+            expires_at=expires_at,
         )
 
     def _authorized_request(

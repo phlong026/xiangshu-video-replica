@@ -4505,6 +4505,43 @@ describe("全自动复刻入口（M8 v1）", () => {
       failedRecovery.unmount();
     },
   );
+  it("培训下载重新签发地址并保留工作台页面", async () => {
+    useStudio.mockReturnValue(studio());
+    trainingMaterialDownloadUrl
+      .mockReset()
+      .mockResolvedValueOnce("https://signed/old")
+      .mockResolvedValueOnce("https://signed/new");
+    const links: { href: string; target: string; rel: string }[] = [];
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        links.push({ href: this.href, target: this.target, rel: this.rel });
+      });
+    try {
+      const view = render(<MaterialsPage />);
+      fireEvent.click(await screen.findByRole("button", { name: "播放" }));
+      await waitFor(() =>
+        expect(view.container.querySelector("video")).toHaveAttribute(
+          "src",
+          "https://signed/old",
+        ),
+      );
+      fireEvent.click(screen.getAllByRole("button", { name: "下载" })[0]);
+      await waitFor(() =>
+        expect(links).toEqual([
+          {
+            href: "https://signed/new",
+            target: "_blank",
+            rel: "noopener noreferrer",
+          },
+        ]),
+      );
+      expect(trainingMaterialDownloadUrl).toHaveBeenCalledTimes(2);
+    } finally {
+      click.mockRestore();
+    }
+  });
+
   it("renews an expired training preview once without reusing the captured URL", async () => {
     useStudio.mockReturnValue(studio());
     trainingMaterialDownloadUrl

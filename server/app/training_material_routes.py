@@ -195,7 +195,7 @@ def _material_row(row: Any) -> dict[str, object]:
         "visible": bool(row["visible"]),
         "download_count": int(row["download_count"]),
         # _NamedRow 无 .get()；客户列表 SELECT * 不带创建者列，缺列回退空串。
-        "created_by": str(getattr(row, "created_by", "") or ""),
+        "created_by": str(row["created_by"] or "") if "created_by" in row.keys() else "",
         "created_at": _ts(row["created_at"]),
         "updated_at": _ts(row["updated_at"]),
     }
@@ -576,6 +576,7 @@ async def create_training_material(
             )
             return {"id": material_id, "request_id": request_id}
 
+        persisted = False
         try:
             contract = TrainingMaterialCreateContract(
                 title=clean_title,
@@ -590,7 +591,7 @@ async def create_training_material(
                 confirm=confirm,
                 reason=reason,
             )
-            return _write_with_idempotency(
+            result = _write_with_idempotency(
                 request,
                 response,
                 actor,
@@ -600,16 +601,17 @@ async def create_training_material(
                 unavailable_code=_UNAVAILABLE_CODE,
                 unavailable_message=_UNAVAILABLE_MESSAGE,
             )
-        except Exception:
-            # 业务失败（含指纹复核拒绝）：网盘侧留下无引用文件（唯一远端名，无污染），
-            # 按运维口径记日志人工清理，本期不做自动 GC（方案 §7.5）。
-            logger.warning(
-                "training material upload not persisted; "
-                "orphan remote file file_id=%s material_id=%s",
-                uploaded.file_id,
-                material_id,
-            )
-            raise
+            persisted = result.get("id") == material_id
+            return result
+        finally:
+            # 回放成功也没有引用本次新文件，与业务失败一并按 §7.5 留痕人工清理。
+            if not persisted:
+                logger.warning(
+                    "training material upload not persisted; "
+                    "orphan remote file file_id=%s material_id=%s",
+                    uploaded.file_id,
+                    material_id,
+                )
     finally:
         tmp_path.unlink(missing_ok=True)
 

@@ -2814,15 +2814,18 @@ export function MaterialsPage() {
   }
 
   async function download(item: TrainingMaterialPublicItem) {
-    const url = await ensurePreviewUrl(item);
+    const url = await ensurePreviewUrl(item, true);
     if (!url) return;
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `${item.title}${item.file_suffix}`;
-    anchor.rel = "noopener";
+    // 跨域直链可能按预览打开，新页兜底避免替换工作台；下载时始终重新签发。
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
+    notify("文件将在新窗口打开；若浏览器显示预览，请使用另存为保存。");
   }
 
   const items = data?.items ?? [];

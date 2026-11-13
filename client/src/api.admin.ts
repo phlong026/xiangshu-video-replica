@@ -1792,6 +1792,7 @@ export function uploadTrainingMaterial(input: {
     form.set("reason", input.reason);
     const request = new XMLHttpRequest();
     request.open("POST", `${apiBaseUrl()}/api/control/training-materials`);
+    request.withCredentials = true;
     request.timeout = 10 * 60 * 1000; // 200MB 上限按慢链路给足
     request.setRequestHeader(CSRF_HEADER, csrf);
     request.setRequestHeader(
