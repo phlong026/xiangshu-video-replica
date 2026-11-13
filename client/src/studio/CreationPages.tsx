@@ -173,6 +173,11 @@ const MIN_REPLICA_SOURCE_SECONDS = 4;
 const MAX_REPLICA_SOURCE_SECONDS = 15;
 const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
 
+// 改写原文上限（M5，与 POST /script-rewrite 的 422 校验、worker 复核同源）。
+// 提取无时长上限、改写限 20000 字符——原文面板必须把上限显式标出来，
+// 否则超长转写稿只会在生成按钮旁看到一个没有上下文的「不能超过 20000 字符」。
+const COPY_SOURCE_TEXT_LIMIT = 20000;
+
 // 清空页面与云端取消是两件事；只有服务端明确返回取消终态才可告知已取消。
 async function cancelPreviousAnalysisTask(taskId: string): Promise<string> {
   try {
@@ -773,7 +778,7 @@ export function CopyPage() {
             ? "请先选择参与二创的人物 IP。"
             : !copySource(state.draft)
               ? "请先提取待改写正文。"
-              : copySource(state.draft).length > 20000
+              : copySource(state.draft).length > COPY_SOURCE_TEXT_LIMIT
                 ? "待改写正文不能超过 20000 字符。"
                 : copyInstructions(state.draft).length > 2000
                   ? "本次改写要求不能超过 2000 字符。"
@@ -1071,13 +1076,24 @@ export function CopyPage() {
                 原文（提取自来源）
               </h2>
               {state.draft.script.original ? (
-                <textarea
-                  aria-label="来源原文"
-                  aria-describedby="copy-resize-hint"
-                  className="creation-textarea creation-source-textarea"
-                  readOnly
-                  value={state.draft.script.original}
-                />
+                <>
+                  <textarea
+                    aria-label="来源原文"
+                    aria-describedby="copy-resize-hint"
+                    className="creation-textarea creation-source-textarea"
+                    readOnly
+                    value={state.draft.script.original}
+                  />
+                  {/* M5：提取无时长上限、改写限 20000 字符——计数与超限提示
+                      放在原文旁边，别让用户到生成按钮旁才看到拒因。 */}
+                  <small aria-live="polite" className="copy-source-meta">
+                    {state.draft.script.original.length} /{" "}
+                    {COPY_SOURCE_TEXT_LIMIT} 字符
+                    {state.draft.script.original.length > COPY_SOURCE_TEXT_LIMIT
+                      ? "；超过改写上限，无法生成二创文案，请精简原文后重试。"
+                      : ""}
+                  </small>
+                </>
               ) : (
                 <Empty
                   title="尚未提取文案"

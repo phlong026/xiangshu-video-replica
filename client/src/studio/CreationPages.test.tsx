@@ -600,6 +600,29 @@ describe("V1.4 创作页面", () => {
     );
   });
 
+  it("原文面板展示改写字符上限计数（M5）", () => {
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+    // 默认原文「原始文案」4 字符：计数与上限并排展示。
+    expect(screen.getByText(/4\s*\/\s*20000\s*字符/)).toBeInTheDocument();
+  });
+
+  it("原文超过改写上限时给出超限提示且不能生成（M5）", () => {
+    const value = studio({ review: false });
+    value.state.draft = {
+      ...value.state.draft,
+      script: {
+        ...value.state.draft.script,
+        original: "超".repeat(20001),
+      },
+    };
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+    expect(screen.getByText(/超过改写上限/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成二创文案" })).toBeDisabled();
+  });
+
   it("解析文案项目没有来源视频，二创按纯文本提交且不带来源 ID", async () => {
     const value = studio({ review: false });
     value.state.draft = {

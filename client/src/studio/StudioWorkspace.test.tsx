@@ -2849,6 +2849,50 @@ describe("V1.4 workspace integration", () => {
       ).toBeInTheDocument();
     });
 
+    it("转写完成时已切换账号：费已花不能静默，提示回原账号取回（M3）", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const accountA = { ...reviewUser, id: "extract-account-a" };
+      const accountB = { ...reviewUser, id: "switch-account-b" };
+      let complete!: (value: unknown) => void;
+      live.awaitScriptFromAudioTask.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      const view = render(
+        <StudioWorkspace
+          currentUser={accountA}
+          initialState={createState("workbench")}
+        />,
+      );
+      act(() => {
+        currentExtractionContext().patchDraft({
+          projectId: "a",
+          sourceId: "a-asset",
+          sourceAssetId: "a-asset",
+        });
+        currentExtractionContext().extractScriptFromUpload(
+          "a",
+          "a-asset",
+          "a-task",
+        );
+      });
+      // 提交后切到账号 B（登出/切换账号场景）：转写费已产生在账号 A。
+      act(() => view.rerender(<StudioWorkspace currentUser={accountB} />));
+      await act(async () =>
+        complete({ text: "账号A的原文", taskId: "a-task" }),
+      );
+      // 正文不写入账号 B 的草稿（归属账号 A），且必须给出可执行的取回提示。
+      expect(currentExtractionContext().state.draft.script.original).not.toBe(
+        "账号A的原文",
+      );
+      expect(
+        await screen.findByText(/重新登录原账号后回到原视频/),
+      ).toBeInTheDocument();
+    });
+
     it("恢复任务正文为空时不回填草稿也不误报交付", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);

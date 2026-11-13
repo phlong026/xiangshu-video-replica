@@ -34,7 +34,15 @@ logger = logging.getLogger(__name__)
 
 
 class ConfirmedRewriteResponseError(HTTPException):
-    """A received supplier response is billable even when its text cannot be delivered."""
+    """供应商已确认受理并返回了响应（真实成本已产生），但响应不可交付.
+
+    计费语义（M6 对账口径，详见 docs/改写计费语义对账-2026-11-13.md）：
+    **客户全额退费**——``fail_script_rewrite_task`` 对本异常以
+    ``finish_source(units=0, succeeded=False)`` 结算，预留全额释放，客户
+    不承担任何费用；供应商成本**仅记在 attempt 层**
+    （``complete_source_attempt(usage=1)`` + external_calls 流水），不进入
+    客户账单。触码：DEEPSEEK_RESPONSE_INVALID / _TRUNCATED / _EMPTY。
+    """
 
 
 # DeepSeek 官方 OpenAI 兼容端点；config.base_url 可覆盖（例如代理/私有网关）。

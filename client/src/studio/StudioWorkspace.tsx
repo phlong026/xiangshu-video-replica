@@ -2218,10 +2218,15 @@ export function StudioWorkspace({
           // FIX-11：任务已被服务端受理、转写费已产生，用户此时切走不能静默丢弃结果。
           // 共享文案缓存退役后正文随本人任务直出，重试必成功——提示用户回原视频
           // 重新提取即可（新任务按本人计一次转写费，不再依赖免费 claim 取回）。
+          // M3：登出/切换账号同样不能静默——费已花在原账号上，提示回原账号取回。
+          setWalletRevision((value) => value + 1);
           if (saveAccountRef.current === extractionAccount) {
-            setWalletRevision((value) => value + 1);
             notify(
               "文案已提取完成，但你已切换到其他来源，未写入当前草稿；回到原视频再点「提取文案」即可取回。",
+            );
+          } else {
+            notify(
+              "转写任务已完成，但你已退出登录或切换了账号；重新登录原账号后回到原视频，再点「提取文案」即可取回。",
             );
           }
           return;
