@@ -62,6 +62,7 @@ from pg_test_kit import (
     upgrade_test_database_to_head,
 )
 
+from app import replica_pipeline as rp
 from app.auth import CurrentUser
 from app.db_portable import BusinessConnection
 from app.rbac_routes import delete_project
@@ -81,6 +82,12 @@ CW059_RBAC_DB_NAME = "cw059_rbac_test"
 # rows in place never blocks the rest of the reset.
 _CLEANUP_ORDER = (
     "audit_logs",
+    # M6b #2：删除保护扩展到在途 pipeline 与首帧任务后，场景重置也要清这些表
+    # （意图先于 pipeline；首帧/拆解先于 projects，保持叶→根顺序）。
+    "replica_pipeline_submit_intents",
+    "replica_pipeline_tasks",
+    "first_frame_tasks",
+    "analysis_tasks",
     "generation_tasks",
     "generation_batches",
     "projects",
@@ -91,8 +98,16 @@ _CLEANUP_ORDER = (
 # The status sets delete_project's has_active_tasks predicate treats as in-flight
 # (block) vs terminal (allow).  generation_tasks.status is an unconstrained text
 # column; these are the exact literals the production query and the fair-queue
-# counter (041_user_fair_queue) use.
-_ACTIVE_STATUSES = ("PENDING", "SUBMITTING", "QUEUED", "RUNNING", "ARCHIVING")
+# counter (041_user_fair_queue) use.  M6b #2 追加提交未知/待核对两态。
+_ACTIVE_STATUSES = (
+    "PENDING",
+    "SUBMITTING",
+    "QUEUED",
+    "RUNNING",
+    "ARCHIVING",
+    "SUBMISSION_UNCERTAIN",
+    "NEEDS_ATTENTION",
+)
 _TERMINAL_STATUSES = ("SUCCEEDED", "FAILED")
 
 
@@ -255,3 +270,153 @@ def test_pg_project_delete_allowed_once_generation_task_terminal(
         )
         == 1
     )
+
+
+# ---------------------------------------------------------------------------
+# M6b #2：删除保护扩展到在途 pipeline 与首帧任务（方案 §6 r2#5）
+# ---------------------------------------------------------------------------
+
+
+def _seed_pipeline(dsn: str, *, status: str) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO replica_pipeline_tasks (
+                id, owner_user_id, project_id, platform, video_id, request_hash,
+                status, stage, idempotency_key, next_poll_at, created_at, updated_at
+            ) VALUES (
+                'pipeline_1', 'user_1', 'proj_1', 'douyin', 'v1', 'pipeline-hash-1',
+                %s, 'initiated', 'pipeline-idem-1', now(), now(), now()
+            )
+            """,
+            (status,),
+        )
+
+
+def _seed_first_frame_task(dsn: str, *, status: str) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO first_frame_tasks (
+                id, created_by_user_id, project_id, idempotency_key, request_hash,
+                request_json, status
+            ) VALUES (
+                'ff_1', 'user_1', 'proj_1', 'ff-idem-1', 'ff-hash-1', '{}', %s
+            )
+            """,
+            (status,),
+        )
+
+
+@pytest.mark.parametrize(
+    "pipeline_status",
+    (
+        rp.STATUS_ENQUEUED,
+        rp.STATUS_GENERATING,
+        rp.STATUS_AWAIT_CONFIRM,
+        rp.STATUS_NEEDS_REVIEW,
+        rp.STATUS_DRAINING,
+    ),
+)
+def test_pg_project_delete_blocked_by_active_pipeline(rbac_dsn: str, pipeline_status: str) -> None:
+    """在途 pipeline 挡住物理删除：编排状态会因项目消失而悬空（方案 r2#5）."""
+    _reset_and_seed(rbac_dsn, task_status="SUCCEEDED")
+    _seed_pipeline(rbac_dsn, status=pipeline_status)
+
+    with pytest.raises(HTTPException) as exc:
+        with psycopg.connect(rbac_dsn) as raw:
+            delete_project(
+                project_id="proj_1",
+                conn=BusinessConnection.postgres(raw),
+                actor=_owner_actor(),
+            )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "PROJECT_DELETE_HAS_ACTIVE_TASKS"
+    assert _count(rbac_dsn, "SELECT COUNT(*) FROM projects WHERE id = %s", ("proj_1",)) == 1
+    assert (
+        _count(
+            rbac_dsn,
+            "SELECT COUNT(*) FROM replica_pipeline_tasks WHERE id = %s",
+            ("pipeline_1",),
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "pipeline_status",
+    (
+        rp.STATUS_FAILED,
+        rp.STATUS_CANCELLED,
+        rp.STATUS_EXPIRED,
+        rp.STATUS_DELIVERED,
+        rp.STATUS_DELIVERED_PARTIAL,
+        rp.STATUS_NEEDS_REVIEW_SETTLED,
+    ),
+)
+def test_pg_project_delete_allowed_after_pipeline_terminal(
+    rbac_dsn: str, pipeline_status: str
+) -> None:
+    """pipeline 收口/终态后放行；pipeline 行按方案 §3.1 保留审计与授权证据."""
+    _reset_and_seed(rbac_dsn, task_status="SUCCEEDED")
+    _seed_pipeline(rbac_dsn, status=pipeline_status)
+
+    with psycopg.connect(rbac_dsn) as raw:
+        response = delete_project(
+            project_id="proj_1",
+            conn=BusinessConnection.postgres(raw),
+            actor=_owner_actor(),
+        )
+
+    assert response.status_code == 204
+    assert _count(rbac_dsn, "SELECT COUNT(*) FROM projects WHERE id = %s", ("proj_1",)) == 0
+    # 无 FK：pipeline 行随项目删除保留（资金授权/审计证据）。
+    assert (
+        _count(
+            rbac_dsn,
+            "SELECT COUNT(*) FROM replica_pipeline_tasks WHERE id = %s",
+            ("pipeline_1",),
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("ff_status", ("PENDING", "RUNNING", "SUBMISSION_UNCERTAIN"))
+def test_pg_project_delete_blocked_by_open_first_frame_task(rbac_dsn: str, ff_status: str) -> None:
+    """首帧在途/提交未知挡住删除：级联删除会销毁已付费调用的结算依据."""
+    _reset_and_seed(rbac_dsn, task_status="SUCCEEDED")
+    _seed_first_frame_task(rbac_dsn, status=ff_status)
+
+    with pytest.raises(HTTPException) as exc:
+        with psycopg.connect(rbac_dsn) as raw:
+            delete_project(
+                project_id="proj_1",
+                conn=BusinessConnection.postgres(raw),
+                actor=_owner_actor(),
+            )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "PROJECT_DELETE_HAS_ACTIVE_TASKS"
+    assert _count(rbac_dsn, "SELECT COUNT(*) FROM projects WHERE id = %s", ("proj_1",)) == 1
+    assert _count(rbac_dsn, "SELECT COUNT(*) FROM first_frame_tasks WHERE id = %s", ("ff_1",)) == 1
+
+
+@pytest.mark.parametrize("ff_status", ("SUCCEEDED", "FAILED"))
+def test_pg_project_delete_allowed_after_first_frame_terminal(
+    rbac_dsn: str, ff_status: str
+) -> None:
+    """首帧收口后放行；首帧行随项目级联删除（结算已完成）."""
+    _reset_and_seed(rbac_dsn, task_status="SUCCEEDED")
+    _seed_first_frame_task(rbac_dsn, status=ff_status)
+
+    with psycopg.connect(rbac_dsn) as raw:
+        response = delete_project(
+            project_id="proj_1",
+            conn=BusinessConnection.postgres(raw),
+            actor=_owner_actor(),
+        )
+
+    assert response.status_code == 204
+    assert _count(rbac_dsn, "SELECT COUNT(*) FROM projects WHERE id = %s", ("proj_1",)) == 0
+    assert _count(rbac_dsn, "SELECT COUNT(*) FROM first_frame_tasks WHERE id = %s", ("ff_1",)) == 0

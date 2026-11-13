@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261112T1200_merge_training_pan123_pipeline"
+      "20261113T1000_replica_pipeline_submit_intents"
     ],
     "parents": {
       "001_core": null,
@@ -207,9 +207,10 @@
       "20261112T1200_merge_training_pan123_pipeline": [
         "20261112T0910_provider_runtime_state",
         "20261111T1000_uncertain_auto_reopen"
-      ]
+      ],
+      "20261113T1000_replica_pipeline_submit_intents": "20261112T1200_merge_training_pan123_pipeline"
     },
-    "revision_count": 185
+    "revision_count": 186
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -963,6 +964,10 @@
     "20261112T1200_merge_training_pan123_pipeline": {
       "file": "versions/20261112T1200_merge_training_pan123_pipeline.py",
       "sha256": "bd7a7fbf8bf34b41d86de88c03061e1947d6d1b286bb8caebbbc8e74a2d10fcd"
+    },
+    "20261113T1000_replica_pipeline_submit_intents": {
+      "file": "versions/20261113T1000_replica_pipeline_submit_intents.py",
+      "sha256": "b82a73a64b3b0f51b8ff1b4335a2a87171b3cc177af94bd4c9f007ff010b61fd"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

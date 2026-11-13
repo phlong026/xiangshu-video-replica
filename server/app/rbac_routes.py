@@ -728,31 +728,50 @@ def delete_project(
     # Paid provider calls may still be in flight for leased tasks; deleting the
     # project underneath them would lose their write-back, so require the
     # operator to wait until they settle (succeed, fail, or supersede).
+    #
+    # M6b #2（方案 §6 r2#5）：删除保护扩展到在途 pipeline、首帧任务与提交未知。
+    # 判定口径 = 「仍有后台付费敞口或结算依据可能被销毁」：
+    # - replica_pipeline_tasks 在途集合（ACTIVE_STATUSES，与状态机常量同源）；
+    # - 首帧任务 PENDING/RUNNING/SUBMISSION_UNCERTAIN（级联删除会销毁结算依据）；
+    # - 生成任务含 SUBMISSION_UNCERTAIN/NEEDS_ATTENTION（可能已发送、等待对账）；
+    # - 拆解任务 PENDING/RUNNING。
+    from app import replica_pipeline as _rp
+
+    _pipeline_active = ", ".join(f"'{value}'" for value in sorted(_rp.ACTIVE_STATUSES))
     has_active_tasks = conn.execute(
-        """
+        f"""
         SELECT 1 FROM (
+            SELECT project_id FROM replica_pipeline_tasks
+            WHERE project_id = %s AND status IN ({_pipeline_active})
+            UNION ALL
             SELECT generation_batches.project_id
             FROM generation_tasks
             JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
             WHERE generation_batches.project_id = %s
               AND generation_tasks.status IN
-                  ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
+                  ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING',
+                   'SUBMISSION_UNCERTAIN', 'NEEDS_ATTENTION')
             UNION ALL
             SELECT analysis_tasks.project_id
             FROM analysis_tasks
             WHERE analysis_tasks.project_id = %s
               AND analysis_tasks.status IN ('PENDING', 'RUNNING')
+            UNION ALL
+            SELECT first_frame_tasks.project_id
+            FROM first_frame_tasks
+            WHERE first_frame_tasks.project_id = %s
+              AND first_frame_tasks.status IN ('PENDING', 'RUNNING', 'SUBMISSION_UNCERTAIN')
         ) AS active_project_tasks
         LIMIT 1
         """,
-        (project_id, project_id),
+        (project_id, project_id, project_id, project_id),
     ).fetchone()
     if has_active_tasks:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "PROJECT_DELETE_HAS_ACTIVE_TASKS",
-                "message": "项目存在进行中的生成任务，请等待任务结束或失败后再删除。",
+                "message": "项目存在进行中或待核对的自动任务，请等待全部任务结束后再删除。",
             },
         )
 

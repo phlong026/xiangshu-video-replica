@@ -108,6 +108,27 @@ ACTIVE_STATUSES: frozenset[str] = (POLL_STATUSES - {STATUS_NEEDS_REVIEW_SETTLED}
 # 不进轮询（等待确认不占执行槽）。
 EXPIRE_SCAN_STATUSES: frozenset[str] = frozenset({STATUS_AWAIT_CONFIRM})
 
+# --------------------------------------------------------------- 发送意图（M6b）
+
+# 三个付费供应商域（方案 §6 三态证据表的域口径）。DDL CHECK 与本集合同源。
+INTENT_DOMAIN_ANALYSIS = "analysis"
+INTENT_DOMAIN_FIRST_FRAME = "first_frame"
+INTENT_DOMAIN_GENERATION = "generation"
+INTENT_DOMAINS: frozenset[str] = frozenset(
+    {INTENT_DOMAIN_ANALYSIS, INTENT_DOMAIN_FIRST_FRAME, INTENT_DOMAIN_GENERATION}
+)
+
+# 允许子任务提交的父编排状态集（方案 §6 提交许可谓词①）：
+# 推进态 + NEEDS_REVIEW（无 uncertain——既有授权内剩余排队任务必须继续提交
+# 才能收口）。DRAINING 不在集合：其剩余排队任务走主动取消而不是继续付费。
+SUBMIT_PERMIT_STATUSES: frozenset[str] = PROGRESS_STATUSES | {STATUS_NEEDS_REVIEW}
+
+# 子任务 → pipeline 引用列的固定映射（SQL 列名只来自本表，杜绝拼接注入）。
+_INTENT_SUBTASK_COLUMNS: dict[str, str] = {
+    INTENT_DOMAIN_ANALYSIS: "analysis_task_id",
+    INTENT_DOMAIN_FIRST_FRAME: "first_frame_task_id",
+}
+
 # --------------------------------------------------------------- 阶段
 
 STAGE_INITIATED = "initiated"
@@ -652,3 +673,100 @@ def require_pipeline_enabled(conn: BusinessConnection) -> None:
             "REPLICA_PIPELINE_DISABLED",
             "全自动复刻暂未开放。",
         )
+
+
+# ============================== M6b：提交点 fencing ============================
+
+
+def pipeline_id_for_sub_task(
+    conn: BusinessConnection, *, domain: str, sub_task_id: str
+) -> str | None:
+    """子任务 → 所属 pipeline（无归属返回 None，手工任务不经管线许可）.
+
+    生成域按 batch_id 归属：pipeline.batch_id 是受理时回填的批次引用；
+    子任务本身来自该批次。拆解/首帧直接按回填列匹配。
+    """
+    if domain == INTENT_DOMAIN_GENERATION:
+        task = conn.execute(
+            "SELECT batch_id FROM generation_tasks WHERE id = %s", (sub_task_id,)
+        ).fetchone()
+        if task is None or task["batch_id"] is None:
+            return None
+        column, value = "batch_id", str(task["batch_id"])
+    elif domain in _INTENT_SUBTASK_COLUMNS:
+        column, value = _INTENT_SUBTASK_COLUMNS[domain], sub_task_id
+    else:
+        raise ReplicaPipelineError(500, "REPLICA_INTENT_DOMAIN_INVALID", "发送意图域无效。")
+    row = conn.execute(
+        f"SELECT id FROM replica_pipeline_tasks WHERE {column} = %s "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (value,),
+    ).fetchone()
+    return str(row["id"]) if row is not None else None
+
+
+def issue_submit_intent(
+    conn: BusinessConnection,
+    *,
+    pipeline_id: str,
+    sub_task_id: str,
+    domain: str,
+    attempt: int,
+) -> bool:
+    """持父行锁签发/消费发送意图；返回 True 才允许发起供应商调用（方案 §6）.
+
+    线性化点语义：本函数返回并 COMMIT 之后，该次提交即视为「已受理」——
+    关闭/挂起/撤销在同一父行锁下发生，只能拦住尚未落意图的调用。因此
+    调用方必须在**真正发起供应商调用前**执行本函数，且不得在拒绝时调用。
+
+    幂等：同一 (pipeline, 子任务, 域, attempt) 重放返回 True（意图已在案），
+    不重复签发；不同 attempt 是新提交点。
+    """
+    if domain not in INTENT_DOMAINS:
+        raise ReplicaPipelineError(500, "REPLICA_INTENT_DOMAIN_INVALID", "发送意图域无效。")
+    # 先父后子：父行锁是关闭/挂起/撤销/恢复的同一把锁（方案 §5.3 固定锁序）。
+    row = conn.execute(
+        "SELECT status, suspended_at, stage_detail FROM replica_pipeline_tasks "
+        "WHERE id = %s FOR UPDATE",
+        (pipeline_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    status = str(row["status"])
+    if status not in SUBMIT_PERMIT_STATUSES:
+        return False
+    if row["suspended_at"] is not None:
+        return False
+    detail = row["stage_detail"] if isinstance(row["stage_detail"], dict) else {}
+    if detail.get("uncertain") is True:
+        return False
+    # 总开关关闭 = 一切付费动作不发生；与 mark_suspended 在同一父行锁下线性化。
+    if not pipeline_enabled(conn):
+        return False
+    conn.execute(
+        """
+        INSERT INTO replica_pipeline_submit_intents
+            (id, pipeline_id, sub_task_id, domain, attempt)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (pipeline_id, sub_task_id, domain, attempt) DO NOTHING
+        """,
+        (uuid.uuid4().hex, pipeline_id, sub_task_id, domain, attempt),
+    )
+    return True
+
+
+def has_submit_intent(
+    conn: BusinessConnection,
+    *,
+    pipeline_id: str,
+    sub_task_id: str,
+    domain: str,
+    attempt: int,
+) -> bool:
+    """三态证据查询：该提交点是否已有意图（删除保护/对账承接用）."""
+    row = conn.execute(
+        "SELECT 1 FROM replica_pipeline_submit_intents "
+        "WHERE pipeline_id = %s AND sub_task_id = %s AND domain = %s AND attempt = %s",
+        (pipeline_id, sub_task_id, domain, attempt),
+    ).fetchone()
+    return row is not None

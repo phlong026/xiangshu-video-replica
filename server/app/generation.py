@@ -5885,6 +5885,32 @@ def prepare_generation_submission(
     )
 
 
+def hold_generation_task_submission(conn: BusinessConnection, *, task_id: str) -> None:
+    """父编排挂起/止付：无发送意图的生成提交退回 PENDING（方案 §6 三态表）.
+
+    仅在 SUBMITTING 且尚无供应商回执时调用：不计费、不耗重试预算；
+    预占保留（在途资格不释放），开关恢复后重新领取再签发意图。
+    """
+    updated = conn.execute(
+        """
+        UPDATE generation_tasks
+        SET status = 'PENDING',
+            error_code = 'REPLICA_PIPELINE_SUSPENDED',
+            error_message_redacted = '全自动复刻已暂停，任务等待恢复。',
+            locked_by = NULL, locked_until = NULL,
+            next_poll_at = CURRENT_TIMESTAMP,
+            submitted_at = NULL, started_at = NULL, completed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND status = 'SUBMITTING' AND provider_task_id IS NULL
+        """,
+        (task_id,),
+    ).rowcount
+    if updated != 1:
+        conn.rollback()
+        raise RuntimeError("generation task submission was not in SUBMITTING state")
+    conn.commit()
+
+
 def mark_generation_task_running(
     conn: BusinessConnection,
     *,

@@ -806,6 +806,31 @@ def renew_image_task_lease(
         raise RuntimeError("image task lease was lost")
 
 
+def hold_first_frame_task_submission(conn: BusinessConnection, *, lease: ImageTaskLease) -> None:
+    """父编排挂起/止付：无发送意图的首帧提交退回 PENDING（方案 §6 三态表）.
+
+    不计费、不耗重试预算；开关恢复后下一次领取会重新签发意图。
+    仅管线驱动的首帧任务走本出口（手工任务无编排归属，直接放行）。
+    """
+    updated = conn.execute(
+        """
+        UPDATE first_frame_tasks
+        SET status = 'PENDING',
+            error_code = 'REPLICA_PIPELINE_SUSPENDED',
+            error_message_redacted = '全自动复刻已暂停，任务等待恢复。',
+            retryable = 1,
+            locked_by = NULL, locked_until = NULL,
+            completed_at = NULL, updated_at = %s
+        WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
+        """,
+        (_now_text(), lease.id, lease.worker_id, lease.attempt),
+    ).rowcount
+    if updated != 1:
+        conn.rollback()
+        raise RuntimeError("first-frame task lease was lost")
+    conn.commit()
+
+
 def record_image_task_provider(
     conn: BusinessConnection,
     *,
@@ -815,7 +840,6 @@ def record_image_task_provider(
     model: str,
 ) -> None:
     """Persist the selected provider before any paid image call can begin."""
-
     current = conn.execute(
         f"SELECT result_json FROM {table} WHERE id = %s AND status = 'RUNNING' AND "
         "locked_by = %s AND attempt = %s",

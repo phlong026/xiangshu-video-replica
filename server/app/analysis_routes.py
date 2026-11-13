@@ -1204,6 +1204,33 @@ def complete_analysis_task(
     conn.commit()
 
 
+def hold_analysis_task_submission(conn: BusinessConnection, *, lease: AnalysisTaskLease) -> None:
+    """父编排挂起/止付：无发送意图的拆解提交退回 PENDING（方案 §6 三态表）.
+
+    不计费、不耗重试预算；开关恢复后下一次领取会重新签发意图。
+    仅管线驱动的拆解任务走本出口（手工任务无编排归属，直接放行）。
+    """
+    now_text = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    updated = conn.execute(
+        """
+        UPDATE analysis_tasks
+        SET status = 'PENDING',
+            error_code = 'REPLICA_PIPELINE_SUSPENDED',
+            error_message_redacted = '全自动复刻已暂停，任务等待恢复。',
+            failure_phase = NULL,
+            retryable = 1,
+            locked_by = NULL, locked_until = NULL,
+            completed_at = NULL, updated_at = %s
+        WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
+        """,
+        (now_text, lease.id, lease.worker_id, lease.attempt),
+    ).rowcount
+    if updated != 1:
+        conn.rollback()
+        raise RuntimeError("analysis task lease was lost")
+    conn.commit()
+
+
 def fail_analysis_task(
     conn: BusinessConnection,
     *,

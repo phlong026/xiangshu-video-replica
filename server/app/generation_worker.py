@@ -20,6 +20,7 @@ from app.analysis_routes import (
     acquire_analysis_task,
     complete_analysis_task,
     fail_analysis_task,
+    hold_analysis_task_submission,
     perform_analysis_task,
     prepare_analysis_task,
 )
@@ -61,6 +62,7 @@ from app.generation import (
     fail_generation_reconcile_operation,
     finalize_generation_direct_result,
     h3_provider_for_task,
+    hold_generation_task_submission,
     is_submission_rejection,
     mark_generation_task_archiving,
     mark_generation_task_running,
@@ -82,6 +84,7 @@ from app.image_tasks import (
     complete_character_sheet_task,
     complete_first_frame_task,
     fail_image_task,
+    hold_first_frame_task_submission,
     log_image_task_failure,
     perform_character_sheet_task,
     prepare_character_sheet_task,
@@ -626,6 +629,20 @@ def run_worker_once(
                 return processed
         analysis_lease = acquire_analysis_task(conn, worker_id=worker_id)
         if analysis_lease is not None:
+            from app import replica_pipeline as _rp
+
+            if not _pipeline_submission_allowed(
+                conn,
+                domain=_rp.INTENT_DOMAIN_ANALYSIS,
+                sub_task_id=analysis_lease.id,
+                attempt=analysis_lease.attempt,
+            ):
+                hold_analysis_task_submission(conn, lease=analysis_lease)
+                processed += 1
+                processed_round = True
+                if max_tasks is not None and processed >= max_tasks:
+                    return processed
+                continue
             try:
                 analysis_work = prepare_analysis_task(
                     conn,
@@ -769,6 +786,20 @@ def run_worker_once(
                 return processed
         first_frame_lease = acquire_first_frame_task(conn, worker_id=worker_id)
         if first_frame_lease is not None:
+            from app import replica_pipeline as _rp
+
+            if not _pipeline_submission_allowed(
+                conn,
+                domain=_rp.INTENT_DOMAIN_FIRST_FRAME,
+                sub_task_id=first_frame_lease.id,
+                attempt=first_frame_lease.attempt,
+            ):
+                hold_first_frame_task_submission(conn, lease=first_frame_lease)
+                processed += 1
+                processed_round = True
+                if max_tasks is not None and processed >= max_tasks:
+                    return processed
+                continue
             submission_started = False
             stored = None
             work = None
@@ -954,6 +985,29 @@ def _run_pg_generation_step(
             )
         return
     elif status == "SUBMITTING":
+        # M6b #1：付费提交前签发发送意图（父行锁内线性化）；无意图不得调用供应商。
+        from app import replica_pipeline as _rp
+
+        with pg_transaction() as raw_conn:
+            fence_conn = BusinessConnection.postgres(raw_conn)
+            fence_pipeline_id = _rp.pipeline_id_for_sub_task(
+                fence_conn,
+                domain=_rp.INTENT_DOMAIN_GENERATION,
+                sub_task_id=task_id,
+            )
+            fence_allowed = fence_pipeline_id is None or _rp.issue_submit_intent(
+                fence_conn,
+                pipeline_id=fence_pipeline_id,
+                sub_task_id=task_id,
+                domain=_rp.INTENT_DOMAIN_GENERATION,
+                attempt=int(lease["attempt"]),
+            )
+        if not fence_allowed:
+            with pg_transaction() as raw_conn:
+                hold_generation_task_submission(
+                    BusinessConnection.postgres(raw_conn), task_id=task_id
+                )
+            return
         try:
             with pg_transaction() as raw_conn:
                 conn = BusinessConnection.postgres(raw_conn)
@@ -1510,6 +1564,32 @@ def run_pg_worker_once(
             conn = BusinessConnection.postgres(raw_conn)
             analysis_lease = acquire_analysis_task(conn, worker_id=worker_id)
         if analysis_lease is not None:
+            from app import replica_pipeline as _rp
+
+            with pg_transaction() as raw_conn:
+                fence_conn = BusinessConnection.postgres(raw_conn)
+                fence_pipeline_id = _rp.pipeline_id_for_sub_task(
+                    fence_conn,
+                    domain=_rp.INTENT_DOMAIN_ANALYSIS,
+                    sub_task_id=analysis_lease.id,
+                )
+                fence_allowed = fence_pipeline_id is None or _rp.issue_submit_intent(
+                    fence_conn,
+                    pipeline_id=fence_pipeline_id,
+                    sub_task_id=analysis_lease.id,
+                    domain=_rp.INTENT_DOMAIN_ANALYSIS,
+                    attempt=analysis_lease.attempt,
+                )
+            if not fence_allowed:
+                with pg_transaction() as raw_conn:
+                    hold_analysis_task_submission(
+                        BusinessConnection.postgres(raw_conn), lease=analysis_lease
+                    )
+                processed += 1
+                processed_round = True
+                if max_tasks is not None and processed >= max_tasks:
+                    return processed
+                continue
             analysis_cost_id = ""
             analysis_cost_usage: float | None = None
 
@@ -1766,6 +1846,32 @@ def run_pg_worker_once(
                 BusinessConnection.postgres(raw_conn), worker_id=worker_id
             )
         if first_frame_lease is not None:
+            from app import replica_pipeline as _rp
+
+            with pg_transaction() as raw_conn:
+                fence_conn = BusinessConnection.postgres(raw_conn)
+                fence_pipeline_id = _rp.pipeline_id_for_sub_task(
+                    fence_conn,
+                    domain=_rp.INTENT_DOMAIN_FIRST_FRAME,
+                    sub_task_id=first_frame_lease.id,
+                )
+                fence_allowed = fence_pipeline_id is None or _rp.issue_submit_intent(
+                    fence_conn,
+                    pipeline_id=fence_pipeline_id,
+                    sub_task_id=first_frame_lease.id,
+                    domain=_rp.INTENT_DOMAIN_FIRST_FRAME,
+                    attempt=first_frame_lease.attempt,
+                )
+            if not fence_allowed:
+                with pg_transaction() as raw_conn:
+                    hold_first_frame_task_submission(
+                        BusinessConnection.postgres(raw_conn), lease=first_frame_lease
+                    )
+                processed += 1
+                processed_round = True
+                if max_tasks is not None and processed >= max_tasks:
+                    return processed
+                continue
             submission_started = False
             stored = None
             work = None
@@ -2055,6 +2161,32 @@ def _drive_replica_pipeline(conn: BusinessConnection, lease: object) -> str:
     from app.replica_pipeline_stages import drive_pipeline_once
 
     return drive_pipeline_once(conn, lease)  # type: ignore[arg-type]
+
+
+def _pipeline_submission_allowed(
+    conn: BusinessConnection, *, domain: str, sub_task_id: str, attempt: int
+) -> bool:
+    """提交点 fencing（M6b #1）：有编排归属时持父行锁签发发送意图.
+
+    返回 True 才允许发起供应商调用。无编排归属（手工任务）直接放行。
+    意图落库与父行锁在同一事务：关闭/挂起/撤销在同一把锁下发生，只能拦住
+    尚未落意图的新增付费调用（方案 §6 线性化点）。
+    """
+    from app import replica_pipeline as rp
+
+    pipeline_id = rp.pipeline_id_for_sub_task(conn, domain=domain, sub_task_id=sub_task_id)
+    if pipeline_id is None:
+        conn.commit()
+        return True
+    allowed = rp.issue_submit_intent(
+        conn,
+        pipeline_id=pipeline_id,
+        sub_task_id=sub_task_id,
+        domain=domain,
+        attempt=attempt,
+    )
+    conn.commit()
+    return allowed
 
 
 def sweep_replica_pipelines(

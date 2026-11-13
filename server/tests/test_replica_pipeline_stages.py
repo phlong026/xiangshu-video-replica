@@ -352,6 +352,69 @@ def test_analysis_success_advances_to_script(
     assert detail.get("shotCardVersionId") == "shot-1"
 
 
+def test_resume_consumes_analysis_completed_during_suspension(
+    biz: BusinessConnection, _stub_domains: dict[str, Any]
+) -> None:
+    """挂起期间子任务完成 → 重开恢复 → 编排消费产物断点续跑（M6b #3）.
+
+    验收口径（方案 §5.3/§9）：挂起不清空已落库产物；恢复后按子任务引用的
+    result_version_id 继续推进，不产生孤儿引用，也不重复付费。
+    """
+    import json as _json
+
+    biz.execute("DELETE FROM replica_pipeline_tasks")
+    pipeline_id = _seed_pipeline(biz, status=rp.STATUS_ANALYZING, slot="susp-ana")
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET analysis_task_id = 'ana-susp',"
+        " suspended_at = now() - interval '5 minutes' WHERE id = %s",
+        (pipeline_id,),
+    )
+    # 子任务在挂起窗口内完成并落库版本（产物已在版本链中）。
+    biz.execute(
+        "INSERT INTO versions (id, project_id, asset_id, kind, version_number, "
+        "payload_json, created_by_user_id) VALUES (%s, %s, NULL, 'analysis', 1, %s, %s) "
+        "ON CONFLICT (id) DO NOTHING",
+        (
+            "ana-susp-ver",
+            "p-susp-ana",
+            _json.dumps({"analysis": {"original_script": "挂起期间完成"}}),
+            "u-susp-ana",
+        ),
+    )
+    biz.execute(
+        "INSERT INTO versions (id, project_id, asset_id, kind, version_number, "
+        "payload_json, created_by_user_id) VALUES (%s, %s, NULL, 'shot_card', 2, %s, %s) "
+        "ON CONFLICT (id) DO NOTHING",
+        (
+            "shot-susp",
+            "p-susp-ana",
+            _json.dumps({"source_analysis_version_id": "ana-susp-ver", "shots": []}),
+            "u-susp-ana",
+        ),
+    )
+    # 开关重开：清挂起屏障并重设轮询（累计挂起时长）。
+    rp.resume_from_suspension(biz, pipeline_id)
+    biz.commit()
+    _stub_domains["sub_status"] = {
+        ("analysis_tasks", "ana-susp"): (
+            "SUCCEEDED",
+            {"result_version_id": "ana-susp-ver", "error_code": None, "retryable": 0},
+        )
+    }
+    lease = _acquire(biz, slot="susp-ana")
+    assert stages.run_pipeline_stage(biz, lease).kind == "advanced"
+    row = biz.execute(
+        "SELECT status, suspended_at, stage_detail FROM replica_pipeline_tasks WHERE id = %s",
+        (pipeline_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == rp.STATUS_SCRIPT_VERSIONING
+    assert row["suspended_at"] is None
+    detail = row["stage_detail"] if isinstance(row["stage_detail"], dict) else {}
+    assert detail.get("analysisVersionId") == "ana-susp-ver"
+    assert detail.get("shotCardVersionId") == "shot-susp"
+
+
 def test_script_bridge_uses_original_script(
     biz: BusinessConnection, _stub_domains: dict[str, Any]
 ) -> None:

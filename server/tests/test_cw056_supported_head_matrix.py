@@ -107,8 +107,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261016T1000_replica_prompt_tasks（长视频复刻提示词任务族）追加其上；
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
-# 列）追加其上，故链尾为该值。
-HEAD_REVISION = "20261112T1200_merge_training_pan123_pipeline"
+# 列）追加其上；20261113T1000_replica_pipeline_submit_intents（M6b 发送意图
+# 表）再追加，故链尾为该值。
+HEAD_REVISION = "20261113T1000_replica_pipeline_submit_intents"
 
 
 @pytest.mark.pg
@@ -433,19 +434,24 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 与 last_seen_not_before_created CHECK（text 时间戳，timestamptz 计数不变），
 # 故 columns +1、check_constraints +1，表名集与其余计数不变；digest 在空库
 # →新 head 的 PG16 探针库（cw056_probe）重算。
+# 2026-11-13 M6b 发送意图：replica_pipeline_submit_intents（pipeline/子任务/
+# 域/attempt 唯一约束 + 域 CHECK + 两个普通索引），故 tables/primary_keys/
+# unique_constraints 各 +1、columns +6、check_constraints +1、
+# timestamptz_columns +1（created_at）；digest 在空库→新 head 的 PG16 探针
+# 库（m6b_schema_probe）重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 408,
-    "columns": 1575,
+    "check_constraints": 409,
+    "columns": 1581,
     "foreign_keys": 221,
     "identity_columns": 0,
     "jsonb_columns": 16,
     "partial_indexes": 48,
-    "primary_keys": 138,
+    "primary_keys": 139,
     "sequences": 8,
-    "tables": 138,
-    "timestamptz_columns": 130,
+    "tables": 139,
+    "timestamptz_columns": 131,
     "triggers": 61,
-    "unique_constraints": 44,
+    "unique_constraints": 45,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -555,6 +561,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "publish_browser_accounts",
     "publish_browser_logins",
     "publish_records",
+    "replica_pipeline_submit_intents",
     "replica_pipeline_tasks",
     "replica_prompt_tasks",
     "recharge_orders",
@@ -707,7 +714,8 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "7788846ef63af0c63bedd13270e98afa22925f552fa130ef9f3f69b350fb3e3f"
+# 2026-11-13 M6b 发送意图表追加后，在空库→新 head 的 PG16 探针库再重算。
+HEAD_SCHEMA_DIGEST = "621c790357b434a1e94a7dee59e4c6dc394fd9ebf705788284023a693d4baa16"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

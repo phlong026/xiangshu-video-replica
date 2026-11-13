@@ -111,6 +111,8 @@ CW030_DB_NAME = "cw030_worker_matrix_test"
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 
 _MATRIX_CLEANUP_ORDER = (
+    "replica_pipeline_submit_intents",
+    "replica_pipeline_tasks",
     "viral_copy_upload_receipts",
     "viral_keyword_runs",
     "viral_content_usage_events",
@@ -3977,3 +3979,129 @@ def test_followup_concurrent_private_sources_have_one_reserved_task_and_reuse_re
     resumed = _enqueue_registered_copy(pg_state, sources[1], key="new-key-with-receipt")
     assert resumed["id"] == tasks[0]["id"] and resumed["provider_task_id"] == "known-receipt"
     assert _one(pg_state, "SELECT count(*) FROM billing_operations WHERE service='asr'") == 1
+
+
+# ---------------------------------------------------------------------------
+# M6b #1：首帧 worker 提交点 fencing（方案 §6「发送意图落库」线性化点）
+# ---------------------------------------------------------------------------
+
+
+def _seed_pipeline_for_first_frame(dsn: str) -> None:
+    """在途 pipeline 指向 ff-1；next_poll_at 推远，只验证 worker 侧提交拦截."""
+    _exec(
+        dsn,
+        "INSERT INTO replica_pipeline_tasks ("
+        " id, owner_user_id, project_id, platform, video_id, request_hash,"
+        " status, stage, idempotency_key, next_poll_at, created_at, updated_at,"
+        " first_frame_task_id"
+        ") VALUES ("
+        " 'pipe-1', 'u1', 'proj-1', 'douyin', 'v1', 'pipeline-hash-1',"
+        " 'FIRST_FRAMING', 'first_frame', 'pipeline-idem-1',"
+        " now() + interval '1 hour', now(), now(), 'ff-1'"
+        ")",
+    )
+
+
+def test_first_frame_pipeline_fence_holds_when_switch_off(pg_state: str) -> None:
+    """总开关关闭：已入队首帧任务被领取后不得发起供应商调用，退回 PENDING."""
+    _seed_base(pg_state)
+    _seed_image_task(pg_state, table="first_frame_tasks", task_id="ff-1")
+    _seed_pipeline_for_first_frame(pg_state)
+
+    _run_worker("worker-fence-off")
+
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code, locked_by FROM first_frame_tasks WHERE id = 'ff-1'",
+    )[0]
+    assert row["status"] == "PENDING"
+    assert row["error_code"] == "REPLICA_PIPELINE_SUSPENDED"
+    assert row["locked_by"] is None
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0
+
+
+def test_first_frame_pipeline_fence_issues_intent_when_switch_on(pg_state: str) -> None:
+    """总开关开启：意图先落库（linearization point），随后才允许准备供应商调用."""
+    _seed_base(pg_state)
+    _exec(pg_state, "UPDATE runtime_settings SET replica_pipeline_enabled = true")
+    _seed_image_task(pg_state, table="first_frame_tasks", task_id="ff-1")
+    _seed_pipeline_for_first_frame(pg_state)
+
+    _run_worker("worker-fence-on")
+
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 1
+    intent = _rows(
+        pg_state,
+        "SELECT pipeline_id, sub_task_id, domain, attempt FROM replica_pipeline_submit_intents",
+    )[0]
+    assert intent["pipeline_id"] == "pipe-1"
+    assert intent["sub_task_id"] == "ff-1"
+    assert intent["domain"] == "first_frame"
+    assert int(intent["attempt"]) == 1
+
+
+def test_generation_pipeline_fence_holds_when_switch_off(pg_state: str) -> None:
+    """总开关关闭：已入队生成任务不得发起供应商调用，退回 PENDING 保留预占."""
+    _seed_base(pg_state)
+    _seed_generation_task(pg_state, task_id="gen-1", user_id="u1")
+    _exec(
+        pg_state,
+        "INSERT INTO replica_pipeline_tasks ("
+        " id, owner_user_id, project_id, platform, video_id, request_hash,"
+        " status, stage, idempotency_key, next_poll_at, created_at, updated_at, batch_id"
+        ") VALUES ("
+        " 'pipe-gen-1', 'u1', 'proj-1', 'douyin', 'v1', 'pipeline-hash-1',"
+        " 'GENERATING', 'generate', 'pipeline-idem-gen-1',"
+        " now() + interval '1 hour', now(), now(), 'batch-gen-1'"
+        ")",
+    )
+
+    _run_worker("worker-gen-fence-off")
+
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code FROM generation_tasks WHERE id = 'gen-1'",
+    )[0]
+    assert row["status"] == "PENDING"
+    assert row["error_code"] == "REPLICA_PIPELINE_SUSPENDED"
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0
+
+
+def test_analysis_pipeline_fence_holds_when_switch_off(pg_state: str) -> None:
+    """总开关关闭：已入队拆解任务不得发起供应商调用，退回 PENDING."""
+    _seed_base(pg_state)
+    _exec(
+        pg_state,
+        "INSERT INTO assets ("
+        " id, project_id, kind, storage_uri, sha256, size_bytes, content_type,"
+        " created_by_user_id"
+        ") VALUES ('asset-ref', 'proj-1', 'reference_video',"
+        " 'fake://sf-uploads/reference.mp4', '" + "b" * 64 + "', 9, 'video/mp4', 'u1')",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO analysis_tasks(id,project_id,asset_id,created_by_user_id,"
+        "duration_seconds,status) VALUES('an-1','proj-1','asset-ref','u1',4,'PENDING')",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO replica_pipeline_tasks ("
+        " id, owner_user_id, project_id, platform, video_id, request_hash,"
+        " status, stage, idempotency_key, next_poll_at, created_at, updated_at,"
+        " analysis_task_id"
+        ") VALUES ("
+        " 'pipe-an-1', 'u1', 'proj-1', 'douyin', 'v1', 'pipeline-hash-1',"
+        " 'ANALYZING', 'analyze', 'pipeline-idem-an-1',"
+        " now() + interval '1 hour', now(), now(), 'an-1'"
+        ")",
+    )
+
+    _run_worker("worker-an-fence-off")
+
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code FROM analysis_tasks WHERE id = 'an-1'",
+    )[0]
+    assert row["status"] == "PENDING"
+    assert row["error_code"] == "REPLICA_PIPELINE_SUSPENDED"
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0

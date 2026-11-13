@@ -99,6 +99,9 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 路由层专用库（test_replica_pipeline_routes.py）：端点注册/总开关/
         # 人物预检归属链。
         "rplc_pipeline_routes_test",
+        # 发送意图（M6b #1）专用库（test_replica_pipeline_intents.py）：
+        # 提交许可谓词/幂等签发/子任务归属解析。
+        "rplc_pipeline_intents_test",
         # Existing business fixtures using W13 routine admin sessions.
         "t09_admin_session_test",
         "t12_admin_activation_test",
