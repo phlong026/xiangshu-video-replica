@@ -15,6 +15,15 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# 登录/会话链路依赖一组 HMAC/AEAD 密钥，缺任一即 503（fail-closed）。
+# 开发密钥放在根目录 .env.dev.local（.gitignore 的 .env.* 规则已忽略，不入库）；
+# 文件不存在只影响登录等功能，服务本身仍可启动。文件里的显式导出优先于本文件。
+if [ -f "$SCRIPT_DIR/../.env.dev.local" ]; then
+  set -a
+  . "$SCRIPT_DIR/../.env.dev.local"
+  set +a
+fi
+
 # 确保 pg-fixture 运行（幂等）
 echo "[dev-with-pg] Ensuring PostgreSQL fixture is running..."
 "$SCRIPT_DIR/pg-fixture.sh" start
