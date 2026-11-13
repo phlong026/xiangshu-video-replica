@@ -222,6 +222,9 @@ FAILURE_RUNBOOK: dict[str, str] = {
         "全自动复刻已暂停，任务会在总开关恢复后自动继续；无需人工处理。"
         "若长时间未恢复，请检查全自动复刻总开关是否开启。"
     ),
+    "REPLICA_PIPELINE_DRAIN_CANCELLED": (
+        "复刻任务已取消，未产生供应商调用、费用已全额释放；如仍需结果请重新发起。"
+    ),
 }
 
 
@@ -335,6 +338,8 @@ FAILURE_CLASSIFICATION: dict[str, tuple[FailureCategory, FailureOwner]] = {
     "DIAGNOSTIC_INTERNAL_ERROR": ("DEFECT", "ENGINEERING"),
     # 止付挂起是流程状态，不是故障；运营确认总开关即可。
     "REPLICA_PIPELINE_SUSPENDED": ("NOT_A_FAILURE", "OPS"),
+    # DRAINING 收口取消同样无损失：未外呼、预占已释放；客服引导客户重新发起即可。
+    "REPLICA_PIPELINE_DRAIN_CANCELLED": ("NOT_A_FAILURE", "SUPPORT"),
 }
 
 

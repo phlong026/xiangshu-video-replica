@@ -73,6 +73,14 @@ def upgrade() -> None:
 def downgrade() -> None:
     if op.get_bind().dialect.name != "postgresql":
         return
+    # 意图是资金授权与审计证据（方案 §6，无 FK 保留策略）：表非空时拒绝降级，
+    # 防止降一版就永久销毁证据。确需销毁必须先完成可核验的归档再手动清表。
+    row = op.get_bind().execute("SELECT 1 FROM replica_pipeline_submit_intents LIMIT 1").fetchone()
+    if row is not None:
+        raise RuntimeError(
+            "replica_pipeline_submit_intents 非空，拒绝 downgrade："
+            "发送意图是资金授权与审计证据，销毁前必须先完成可核验归档。"
+        )
     op.drop_index(
         "ix_replica_pipeline_submit_intents_subtask",
         table_name="replica_pipeline_submit_intents",

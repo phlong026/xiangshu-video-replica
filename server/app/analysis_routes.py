@@ -869,6 +869,8 @@ def acquire_analysis_task(
             FROM analysis_tasks
             WHERE status = 'PENDING'
               AND (error_code IS NOT NULL OR failure_phase IS NOT NULL)
+              -- M6b：fencing hold 标记不是失败残留，不归档不清除（挂起期间保持）。
+              AND (error_code IS DISTINCT FROM 'REPLICA_PIPELINE_SUSPENDED')
             ORDER BY created_at, id
             LIMIT 1
             FOR UPDATE
@@ -911,6 +913,9 @@ def acquire_analysis_task(
             WHERE id = (
                 SELECT id FROM analysis_tasks
                 WHERE status = 'PENDING'
+                  -- M6b/Codex r-P1：fencing hold 的任务被父编排挂起，排除领取
+                  -- 防热循环烧 attempt；开关恢复由 resume_from_suspension 清标记。
+                  AND (error_code IS DISTINCT FROM 'REPLICA_PIPELINE_SUSPENDED')
                 ORDER BY created_at, id
                 LIMIT 1
             ) AND status = 'PENDING'
@@ -1228,6 +1233,37 @@ def hold_analysis_task_submission(conn: BusinessConnection, *, lease: AnalysisTa
     if updated != 1:
         conn.rollback()
         raise RuntimeError("analysis task lease was lost")
+    conn.commit()
+
+
+def cancel_analysis_task_on_drain(conn: BusinessConnection, *, lease: AnalysisTaskLease) -> None:
+    """父编排进入 DRAINING/终态：无意图的确定未发送任务直接终态并释放预占.
+
+    方案 §6 r6#3（Codex r-P1）：hold 语义只服务可恢复的挂起；DRAINING 的
+    排队任务若仍回 PENDING，观察收口会把它当未收口，在途资格与预占永久
+    占用。终态 + 零单位结算（预占释放）让观察轮询可以落终态。
+    """
+    now_text = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    updated = conn.execute(
+        """
+        UPDATE analysis_tasks
+        SET status = 'FAILED',
+            error_code = 'REPLICA_PIPELINE_DRAIN_CANCELLED',
+            error_message_redacted = '全自动复刻任务已取消，本次不再执行；可重新发起。',
+            failure_phase = NULL,
+            retryable = 0,
+            locked_by = NULL, locked_until = NULL,
+            completed_at = %s, updated_at = %s
+        WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
+        """,
+        (now_text, now_text, lease.id, lease.worker_id, lease.attempt),
+    ).rowcount
+    if updated != 1:
+        conn.rollback()
+        raise RuntimeError("analysis task lease was lost")
+    from app.usage_billing import finish_source
+
+    finish_source(conn, lease.id, units=0, succeeded=False)
     conn.commit()
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 
 from app.db_portable import (
@@ -638,7 +638,9 @@ def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> None:
     """总开关重开：累计挂起时长、清挂起起点、重设轮询时间（方案 §3.2.3）.
 
     挂起产物的版本链恢复在 M6 的受保护恢复事务中执行（r3#5/r5#6）；此处
-    只负责行级挂起属性的清算。
+    负责行级挂起属性的清算，并把本管线被 fencing 拦下的任务重新开放领取
+    （Codex r-P1：hold 打的 REPLICA_PIPELINE_SUSPENDED 标记会被领取谓词
+    排除——不清掉，开关恢复后任务永远不可领取）。
     """
     conn.execute(
         """
@@ -650,6 +652,36 @@ def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> None:
             next_poll_at = now(),
             updated_at = now()
         WHERE id = %s AND suspended_at IS NOT NULL
+        """,
+        (pipeline_id,),
+    )
+    conn.execute(
+        """
+        UPDATE first_frame_tasks SET error_code = NULL,
+            error_message_redacted = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+          AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
+                      WHERE p.first_frame_task_id = first_frame_tasks.id AND p.id = %s)
+        """,
+        (pipeline_id,),
+    )
+    conn.execute(
+        """
+        UPDATE analysis_tasks SET error_code = NULL,
+            error_message_redacted = NULL, updated_at = %s
+        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+          AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
+                      WHERE p.analysis_task_id = analysis_tasks.id AND p.id = %s)
+        """,
+        (datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"), pipeline_id),
+    )
+    conn.execute(
+        """
+        UPDATE generation_tasks SET error_code = NULL,
+            error_message_redacted = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+          AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
+                      WHERE p.batch_id = generation_tasks.batch_id AND p.id = %s)
         """,
         (pipeline_id,),
     )
@@ -673,6 +705,14 @@ def require_pipeline_enabled(conn: BusinessConnection) -> None:
             "REPLICA_PIPELINE_DISABLED",
             "全自动复刻暂未开放。",
         )
+
+
+def pipeline_status_of(conn: BusinessConnection, pipeline_id: str) -> str | None:
+    """读父编排当前状态（fencing 拒绝分支区分 hold / DRAINING 收口取消用）."""
+    row = conn.execute(
+        "SELECT status FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    return str(row["status"]) if row is not None else None
 
 
 # ============================== M6b：提交点 fencing ============================
@@ -705,6 +745,28 @@ def pipeline_id_for_sub_task(
     return str(row["id"]) if row is not None else None
 
 
+def _pipeline_generation_uncertain(conn: BusinessConnection, pipeline_id: str) -> bool:
+    """生成域提交未知/待核对的**签发侧实时复核**（Codex r-P1）.
+
+    父行 ``stage_detail.uncertain`` 由编排轮询延迟写入：某任务进入
+    SUBMISSION_UNCERTAIN 后、父标志落库前，同批次其他任务仍可能签发意图
+    继续付费。签发侧直接按关联批次任务行的真实状态判定，不依赖延迟标志。
+    """
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM replica_pipeline_tasks p
+        JOIN generation_tasks t ON t.batch_id = p.batch_id
+        WHERE p.id = %s AND p.batch_id IS NOT NULL
+          AND (t.status IN ('SUBMISSION_UNCERTAIN', 'NEEDS_ATTENTION')
+               OR t.error_code = 'LEASE_EXPIRED_NEEDS_ATTENTION')
+        LIMIT 1
+        """,
+        (pipeline_id,),
+    ).fetchone()
+    return row is not None
+
+
 def issue_submit_intent(
     conn: BusinessConnection,
     *,
@@ -718,6 +780,11 @@ def issue_submit_intent(
     线性化点语义：本函数返回并 COMMIT 之后，该次提交即视为「已受理」——
     关闭/挂起/撤销在同一父行锁下发生，只能拦住尚未落意图的调用。因此
     调用方必须在**真正发起供应商调用前**执行本函数，且不得在拒绝时调用。
+
+    总开关的线性化论证（Codex r-P1 评审闭环）：挂起写点（mark_suspended 的
+    pipeline UPDATE）会阻塞在本函数持有的父行锁上，因此「关闭先提交、
+    签发后落地」不可能——settings 的 ON 读必然发生在挂起提交之前，本次
+    签发按设计线性化在挂起之前，属「意图已落库视为已受理」的许可语义。
 
     幂等：同一 (pipeline, 子任务, 域, attempt) 重放返回 True（意图已在案），
     不重复签发；不同 attempt 是新提交点。
@@ -739,6 +806,10 @@ def issue_submit_intent(
         return False
     detail = row["stage_detail"] if isinstance(row["stage_detail"], dict) else {}
     if detail.get("uncertain") is True:
+        return False
+    # 生成域签发侧实时复核（Codex r-P1）：父 uncertain 标志由编排轮询延迟
+    # 写入，不能作为止付依据——直接查关联批次任务行的真实状态。
+    if domain == INTENT_DOMAIN_GENERATION and _pipeline_generation_uncertain(conn, pipeline_id):
         return False
     # 总开关关闭 = 一切付费动作不发生；与 mark_suspended 在同一父行锁下线性化。
     if not pipeline_enabled(conn):

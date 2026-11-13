@@ -2271,7 +2271,16 @@ export function StudioWorkspace({
       .catch((cause: unknown) => {
         extractingRef.current = false;
         endCopyExtractionProgress();
-        if (!scopeStillCurrent()) return;
+        if (!scopeStillCurrent()) {
+          // M3/Codex r-P2：切账号后轮询用当前账号令牌，读原账号任务会鉴权失败
+          // 落进本分支——费已花在原账号，同样不能静默，给出回原账号取回的指引。
+          if (saveAccountRef.current !== extractionAccount) {
+            notify(
+              "转写任务未确认完成，但你已退出登录或切换了账号；重新登录原账号后回到原视频，再点「提取文案」即可取回。",
+            );
+          }
+          return;
+        }
         setWalletRevision((value) => value + 1);
         notify(
           customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),

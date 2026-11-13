@@ -5588,6 +5588,9 @@ def _acquire_fair_queue_lease(
                     )
                     AND (t.locked_until IS NULL OR t.locked_until::timestamptz <= now())
                     AND {eligible_task_sql(conn, "t")}
+                    -- M6b/Codex r-P1：fencing hold 的任务被父编排挂起，排除领取
+                    -- 防热循环与槽位抖动；开关恢复由 resume_from_suspension 清标记。
+                    AND (t.error_code IS DISTINCT FROM 'REPLICA_PIPELINE_SUSPENDED')
                     AND (t.next_poll_at IS NULL OR t.next_poll_at::timestamptz <= now())
                     AND EXISTS (
                         SELECT 1
@@ -5682,6 +5685,8 @@ def _acquire_global_fifo_lease(
                     OR locked_until::timestamptz <= now()
                 )
                 AND {eligible_task_sql(conn, "generation_tasks")}
+                -- M6b/Codex r-P1：fencing hold 的任务被父编排挂起，排除领取。
+                AND (error_code IS DISTINCT FROM 'REPLICA_PIPELINE_SUSPENDED')
                 AND (next_poll_at IS NULL OR next_poll_at::timestamptz <= now())
                 AND NOT EXISTS (
                     SELECT 1
@@ -5885,11 +5890,16 @@ def prepare_generation_submission(
     )
 
 
-def hold_generation_task_submission(conn: BusinessConnection, *, task_id: str) -> None:
+def hold_generation_task_submission(conn: BusinessConnection, *, lease: dict[str, Any]) -> None:
     """父编排挂起/止付：无发送意图的生成提交退回 PENDING（方案 §6 三态表）.
 
     仅在 SUBMITTING 且尚无供应商回执时调用：不计费、不耗重试预算；
     预占保留（在途资格不释放），开关恢复后重新领取再签发意图。
+
+    - CAS 绑定 ``locked_by``/``attempt``（Codex r-P1：失租旧 worker 的迟到
+      hold 不得清掉新 worker 的租约，否则提交中的任务被重复排队）；
+    - 同事务归还公平队列槽（Codex r-P1：一次拒绝若不还槽，用户槽位恒为 1，
+      开关恢复后也无法再领取）；GREATEST 守卫使重复释放无害。
     """
     updated = conn.execute(
         """
@@ -5902,12 +5912,14 @@ def hold_generation_task_submission(conn: BusinessConnection, *, task_id: str) -
             submitted_at = NULL, started_at = NULL, completed_at = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = %s AND status = 'SUBMITTING' AND provider_task_id IS NULL
+          AND locked_by = %s AND attempt = %s
         """,
-        (task_id,),
+        (str(lease["id"]), str(lease["locked_by"]), int(lease["attempt"])),
     ).rowcount
     if updated != 1:
         conn.rollback()
-        raise RuntimeError("generation task submission was not in SUBMITTING state")
+        raise RuntimeError("generation task submission lease was lost")
+    release_user_queue_slot_for_task(conn, task_id=str(lease["id"]))
     conn.commit()
 
 

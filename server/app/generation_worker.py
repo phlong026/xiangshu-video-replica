@@ -18,6 +18,7 @@ from app import content_store
 from app.analysis import VideoAnalysisProvider
 from app.analysis_routes import (
     acquire_analysis_task,
+    cancel_analysis_task_on_drain,
     complete_analysis_task,
     fail_analysis_task,
     hold_analysis_task_submission,
@@ -81,6 +82,7 @@ from app.hifly import HiflyClient, HiflySettingsUnavailable, hifly_client_from_s
 from app.image_tasks import (
     acquire_character_sheet_task,
     acquire_first_frame_task,
+    cancel_first_frame_task_on_drain,
     complete_character_sheet_task,
     complete_first_frame_task,
     fail_image_task,
@@ -590,6 +592,10 @@ def run_worker_once(
                 return processed
         generation_handled = False
         try:
+            # 注意（Codex r-P3 闭环）：本循环是已退役的 SQLite 车道（CW-042-b），
+            # 生产 PG 入口只走 run_pg_worker_once → _run_pg_generation_step（已接
+            # M6b 发送意图 fencing）。此处的生成提交不经 fencing 是车道退役的
+            # 既有事实，不是缺口；如复活本车道必须先补 fencing。
             generation_handled = (
                 run_next_generation_task(
                     conn,
@@ -1004,9 +1010,7 @@ def _run_pg_generation_step(
             )
         if not fence_allowed:
             with pg_transaction() as raw_conn:
-                hold_generation_task_submission(
-                    BusinessConnection.postgres(raw_conn), task_id=task_id
-                )
+                hold_generation_task_submission(BusinessConnection.postgres(raw_conn), lease=lease)
             return
         try:
             with pg_transaction() as raw_conn:
@@ -1581,10 +1585,17 @@ def run_pg_worker_once(
                     attempt=analysis_lease.attempt,
                 )
             if not fence_allowed:
+                # fence_allowed=False 蕴含 fence_pipeline_id 非空（无归属任务直接放行）。
+                assert fence_pipeline_id is not None
                 with pg_transaction() as raw_conn:
-                    hold_analysis_task_submission(
-                        BusinessConnection.postgres(raw_conn), lease=analysis_lease
-                    )
+                    fence_conn = BusinessConnection.postgres(raw_conn)
+                    fence_parent = _rp.pipeline_status_of(fence_conn, fence_pipeline_id)
+                    # DRAINING/终态：无意图=确定未发送，直接终态释放预占（r6#3）；
+                    # 挂起：hold 等开关恢复。
+                    if fence_parent == _rp.STATUS_DRAINING or fence_parent in _rp.TERMINAL_STATUSES:
+                        cancel_analysis_task_on_drain(fence_conn, lease=analysis_lease)
+                    else:
+                        hold_analysis_task_submission(fence_conn, lease=analysis_lease)
                 processed += 1
                 processed_round = True
                 if max_tasks is not None and processed >= max_tasks:
@@ -1863,10 +1874,17 @@ def run_pg_worker_once(
                     attempt=first_frame_lease.attempt,
                 )
             if not fence_allowed:
+                # fence_allowed=False 蕴含 fence_pipeline_id 非空（无归属任务直接放行）。
+                assert fence_pipeline_id is not None
                 with pg_transaction() as raw_conn:
-                    hold_first_frame_task_submission(
-                        BusinessConnection.postgres(raw_conn), lease=first_frame_lease
-                    )
+                    fence_conn = BusinessConnection.postgres(raw_conn)
+                    fence_parent = _rp.pipeline_status_of(fence_conn, fence_pipeline_id)
+                    # DRAINING/终态：无意图=确定未发送，直接终态释放预占（r6#3）；
+                    # 挂起：hold 等开关恢复。
+                    if fence_parent == _rp.STATUS_DRAINING or fence_parent in _rp.TERMINAL_STATUSES:
+                        cancel_first_frame_task_on_drain(fence_conn, lease=first_frame_lease)
+                    else:
+                        hold_first_frame_task_submission(fence_conn, lease=first_frame_lease)
                 processed += 1
                 processed_round = True
                 if max_tasks is not None and processed >= max_tasks:

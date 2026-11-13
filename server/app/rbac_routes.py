@@ -725,6 +725,11 @@ def delete_project(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="project.delete")
 
+    # M6b/Codex r-P1：先锁项目行再查在途——入队/重生成按全局锁序先锁 projects，
+    # 删除也先锁同一行，使「读到 NEEDS_REVIEW_SETTLED → 并发重生成转 GENERATING →
+    # 删除级联清掉批次」的检查后删除竞态被串行化（复查与删除同事务）。
+    conn.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE", (project_id,))
+
     # Paid provider calls may still be in flight for leased tasks; deleting the
     # project underneath them would lose their write-back, so require the
     # operator to wait until they settle (succeed, fail, or supersede).
