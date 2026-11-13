@@ -157,6 +157,38 @@ impl ViralCache {
             .and_then(|map| map.get(&key.storage_id()).map(|e| e.progress.clone()))
     }
 
+    /// 单个 key 的状态判定：文件系统是唯一真源；内存视图只承载本进程的活跃任务。
+    ///
+    /// M4（2026-11-13）：文件缺失且内存无条目 = 本进程从未登记过任务（典型是
+    /// 重启后的孤儿）——此前兜底返回 Queued，会让前端按「排队中」假活轮询
+    /// 300 秒；现在直接判 Failed 并提示重新下载。
+    fn resolve_status(&self, key: &CacheKey) -> CacheProgress {
+        let final_path = self.video_path(key);
+        if final_path.is_file() {
+            let bytes = std::fs::metadata(&final_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            return CacheProgress {
+                platform: key.platform.clone(),
+                video_id: key.video_id.clone(),
+                state: CacheState::Cached,
+                downloaded_bytes: bytes,
+                total_bytes: Some(bytes),
+                speed_bytes_per_second: 0,
+                error: None,
+            };
+        }
+        self.status_of(key).unwrap_or(CacheProgress {
+            platform: key.platform.clone(),
+            video_id: key.video_id.clone(),
+            state: CacheState::Failed,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bytes_per_second: 0,
+            error: Some("应用重启导致缓存任务中断，请重新下载。".to_string()),
+        })
+    }
+
     fn remember(&self, progress: CacheProgress) {
         let started_at = self
             .statuses
@@ -618,6 +650,17 @@ pub async fn viral_cache_ensure(
         statuses: cache.statuses.clone(),
     };
     let key = CacheKey { platform, video_id };
+    // M4：入队即同步登记内存条目（在 spawn 之前），保证 ensure 返回后的立即
+    // 查询看到真实 Queued，而不会把「尚无条目」误判成重启孤儿。
+    cache.remember(CacheProgress {
+        platform: key.platform.clone(),
+        video_id: key.video_id.clone(),
+        state: CacheState::Queued,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        speed_bytes_per_second: 0,
+        error: None,
+    });
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = ensure(&owned, &app_handle, key, url, decode_key).await;
@@ -633,32 +676,7 @@ pub fn viral_cache_status(
 ) -> Vec<CacheProgress> {
     items
         .into_iter()
-        .map(|key| {
-            let final_path = cache.video_path(&key);
-            if final_path.is_file() {
-                let bytes = std::fs::metadata(&final_path)
-                    .map(|meta| meta.len())
-                    .unwrap_or(0);
-                return CacheProgress {
-                    platform: key.platform.clone(),
-                    video_id: key.video_id.clone(),
-                    state: CacheState::Cached,
-                    downloaded_bytes: bytes,
-                    total_bytes: Some(bytes),
-                    speed_bytes_per_second: 0,
-                    error: None,
-                };
-            }
-            cache.status_of(&key).unwrap_or(CacheProgress {
-                platform: key.platform,
-                video_id: key.video_id,
-                state: CacheState::Queued,
-                downloaded_bytes: 0,
-                total_bytes: None,
-                speed_bytes_per_second: 0,
-                error: None,
-            })
-        })
+        .map(|key| cache.resolve_status(&key))
         .collect()
 }
 
@@ -1054,5 +1072,80 @@ mod tests {
     #[test]
     fn eviction_plan_handles_empty_cache() {
         assert!(eviction_plan(&[], 10, &HashSet::new()).is_empty());
+    }
+
+    // ---- M4：状态判定自愈（文件系统真源 + 内存视图孤儿判定）----
+
+    fn status_test_cache(name: &str) -> ViralCache {
+        let root = std::env::temp_dir().join(format!(
+            "viral-cache-status-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp cache root");
+        ViralCache::new(root)
+    }
+
+    #[test]
+    fn restart_orphan_resolves_to_failed_not_fake_queued() {
+        // 重启后内存为空、文件也不存在：不再谎报 Queued（前端会假活轮询 300s），
+        // 直接判 Failed 并提示重新下载。
+        let cache = status_test_cache("orphan");
+        let key = CacheKey {
+            platform: "wechat_channels".into(),
+            video_id: "orphan-1".into(),
+        };
+        let progress = cache.resolve_status(&key);
+        assert_eq!(progress.state, CacheState::Failed);
+        assert!(progress
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("重新下载"));
+    }
+
+    #[test]
+    fn freshly_enqueued_entry_still_reports_queued() {
+        // ensure 命令在 spawn 前同步登记 Queued：入队后的立即查询必须仍是
+        // Queued，不能被孤儿判定误伤。
+        let cache = status_test_cache("queued");
+        let key = CacheKey {
+            platform: "douyin".into(),
+            video_id: "fresh-1".into(),
+        };
+        cache.remember(CacheProgress {
+            platform: key.platform.clone(),
+            video_id: key.video_id.clone(),
+            state: CacheState::Queued,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bytes_per_second: 0,
+            error: None,
+        });
+        assert_eq!(cache.resolve_status(&key).state, CacheState::Queued);
+    }
+
+    #[test]
+    fn cached_file_beats_stale_memory_entry() {
+        // 文件系统是唯一真源：即使内存残留 Failed，文件存在即 Cached。
+        let cache = status_test_cache("cached");
+        let key = CacheKey {
+            platform: "douyin".into(),
+            video_id: "done-1".into(),
+        };
+        cache.remember(CacheProgress {
+            platform: key.platform.clone(),
+            video_id: key.video_id.clone(),
+            state: CacheState::Failed,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bytes_per_second: 0,
+            error: Some("旧失败".into()),
+        });
+        let final_path = cache.video_path(&key);
+        std::fs::create_dir_all(final_path.parent().expect("parent")).expect("create platform dir");
+        std::fs::write(&final_path, b"payload").expect("write cached file");
+        let progress = cache.resolve_status(&key);
+        assert_eq!(progress.state, CacheState::Cached);
+        assert_eq!(progress.downloaded_bytes, 7);
     }
 }
