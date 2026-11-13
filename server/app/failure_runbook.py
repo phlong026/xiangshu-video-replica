@@ -217,6 +217,11 @@ FAILURE_RUNBOOK: dict[str, str] = {
     "DIAGNOSTIC_INTERNAL_ERROR": (
         "连接测试发生内部错误。重试；仍失败请下载诊断日志并检查服务端日志。"
     ),
+    # ---- 全自动复刻编排（M6b 止付挂起）----
+    "REPLICA_PIPELINE_SUSPENDED": (
+        "全自动复刻已暂停，任务会在总开关恢复后自动继续；无需人工处理。"
+        "若长时间未恢复，请检查全自动复刻总开关是否开启。"
+    ),
 }
 
 
@@ -328,6 +333,8 @@ FAILURE_CLASSIFICATION: dict[str, tuple[FailureCategory, FailureOwner]] = {
     "ZPAY_MISSING_FIELDS": ("CONFIG", "ENGINEERING"),
     "ZPAY_INVALID_AMOUNT": ("CONFIG", "ENGINEERING"),
     "DIAGNOSTIC_INTERNAL_ERROR": ("DEFECT", "ENGINEERING"),
+    # 止付挂起是流程状态，不是故障；运营确认总开关即可。
+    "REPLICA_PIPELINE_SUSPENDED": ("NOT_A_FAILURE", "OPS"),
 }
 
 
