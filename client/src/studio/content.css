@@ -513,6 +513,8 @@
    在素材库场景常显为文档流内的信息块。 */
 .content-asset-grid .content-asset__quick {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
   position: static;
 }
 .content-asset__quick button {
