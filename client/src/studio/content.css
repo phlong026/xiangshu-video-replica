@@ -507,6 +507,14 @@
 .content-asset-cell:focus-within .content-asset__quick {
   display: flex;
 }
+/* 素材库网格（.content-asset-grid）没有 .content-asset-cell 这个 hover 容器，
+   quick 信息块（标题/描述/标签，无媒体封面时的卡片主体）若沿用上面的
+   hover-only 规则会永久 display:none，卡片只剩 footer 按钮。这里让它
+   在素材库场景常显为文档流内的信息块。 */
+.content-asset-grid .content-asset__quick {
+  display: flex;
+  position: static;
+}
 .content-asset__quick button {
   background: rgba(23, 26, 33, 0.86);
   border: 0;
