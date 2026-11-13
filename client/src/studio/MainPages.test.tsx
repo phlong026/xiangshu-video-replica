@@ -27,7 +27,6 @@ type WorkbenchUploadResult = {
 const {
   useStudio,
   loadTaskPreview,
-  saveTaskPreview,
   uploadWorkbenchSourceVideo,
   readVideoDuration,
   studioVideoFromViral,
@@ -54,7 +53,6 @@ const {
 } = vi.hoisted(() => ({
   useStudio: vi.fn<() => StudioContextValue>(),
   loadTaskPreview: vi.fn(),
-  saveTaskPreview: vi.fn(),
   uploadWorkbenchSourceVideo:
     vi.fn<
       (
@@ -132,7 +130,6 @@ vi.mock("../api", async (importOriginal) => ({
 }));
 vi.mock("./live", () => ({
   loadTaskPreview,
-  saveTaskPreview,
   uploadWorkbenchSourceVideo,
   readVideoDuration,
   studioVideoFromViral,
@@ -480,64 +477,6 @@ describe("V1.4 任务详情真实成片预览", () => {
     );
   });
 
-  it.each([false, true])(
-    "任务轮询不清除直出预览，归档后才可发布（响应丢失=%s）",
-    async (responseLost) => {
-      const asset: StudioAsset = {
-        id: "direct-task-result-a",
-        name: "直出成片",
-        kind: "video",
-        url: "/signed/direct-a",
-        group: "任务结果",
-        source: "任务中心",
-        saved: false,
-        generationTaskId: "provider-result-a",
-      };
-      let value = studio();
-      useStudio.mockImplementation(() => value);
-      loadTaskPreview.mockResolvedValue(asset);
-      const view = render(<TaskDetailPage />);
-      await waitFor(() => expect(value.updateData).toHaveBeenCalledOnce());
-      const update = vi.mocked(value.updateData).mock.calls[0][0];
-      value = { ...value, data: update(value.data) };
-      view.rerender(<TaskDetailPage />);
-      const video = view.container.querySelector("video");
-      expect(video).not.toBeNull();
-      value = { ...value, data: { ...value.data, tasks: [{ ...taskA }] } };
-      view.rerender(<TaskDetailPage />);
-      expect(view.container.querySelector("video")).toBe(video);
-      expect(screen.getByRole("button", { name: "查看素材" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "去发布管理" })).toBeDisabled();
-      saveTaskPreview.mockResolvedValue({
-        ...asset,
-        id: "saved-result",
-        saved: true,
-      });
-      if (responseLost) {
-        saveTaskPreview.mockRejectedValueOnce(new Error("保存结果暂未确认"));
-        loadTaskPreview.mockResolvedValueOnce({
-          ...asset,
-          id: "saved-result",
-          saved: true,
-        });
-      }
-      fireEvent.click(screen.getByRole("button", { name: "保存到素材库" }));
-      expect(
-        await screen.findByRole("button", { name: "正在保存成片…" }),
-      ).toBeDisabled();
-      await waitFor(() =>
-        expect(
-          screen.getByRole("button", { name: "去发布管理" }),
-        ).toBeEnabled(),
-      );
-      expect(saveTaskPreview).toHaveBeenCalledWith(asset);
-      fireEvent.click(screen.getByRole("button", { name: "去发布管理" }));
-      expect(value.navigate).toHaveBeenCalledWith("publishing", {
-        selectedAssetId: "saved-result",
-      });
-    },
-  );
-
   it("后台归档后轮询得到的新资产取代已加载的供应商直链", async () => {
     const direct: StudioAsset = {
       id: "direct-task-old-result",
@@ -584,7 +523,8 @@ describe("V1.4 任务详情真实成片预览", () => {
       "src",
       archived.url,
     );
-    expect(screen.getByRole("button", { name: "查看素材" })).toBeEnabled();
+    // IA 改版第 5 项：素材库换源后「查看素材」入口下线；归档成片仍可直接去发布。
+    expect(screen.queryByRole("button", { name: "查看素材" })).toBeNull();
     expect(screen.getByRole("button", { name: "去发布管理" })).toBeEnabled();
   });
 
@@ -778,52 +718,6 @@ describe("V1.4 任务详情真实成片预览", () => {
 
     expect(await screen.findByText("状态待确认")).toBeInTheDocument();
     expect(loadTaskPreview).not.toHaveBeenCalled();
-  });
-
-  it("直链成片提醒及时保存；保存时发现直链已失效则改为「文件已失效」（FIX-02）", async () => {
-    const direct: StudioAsset = {
-      id: "direct-task-a",
-      name: "张工建房预算 · 首个可用结果",
-      kind: "video",
-      url: "https://provider.example/a.mp4",
-      group: "任务结果",
-      source: "任务中心",
-      saved: false,
-      generationTaskId: "provider-result-a",
-      delivery: "direct",
-    };
-    let value = studio();
-    useStudio.mockImplementation(() => value);
-    loadTaskPreview.mockResolvedValue(direct);
-    const view = render(<TaskDetailPage />);
-    await waitFor(() => expect(value.updateData).toHaveBeenCalledOnce());
-    const update = vi.mocked(value.updateData).mock.calls[0][0];
-    value = { ...value, data: update(value.data) };
-    view.rerender(<TaskDetailPage />);
-    expect(
-      screen.getByText(/链接可能存在有效期，请尽快下载到本地/),
-    ).toBeVisible();
-
-    saveTaskPreview.mockRejectedValueOnce(
-      Object.assign(
-        new Error("成片文件已失效：生成服务提供的下载链接已过期。"),
-        {
-          code: "RESULT_URL_EXPIRED",
-          status: 410,
-        },
-      ),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "保存到素材库" }));
-    expect(
-      await screen.findByText(
-        /成片文件已失效：生成服务提供的下载链接已过期，无法再预览/,
-      ),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "保存到素材库" }),
-    ).not.toBeInTheDocument();
-    // 失效后不再反复重新读取预览。
-    expect(loadTaskPreview).toHaveBeenCalledTimes(1);
   });
 
   it("审核示例不请求真实预览接口", () => {

@@ -95,29 +95,54 @@ class ScriptFromAudioTaskResponse(BaseModel):
     completed_at: str | None
 
 
-def _legacy_cache_artifact(row: BusinessRow) -> bool:
-    """2026-11-11 之前「共享缓存命中秒回」任务：正文来自别人的转写、本人未付 ASR.
+# 归档指纹同样存在于真实生产任务，只能结合结算依据判定旧正文权益。
+# 保持任务响应和提取历史共用同一谓词；无结算证明的共享命中仍不下发正文。
+LEGACY_SCRIPT_TEXT_ACCESS_SQL = """(
+    NOT (t.request_json::jsonb ? 'viral_archive_sha256')
+    OR EXISTS (
+        SELECT 1 FROM billing_operations b
+        WHERE b.service='asr' AND b.source_id=t.id
+          AND b.user_id=t.created_by_user_id AND b.state='SUCCEEDED'
+    )
+    OR EXISTS (
+        SELECT 1 FROM billing_operations b
+        WHERE b.service='viral_copy' AND b.state='SUCCEEDED'
+          AND b.source_id = 'viral-copy:' ||
+              COALESCE((SELECT parent_user_id FROM users WHERE id=t.created_by_user_id),
+                       t.created_by_user_id) || ':' ||
+              (t.request_json::jsonb->'viral_source'->>0) || ':' ||
+              (t.request_json::jsonb->'viral_source'->>1)
+    )
+)"""
 
-    旧报告层用 claim 交付闸门向本人收交付费；claim 端点已退役为 410，若仍让
-    这类任务的正文随响应直出，等于对未付费产出开放免费正文（Codex S 级评审
-    阻塞 2）。凭据标记是旧入队时才写入的 ``viral_archive_sha256``——新链路
-    只写 viral_source 归因，因此该标记是精确的历史判别位。
-    """
+
+def _legacy_cache_artifact(row: BusinessRow, conn: BusinessConnection | None = None) -> bool:
+    """只隐藏没有本人转写结算或旧交付购买凭据的历史共享正文。"""
     try:
         payload = json.loads(str(row["request_json"] or "{}"))
     except (ValueError, TypeError):
         return False
-    return isinstance(payload, dict) and "viral_archive_sha256" in payload
+    if not isinstance(payload, dict) or "viral_archive_sha256" not in payload:
+        return False
+    if conn is None:
+        return True
+    entitled = conn.execute(
+        "SELECT 1 FROM script_from_audio_tasks t WHERE t.id=%s AND "
+        + LEGACY_SCRIPT_TEXT_ACCESS_SQL,
+        (row["id"],),
+    ).fetchone()
+    return entitled is None
 
 
-def script_from_audio_task_response(row: BusinessRow) -> ScriptFromAudioTaskResponse:
+def script_from_audio_task_response(
+    row: BusinessRow, *, conn: BusinessConnection | None = None
+) -> ScriptFromAudioTaskResponse:
     result_json = row["result_json"]
     result: ScriptFromAudioResult | None = None
     if result_json is not None:
         payload = json.loads(str(result_json))
-        # 历史缓存命中任务的正文不下发（见 _legacy_cache_artifact）：重新提取
-        # 会走新链路、按本人真实转写计费。
-        text = None if _legacy_cache_artifact(row) else str(payload.get("text", ""))
+        # 历史已结算成果继续交付；不能要求已付费用户重新转写。
+        text = None if _legacy_cache_artifact(row, conn) else str(payload.get("text", ""))
         result = ScriptFromAudioResult(
             text=text,
             duration_sec=(

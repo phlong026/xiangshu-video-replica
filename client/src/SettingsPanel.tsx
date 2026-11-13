@@ -224,6 +224,17 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
       { name: "agent_id", label: "会话 ID（浏览器地址栏 /chat/ 后一段）" },
     ],
   },
+  pan123: {
+    title: "培训素材存储",
+    note: "工作台素材库（培训视频与文档）的存储通道。上传后素材一经入库即绑定当前网盘账号，不支持更换；测试连接会上传一个临时探针文件，校验上传、直链防盗链签名与清理全链路。",
+    fields: [
+      { name: "client_id", label: "Client ID" },
+      { name: "client_secret", label: "Client Secret", secret: true },
+      { name: "uid", label: "直链鉴权 UID" },
+      { name: "sign_secret", label: "直链鉴权密钥", secret: true },
+      { name: "folder_id", label: "素材文件夹 ID" },
+    ],
+  },
 };
 
 const PROVIDER_ORDER: ProviderName[] = [
@@ -237,6 +248,7 @@ const PROVIDER_ORDER: ProviderName[] = [
   "douyidou",
   "yuanbao",
   "ses",
+  "pan123",
 ];
 
 export function SettingsPanel(props: SettingsPanelProps) {
@@ -909,7 +921,7 @@ function RuntimeForm({
       </div>
       <p className="storage-provider-hint">
         人物图片、参考视频与首帧保存到腾讯云存储（需在桶 CORS 放行
-        PUT/GET/HEAD，否则上传失败）；生成的成片可在任务结果中保存到素材库，或下载到本机。
+        PUT/GET/HEAD，否则上传失败）；生成的成片可在任务结果中直接下载到本机留存。
       </p>
       {runtime.active_storage_provider === "local" ? (
         <div>

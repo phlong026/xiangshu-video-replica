@@ -39,7 +39,7 @@ def extract_script_from_audio(
             source_asset_id=request.source_asset_id,
             idempotency_key=request.idempotency_key or str(uuid4()),
         )
-        return script_from_audio_task_response(row)
+        return script_from_audio_task_response(row, conn=conn)
 
 
 @router.get(
@@ -58,7 +58,7 @@ def read_script_from_audio_task(
         project_id=str(row["project_id"]),
         action="project.script_from_audio_read",
     )
-    return script_from_audio_task_response(row)
+    return script_from_audio_task_response(row, conn=conn)
 
 
 @router.get(
@@ -77,4 +77,4 @@ def read_latest_script_from_audio_task(
         action="project.script_from_audio_read",
     )
     row = latest_script_from_audio_task(conn, project_id=project_id)
-    return None if row is None else script_from_audio_task_response(row)
+    return None if row is None else script_from_audio_task_response(row, conn=conn)

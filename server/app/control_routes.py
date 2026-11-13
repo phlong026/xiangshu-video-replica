@@ -57,10 +57,13 @@ from app.security_rate_limit import (
     rate_limit_window_seconds,
 )
 from app.settings import (
+    PAN123_PROVIDER_NAME,
     ProviderName,
     ProviderTester,
     ProviderTestResult,
     SettingsRepository,
+    enable_pan123_direct_link_after_save,
+    enforce_pan123_config_guard,
     get_provider_tester,
     merge_provider_config,
     remove_cos_lifecycle_rules,
@@ -555,6 +558,9 @@ def _update_control_provider_settings_business(
         repo = SettingsRepository(conn)
         current = repo.load_provider_config(provider_name)
         merged = merge_provider_config(current, config)
+        if provider_name == PAN123_PROVIDER_NAME:
+            # 护栏：有素材行禁换账号 + 同事务原子清共享 token（统一锁同键幂等重取）。
+            enforce_pan123_config_guard(conn, merged)
         saved = repo.save_provider_config(
             provider_name,
             merged,
@@ -575,6 +581,23 @@ def _update_control_provider_settings_business(
             "request_id": request_id,
         },
     )
+    if provider_name == PAN123_PROVIDER_NAME:
+        # 跟随 cos lifecycle 先例：保存事务内幂等开通直链空间，失败不阻断。
+        direct_link = enable_pan123_direct_link_after_save(
+            merged, repo.provider_config_version(PAN123_PROVIDER_NAME), connection=conn
+        )
+        write_audit(
+            conn,
+            actor=actor,
+            action=f"pan123_direct_link.{direct_link['status']}",
+            entity_type="provider_settings",
+            entity_id=PAN123_PROVIDER_NAME,
+            metadata={
+                "status": direct_link["status"],
+                "reason": reason.strip(),
+                "request_id": request_id,
+            },
+        )
     if provider_name == "cos":
         lifecycle = remove_cos_lifecycle_rules(merged, actor_id=actor.id)
         write_audit(

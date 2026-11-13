@@ -66,6 +66,7 @@ def test_routes_registered_on_main_app() -> None:
 
     paths = app.openapi()["paths"]
     assert "post" in paths["/api/viral/replica-pipelines"]
+    assert "get" in paths["/api/viral/replica-pipelines/active"]
     assert "get" in paths["/api/viral/replica-pipelines/{pipeline_id}"]
     for suffix in ("confirm", "cancel", "regenerate", "accept-partial"):
         entry = paths[f"/api/viral/replica-pipelines/{{pipeline_id}}/{suffix}"]
@@ -211,3 +212,33 @@ def test_initiate_wires_authoritative_character_check() -> None:
     # 开关检查必须在异常映射内（422 而非 500，评审 B-r2#3/B-r3#3）。
     enabled_block = source.split("require_pipeline_enabled", 1)[0]
     assert enabled_block.count("try:") >= 1
+
+
+def test_active_lookup_is_owner_and_video_scoped(biz: BusinessConnection) -> None:
+    """重进页面只找回本账号本视频在途任务，不暴露他人任务或重放旧终态。"""
+    from app.auth import CurrentUser
+    from app.replica_pipeline_routes import find_active_replica_pipeline
+
+    for owner, video, key in [("lookup-owner", "v1", "a"), ("lookup-other", "v1", "b")]:
+        _seed_user(biz, owner)
+        rp.enqueue_replica_pipeline(
+            biz,
+            owner_user_id=owner,
+            platform="douyin",
+            video_id=video,
+            character_version_id="cv",
+            idempotency_key=f"lookup-key-{key}",
+            request_hash=key,
+            pipeline_id=f"lookup-{owner}",
+        )
+    actor = CurrentUser(
+        id="lookup-owner", username="lookup-owner", display_name="测试", role="customer"
+    )
+    found = find_active_replica_pipeline("douyin", "v1", biz, actor)
+    assert found["pipelineId"] == "lookup-lookup-owner"
+    assert find_active_replica_pipeline("xiaohongshu", "v1", biz, actor) == {"pipelineId": None}
+    assert find_active_replica_pipeline("douyin", "v2", biz, actor) == {"pipelineId": None}
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET status = 'FAILED' WHERE owner_user_id = %s", (actor.id,)
+    )
+    assert find_active_replica_pipeline("douyin", "v1", biz, actor) == {"pipelineId": None}

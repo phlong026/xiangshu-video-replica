@@ -226,6 +226,99 @@ def test_viral_media_key_naming() -> None:
     assert viral_media_key("wechat_channels", "v2", "video") == ("viral/wechat_channels/v2.mp4")
 
 
+@pytest.mark.parametrize("prefer", ["video", "audio"])
+def test_cached_video_without_source_link_remains_playable_and_transcribable(monkeypatch, prefer):
+    from app.storage import FakeStorageAdapter
+
+    storage = FakeStorageAdapter(provider="cos", bucket="test")
+    stored = storage.put_object("viral/prepared/upload.mp4", b"video", content_type="video/mp4")
+    monkeypatch.setattr("app.viral_media.ViralMediaPreparation.cached", lambda self, **kw: stored)
+    video = replace(_video("douyin"), play_url=None, audio_url=None)
+    result = ViralMediaPipeline(client=None, storage=storage, shared=True, cached_only=True).fetch(
+        video, prefer=prefer
+    )
+    assert result.kind == "video" and result.cache_hit and result.storage_uri == stored.uri
+
+
+def test_admin_upload_validates_video_before_storage(monkeypatch):
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException, Request, Response, UploadFile
+    from starlette.datastructures import Headers
+
+    from app import admin_viral_upload
+
+    monkeypatch.setattr(
+        admin_viral_upload,
+        "write_with_idempotency",
+        lambda **kw: pytest.fail("unexpected DB access"),
+    )
+    for title in ("视频", " "):
+        with pytest.raises(HTTPException) as caught:
+            admin_viral_upload.upload_viral_video(
+                Request({"type": "http", "headers": [(b"idempotency-key", b"invalid-file")]}),
+                Response(),
+                SimpleNamespace(user_id="admin"),
+                UploadFile(
+                    BytesIO(b"invalid"),
+                    filename="fake.mp4",
+                    size=7,
+                    headers=Headers({"content-type": "video/mp4"}),
+                ),
+                "douyin",
+                title,
+                "",
+                True,
+                "测试",
+            )
+        assert caught.value.status_code == 422
+
+
+def test_upload_mov_normalizes_legacy_container_without_relaxing_generated_video():
+    import subprocess
+
+    from app.media_tools import (
+        MediaValidationFailed,
+        normalize_generated_video,
+        resolve_media_binary,
+    )
+
+    generated = subprocess.run(
+        [
+            resolve_media_binary("ffmpeg"),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x64:r=5:d=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "empty_moov+frag_keyframe+default_base_moof",
+            "-f",
+            "mov",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    legacy_mov = generated[int.from_bytes(generated[:4], "big") :]
+    assert legacy_mov[4:8] == b"moov"
+    with pytest.raises(MediaValidationFailed):
+        normalize_generated_video(legacy_mov, target_width=64, target_height=64)
+    normalized = normalize_generated_video(
+        legacy_mov,
+        target_width=64,
+        target_height=64,
+        allow_mov=True,
+    )
+    assert normalized.content[4:8] == b"ftyp" and normalized.transformed
+
+
 @pytest.mark.parametrize("prefer,expected", [(None, "audio"), ("video", "video")])
 def test_xiaohongshu_media_uses_plain_download_and_cache(prefer: str | None, expected: str) -> None:
     video = replace(_video("douyin", "note"), platform="xiaohongshu")

@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261111T1000_uncertain_auto_reopen"
+      "20261112T1200_merge_training_pan123_pipeline"
     ],
     "parents": {
       "001_core": null,
@@ -195,14 +195,21 @@
       "20261014T1100_customer_ops_params": "20261014T1000_support_ticket_priority",
       "20261014T1200_admin_role_templates": "20261014T1100_customer_ops_params",
       "20261016T1000_replica_prompt_tasks": "20261014T1200_admin_role_templates",
+      "20261101T1000_training_materials": "20261102T0900_customer_session_last_seen",
       "20261101T1000_video_long_tier": "20261016T1000_replica_prompt_tasks",
       "20261102T0900_customer_session_last_seen": "20261101T1000_video_long_tier",
       "20261111T1000_replica_pipeline_tasks": "20261102T0900_customer_session_last_seen",
       "20261111T1000_uncertain_auto_reopen": "20261112T1100_replica_pipeline_switch",
+      "20261112T0900_yuanbao_pan123_widen": "20261101T1000_training_materials",
+      "20261112T0910_provider_runtime_state": "20261112T0900_yuanbao_pan123_widen",
       "20261112T1000_replica_pipeline_awaiting_since": "20261111T1000_replica_pipeline_tasks",
-      "20261112T1100_replica_pipeline_switch": "20261112T1000_replica_pipeline_awaiting_since"
+      "20261112T1100_replica_pipeline_switch": "20261112T1000_replica_pipeline_awaiting_since",
+      "20261112T1200_merge_training_pan123_pipeline": [
+        "20261112T0910_provider_runtime_state",
+        "20261111T1000_uncertain_auto_reopen"
+      ]
     },
-    "revision_count": 181
+    "revision_count": 185
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -917,6 +924,10 @@
       "file": "versions/20261016T1000_replica_prompt_tasks.py",
       "sha256": "9774a9e481b2ffd5b1bae05a33731e6c25fc3aa010e3536e37a70f3535000a75"
     },
+    "20261101T1000_training_materials": {
+      "file": "versions/20261101T1000_training_materials.py",
+      "sha256": "5d02c7be0ee693fcd3f10953c9e00e7643f81453fd7d273b0ee50c021297e8f8"
+    },
     "20261101T1000_video_long_tier": {
       "file": "versions/20261101T1000_video_long_tier.py",
       "sha256": "b84b53ce6ad2df553056ca6fff2821e55702f4c926e94d12b896e5004cc7fb36"
@@ -933,6 +944,14 @@
       "file": "versions/20261111T1000_uncertain_auto_reopen.py",
       "sha256": "200fd7c349fa9a335c479ebe96923357efe84d35346ac56cde171f85dbde77c2"
     },
+    "20261112T0900_yuanbao_pan123_widen": {
+      "file": "versions/20261112T0900_yuanbao_pan123_widen.py",
+      "sha256": "7e08110554e3c2427fa1eff9fe089d77e83d11f09e9557dacae1b15aa1a8b490"
+    },
+    "20261112T0910_provider_runtime_state": {
+      "file": "versions/20261112T0910_provider_runtime_state.py",
+      "sha256": "4c607e22186e5fa844037613f24a5a6005aeb20b3f9257a980c4466a2c9b5183"
+    },
     "20261112T1000_replica_pipeline_awaiting_since": {
       "file": "versions/20261112T1000_replica_pipeline_awaiting_since.py",
       "sha256": "31e47969ff4a6849597042d1d4e6c2215ac18a4ac07333a2b2456b0500c3f510"
@@ -940,6 +959,10 @@
     "20261112T1100_replica_pipeline_switch": {
       "file": "versions/20261112T1100_replica_pipeline_switch.py",
       "sha256": "5ba080edc95d2d4f8b321c9e512b906ab0504b677a3768d37ea4e6317b64eed3"
+    },
+    "20261112T1200_merge_training_pan123_pipeline": {
+      "file": "versions/20261112T1200_merge_training_pan123_pipeline.py",
+      "sha256": "bd7a7fbf8bf34b41d86de88c03061e1947d6d1b286bb8caebbbc8e74a2d10fcd"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setAdminCsrfToken } from "../api";
 import { ViralCollectionBilling } from "./ViralCollectionBilling";
 import { ViralVideosPage } from "./ViralVideosPage";
+import { ViralVideoUpload } from "./ViralVideoUpload";
 
 /** 已准备到云端的视频号行：默认覆盖「封面 / 头像 / 统计 / 发布时间」全字段。 */
 function row(overrides: Record<string, unknown> = {}) {
@@ -173,6 +174,84 @@ function writesOf(fetchMock: ReturnType<typeof installFetch>) {
     ([url, init]) => isWrite(init) && !url.includes("/operations/estimate"),
   );
 }
+
+it("视频上传携带权限与文件，失败重试复用幂等键，成功后提示待发布", async () => {
+  let attempts = 0;
+  const fetchMock = installFetch({
+    write: () => {
+      attempts += 1;
+      return attempts === 1
+        ? respond({ detail: { message: "暂时失败" } }, 503)
+        : respond({ platform: "douyin", videoId: "upload-video" }, 201);
+    },
+  });
+  const onUploaded = vi.fn();
+  render(<ViralVideoUpload onUploaded={onUploaded} />);
+  fireEvent.change(screen.getByLabelText("视频标题"), {
+    target: { value: "精选案例" },
+  });
+  fireEvent.change(screen.getByLabelText("视频文件"), {
+    target: { files: [new File(["video"], "case.mp4", { type: "video/mp4" })] },
+  });
+  fireEvent.submit(
+    screen
+      .getByRole("button", { name: "上传入库" })
+      .closest("form") as HTMLFormElement,
+  );
+  await screen.findByText(/暂时失败/);
+  expect(screen.getByLabelText("视频标题")).toHaveValue("精选案例");
+  fireEvent.submit(
+    screen
+      .getByRole("button", { name: "上传入库" })
+      .closest("form") as HTMLFormElement,
+  );
+  await screen.findByText(/请在视频库中推送到前端/);
+  const calls = writesOf(fetchMock);
+  expect(calls).toHaveLength(2);
+  const firstHeaders = new Headers(calls[0][1]?.headers);
+  expect(firstHeaders.get("X-Admin-CSRF")).toBe("csrf-curation-test");
+  expect(firstHeaders.get("Idempotency-Key")).toBe(
+    new Headers(calls[1][1]?.headers).get("Idempotency-Key"),
+  );
+  expect(firstHeaders.has("Content-Type")).toBe(false);
+  const body = calls[0][1]?.body as FormData;
+  expect(body.get("title")).toBe("精选案例");
+  expect(body.get("file")).toBeInstanceOf(File);
+  expect(body.get("confirm")).toBe("true");
+  expect(onUploaded).toHaveBeenCalledOnce();
+});
+
+it("链接采集失败重试保持同一请求，入库后提示准备及发布", async () => {
+  let attempts = 0;
+  const fetchMock = installFetch({
+    write: (url) => {
+      if (!url.includes("/link-import")) return;
+      attempts += 1;
+      return attempts === 1
+        ? respond({ detail: { message: "结果待确认" } }, 503)
+        : respond({ archiveQueued: true, items: [] }, 202);
+    },
+  });
+  render(
+    <ViralVideosPage initialSearch={{ keyword: "", platform: "douyin" }} />,
+  );
+  const form = await screen.findByRole("form", { name: "粘贴链接采集" });
+  fireEvent.change(within(form).getByRole("textbox"), {
+    target: { value: "https://v.douyin.com/example" },
+  });
+  fireEvent.submit(form);
+  await screen.findByText(/结果待确认/);
+  fireEvent.submit(form);
+  await screen.findByText("已采集入库，素材准备中；完成后请发布给客户。");
+  const calls = writesOf(fetchMock).filter(([url]) =>
+    url.includes("/link-import"),
+  );
+  expect(calls).toHaveLength(2);
+  expect(new Headers(calls[0][1]?.headers).get("Idempotency-Key")).toBe(
+    new Headers(calls[1][1]?.headers).get("Idempotency-Key"),
+  );
+  expect(within(form).getByRole("textbox")).toHaveValue("");
+});
 
 it("分类目录覆盖当前页之外，未分类和批次筛选准确请求并保留导航范围", async () => {
   const fetchMock = installFetch({

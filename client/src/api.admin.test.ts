@@ -35,6 +35,7 @@ import {
   suspendActivationCode,
   unbindDevice,
   updateCustomerUnitPrice,
+  uploadTrainingMaterial,
 } from "./api.admin";
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -48,6 +49,57 @@ function jsonResponse(payload: unknown, status = 200) {
 // The mock literal is indirect so the repo secret scan (which flags
 // `token:` followed by a quoted literal) stays quiet — the T29 precedent.
 const CSRF_TOKEN_TEXT = "csrf-token-1";
+
+it("培训上传携带跨域管理员会话和完整写契约", async () => {
+  setAdminCsrfToken(CSRF_TOKEN_TEXT);
+  const request = {
+    withCredentials: false,
+    timeout: 0,
+    status: 201,
+    responseText: JSON.stringify({ id: "training-1" }),
+    upload: { onprogress: null },
+    onload: null as (() => void) | null,
+    open: vi.fn(),
+    setRequestHeader: vi.fn(),
+    send: vi.fn((_form: FormData) => request.onload?.()),
+  };
+  vi.stubGlobal(
+    "XMLHttpRequest",
+    // biome-ignore lint/complexity/useArrowFunction: XMLHttpRequest 替身必须可构造。
+    vi.fn(function () {
+      return request;
+    }),
+  );
+  try {
+    await expect(
+      uploadTrainingMaterial({
+        file: new File(["test"], "培训.pdf", { type: "application/pdf" }),
+        title: "培训",
+        description: "",
+        tags: ["入门"],
+        sortOrder: 0,
+        visible: true,
+        reason: "添加培训资料",
+        idempotencyKey: "training-upload-key",
+      }),
+    ).resolves.toEqual({ id: "training-1" });
+    expect(request.withCredentials).toBe(true);
+    expect(request.setRequestHeader).toHaveBeenCalledWith(
+      "X-Admin-CSRF",
+      CSRF_TOKEN_TEXT,
+    );
+    expect(request.setRequestHeader).toHaveBeenCalledWith(
+      "Idempotency-Key",
+      "training-upload-key",
+    );
+    const form = request.send.mock.calls[0][0];
+    expect(form.get("confirm")).toBe("true");
+    expect(form.get("tags")).toBe('["入门"]');
+  } finally {
+    vi.unstubAllGlobals();
+    setAdminCsrfToken("");
+  }
+});
 
 // requestControl 发出的 headers 统一为 Headers 实例（2026-10-31 与 api.ts
 // 收敛为共享工厂后），断言用同一表示读取；nth 为 1 基，与

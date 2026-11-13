@@ -42,6 +42,32 @@ def test_redact_url_masks_signature_parameters_and_credentials() -> None:
     assert redacted.startswith("https://bucket.cos.example.com/a/b.mp4?")
 
 
+def test_redaction_covers_pan123_auth_key_on_all_paths() -> None:
+    """123网盘直链防盗链参数持有即可访问：URL 查询、JSON 字段、错误正文里的
+    整条 URL 三条路径都必须遮蔽，大小写与分隔符变体不改变敏感等级。"""
+    # URL 查询参数（auth_key 与既有 query 并存）。
+    redacted = redact_url(
+        "https://cdn.example.invalid/direct/1/2/a.mp4"
+        "?auth_key=1719000000-abc-1-0123456789abcdef&rate=2"
+    )
+    assert "0123456789abcdef" not in redacted
+    assert "rate=2" in redacted
+    # JSON 响应字段：download_info / direct-link 的 downloadUrl 值内嵌整条带签 URL。
+    body = json.dumps(
+        {"code": 0, "data": {"downloadUrl": "https://cdn.example.invalid/a?auth_key=SECRET9"}}
+    )
+    assert "SECRET9" not in redact_text(body)
+    # 非 JSON 错误正文与键名变体（authKey/auth-key/AUTH_KEY）。
+    for variant in ("auth_key", "authKey", "auth-key", "AUTH_KEY"):
+        assert "SECRET9" not in redact_text(f'{{"{variant}":"SECRET9"}}')
+        assert "SECRET9" not in redact_text(
+            f"GET https://cdn.example.invalid/a?{variant}=SECRET9 failed"
+        )
+    # expires 在既有清单内（COS 预签名口径）同样遮蔽；auth_key 方案下直链 URL
+    # 只带 auth_key 一个参数，到期时间编码在其值内部，随之一起被遮蔽。
+    assert "1719000000" not in redact_url("https://cdn.example.invalid/a?expires=1719000000&page=1")
+
+
 @pytest.mark.parametrize(
     ("provider", "path"),
     [

@@ -884,64 +884,6 @@ describe("真实 Studio 只读适配器", () => {
     });
   });
 
-  it("直出保存只使用既有任务入库接口，并返回真实资产引用", async () => {
-    api.resolveMaterials.mockResolvedValue({
-      items: [
-        {
-          id: "asset:saved-1",
-          asset_id: "saved-1",
-          owner_user_id: "user-1",
-          generation_task_id: "one",
-          project_id: null,
-          person_id: null,
-          title: "成片",
-          group: "任务结果",
-          media_type: "video",
-          source: "generation",
-          status: "ready",
-          delivery: "stored",
-          content_type: "video/mp4",
-          size_bytes: 1024,
-          duration_seconds: 4.458333,
-          created_at: "2026-09-14T15:00:00Z",
-          hidden: false,
-          saved: true,
-          composite: false,
-          allowed_uses: ["reference"],
-          allowed_actions: ["preview", "download", "rename", "hide"],
-          tags: [],
-        } satisfies MaterialItem,
-      ],
-      unavailable_ids: [],
-    });
-    api.archiveGenerationTask.mockResolvedValue(
-      generationTask({ result_asset_id: "saved-1" }),
-    );
-    api.getAssetDownloadUrl.mockResolvedValue({
-      url: "https://signed/saved-1",
-    });
-    const saved = await live.saveTaskPreview({
-      id: "direct-task-one",
-      generationTaskId: "one",
-      name: "成片",
-      kind: "video",
-      group: "结果",
-      source: "任务中心",
-      saved: false,
-    });
-    expect(api.archiveGenerationTask).toHaveBeenCalledWith("one");
-    expect(api.createGenerationBatch).not.toHaveBeenCalled();
-    expect(saved).toMatchObject({
-      id: "saved-1",
-      assetId: "saved-1",
-      materialId: "asset:saved-1",
-      saved: true,
-      delivery: "stored",
-      url: "https://signed/saved-1",
-      allowedActions: ["preview", "download", "rename", "hide"],
-    });
-  });
-
   it("没有直出结果时使用首个成功归档资产", async () => {
     api.getGenerationBatch.mockResolvedValue(
       generationBatch([

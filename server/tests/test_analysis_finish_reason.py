@@ -614,3 +614,57 @@ def test_garbage_completion_body_still_fails_closed() -> None:
         provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
 
     assert (caught.value.upstream_diagnostic or {})["reason"] == "JSONDecodeError"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{}",
+        _completion_body(content="partial", finish_reason="length"),
+        _completion_body(content="blocked", finish_reason="content_filter"),
+        _completion_body(content="", include_message=False),
+        _completion_body(content=""),
+    ],
+)
+def test_completion_diagnostic_logs_are_provider_neutral(
+    body: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider, _ = _provider([body], fallback_models=())
+    with pytest.raises(AnalysisProviderFailed):
+        provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
+    assert caplog.records
+    assert "apilio" not in caplog.text.lower()
+    assert "gemini" not in caplog.text.lower()
+
+
+def test_long_video_timeout_leaves_room_for_provider_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import replica_prompt
+    from app.analysis import _BudgetTracker
+
+    monkeypatch.setenv(replica_prompt.REPLICA_PROMPT_TIMEOUT_ENV, "99999")
+    monkeypatch.setattr(replica_prompt, "get_video_analysis_provider", lambda conn, **kw: kw)
+    monkeypatch.setattr(replica_prompt.time, "monotonic", lambda: 100.0)
+    options = replica_prompt.build_long_video_provider(Mock())
+    monkeypatch.setattr(replica_prompt.time, "monotonic", lambda: 101.0)
+    assert _BudgetTracker(options["video_call_budget"]).can_start(
+        options["transport"].timeout_seconds
+    )
+    # 准备时间超限时仍拒绝付费请求，不延长截止线。
+    monkeypatch.setattr(replica_prompt.time, "monotonic", lambda: 221.0)
+    assert not _BudgetTracker(options["video_call_budget"]).can_start(
+        options["transport"].timeout_seconds
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("", 900.0), ("bad", 900.0), ("1", 60.0), ("900", 900.0)]
+)
+def test_long_video_timeout_preserves_default_and_lower_bound(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: float
+) -> None:
+    from app import replica_prompt
+
+    monkeypatch.setenv(replica_prompt.REPLICA_PROMPT_TIMEOUT_ENV, raw)
+    assert replica_prompt.provider_timeout_seconds() == expected

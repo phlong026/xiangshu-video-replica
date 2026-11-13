@@ -5631,6 +5631,143 @@ def test_admin_private_cover_missing_and_storage_failure_are_closed(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels"])
+def test_admin_upload_is_private_until_published_and_importable(
+    client, route_state, monkeypatch, platform, tmp_path
+):
+    import subprocess
+
+    from app.auth import CurrentUser
+    from app.db_portable import BusinessConnection
+    from app.media_tools import resolve_media_binary
+    from app.storage import FakeStorageAdapter
+    from app.viral_import import (
+        ViralImportRequest,
+        acquire_viral_import_task,
+        complete_viral_import_task,
+        enqueue_viral_import_task,
+        perform_viral_import_task,
+        prepare_viral_import_task,
+    )
+    from app.viral_store import list_viral_video_page
+
+    source = tmp_path / "video.mp4"
+    subprocess.run(
+        [
+            resolve_media_binary("ffmpeg"),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x64:r=5:d=6",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=6",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    storage = FakeStorageAdapter(provider="cos", bucket="test")
+    monkeypatch.setattr("app.media_routes.get_media_storage", lambda conn: storage)
+    headers = {**_admin_session(client), "Idempotency-Key": "upload-video"}
+    data = {"platform": platform, "title": "人工精选案例", "confirm": "true", "reason": "上传爆款"}
+    files = {"file": ("video.mp4", source.read_bytes(), "video/mp4")}
+    result = client.post("/api/control/viral/uploads", headers=headers, data=data, files=files)
+    assert result.status_code == 201, result.text
+    video_id = result.json()["videoId"]
+    replay = client.post("/api/control/viral/uploads", headers=headers, data=data, files=files)
+    assert replay.status_code == 201 and replay.headers["X-Idempotent-Replay"] == "true"
+    conflict = client.post(
+        "/api/control/viral/uploads",
+        headers=headers,
+        data=data,
+        files={"file": ("video.mp4", source.read_bytes() + b"\x00\x00\x00\x08free", "video/mp4")},
+    )
+    assert conflict.status_code == 409
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT count(*) FROM viral_media_preparations").fetchone()[0] == 1
+        conn = BusinessConnection.postgres(raw)
+        assert video_id not in {
+            v.video_id
+            for v in list_viral_video_page(conn, platform=platform, sort="hot", limit=100).items
+        }
+        row = raw.execute(
+            "SELECT likes,comments,shares,collects,cover_key FROM viral_videos "
+            "WHERE platform=%s AND video_id=%s",
+            (platform, video_id),
+        ).fetchone()
+        assert row[:4] == (None, None, None, None) and row[4]
+    pushed = client.post(
+        "/api/control/viral/videos/curation:batch",
+        headers={**headers, "Idempotency-Key": "publish-upload"},
+        json={
+            "action": "push",
+            "confirm": True,
+            "reason": "发布精选",
+            "items": [{"platform": platform, "video_id": video_id}],
+        },
+    )
+    assert pushed.status_code == 200 and pushed.json()["items"][0]["published"]
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert video_id in {
+            v.video_id
+            for v in list_viral_video_page(conn, platform=platform, sort="hot", limit=100).items
+        }
+        actor = CurrentUser(
+            id="customer_u", username="customer_u", display_name="客户", role="customer"
+        )
+        for purpose in ("copy", "replica"):
+            enqueue_viral_import_task(
+                conn,
+                actor=actor,
+                request=ViralImportRequest(platform=platform, videoId=video_id, purpose=purpose),
+                idempotency_key=f"uploaded-{purpose}",
+            )
+            lease = acquire_viral_import_task(conn, worker_id="upload-chain-test")
+            assert lease is not None
+            work = prepare_viral_import_task(conn, lease=lease, storage=storage)
+            outcome = perform_viral_import_task(work)
+            complete_viral_import_task(conn, lease=lease, outcome=outcome)
+            assert outcome.media_kind == "video" and outcome.stored.size > 0
+
+
+def test_admin_upload_requires_content_permission_and_rejects_invalid_files(client, route_state):
+    data = {"platform": "douyin", "title": "测试视频", "confirm": "true", "reason": "测试"}
+    files = {"file": ("fake.mp4", b"not-a-video", "video/mp4")}
+    headers = {**_admin_session(client, "auditor_u"), "Idempotency-Key": "upload-denied"}
+    assert (
+        client.post(
+            "/api/control/viral/uploads", headers=headers, data=data, files=files
+        ).status_code
+        == 403
+    )
+    headers = {**_admin_session(client), "Idempotency-Key": "upload-invalid"}
+    assert (
+        client.post(
+            "/api/control/viral/uploads", headers=headers, data=data, files=files
+        ).status_code
+        == 422
+    )
+    data["platform"] = "xiaohongshu"
+    assert (
+        client.post(
+            "/api/control/viral/uploads", headers=headers, data=data, files=files
+        ).status_code
+        == 422
+    )
+
+
 def _stub_link_import_infra(monkeypatch: pytest.MonkeyPatch) -> None:
     """采集接口的外围桩：封面归档不外呼、存储用假适配器."""
     from app.storage import FakeStorageAdapter

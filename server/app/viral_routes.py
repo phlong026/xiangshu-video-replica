@@ -13,6 +13,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import math
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn
@@ -1064,10 +1065,9 @@ def list_viral_copy_extractions(
     聚合）；正文从任务自身 result_json 直取——自己的转写结果永远可复用，
     不再有「缓存已归档正文过期」的口径。无爆款身份的普通上传任务不进此列表。
     """
-    # 历史缓存命中任务的正文是别人转写、本人未付 ASR 的产物（旧 claim 闸门
-    # 已退役为 410），不进入个人提取记录，否则等于对未付费产出开放免费正文
-    # （Codex S 级评审阻塞 2）。
-    legacy_artifact = "NOT (t.request_json::jsonb ? 'viral_archive_sha256')"
+    from app.script_from_audio import LEGACY_SCRIPT_TEXT_ACCESS_SQL
+
+    legacy_artifact = LEGACY_SCRIPT_TEXT_ACCESS_SQL
     # 两条查询取代逐视频回源（原 N+1 最多 51 次 SQL，Codex 评审建议 2）：
     # ①聚合出每视频的最新任务 id；②按 id 批量取正文。
     rows = conn.execute(
@@ -1111,7 +1111,65 @@ def list_viral_copy_extractions(
                 updatedAt=updated_at,
             )
         )
-    return ViralCopyExtractionsResponse(items=items)
+    # 旧 claim 可以直接购买而不创建个人转写任务。仅恢复本人读取过、且所属
+    # 钱包已有成功交付结算的记录；全局缓存与读取事件本身都不能证明权益。
+    from app.usage_billing import resolve_wallet_owner
+
+    legacy_rows = conn.execute(
+        "SELECT e.platform,e.video_id,COUNT(*) AS times,MAX(e.created_at) AS last_at, "
+        "COALESCE(MAX(v.title),'') AS title,c.result_json,c.updated_at "
+        "FROM viral_content_usage_events e "
+        "LEFT JOIN viral_script_cache c ON c.platform=e.platform AND c.video_id=e.video_id "
+        "LEFT JOIN viral_videos v ON v.platform=e.platform AND v.video_id=e.video_id "
+        "AND v.deleted_at IS NULL "
+        "WHERE e.user_id=%s AND e.kind='copy' AND EXISTS ("
+        "SELECT 1 FROM billing_operations b WHERE b.service='viral_copy' "
+        "AND b.state='SUCCEEDED' AND b.source_id="
+        "'viral-copy:' || %s || ':' || e.platform || ':' || e.video_id) "
+        "GROUP BY e.platform,e.video_id,c.result_json,c.updated_at "
+        "ORDER BY MAX(e.created_at) DESC,e.platform,e.video_id LIMIT 50",
+        (actor.id, resolve_wallet_owner(conn, actor.id)),
+    ).fetchall()
+    current_keys = {(item.platform, item.videoId) for item in items}
+    for legacy in legacy_rows:
+        key = (str(legacy["platform"]), str(legacy["video_id"]))
+        # 同视频已有个人转写时以个人成果为准，不将旧交付次数冒充转写次数。
+        if key in current_keys:
+            continue
+        # 缓存已物理清除时保留已购记录但不伪造正文，不触发新转写或扣费。
+        text = None
+        try:
+            payload = json.loads(str(legacy["result_json"] or "{}"))
+            archive = payload.get("archive", {})
+            digest = archive.get("sha256", "")
+            duration = float(payload["duration_sec"])
+            if (
+                (archive.get("platform"), archive.get("video_id")) == key
+                and archive.get("kind") in (None, "audio", "video")
+                and isinstance(digest, str)
+                and len(digest) == 64
+                and all(c in "0123456789abcdef" for c in digest)
+                and math.isfinite(duration)
+                and duration > 0
+                and isinstance(payload.get("text"), str)
+                and payload["text"].strip()
+            ):
+                text = payload["text"]
+        except (ValueError, TypeError, KeyError, AttributeError):
+            pass
+        items.append(
+            ViralCopyExtractionRecord(
+                platform=key[0],
+                videoId=key[1],
+                title=str(legacy["title"]),
+                lastExtractedAt=_iso_updated_at(legacy["last_at"]),
+                times=int(legacy["times"]),
+                text=text,
+                updatedAt=_iso_updated_at(legacy["updated_at"]) if legacy["updated_at"] else None,
+            )
+        )
+    items.sort(key=lambda item: (item.lastExtractedAt, item.platform, item.videoId), reverse=True)
+    return ViralCopyExtractionsResponse(items=items[:50])
 
 
 @router.get("/videos/{platform}/{video_id:path}", response_model=ViralVideoItem)

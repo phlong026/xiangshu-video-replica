@@ -18,9 +18,12 @@ from app.db_portable import BusinessConnection
 from app.h3_account_pool import paid_probe_config
 from app.permissions import require_role
 from app.settings import (
+    PAN123_PROVIDER_NAME,
     ProviderTester,
     ProviderTestResult,
     SettingsRepository,
+    enable_pan123_direct_link_after_save,
+    enforce_pan123_config_guard,
     get_provider_tester,
     is_secret_field,
     merge_provider_config,
@@ -123,6 +126,10 @@ def update_provider_settings(
     try:
         saved_config = repo.load_provider_config(provider_name)
         incoming_config = merge_provider_config(saved_config, payload.config)
+        if provider_name == PAN123_PROVIDER_NAME:
+            # legacy 保存入口此前绕过 control 层、无锁——护栏在此补齐统一互斥锁
+            # 与账号切换/共享 token 清除语义（r2-P1-2 / r3-P1-1）。
+            enforce_pan123_config_guard(conn, incoming_config)
         result = repo.save_provider_config(
             provider_name,
             incoming_config,
@@ -142,6 +149,19 @@ def update_provider_settings(
         entity_id=provider_name,
         metadata_json=f'{{"provider":"{provider_name}"}}',
     )
+
+    if provider_name == PAN123_PROVIDER_NAME:
+        direct_link = enable_pan123_direct_link_after_save(
+            incoming_config, repo.provider_config_version(PAN123_PROVIDER_NAME), connection=conn
+        )
+        write_audit_log(
+            conn,
+            actor_user_id=admin.id,
+            action=f"pan123_direct_link.{direct_link['status']}",
+            entity_type="provider_settings",
+            entity_id=provider_name,
+            metadata_json=json.dumps({"status": direct_link["status"]}, sort_keys=True),
+        )
 
     lifecycle = None
     if provider_name == "cos":

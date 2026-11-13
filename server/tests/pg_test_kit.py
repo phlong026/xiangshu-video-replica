@@ -107,6 +107,8 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # P2-3 customer annotations (tags / note / owner) dedicated migrated
         # database, truncated per test (test_admin_customer_annotations.py).
         "customer_annotations_test",
+        # IA 改版第 5 项：平台培训素材库（admin 上传 + 客户只读）。
+        "training_materials_test",
         # R0 批级重生成门禁的真库回滚验证专用库（test_generation_batch_regen_gate_pg.py）。
         "r0_batch_regen_gate_test",
         "w15_dashboard_test",

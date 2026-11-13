@@ -516,7 +516,7 @@ class UrllibApilioChatTransport:
                 # never replace the failure it was meant to explain.
                 reason = ""
             logger.warning(
-                "%s Apilio video analysis request failed with HTTP status %s: %s",
+                "%s 视频分析请求失败，HTTP 状态 %s：%s",
                 analysis_log_ref(),
                 exc.code,
                 reason or "(上游未返回可读原因)",
@@ -538,11 +538,9 @@ class UrllibApilioChatTransport:
             # embed the signed video URL or the request headers.
             reason = type(exc).__name__
             timed_out = _is_timeout_failure(exc)
-            logger.warning(
-                "%s Apilio video analysis request failed: %s", analysis_log_ref(), reason
-            )
+            logger.warning("%s 视频分析请求失败：%s", analysis_log_ref(), reason)
             raise AnalysisProviderFailed(
-                f"Apilio video analysis request failed ({reason})",
+                f"视频分析请求失败（{reason}）",
                 failure_phase=NETWORK_FAILURE_PHASE,
                 # 对用户「可重试」；但自动重试一律关闭（决策 D5 经评审 #1 修订）：
                 # 断连可能发生在请求已提交之后，重发会叠加一次结果不确定的付费
@@ -863,7 +861,7 @@ class ApilioGemini:
             finish_reason = choice.get("finish_reason")
         except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             logger.warning(
-                "%s Apilio Gemini response is not a readable completion: %s",
+                "%s 视频分析响应结构无法识别：%s",
                 analysis_log_ref(),
                 type(exc).__name__,
             )
@@ -889,7 +887,7 @@ class ApilioGemini:
         diagnostic_finish = finish_reason if isinstance(finish_reason, str) else None
         if "length" in reason_text:
             logger.warning(
-                "%s Apilio Gemini completion truncated (finish_reason=%s)",
+                "%s 视频分析响应被截断（finish_reason=%s）",
                 analysis_log_ref(),
                 finish_reason,
             )
@@ -906,7 +904,7 @@ class ApilioGemini:
             marker in reason_text for marker in ("filter", "safety", "recitation", "prohibited")
         ):
             logger.warning(
-                "%s Apilio Gemini completion blocked (finish_reason=%s)",
+                "%s 视频分析响应被安全策略拦截（finish_reason=%s）",
                 analysis_log_ref(),
                 finish_reason,
             )
@@ -923,7 +921,7 @@ class ApilioGemini:
             content = choice["message"]["content"]
         except (KeyError, TypeError) as exc:
             logger.warning(
-                "%s Apilio Gemini completion carried no message/content: %s",
+                "%s 视频分析响应缺少正文字段：%s",
                 analysis_log_ref(),
                 type(exc).__name__,
             )
@@ -937,9 +935,7 @@ class ApilioGemini:
                 },
             ) from exc
         if not isinstance(content, str) or not content.strip():
-            logger.warning(
-                "%s Apilio Gemini completion carried no analysis content", analysis_log_ref()
-            )
+            logger.warning("%s 视频分析响应正文为空", analysis_log_ref())
             raise AnalysisProviderFailed(
                 "视频拆解服务返回了空结果；请重试或更换参考视频。",
                 # 空结果属于「正常结束但内容不可用」，预算内可同模型重试（T4）；
