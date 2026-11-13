@@ -46,6 +46,7 @@ import {
   downloadMaterialAsset,
   evictMaterialCachedPreview,
   extractSourceFrames,
+  fetchViralVideoSource,
   generateFirstFrames,
   getAssetDownloadUrl,
   getCachedCharacterAssetUrl,
@@ -1117,6 +1118,75 @@ describe("爆款列表 API", () => {
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(new Headers(init.headers).get("Idempotency-Key")).toBe(
       "resolve-key",
+    );
+  });
+});
+
+describe("爆款源站直链 API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("默认幂等键按平台+视频确定性派生：连点重试复用同一键", async () => {
+    const body = {
+      platform: "douyin",
+      videoId: "vid-1",
+      fullUrl: "https://cdn.example.com/v.mp4",
+      decodeKey: null,
+      contentType: "video/mp4",
+      expiresAt: "2026-11-13T00:00:00+08:00",
+      billing: { charged: 1, unit: "次" },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => body,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchViralVideoSource("douyin", "vid-1")).resolves.toEqual(
+      body,
+    );
+    await expect(fetchViralVideoSource("douyin", "vid-1")).resolves.toEqual(
+      body,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const keys = fetchMock.mock.calls.map((call) =>
+      new Headers((call[1] as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[0]).toBe("viral-source-douyin-vid-1");
+    expect(keys[1]).toBe(keys[0]);
+    // 不同视频派生不同键，互不串账。
+    await expect(fetchViralVideoSource("douyin", "vid-2")).resolves.toEqual(
+      body,
+    );
+    const third = fetchMock.mock.calls[2]?.[1] as RequestInit;
+    expect(new Headers(third.headers).get("Idempotency-Key")).toBe(
+      "viral-source-douyin-vid-2",
+    );
+  });
+
+  it("显式传入的幂等键优先于默认派生", async () => {
+    const body = {
+      platform: "douyin",
+      videoId: "vid-1",
+      fullUrl: "https://cdn.example.com/v.mp4",
+      decodeKey: null,
+      contentType: "video/mp4",
+      expiresAt: "2026-11-13T00:00:00+08:00",
+      billing: { charged: 1, unit: "次" },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => body,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchViralVideoSource("douyin", "vid-1", "explicit-key"),
+    ).resolves.toEqual(body);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe(
+      "explicit-key",
     );
   });
 });

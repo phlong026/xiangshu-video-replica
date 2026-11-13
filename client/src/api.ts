@@ -8791,12 +8791,16 @@ export type ViralVideoSource = {
  *
  * **该端点按次计费**（`viral_search_refresh` 科目），所以只能由用户明确动作触发
  * ——缓存或播放某个视频时——绝不能随列表渲染自动调用，否则翻几页就是几十次计费。
- * 幂等键相同的重试复用同一计费轮次，不会重复扣费。
+ *
+ * 幂等键默认按 `(平台, 视频ID)` 确定性派生（M2，2026-11-13）：连点与失败重试
+ * 复用同一个键——服务端对**在途（PENDING）**轮次按同键重放，不重复扣费；
+ * 已终态的轮次服务端自动开新一轮，因此之后的再次下载仍按次计费，不会变成
+ * 「一次购买永久免费」。需要隔离计费轮次的调用方仍可显式传键覆盖。
  */
 export function fetchViralVideoSource(
   platform: ViralPlatform,
   videoId: string,
-  idempotencyKey: string = createRequestKey("viral-source"),
+  idempotencyKey: string = `viral-source-${platform}-${videoId}`,
 ): Promise<ViralVideoSource> {
   return requestApiJson<ViralVideoSource>(
     "/api/viral/videos/source",
