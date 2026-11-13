@@ -5923,6 +5923,39 @@ def hold_generation_task_submission(conn: BusinessConnection, *, lease: dict[str
     conn.commit()
 
 
+def cancel_generation_task_on_drain(conn: BusinessConnection, *, lease: dict[str, Any]) -> None:
+    """父编排进入 DRAINING/终态：无意图的确定未发送任务终态并释放预占.
+
+    方案 §6 r6#3（Codex r-P1 挂账闭环）：hold 语义只服务可恢复的挂起；生成
+    任务若在 DRAINING 里仍回 PENDING，批次观察会把未收口子任务永久占用在途
+    资格与预占。处理与批次取消同款：CAS 绑定租约置 CANCELLED，
+    ``finalize_internal_billing(outcome="failed")`` 释放预占（实战路径），
+    公平队列槽同步归还。
+    """
+    updated = conn.execute(
+        """
+        UPDATE generation_tasks
+        SET status = 'CANCELLED',
+            error_code = 'REPLICA_PIPELINE_DRAIN_CANCELLED',
+            error_message_redacted =
+                '全自动复刻任务已取消，未产生供应商调用，费用已全额释放；可重新发起。',
+            locked_by = NULL, locked_until = NULL,
+            next_poll_at = CURRENT_TIMESTAMP,
+            submitted_at = NULL, started_at = NULL, completed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND status = 'SUBMITTING' AND provider_task_id IS NULL
+          AND locked_by = %s AND attempt = %s
+        """,
+        (str(lease["id"]), str(lease["locked_by"]), int(lease["attempt"])),
+    ).rowcount
+    if updated != 1:
+        conn.rollback()
+        raise RuntimeError("generation task submission lease was lost")
+    finalize_internal_billing(conn, task_id=str(lease["id"]), outcome="failed")
+    release_user_queue_slot_for_task(conn, task_id=str(lease["id"]))
+    conn.commit()
+
+
 def mark_generation_task_running(
     conn: BusinessConnection,
     *,

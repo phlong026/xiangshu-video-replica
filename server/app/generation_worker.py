@@ -59,6 +59,7 @@ from app.generation import (
     acquire_generation_continuation_lease,
     acquire_generation_reconcile_operation,
     acquire_generation_task_lease,
+    cancel_generation_task_on_drain,
     complete_generation_reconcile_operation,
     fail_generation_reconcile_operation,
     finalize_generation_direct_result,
@@ -1009,8 +1010,17 @@ def _run_pg_generation_step(
                 attempt=int(lease["attempt"]),
             )
         if not fence_allowed:
+            # fence_allowed=False 蕴含 fence_pipeline_id 非空（无归属任务直接放行）。
+            assert fence_pipeline_id is not None
             with pg_transaction() as raw_conn:
-                hold_generation_task_submission(BusinessConnection.postgres(raw_conn), lease=lease)
+                fence_conn = BusinessConnection.postgres(raw_conn)
+                fence_parent = _rp.pipeline_status_of(fence_conn, fence_pipeline_id)
+                # DRAINING/终态：无意图=确定未发送，终态 + 预占释放（r6#3，与
+                # 批次取消同款结算）；挂起：hold 等开关恢复。
+                if fence_parent == _rp.STATUS_DRAINING or fence_parent in _rp.TERMINAL_STATUSES:
+                    cancel_generation_task_on_drain(fence_conn, lease=lease)
+                else:
+                    hold_generation_task_submission(fence_conn, lease=lease)
             return
         try:
             with pg_transaction() as raw_conn:

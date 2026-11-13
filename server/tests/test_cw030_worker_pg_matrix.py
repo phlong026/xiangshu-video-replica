@@ -4105,3 +4105,37 @@ def test_analysis_pipeline_fence_holds_when_switch_off(pg_state: str) -> None:
     assert row["status"] == "PENDING"
     assert row["error_code"] == "REPLICA_PIPELINE_SUSPENDED"
     assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0
+
+
+def test_generation_pipeline_fence_cancels_when_draining(pg_state: str) -> None:
+    """DRAINING：无意图的确定未发送任务直接终态 + 预占释放 + 归还槽位（r6#3）.
+
+    Codex r-P1 挂账闭环：生成任务在 DRAINING 里若仍 hold 回 PENDING，批次
+    观察会把它当未收口，在途资格与预占永久占用；现在直接终态并走批次取消
+    同款结算（finalize_internal_billing outcome=failed）。
+    """
+    _seed_base(pg_state)
+    _seed_generation_task(pg_state, task_id="gen-drain", user_id="u1")
+    _exec(
+        pg_state,
+        "INSERT INTO replica_pipeline_tasks ("
+        " id, owner_user_id, project_id, platform, video_id, request_hash,"
+        " status, stage, idempotency_key, next_poll_at, created_at, updated_at, batch_id"
+        ") VALUES ("
+        " 'pipe-drain', 'u1', 'proj-1', 'douyin', 'v1', 'pipeline-hash-1',"
+        " 'DRAINING', 'generate', 'pipeline-idem-drain',"
+        " now() + interval '1 hour', now(), now(), 'batch-gen-drain'"
+        ")",
+    )
+
+    _run_worker("worker-gen-drain")
+
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code FROM generation_tasks WHERE id = 'gen-drain'",
+    )[0]
+    assert row["status"] == "CANCELLED"
+    assert row["error_code"] == "REPLICA_PIPELINE_DRAIN_CANCELLED"
+    # 公平队列槽已归还：认领 +1、取消 -1，回到 0。
+    assert _cursor_count(pg_state, "u1") == 0
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0

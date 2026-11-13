@@ -62,25 +62,66 @@ fn failure_tail(stderr: &str) -> String {
     lines[start..].join("\n")
 }
 
+/// 抽音轨硬时限（M1，2026-11-13）：`Command::output()` 无上限等待——损坏容器/
+/// 管道阻塞会让 ffmpeg 永不退出，横幅永久挂起。120 秒对 50MB/15s 视频是量级
+/// 富余；超时即 kill 并报可重试错误。stderr 落临时文件取尾部（避免 pipe 读写
+/// 与轮询等待的死锁面）。
+const EXTRACT_AUDIO_TIMEOUT_SECS: u64 = 120;
+
 /// 抽音轨。参数顺序与服务端一致，便于对照排查。
 pub fn extract_audio(ffmpeg: &Path, video: &Path, audio: &Path) -> Result<(), String> {
-    let output = Command::new(ffmpeg)
-        .arg("-y")
-        .arg("-i")
-        .arg(video)
-        .args([
-            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k",
-        ])
-        .arg(audio)
-        .output()
-        .map_err(|error| format!("无法启动 ffmpeg：{error}"))?;
-    if !output.status.success() {
-        return Err(format!(
+    let stderr_path = audio.with_extension("stderr.log");
+    let spawn_result = (|| {
+        let stderr_file = std::fs::File::create(&stderr_path)
+            .map_err(|error| format!("无法创建 ffmpeg 日志文件：{error}"))?;
+        Command::new(ffmpeg)
+            .arg("-y")
+            .arg("-i")
+            .arg(video)
+            .args([
+                "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k",
+            ])
+            .arg(audio)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(stderr_file))
+            .spawn()
+            .map_err(|error| format!("无法启动 ffmpeg：{error}"))
+    })();
+    let mut child = match spawn_result {
+        Ok(child) => child,
+        Err(error) => {
+            // 启动失败也要清日志文件：workdir 清理只认 video/audio 两个名字。
+            let _ = std::fs::remove_file(&stderr_path);
+            return Err(error);
+        }
+    };
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(EXTRACT_AUDIO_TIMEOUT_SECS);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Err(error) => return Err(format!("等待 ffmpeg 退出失败：{error}")),
+        }
+    };
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&stderr_path);
+    match status {
+        None => Err(format!(
+            "抽取音轨超时（已等待 {EXTRACT_AUDIO_TIMEOUT_SECS} 秒并终止）：请更换或压缩视频后重试。{}",
+            failure_tail(&stderr)
+        )),
+        Some(status) if !status.success() => Err(format!(
             "抽取音轨失败：{}",
-            failure_tail(&String::from_utf8_lossy(&output.stderr))
-        ));
+            failure_tail(&stderr)
+        )),
+        Some(_) => Ok(()),
     }
-    Ok(())
 }
 
 /// 派生音轨的存放位置：与视频同根，单独一个 audio/ 子树，便于整体清理。

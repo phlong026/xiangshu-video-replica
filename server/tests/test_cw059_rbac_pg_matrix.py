@@ -420,3 +420,56 @@ def test_pg_project_delete_allowed_after_first_frame_terminal(
     assert response.status_code == 204
     assert _count(rbac_dsn, "SELECT COUNT(*) FROM projects WHERE id = %s", ("proj_1",)) == 0
     assert _count(rbac_dsn, "SELECT COUNT(*) FROM first_frame_tasks WHERE id = %s", ("ff_1",)) == 0
+
+
+def test_pg_delete_wins_then_regenerate_cannot_create_orphan_batch(
+    rbac_dsn: str,
+) -> None:
+    """删除-vs-重生成竞态·删除先赢方向（Codex r-P1 并发用例）.
+
+    删除与新锁序串行化后：SETTLED pipeline 随项目删除（pipeline 行按 §3.1
+    保留但项目/批次已级联清掉），此后重生成受理必须失败且**不产出孤儿批次**
+    ——重生成 winners 方向（先翻 GENERATING）由 cw059 在途 pipeline 拒删用例
+    反向覆盖，两侧同锁序（均 projects 先）由 PG 行锁保证互斥。
+    """
+    _reset_and_seed(rbac_dsn, task_status="SUCCEEDED")
+    _seed_pipeline(rbac_dsn, status="NEEDS_REVIEW_SETTLED")
+
+    with psycopg.connect(rbac_dsn) as raw:
+        response = delete_project(
+            project_id="proj_1",
+            conn=BusinessConnection.postgres(raw),
+            actor=_owner_actor(),
+        )
+    assert response.status_code == 204
+    assert _count(rbac_dsn, "SELECT COUNT(*) FROM projects WHERE id = %s", ("proj_1",)) == 0
+
+    # 项目已删：重生成受理必须失败（项目行锁落空/批次创建被 FK 拒绝/业务前置
+    # 不满足皆可），关键不变量 = 不产出孤儿批次、pipeline 行按策略保留。
+    from app.replica_pipeline_generation import regenerate_pipeline
+
+    with pytest.raises(Exception):  # noqa: B017 - 不变量断言在下方计数
+        with psycopg.connect(rbac_dsn) as raw:
+            regenerate_pipeline(
+                conn=BusinessConnection.postgres(raw),
+                pipeline_id="pipeline_1",
+                owner_user_id="user_1",
+                quote_token="quote-token-deleted",
+                max_credits=100,
+            )
+    assert (
+        _count(
+            rbac_dsn,
+            "SELECT COUNT(*) FROM generation_batches WHERE project_id = %s",
+            ("proj_1",),
+        )
+        == 0
+    )
+    assert (
+        _count(
+            rbac_dsn,
+            "SELECT COUNT(*) FROM replica_pipeline_tasks WHERE id = %s",
+            ("pipeline_1",),
+        )
+        == 1
+    )
