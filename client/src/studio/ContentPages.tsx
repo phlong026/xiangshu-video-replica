@@ -107,8 +107,6 @@ import {
 } from "./viralImport";
 import "./content.css";
 
-const categoryTabs = ["全部", "建房预算", "户型设计", "施工避坑", "庭院案例"];
-
 /** MATERIAL-PERF-A（P0-1）：分页按钮窗口化——始终含首末页与当前页 ±1，
  * 其余以「…」折叠，页数多时不再渲染整排页码按钮。 */
 export function visiblePageButtons(
@@ -1323,7 +1321,6 @@ export function ViralPage() {
   const { data, review, updateData, user } = useStudio();
   const accountId = user.id;
   const [platform, setPlatform] = useState<"抖音" | "视频号">("抖音");
-  const [category, setCategory] = useState("全部");
   const [sort, setSort] = useState<"热门优先" | "最新">("热门优先");
   const [scope, setScope] = useState<"all" | "favorites">("all");
   const [visibleCount, setVisibleCount] = useState(viralInitialCount);
@@ -1352,7 +1349,7 @@ export function ViralPage() {
   const platformKey: ViralPlatform =
     platform === "抖音" ? "douyin" : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
-  const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}:${category}`;
+  const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}`;
   const paginationContextKeyRef = useRef(paginationContextKey);
   const paginationOperationRef = useRef(0);
   const activePaginationContextRef = useRef({
@@ -1445,8 +1442,7 @@ export function ViralPage() {
       .filter(
         (item) =>
           item.platform === platform &&
-          (scope !== "favorites" || favoriteKeys.has(viralIdentity(item))) &&
-          (category === "全部" || item.category === category),
+          (scope !== "favorites" || favoriteKeys.has(viralIdentity(item))),
       )
       .sort((left, right) => {
         // API已按完整首页顺序分页；再次按点赞排序会把管理员移到首位的内容挤走。
@@ -1463,21 +1459,12 @@ export function ViralPage() {
         }
         return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
       });
-  }, [
-    category,
-    curated,
-    data.videos,
-    favoriteKeys,
-    platform,
-    scope,
-    sort,
-    review,
-  ]);
+  }, [curated, data.videos, favoriteKeys, platform, scope, sort, review]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/分类/排序变化时重置滚动加载计数。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/排序变化时重置滚动加载计数。
   useEffect(() => {
     setVisibleCount(viralInitialCount);
-  }, [platform, category, scope, sort]);
+  }, [platform, scope, sort]);
 
   const current = review ? shown.slice(0, visibleCount) : shown;
   const statistics = useViralStatistics(current, !review);
@@ -1920,19 +1907,6 @@ export function ViralPage() {
         : curated.filter((video) => video.platform === item).length
     }`,
   }));
-  const categories = review
-    ? categoryTabs
-    : [
-        "全部",
-        ...new Set(
-          curated
-            .filter(
-              (video: { platform: string; category?: string }) =>
-                video.platform === platform && Boolean(video.category),
-            )
-            .map((video: { category?: string }) => video.category as string),
-        ),
-      ];
 
   return (
     <section className="content-page content-viral">
@@ -1951,10 +1925,7 @@ export function ViralPage() {
           <button
             aria-selected={scope === "all"}
             className={scope === "all" ? "is-active" : ""}
-            onClick={() => {
-              setCategory("全部");
-              setScope("all");
-            }}
+            onClick={() => setScope("all")}
             role="tab"
             type="button"
           >
@@ -1963,10 +1934,7 @@ export function ViralPage() {
           <button
             aria-selected={scope === "favorites"}
             className={scope === "favorites" ? "is-active" : ""}
-            onClick={() => {
-              setCategory("全部");
-              setScope("favorites");
-            }}
+            onClick={() => setScope("favorites")}
             role="tab"
             type="button"
           >
@@ -1983,10 +1951,7 @@ export function ViralPage() {
               aria-selected={item.id === platform}
               className={item.id === platform ? "is-active" : ""}
               key={item.id}
-              onClick={() => {
-                setCategory("全部");
-                setPlatform(item.id);
-              }}
+              onClick={() => setPlatform(item.id)}
               role="tab"
               type="button"
             >
@@ -2008,17 +1973,6 @@ export function ViralPage() {
           </select>
         </label>
       </div>
-      <nav className="content-filters" aria-label="视频分类">
-        {categories.map((item) => (
-          <Button
-            key={item}
-            variant={item === category ? "primary" : "outline"}
-            onClick={() => setCategory(item)}
-          >
-            {item}
-          </Button>
-        ))}
-      </nav>
       {!review && <ViralCacheUsage revision={cachedOnPage} />}
       {(listError || statistics.error) && (
         <p className="viral-media-status is-error" role="status">
