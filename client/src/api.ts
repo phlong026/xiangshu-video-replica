@@ -3666,10 +3666,12 @@ export async function startReplicaPromptTask(
 
 export async function getReplicaPromptTask(
   taskId: string,
+  signal?: AbortSignal,
 ): Promise<ReplicaPromptTask> {
   return requestApiJson<ReplicaPromptTask>(
     `/api/replica-prompt-tasks/${encodeURIComponent(taskId)}`,
     "读取长视频拆解任务失败",
+    { signal },
   );
 }
 
@@ -3715,7 +3717,10 @@ const replicaPromptTaskObservers = new Map<
 export async function waitForReplicaPromptTask(
   taskId: string,
   onUpdate?: (task: ReplicaPromptTask) => void,
+  signal?: AbortSignal,
 ): Promise<ReplicaPromptTask> {
+  // 页面跟踪必须随账号/组件生命周期终止；不能复用旧账号尚未退出的共享轮询。
+  if (signal) return pollReplicaPromptTask(taskId, signal, onUpdate);
   const observers = replicaPromptTaskObservers.get(taskId) ?? new Set();
   replicaPromptTaskObservers.set(taskId, observers);
   if (onUpdate) observers.add(onUpdate);
@@ -3741,13 +3746,22 @@ export async function waitForReplicaPromptTask(
 
 async function pollReplicaPromptTask(
   taskId: string,
+  signal?: AbortSignal,
+  onUpdate?: (task: ReplicaPromptTask) => void,
 ): Promise<ReplicaPromptTask> {
   // 长视频拆解实测可达 5–15 分钟：轮询上限 30 分钟，超时提示可离开再回来恢复。
   const deadline = Date.now() + 30 * 60_000;
   const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
-    const task = await getReplicaPromptTask(taskId);
-    for (const observer of replicaPromptTaskObservers.get(taskId) ?? []) {
+    signal?.throwIfAborted();
+    const task = await getReplicaPromptTask(taskId, signal);
+    signal?.throwIfAborted();
+    const observers = signal
+      ? onUpdate
+        ? [onUpdate]
+        : []
+      : (replicaPromptTaskObservers.get(taskId) ?? []);
+    for (const observer of observers) {
       try {
         observer(task);
       } catch {
