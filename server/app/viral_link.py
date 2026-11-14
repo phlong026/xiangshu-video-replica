@@ -442,9 +442,17 @@ def _optional_metadata(payload: Mapping[str, Any]) -> ResolvedViralMetadata:
     """
     author = payload.get("author")
     author_block = author if isinstance(author, Mapping) else {}
-    statistics = payload.get("statistics")
-    # 计数可能在 statistics 子对象里，也可能平铺在顶层；其余字段一律只看顶层。
-    stats = statistics if isinstance(statistics, Mapping) else payload
+    # 豆一豆把互动计数与发布时间嵌在 data.other 子对象里（2026-11-14 实测：
+    # other={digg_count,comment_count,share_count,collect_count,create_time,...}），
+    # statistics 子对象与顶层平铺是另外两家上游的形态；三者按序取第一个命中的
+    # 映射作为计数源。
+    stats_source: Mapping[str, Any] = payload
+    for key in ("statistics", "other"):
+        candidate = payload.get(key)
+        if isinstance(candidate, Mapping):
+            stats_source = candidate
+            break
+    stats = stats_source
 
     def first(source: Mapping[str, Any], keys: tuple[str, ...]) -> int | None:
         parsed = (_count(source.get(key)) for key in keys)
@@ -464,7 +472,7 @@ def _optional_metadata(payload: Mapping[str, Any]) -> ResolvedViralMetadata:
         comments=first(stats, _STATISTIC_KEYS["comments"]),
         shares=first(stats, _STATISTIC_KEYS["shares"]),
         collects=first(stats, _STATISTIC_KEYS["collects"]),
-        published_at=first(payload, _PUBLISHED_AT_KEYS),
+        published_at=first(stats, _PUBLISHED_AT_KEYS) or first(payload, _PUBLISHED_AT_KEYS),
         tags=_hashtags(payload),
     )
 

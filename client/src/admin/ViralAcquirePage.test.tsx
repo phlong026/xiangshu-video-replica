@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { setAdminCsrfToken } from "../api";
 import { ViralAcquirePage } from "./ViralAcquirePage";
@@ -60,6 +66,24 @@ function installFetch(
     if (method !== "GET") {
       const custom = overrides.write?.(path, (init ?? {}) as RequestInit);
       if (custom) return respond(custom.body, custom.status ?? 200);
+      if (path.includes("link-resolve")) {
+        return respond({
+          platform: "douyin",
+          videoId: "link-new",
+          title: "新采集视频",
+          author: "解析作者",
+          authorAvatar: null,
+          verified: false,
+          coverUrl: null,
+          durationMs: 34_000,
+          likes: null,
+          comments: null,
+          shares: null,
+          collects: null,
+          publishedAt: null,
+          tags: [],
+        });
+      }
       if (path.includes("link-import")) {
         return respond(
           {
@@ -146,7 +170,7 @@ it("挂载即读取最近入库并渲染卡片；转存中卡片可补转存+删
   expect(screen.getByRole("button", { name: "下架" })).toBeTruthy();
 });
 
-it("粘贴链接采集成功：调用 link-import、提示入库并刷新列表", async () => {
+it("粘贴链接采集：先解析预检弹确认窗，补填统计后入库", async () => {
   const fetchMock = installFetch();
   render(<ViralAcquirePage readOnly={false} />);
   await waitFor(() => expect(screen.getByRole("status")).toBeTruthy());
@@ -154,6 +178,17 @@ it("粘贴链接采集成功：调用 link-import、提示入库并刷新列表"
     target: { value: "https://v.douyin.com/acquire-one" },
   });
   fireEvent.click(screen.getByRole("button", { name: "采集入库" }));
+  // 第一段：解析预检弹窗出现，标题按解析结果预填。
+  const dialog = await screen.findByRole("dialog", {
+    name: "链接采集 · 确认信息",
+  });
+  expect(dialog).toBeTruthy();
+  expect(within(dialog).getByDisplayValue("新采集视频")).toBeTruthy();
+  // 运营补填缺失的点赞统计。
+  fireEvent.change(within(dialog).getByLabelText("点赞"), {
+    target: { value: "1678" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认采集入库" }));
   await waitFor(() =>
     expect(screen.getByText(/已入库（抖音 · link-new）/).textContent).toContain(
       "自动转存",
@@ -162,9 +197,11 @@ it("粘贴链接采集成功：调用 link-import、提示入库并刷新列表"
   const importCall = fetchMock.mock.calls.find(([url]) =>
     String(url).includes("link-import"),
   ) as unknown as [string, RequestInit];
-  expect(JSON.parse(String(importCall[1].body)).url).toBe(
-    "https://v.douyin.com/acquire-one",
-  );
+  const body = JSON.parse(String(importCall[1].body));
+  expect(body.url).toBe("https://v.douyin.com/acquire-one");
+  // 弹窗回传：标题沿用解析结果不重复传；统计手填项带覆盖。
+  expect(body.title).toBeUndefined();
+  expect(body.likes).toBe(1678);
   // 首次挂载 + 成功后刷新：列表至少请求两次。
   const listCalls = fetchMock.mock.calls.filter(([url]) =>
     String(url).includes("/api/control/viral/videos?"),
@@ -172,7 +209,34 @@ it("粘贴链接采集成功：调用 link-import、提示入库并刷新列表"
   expect(listCalls.length).toBeGreaterThanOrEqual(2);
 });
 
-it("链接采集失败：显示服务端错误，重试换用新的幂等键", async () => {
+it("链接解析失败：弹窗不出现，错误展示在页面上", async () => {
+  installFetch({
+    write: (url) => {
+      if (!url.includes("link-resolve")) return undefined;
+      return {
+        body: {
+          detail: {
+            message: "视频链接无法解析",
+            code: "VIRAL_LINK_PARSE_FAILED",
+          },
+        },
+        status: 422,
+      };
+    },
+  });
+  render(<ViralAcquirePage readOnly={false} />);
+  await waitFor(() => expect(screen.getByRole("status")).toBeTruthy());
+  fireEvent.change(screen.getByLabelText("视频链接"), {
+    target: { value: "https://v.douyin.com/bad" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "采集入库" }));
+  await waitFor(() =>
+    expect(screen.getByText(/视频链接无法解析/)).toBeTruthy(),
+  );
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("链接入库失败：确认窗内显示错误，重试换用新的幂等键", async () => {
   let attempts = 0;
   const keys: string[] = [];
   installFetch({
@@ -204,11 +268,38 @@ it("链接采集失败：显示服务端错误，重试换用新的幂等键", a
     target: { value: "https://v.douyin.com/retry-me" },
   });
   fireEvent.click(screen.getByRole("button", { name: "采集入库" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "链接采集 · 确认信息",
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认采集入库" }));
   await waitFor(() => expect(screen.getByText(/平台不支持/)).toBeTruthy());
-  fireEvent.click(screen.getByRole("button", { name: "采集入库" }));
+  // 确认窗保持打开：改一下统计再重试。
+  fireEvent.change(within(dialog).getByLabelText("点赞"), {
+    target: { value: "10" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认采集入库" }));
   await waitFor(() => expect(screen.getByText(/已入库/)).toBeTruthy());
   expect(attempts).toBe(2);
   expect(keys[0]).not.toBe(keys[1]);
+});
+
+it("详情弹窗：就绪条目拉预览并渲染完整字段", async () => {
+  const fetchMock = installFetch();
+  render(<ViralAcquirePage readOnly={false} />);
+  await waitFor(() =>
+    expect(screen.getAllByText(/秋天第一杯奶茶/).length).toBeGreaterThan(0),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "详情" }));
+  const dialog = await screen.findByRole("dialog", { name: "视频详情" });
+  expect(dialog).toBeTruthy();
+  await waitFor(() =>
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes("/preview")),
+    ).toBeTruthy(),
+  );
+  expect(screen.getByText("23.1w / 1852")).toBeTruthy();
+  expect(screen.getByText("4371 / 9620")).toBeTruthy();
+  expect(screen.getByText("#探店 #奶茶")).toBeTruthy();
 });
 
 it("上传弹窗：本地预读失败不阻塞补填，提交携带平台与文件", async () => {
