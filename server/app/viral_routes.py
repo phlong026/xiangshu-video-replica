@@ -302,7 +302,6 @@ def _item(
 def list_viral_videos(
     conn: Database,
     actor: AuthenticatedUser,
-    client: ViralSourceClientDep,
     platform: str = PLATFORM_DOUYIN,
     sort: str = SORT_HOT,
     limit: Annotated[int, Query(ge=1, le=50)] = 12,
