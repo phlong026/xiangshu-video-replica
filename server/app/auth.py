@@ -60,7 +60,9 @@ def get_database() -> Iterator[BusinessConnection]:
     )
 
 
-Database = Annotated[BusinessConnection, Depends(get_database)]
+# 认证会锁定会话行并续期；事务必须在返回响应前提交，不能被慢客户端或
+# 流式响应拖到收包结束，否则同一会话的预览授权会因等锁超时而批量失败。
+Database = Annotated[BusinessConnection, Depends(get_database, scope="function")]
 
 
 def get_current_user(

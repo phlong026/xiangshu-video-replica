@@ -2,10 +2,15 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
-import type { ReplicaPromptResult, ReplicaPromptVersion } from "../api";
+import type {
+  ReplicaPromptResult,
+  ReplicaPromptTask,
+  ReplicaPromptVersion,
+} from "../api";
 import {
   cancelReplicaPromptTask,
   getLatestReplicaPromptResult,
@@ -17,6 +22,11 @@ import { isInsufficientCredits } from "../insufficientCredits";
 import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { readVideoDuration, uploadWorkbenchSourceVideo } from "./live";
+import {
+  getLongReplicaSession,
+  isCurrentLongReplicaSession,
+  type LongReplicaRun,
+} from "./longReplicaSession";
 import { Button, Empty, Icon, Panel } from "./ui";
 
 import "./longReplica.css";
@@ -28,35 +38,15 @@ const MAX_SOURCE_SECONDS = 180;
 const DURATION_TOLERANCE_SECONDS = 0.1;
 const COPY_FEEDBACK_MS = 2000;
 
-type Stage = "idle" | "uploading" | "analyzing" | "ready" | "failed";
+type Stage =
+  | "idle"
+  | "uploading"
+  | "analyzing"
+  | "ready"
+  | "failed"
+  | "cancelled";
 
-type LastRun = {
-  projectId: string;
-  assetId: string;
-  taskId: string;
-};
-
-// 会话内记忆最近一次运行：离开页面再回来时凭它接回在途任务/已出结果。
-// 跨重启不恢复——重新上传即重建项目，云端草稿里没有这个链路的合同。
-let lastRun: LastRun | null = null;
-let lastResult: ReplicaPromptVersion | null = null;
-// 工作台「开始复刻」对 >15s 来源的交接：整片已用 replica_prompt 用途上传，
-// 跳转到本页签后自动建任务开跑（不要求用户再传一遍）。
-let pendingAutoStart = false;
-
-/** 工作台上传整片后调用：登记来源并要求本页签挂载即自动开始拆解。 */
-export function handOffLongReplicaSource(source: {
-  projectId: string;
-  assetId: string;
-}): void {
-  lastRun = {
-    projectId: source.projectId,
-    assetId: source.assetId,
-    taskId: "",
-  };
-  lastResult = null;
-  pendingAutoStart = true;
-}
+const CANCELLED_CODE = "REPLICA_PROMPT_TASK_CANCELLED";
 
 const SUMMARY_FIELDS: {
   key: keyof ReplicaPromptResult["summary"];
@@ -131,26 +121,55 @@ function CopyBlock({
 }
 
 export function LongReplicaPage() {
+  const { user } = useStudio();
+  // key 使同一页面内的账号切换也立即卸载旧视图，局部结果和错误不会沿用。
+  return <LongReplicaAccountPage key={user.id} accountId={user.id} />;
+}
+
+function LongReplicaAccountPage({ accountId }: { accountId: string }) {
   const { notify, openLive } = useStudio();
-  const [stage, setStage] = useState<Stage>("idle");
+  const [cache] = useState(() => getLongReplicaSession(accountId));
+  const [stage, setStage] = useState<Stage>(cache.result ? "ready" : "idle");
   const [error, setError] = useState("");
-  const [result, setResult] = useState<ReplicaPromptVersion | null>(lastResult);
+  const [result, setResult] = useState<ReplicaPromptVersion | null>(
+    cache.result,
+  );
+  const [currentRun, setCurrentRun] = useState(cache.run);
+  const resultTaskIdRef = useRef(cache.result ? cache.run?.taskId : null);
   const [uploadPercent, setUploadPercent] = useState(-1);
   const [elapsed, setElapsed] = useState(0);
-  const [, setTick] = useState(0);
-  const stageRef = useRef<Stage>("idle");
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState("");
   const sessionRef = useRef(0);
+  const selectionRef = useRef(0);
+  const mountedRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resumedRef = useRef(false);
-  stageRef.current = stage;
+  const cancelPendingRef = useRef(false);
+  const openLiveRef = useRef(openLive);
+  openLiveRef.current = openLive;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    mountedRef.current = true;
     return () => {
+      // 在切换账号提交新界面时同步失效；旧上传、建任务、取消和结果查询都不能再推进。
+      mountedRef.current = false;
       sessionRef.current += 1;
+      resumedRef.current = false;
       abortRef.current?.abort();
+      pollAbortRef.current?.abort();
     };
   }, []);
+
+  const isActive = useCallback(
+    (session: number) =>
+      mountedRef.current &&
+      session === sessionRef.current &&
+      isCurrentLongReplicaSession(accountId, cache),
+    [accountId, cache],
+  );
 
   useEffect(() => {
     if (stage !== "analyzing") return;
@@ -162,125 +181,171 @@ export function LongReplicaPage() {
     return () => window.clearInterval(timer);
   }, [stage]);
 
-  // 等一个已知 taskId 的任务跑到终态并拉取结果（上传启动 / 重新拆解共用）。
+  const showFailure = useCallback(
+    (cause: unknown, session: number) => {
+      if (!isActive(session)) return;
+      const code =
+        cause && typeof cause === "object" && "code" in cause
+          ? cause.code
+          : null;
+      setCancelError("");
+      if (code === CANCELLED_CODE) {
+        setStage("cancelled");
+        setError("");
+        return;
+      }
+      setStage("failed");
+      if (isInsufficientCredits(cause)) {
+        setError("积分余额不足，请先充值后重试。");
+        openLiveRef.current("wallet");
+        return;
+      }
+      setError(
+        cause instanceof Error ? cause.message : "长视频拆解失败，请重新提交。",
+      );
+    },
+    [isActive],
+  );
+
+  const showTerminalTask = useCallback(
+    async (task: ReplicaPromptTask, run: LongReplicaRun, session: number) => {
+      if (!isActive(session)) return;
+      if (task.status === "FAILED") {
+        showFailure(
+          Object.assign(
+            new Error(task.error_message || "长视频拆解失败，请重新提交。"),
+            {
+              code: task.error_code,
+            },
+          ),
+          session,
+        );
+        return;
+      }
+      // 轮询可能先于取消回执拿到结果；同一成功终态直接复用，迟到回执不再发起可能失败的查询。
+      if (resultTaskIdRef.current === task.id && cache.result) {
+        setResult(cache.result);
+        setCancelError("");
+        setStage("ready");
+        return;
+      }
+      const version = await getLatestReplicaPromptResult(run.projectId);
+      if (!isActive(session)) return;
+      cache.result = version;
+      resultTaskIdRef.current = version ? task.id : null;
+      setResult(version);
+      setCancelError("");
+      setStage(version ? "ready" : "idle");
+    },
+    [cache, isActive, showFailure],
+  );
+
+  // 创建请求在页间恢复和 StrictMode 重挂载时复用，避免同一来源重复提交。
+  const startTask = useCallback(
+    async (run: LongReplicaRun, forceNew = false) => {
+      const pending =
+        cache.starting ??
+        (forceNew
+          ? startReplicaPromptTask(run.projectId, run.assetId, true)
+          : startReplicaPromptTask(run.projectId, run.assetId));
+      cache.starting = pending;
+      try {
+        const task = await pending;
+        if (
+          isCurrentLongReplicaSession(accountId, cache) &&
+          cache.starting === pending
+        ) {
+          cache.run = { ...run, taskId: task.id };
+        }
+        return task;
+      } finally {
+        if (cache.starting === pending) cache.starting = null;
+      }
+    },
+    [accountId, cache],
+  );
+
   const awaitTaskRun = useCallback(
-    (run: LastRun, session: number) => {
+    (run: LongReplicaRun, session: number) => {
+      pollAbortRef.current?.abort();
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
       void (async () => {
         try {
-          await waitForReplicaPromptTask(run.taskId, () => {
-            if (session !== sessionRef.current) return;
-            setTick((value) => value + 1);
-          });
-          if (session !== sessionRef.current) return;
-          const version = await getLatestReplicaPromptResult(run.projectId);
-          if (session !== sessionRef.current) return;
-          if (!version) {
-            setStage("idle");
-            return;
-          }
-          lastResult = version;
-          setResult(version);
-          setStage("ready");
-        } catch (cause: unknown) {
-          if (session !== sessionRef.current) return;
-          setStage("failed");
-          if (isInsufficientCredits(cause)) {
-            setError("积分余额不足，请先充值后重试。");
-            openLive("wallet");
-            return;
-          }
-          setError(
-            cause instanceof Error
-              ? cause.message
-              : "长视频拆解失败，请重新提交。",
+          const task = await waitForReplicaPromptTask(
+            run.taskId,
+            undefined,
+            controller.signal,
           );
+          if (!isActive(session)) return;
+          await showTerminalTask(task, run, session);
+        } catch (cause: unknown) {
+          showFailure(cause, session);
         }
       })();
     },
-    [openLive],
+    [isActive, showFailure, showTerminalTask],
   );
 
   const resumeRun = useCallback(
-    (run: LastRun) => {
+    (run: LongReplicaRun) => {
       const session = ++sessionRef.current;
+      setCurrentRun({ ...run, taskId: "" });
       setStage("analyzing");
       setError("");
       void (async () => {
         try {
-          if (pendingAutoStart) {
-            // 工作台交接来的新来源：上传已完成，这里直接建任务开跑。
-            pendingAutoStart = false;
-            const started = await startReplicaPromptTask(
-              run.projectId,
-              run.assetId,
-            );
-            if (session !== sessionRef.current) return;
-            const startedRun: LastRun = { ...run, taskId: started.id };
-            lastRun = startedRun;
+          if (cache.pendingAutoStart || cache.starting) {
+            cache.pendingAutoStart = false;
+            const task = await startTask(run);
+            if (!isActive(session)) return;
+            const startedRun = { ...run, taskId: task.id };
+            setCurrentRun(startedRun);
             awaitTaskRun(startedRun, session);
             return;
           }
           const task = await getLatestReplicaPromptTask(run.projectId);
-          if (session !== sessionRef.current) return;
+          if (!isActive(session)) return;
           if (!task || task.asset_id !== run.assetId) {
-            setStage(lastResult ? "ready" : "idle");
-            return;
-          }
-          if (task.status === "SUCCEEDED") {
-            const version = await getLatestReplicaPromptResult(run.projectId);
-            if (session !== sessionRef.current) return;
-            if (version) {
-              lastResult = version;
-              setResult(version);
-              setStage("ready");
-            } else {
-              setStage("idle");
-            }
-            return;
-          }
-          if (task.status === "FAILED") {
-            setStage("failed");
-            setError(task.error_message || "长视频拆解失败，请重新提交。");
-            return;
-          }
-          await waitForReplicaPromptTask(task.id, (updated) => {
-            if (session !== sessionRef.current) return;
-            setTick((value) => value + 1);
-            if (updated.status === "RUNNING") setStage("analyzing");
-          });
-          if (session !== sessionRef.current) return;
-          const version = await getLatestReplicaPromptResult(run.projectId);
-          if (session !== sessionRef.current) return;
-          if (!version) {
+            cache.run = null;
+            cache.result = null;
+            setCurrentRun(null);
+            setResult(null);
             setStage("idle");
             return;
           }
-          lastResult = version;
-          setResult(version);
-          setStage("ready");
+          const restoredRun = { ...run, taskId: task.id };
+          // 服务端可能已由另一个页面启动新任务；更新任务定位时不能保留旧任务的结果。
+          if (task.id !== run.taskId) {
+            cache.result = null;
+            resultTaskIdRef.current = null;
+            setResult(null);
+          }
+          cache.run = restoredRun;
+          setCurrentRun(restoredRun);
+          if (task.status === "SUCCEEDED" || task.status === "FAILED") {
+            await showTerminalTask(task, restoredRun, session);
+            return;
+          }
+          awaitTaskRun(restoredRun, session);
         } catch (cause: unknown) {
-          if (session !== sessionRef.current) return;
-          setStage("failed");
-          setError(
-            cause instanceof Error
-              ? cause.message
-              : "长视频拆解失败，请重新提交。",
-          );
+          showFailure(cause, session);
         }
       })();
-      // awaitTaskRun 是 useCallback([]) 稳定引用：工作台交接的自动启动路径复用它。
     },
-    [awaitTaskRun],
+    [awaitTaskRun, cache, isActive, showFailure, showTerminalTask, startTask],
   );
 
-  // 挂载接回：会话内有过运行（含正在跑的）就恢复，不要求用户重新上传。
   useEffect(() => {
-    if (resumedRef.current || !lastRun) return;
+    if (resumedRef.current || !cache.run) return;
     resumedRef.current = true;
-    resumeRun(lastRun);
-  }, [resumeRun]);
+    resumeRun(cache.run);
+  }, [cache, resumeRun]);
 
   const handleUpload = async (file: File) => {
+    const selection = ++selectionRef.current;
+    const validationSession = sessionRef.current;
+    if (!isActive(validationSession)) return;
     if (file.size > MAX_SOURCE_BYTES) {
       notify("长视频不能超过 600 MB，请压缩后再上传。");
       return;
@@ -291,6 +356,9 @@ export function LongReplicaPage() {
     } catch {
       duration = undefined;
     }
+    // 读取本地时长期间也可能换账号，必须在发起任何上传前再次核对。
+    if (!isActive(validationSession) || selection !== selectionRef.current)
+      return;
     if (typeof duration === "number") {
       if (duration > MAX_SOURCE_SECONDS + DURATION_TOLERANCE_SECONDS) {
         notify("长视频时长不能超过 180 秒，请裁剪后再上传。");
@@ -301,19 +369,30 @@ export function LongReplicaPage() {
         return;
       }
     }
+    // 新文件通过校验才替换实际任务；无效选择不能让已有上传的回调失效。
     const session = ++sessionRef.current;
+    abortRef.current?.abort();
+    pollAbortRef.current?.abort();
     const abortController = new AbortController();
     abortRef.current = abortController;
+    cache.run = null;
+    cache.result = null;
+    resultTaskIdRef.current = null;
+    cache.pendingAutoStart = false;
+    cache.starting = null;
+    setCurrentRun(null);
+    setResult(null);
     setUploadPercent(0);
     setStage("uploading");
     setError("");
+    setCancelError("");
     notify("正在上传长视频…");
     let notifiedStep = -1;
     try {
       const uploaded = await uploadWorkbenchSourceVideo(
         file,
         (percent) => {
-          if (session !== sessionRef.current) return;
+          if (!isActive(session)) return;
           setUploadPercent(percent);
           const step = Math.min(
             100,
@@ -326,80 +405,86 @@ export function LongReplicaPage() {
         abortController.signal,
         "replica_prompt",
       );
-      if (session !== sessionRef.current) return;
+      if (!isActive(session)) return;
       setUploadPercent(-1);
-      lastRun = {
-        projectId: uploaded.projectId,
-        assetId: uploaded.assetId,
-        taskId: "",
-      };
+      setStage("analyzing");
+      const run = { ...uploaded, taskId: "" };
+      cache.run = run;
+      setCurrentRun(run);
+      const task = await startTask(run);
+      if (!isActive(session)) return;
+      const startedRun = { ...run, taskId: task.id };
+      setCurrentRun(startedRun);
       notify("上传完成，已开始长视频拆解，预计 5–15 分钟。");
-      const task = await startReplicaPromptTask(
-        uploaded.projectId,
-        uploaded.assetId,
-      );
-      if (session !== sessionRef.current) return;
-      const run: LastRun = { ...lastRun, taskId: task.id };
-      lastRun = run;
-      awaitTaskRun(run, session);
+      awaitTaskRun(startedRun, session);
     } catch (cause: unknown) {
-      if (session !== sessionRef.current) return;
+      if (!isActive(session)) return;
       setUploadPercent(-1);
-      setStage("failed");
-      if (isInsufficientCredits(cause)) {
-        setError("积分余额不足，请先充值后重试。");
-        openLive("wallet");
-        return;
-      }
-      setError(
-        cause instanceof Error ? cause.message : "上传失败，请检查网络后重试。",
-      );
+      showFailure(cause, session);
     }
   };
 
   const handleCancel = async () => {
-    const run = lastRun;
-    if (!run?.taskId) return;
+    const run = currentRun;
+    const session = sessionRef.current;
+    if (!run?.taskId || cancelPendingRef.current || !isActive(session)) return;
+    cancelPendingRef.current = true;
+    setCancelling(true);
+    setCancelError("");
     try {
-      await cancelReplicaPromptTask(run.taskId);
+      const task = await cancelReplicaPromptTask(run.taskId);
+      if (!isActive(session)) return;
+      if (task.status === "SUCCEEDED" || task.status === "FAILED") {
+        // 所有已确认终态都停止旧轮询，迟到的网络错误不能覆盖成功结果。
+        const terminalSession = ++sessionRef.current;
+        pollAbortRef.current?.abort();
+        if (task.status === "FAILED" && task.error_code === CANCELLED_CODE) {
+          setStage("cancelled");
+          setError("");
+          notify("本次长视频拆解已取消。");
+        } else {
+          await showTerminalTask(task, run, terminalSession).catch((cause) =>
+            showFailure(cause, terminalSession),
+          );
+        }
+      } else {
+        setCancelError("取消尚未确认，任务仍在跟踪中，请稍后重试。");
+      }
     } catch {
-      // 取消失败不阻断界面：任务可能刚好完成，等轮询收尾给出终态。
+      if (isActive(session)) {
+        setCancelError("取消结果暂未确认，任务仍在跟踪中，请稍后重试。");
+      }
+    } finally {
+      if (mountedRef.current && isCurrentLongReplicaSession(accountId, cache)) {
+        cancelPendingRef.current = false;
+        setCancelling(false);
+      }
     }
-    sessionRef.current += 1;
-    setStage(lastResult ? "ready" : "idle");
-    notify("已取消本次长视频拆解，预留积分将退回。");
   };
 
   const handleRetry = () => {
-    const previous = lastRun;
-    if (!previous) return;
+    const previous = currentRun;
+    if (!previous || cancelPendingRef.current) return;
     const session = ++sessionRef.current;
+    if (!isActive(session)) return;
+    cache.result = null;
+    resultTaskIdRef.current = null;
+    const pendingRun = { ...previous, taskId: "" };
+    cache.run = pendingRun;
+    setCurrentRun(pendingRun);
+    setResult(null);
     setStage("analyzing");
     setError("");
+    setCancelError("");
     void (async () => {
       try {
-        const task = await startReplicaPromptTask(
-          previous.projectId,
-          previous.assetId,
-          true,
-        );
-        if (session !== sessionRef.current) return;
-        const run: LastRun = { ...previous, taskId: task.id };
-        lastRun = run;
+        const task = await startTask(previous, true);
+        if (!isActive(session)) return;
+        const run = { ...previous, taskId: task.id };
+        setCurrentRun(run);
         awaitTaskRun(run, session);
       } catch (cause: unknown) {
-        if (session !== sessionRef.current) return;
-        setStage("failed");
-        if (isInsufficientCredits(cause)) {
-          setError("积分余额不足，请先充值后重试。");
-          openLive("wallet");
-          return;
-        }
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "长视频拆解失败，请重新提交。",
-        );
+        showFailure(cause, session);
       }
     })();
   };
@@ -451,9 +536,10 @@ export function LongReplicaPage() {
               分钟，可以离开本页稍后回来查看。
             </p>
           </div>
-          {stage === "idle" || stage === "failed" ? (
+          {stage === "idle" || stage === "failed" || stage === "cancelled" ? (
             <Button
               variant="primary"
+              disabled={cancelling}
               onClick={() => fileInputRef.current?.click()}
             >
               {stage === "failed" ? "重新上传视频" : "上传长视频"}
@@ -463,7 +549,7 @@ export function LongReplicaPage() {
 
         {stage === "uploading" ? (
           <Panel className="long-replica-progress">
-            <p>
+            <p role="status">
               正在上传视频…{" "}
               {uploadPercent >= 0 ? `${Math.round(uploadPercent)}%` : ""}
             </p>
@@ -480,9 +566,14 @@ export function LongReplicaPage() {
               长视频拆解比 15 秒片段慢，预计 5–15
               分钟；可以先去处理其他事情，稍后回到本页查看。
             </p>
-            {lastRun?.taskId ? (
-              <Button variant="outline" onClick={() => void handleCancel()}>
-                取消拆解
+            {cancelError ? <p role="alert">{cancelError}</p> : null}
+            {currentRun?.taskId ? (
+              <Button
+                variant="outline"
+                disabled={cancelling}
+                onClick={() => void handleCancel()}
+              >
+                {cancelling ? "正在取消…" : "取消拆解"}
               </Button>
             ) : null}
           </Panel>
@@ -493,11 +584,30 @@ export function LongReplicaPage() {
             <p role="alert" className="settings-error">
               {error}
             </p>
-            {lastRun ? (
-              <Button variant="primary" onClick={handleRetry}>
+            {currentRun ? (
+              <Button
+                variant="primary"
+                disabled={cancelling}
+                onClick={handleRetry}
+              >
                 重新拆解
               </Button>
             ) : null}
+          </Panel>
+        ) : null}
+
+        {stage === "cancelled" ? (
+          <Panel className="long-replica-progress">
+            <p role="status">
+              本次长视频拆解已取消。积分变动请以消费记录为准。
+            </p>
+            <Button
+              variant="outline"
+              disabled={cancelling}
+              onClick={handleRetry}
+            >
+              重新拆解
+            </Button>
           </Panel>
         ) : null}
 

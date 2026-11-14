@@ -5632,9 +5632,11 @@ def test_admin_private_cover_missing_and_storage_failure_are_closed(
 
 
 @pytest.mark.parametrize("platform", ["douyin", "wechat_channels"])
-def test_admin_upload_is_private_until_published_and_importable(
+def test_admin_upload_auto_publishes_to_customers_and_homepage(
     client, route_state, monkeypatch, platform, tmp_path
 ):
+    """上传即自动上架（2026-11 内容组精简）：pushed_at 置位 + 首页推荐位置顶；
+    弹窗补填的元数据直落卡片字段；幂等重放不重新置顶；媒体照常可复刻/提取文案."""
     import subprocess
 
     from app.auth import CurrentUser
@@ -5680,13 +5682,54 @@ def test_admin_upload_is_private_until_published_and_importable(
     storage = FakeStorageAdapter(provider="cos", bucket="test")
     monkeypatch.setattr("app.media_routes.get_media_storage", lambda conn: storage)
     headers = {**_admin_session(client), "Idempotency-Key": "upload-video"}
-    data = {"platform": platform, "title": "人工精选案例", "confirm": "true", "reason": "上传爆款"}
+    data = {
+        "platform": platform,
+        "title": "人工精选案例",
+        "author": "庭院老周",
+        "confirm": "true",
+        "reason": "上传爆款",
+        "verified": "true",
+        "published_display": "2026-11-13",
+        "likes": "120",
+        "comments": "9",
+        "shares": "30",
+        "collects": "45",
+        "tags": "#乡墅 #庭院 vlog",
+    }
     files = {"file": ("video.mp4", source.read_bytes(), "video/mp4")}
     result = client.post("/api/control/viral/uploads", headers=headers, data=data, files=files)
     assert result.status_code == 201, result.text
     video_id = result.json()["videoId"]
+    assert result.json()["autoPublished"] is True
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT count(*) FROM viral_media_preparations").fetchone()[0] == 1
+        row = raw.execute(
+            "SELECT pushed_at IS NOT NULL,homepage_featured,homepage_rank,verified,likes,"
+            "comments,shares,collects,published_display,tags_json,author FROM viral_videos "
+            "WHERE platform=%s AND video_id=%s",
+            (platform, video_id),
+        ).fetchone()
+        assert row[0] is True and row[1] == 1 and row[2] is not None
+        assert (row[3], row[4], row[5], row[6], row[7]) == (True, 120, 9, 30, 45)
+        assert row[8] == "2026-11-13" and json.loads(row[9]) == ["乡墅", "庭院", "vlog"]
+        assert row[10] == "庭院老周"
+        conn = BusinessConnection.postgres(raw)
+        assert video_id in {
+            v.video_id
+            for v in list_viral_video_page(conn, platform=platform, sort="hot", limit=100).items
+        }
+        rank_before = row[2]
     replay = client.post("/api/control/viral/uploads", headers=headers, data=data, files=files)
     assert replay.status_code == 201 and replay.headers["X-Idempotent-Replay"] == "true"
+    with psycopg.connect(route_state) as raw:
+        # 幂等重放：首推守卫保证首页不重新置顶（rank 保持不变）。
+        assert (
+            raw.execute(
+                "SELECT homepage_rank FROM viral_videos WHERE platform=%s AND video_id=%s",
+                (platform, video_id),
+            ).fetchone()[0]
+            == rank_before
+        )
     conflict = client.post(
         "/api/control/viral/uploads",
         headers=headers,
@@ -5695,35 +5738,7 @@ def test_admin_upload_is_private_until_published_and_importable(
     )
     assert conflict.status_code == 409
     with psycopg.connect(route_state) as raw:
-        assert raw.execute("SELECT count(*) FROM viral_media_preparations").fetchone()[0] == 1
         conn = BusinessConnection.postgres(raw)
-        assert video_id not in {
-            v.video_id
-            for v in list_viral_video_page(conn, platform=platform, sort="hot", limit=100).items
-        }
-        row = raw.execute(
-            "SELECT likes,comments,shares,collects,cover_key FROM viral_videos "
-            "WHERE platform=%s AND video_id=%s",
-            (platform, video_id),
-        ).fetchone()
-        assert row[:4] == (None, None, None, None) and row[4]
-    pushed = client.post(
-        "/api/control/viral/videos/curation:batch",
-        headers={**headers, "Idempotency-Key": "publish-upload"},
-        json={
-            "action": "push",
-            "confirm": True,
-            "reason": "发布精选",
-            "items": [{"platform": platform, "video_id": video_id}],
-        },
-    )
-    assert pushed.status_code == 200 and pushed.json()["items"][0]["published"]
-    with psycopg.connect(route_state) as raw:
-        conn = BusinessConnection.postgres(raw)
-        assert video_id in {
-            v.video_id
-            for v in list_viral_video_page(conn, platform=platform, sort="hot", limit=100).items
-        }
         actor = CurrentUser(
             id="customer_u", username="customer_u", display_name="客户", role="customer"
         )
@@ -5759,7 +5774,7 @@ def test_admin_upload_requires_content_permission_and_rejects_invalid_files(clie
         ).status_code
         == 422
     )
-    data["platform"] = "xiaohongshu"
+    data["platform"] = "kuaishou"
     assert (
         client.post(
             "/api/control/viral/uploads", headers=headers, data=data, files=files
@@ -5855,7 +5870,10 @@ def test_admin_link_import_resolves_upserts_and_queues_archive(
             "SELECT status, collection_config_json FROM viral_refresh_tasks"
         ).fetchone()
         assert task is not None and task[0] == "PENDING"
-        assert json.loads(task[1]) == {"kind": "single_archive", "video_id": "link-import-1"}
+        config = json.loads(task[1])
+        assert config["kind"] == "single_archive" and config["video_id"] == "link-import-1"
+        # 采集即发布：转存任务携带自动上架意图（媒体就绪后由 worker 兑现）。
+        assert config["publish_after"]["actor_user_id"] == "admin_u"
         assert (
             raw.execute(
                 "SELECT count(*) FROM audit_logs "
@@ -5864,6 +5882,72 @@ def test_admin_link_import_resolves_upserts_and_queues_archive(
             ).fetchone()[0]
             == 1
         )
+
+
+@pytest.mark.pg
+def test_admin_link_import_merges_into_pending_archive_slot(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """槽位被上一条采集占用（PENDING）：本条搭车原地扩成 archive_batch.
+
+    连续粘贴同平台链接时，若上一条转存还没跑完，本条若只是跳过入队就
+    永远没有转存/上架机会（手动转存入口已随视频库页面移除）——必须搭车.
+    """
+    from app.viral_link import ResolvedViralLink
+
+    headers = _admin_session(client)
+
+    class Resolver:
+        def __init__(self, video_id: str) -> None:
+            self.video_id = video_id
+
+        def resolve(self, url: str, *, purpose: str) -> ResolvedViralLink:
+            return ResolvedViralLink(
+                platform="douyin",
+                video_id=self.video_id,
+                title=f"粘贴采集{self.video_id}",
+                author="乡墅作者",
+                cover_url=None,
+                video_url="https://cdn.example/video.mp4",
+                audio_url=None,
+                duration_ms=12_000,
+                source_description="",
+            )
+
+    monkeypatch.setattr(
+        "app.viral_link.douyidou_link_client_from_settings",
+        lambda conn: Resolver("link-import-a"),
+    )
+    _stub_link_import_infra(monkeypatch)
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_refresh_tasks")
+
+    first = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-merge-a"},
+        json={"url": "https://v.douyin.com/merge-a", "confirm": True, "reason": "采集A"},
+    )
+    assert first.status_code == 202, first.text
+    assert first.json()["archiveQueued"] is True
+
+    monkeypatch.setattr(
+        "app.viral_link.douyidou_link_client_from_settings",
+        lambda conn: Resolver("link-import-b"),
+    )
+    second = client.post(
+        "/api/control/viral/link-import",
+        headers={**headers, "Idempotency-Key": "link-import-merge-b"},
+        json={"url": "https://v.douyin.com/merge-b", "confirm": True, "reason": "采集B"},
+    )
+    assert second.status_code == 202, second.text
+    assert second.json()["archiveQueued"] is True
+    with psycopg.connect(route_state) as raw:
+        config = json.loads(
+            raw.execute("SELECT collection_config_json FROM viral_refresh_tasks").fetchone()[0]
+        )
+        assert config["kind"] == "archive_batch"
+        assert config["video_ids"] == ["link-import-a", "link-import-b"]
+        assert config["publish_after"]["actor_user_id"] == "admin_u"
 
 
 @pytest.mark.pg

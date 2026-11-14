@@ -126,3 +126,81 @@ def mark_viral_push_published(
         ),
     )
     return True
+
+
+def auto_publish_viral_video(
+    conn: BusinessConnection,
+    *,
+    platform: str,
+    video_id: str,
+    actor_user_id: str = "",
+    reason: str = "",
+    request_id: str = "",
+) -> bool:
+    """自动上架：管理端「爆款视频获取」全自动链路的发布动作.
+
+    与人工 push 共用同一守卫（``mark_viral_push_published``：媒体已归档、
+    封面就绪、未删除、未下架），上架成功后把条目置顶首页推荐位——首页
+    推荐位跟随后台发布自动变动，不再依赖「首页编排」人工维护。首页容量取
+    ``viral_runtime_controls.homepage_capacity``（NULL = 不设上限），超出
+    容量的最旧条目自动撤出推荐位（仍在客户列表，不丢内容）。重复触发不
+    重复置位：仅首推才动首页，幂等重放不会把老条目重新顶到最前。
+    """
+    existing = conn.execute(
+        "SELECT pushed_at FROM viral_videos WHERE platform=%s AND video_id=%s",
+        (platform, video_id),
+    ).fetchone()
+    first_publish = existing is not None and existing[0] is None
+    published = mark_viral_push_published(
+        conn,
+        platform=platform,
+        video_id=video_id,
+        actor_user_id=actor_user_id,
+        reason=reason,
+        request_id=request_id,
+    )
+    if not published:
+        return False
+    if first_publish:
+        _feature_homepage_top(conn, platform=platform, video_id=video_id)
+    return True
+
+
+def _feature_homepage_top(conn: BusinessConnection, *, platform: str, video_id: str) -> None:
+    """置顶首页推荐位（rank 取当前最小值再减一），并按容量撤掉最旧条目.
+
+    下架仍走既有 hide：首页快照查询自带 visibility/删除/就绪守卫，下架
+    条目自动从推荐位消失，无需额外清理。
+    """
+    capacity_row = conn.execute(
+        "SELECT homepage_capacity FROM viral_runtime_controls WHERE id=1"
+    ).fetchone()
+    capacity = int(capacity_row[0]) if capacity_row is not None and capacity_row[0] else None
+    conn.execute(
+        """
+        UPDATE viral_videos v SET homepage_featured = 1,
+            homepage_rank = COALESCE((
+                SELECT MIN(v2.homepage_rank) FROM viral_videos v2
+                WHERE v2.platform = v.platform AND v2.homepage_featured = 1
+            ), 0) - 1,
+            homepage_featured_at = now(),
+            homepage_starts_at = NULL, homepage_ends_at = NULL
+        WHERE v.platform = %s AND v.video_id = %s
+        """,
+        (platform, video_id),
+    )
+    if capacity is not None and capacity > 0:
+        conn.execute(
+            """
+            UPDATE viral_videos SET homepage_featured = 0, homepage_rank = NULL,
+                homepage_featured_at = NULL
+            WHERE platform = %s AND homepage_featured = 1
+                AND (platform, video_id) NOT IN (
+                    SELECT platform, video_id FROM viral_videos
+                    WHERE platform = %s AND homepage_featured = 1
+                    ORDER BY homepage_rank ASC NULLS LAST, pushed_at DESC NULLS LAST
+                    LIMIT %s
+                )
+            """,
+            (platform, platform, capacity),
+        )
