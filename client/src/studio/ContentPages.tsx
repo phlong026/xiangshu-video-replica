@@ -2899,7 +2899,7 @@ export function MaterialsPage() {
           {items.map((item) => {
             const url = previewUrls[item.id];
             return (
-              <article key={item.id} className="content-asset">
+              <article key={item.id} className="content-asset" data-kind={item.kind}>
                 {item.kind === "image" && url ? (
                   <img
                     alt={item.title}

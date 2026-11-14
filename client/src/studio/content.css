@@ -511,11 +511,75 @@
    quick 信息块（标题/描述/标签，无媒体封面时的卡片主体）若沿用上面的
    hover-only 规则会永久 display:none，卡片只剩 footer 按钮。这里让它
    在素材库场景常显为文档流内的信息块。 */
+
+/* 素材卡是「信息块 + footer」两元素结构，不能沿用爆款卡片的
+   160px 媒体行模板（160/24/18/22）：footer 被压进 24px 行导致
+   时间与按钮挤行重叠，剩余行空成中部挖空。改为信息块自适应撑满、
+   footer 自然高度贴底。 */
+.content-asset-grid .content-asset {
+  align-content: stretch;
+  cursor: default;
+  grid-template-rows: minmax(0, 1fr) auto;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.content-asset-grid .content-asset:hover {
+  border-color: #3d3e39;
+  transform: translateY(-1px);
+}
 .content-asset-grid .content-asset__quick {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  min-height: 0;
   position: static;
+}
+.content-asset-grid .content-asset__quick strong {
+  display: -webkit-box;
+  font-size: 15px;
+  line-height: 1.35;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.content-asset-grid .content-asset__quick p.le-sub {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.content-asset-grid .content-asset footer {
+  border-top: 1px solid #292a27;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+}
+.content-asset-grid .content-asset footer small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.content-asset-grid .content-asset footer span {
+  display: flex;
+  gap: 8px;
+}
+.content-asset-grid .content-asset footer button {
+  flex: 1;
+  white-space: nowrap;
+}
+/* 按素材类型给 kind 徽标着色，无媒体封面的卡片多一层视觉锚点 */
+.content-asset[data-kind="doc"] .content-asset__quick .studio-status {
+  color: #8fc7ff;
+}
+.content-asset[data-kind="image"] .content-asset__quick .studio-status {
+  color: #b9e28c;
+}
+.content-asset[data-kind="audio"] .content-asset__quick .studio-status {
+  color: #f0c65b;
+}
+.content-asset[data-kind="video"] .content-asset__quick .studio-status {
+  color: #f09a6a;
 }
 .content-asset__quick button {
   background: rgba(23, 26, 33, 0.86);
