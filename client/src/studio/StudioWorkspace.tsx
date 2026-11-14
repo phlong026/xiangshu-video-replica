@@ -986,10 +986,10 @@ export function StudioWorkspace({
   const videoQuoteDiscountSource = videoQuoteReady
     ? discountSourceLabel(videoQuote?.discount_source)
     : null;
-  // 16-30 秒长档备注（产品口径：30s 价格 = 15s 的 2 倍），随报价一并展示。
+  // 长档费率可由后台独立配置，不能用固定倍数替代当前报价。
   const videoQuoteTierNote =
     videoQuoteReady && videoQuote?.price_tier === "16-30s"
-      ? "长视频档单价为 15 秒及以内的 2 倍"
+      ? "长视频档独立定价，按输出秒数和生成数量计费"
       : null;
   const videoQuoteDiscountNote = videoQuoteDiscountZhe
     ? `已享${videoQuoteDiscountZhe}优惠${videoQuoteDiscountSource ? `（${videoQuoteDiscountSource}）` : ""}`

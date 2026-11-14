@@ -6642,6 +6642,36 @@ def _refresh_batch_status_in_transaction(
 
 
 MANUAL_ARCHIVE_LEASE_SECONDS = 600
+STRICT_DURATION_POLICY = "strict_duration_v1"
+
+
+def requires_strict_generation_duration(task: Mapping[str, Any]) -> bool:
+    return (
+        task.get("billed_seconds") == 30
+        or _seconds_from_prompt_snapshot(task.get("prompt_snapshot_json")) == 30
+    )
+
+
+def generation_result_archive_ready(conn: BusinessConnection, task: Mapping[str, Any]) -> bool:
+    if not task["result_asset_id"]:
+        return False
+    if not requires_strict_generation_duration(task):
+        return True
+    asset = conn.execute(
+        "SELECT metadata_json FROM assets WHERE id=%s", (task["result_asset_id"],)
+    ).fetchone()
+    if asset is None:
+        return False
+    try:
+        metadata = json.loads(str(asset["metadata_json"]))
+        normalized = metadata["video_normalization"]
+        return bool(
+            normalized["policy"] == STRICT_DURATION_POLICY
+            and normalized["target_duration_seconds"] == 30
+            and metadata["duration_seconds"] == 30
+        )
+    except (TypeError, ValueError, KeyError):
+        return False
 
 
 def prepare_generation_result_archive(
@@ -6687,7 +6717,7 @@ def claim_generation_result_archive(
 ) -> dict[str, Any]:
     """Claim only a completed result; ordinary workers cannot consume this lease."""
     prepared = prepare_generation_result_archive(conn, actor=actor, task_id=task_id)
-    if prepared["result_asset_id"]:
+    if generation_result_archive_ready(conn, prepared):
         return prepared
     claimed = conn.execute(
         """UPDATE generation_tasks
@@ -6695,24 +6725,24 @@ def claim_generation_result_archive(
                locked_until=(clock_timestamp()+%s*interval '1 second')::text,
                updated_at=CURRENT_TIMESTAMP
            WHERE id=%s AND status='SUCCEEDED' AND archive_status IN ('DIRECT','ARCHIVED')
-             AND result_asset_id IS NULL AND superseded_by_task_id IS NULL
+             AND result_asset_id IS NOT DISTINCT FROM %s AND superseded_by_task_id IS NULL
              AND (locked_by IS NULL OR locked_until IS NULL
                   OR locked_until::timestamptz <= clock_timestamp())
            RETURNING id""",
-        (f"archive:{uuid4()}", MANUAL_ARCHIVE_LEASE_SECONDS, task_id),
+        (f"archive:{uuid4()}", MANUAL_ARCHIVE_LEASE_SECONDS, task_id, prepared["result_asset_id"]),
     ).fetchone()
     current = prepare_generation_result_archive(conn, actor=actor, task_id=task_id)
-    if claimed is None and not current["result_asset_id"]:
+    if claimed is None and not generation_result_archive_ready(conn, current):
         raise generation_error(
             409, "RESULT_ARCHIVE_IN_PROGRESS", "同一成片正在保存中，请稍后刷新任务核对。"
         )
-    return current
+    return {**current, "_archive_claim_acquired": claimed is not None}
 
 
 def _require_archive_source_unchanged(current: dict[str, Any], prepared: dict[str, Any]) -> None:
     if any(
         current[key] != prepared[key]
-        for key in ("provider_result_url", "project_id", "prompt_snapshot_json")
+        for key in ("provider_result_url", "project_id", "prompt_snapshot_json", "result_asset_id")
     ):
         raise generation_error(409, "RESULT_CHANGED", "成片记录已变化，请刷新后重试。")
 
@@ -6733,7 +6763,7 @@ def renew_generation_result_archive_claim(
         """UPDATE generation_tasks
            SET locked_until=(clock_timestamp()+%s*interval '1 second')::text,
                updated_at=CURRENT_TIMESTAMP
-           WHERE id=%s AND status='SUCCEEDED' AND result_asset_id IS NULL
+           WHERE id=%s AND status='SUCCEEDED' AND result_asset_id IS NOT DISTINCT FROM %s
              AND superseded_by_task_id IS NULL
              AND locked_by=%s AND locked_until=%s
              AND locked_until::timestamptz > clock_timestamp()
@@ -6741,6 +6771,7 @@ def renew_generation_result_archive_claim(
         (
             MANUAL_ARCHIVE_LEASE_SECONDS,
             prepared["id"],
+            prepared["result_asset_id"],
             prepared.get("locked_by"),
             prepared.get("locked_until"),
         ),
@@ -6760,9 +6791,9 @@ def release_generation_result_archive_claim(
     result = conn.execute(
         """UPDATE generation_tasks SET locked_by=NULL,locked_until=NULL,
                   updated_at=CURRENT_TIMESTAMP
-           WHERE id=%s AND status='SUCCEEDED' AND result_asset_id IS NULL
+           WHERE id=%s AND status='SUCCEEDED' AND result_asset_id IS NOT DISTINCT FROM %s
              AND locked_by=%s AND locked_until=%s""",
-        (prepared["id"], owner, prepared.get("locked_until")),
+        (prepared["id"], prepared["result_asset_id"], owner, prepared.get("locked_until")),
     )
     return result.rowcount == 1
 
@@ -6784,8 +6815,17 @@ def persist_generation_result_archive(
             "SELECT id FROM generation_tasks WHERE id=%s FOR UPDATE", (task_id,)
         ).fetchone()
         current = prepare_generation_result_archive(conn, actor=actor, task_id=task_id)
-        if current["result_asset_id"]:
+        if generation_result_archive_ready(conn, current):
             return get_task_result(conn, task_id)
+        if requires_strict_generation_duration(current) and (
+            duration_seconds != 30
+            or normalization_metadata is None
+            or normalization_metadata.get("policy") != STRICT_DURATION_POLICY
+            or normalization_metadata.get("target_duration_seconds") != 30
+        ):
+            raise generation_error(
+                409, "RESULT_DURATION_INVALID", "30 秒成片尚未通过交付时长校验。"
+            )
         _require_archive_source_unchanged(current, prepared)
         claim = conn.execute(
             """SELECT id FROM generation_tasks WHERE id=%s AND locked_by=%s

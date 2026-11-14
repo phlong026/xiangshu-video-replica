@@ -113,6 +113,21 @@ class _GeneratedVideoGeometry:
     rotation: int
     duration: float
     audio_codecs: tuple[str, ...]
+    video_duration: float | None = None
+    audio_durations: tuple[float | None, ...] = ()
+    frame_rate: Fraction = Fraction(0)
+    frame_count: int | None = None
+
+
+def _has_exact_duration(video: _GeneratedVideoGeometry, seconds: int) -> bool:
+    # 容器、视频和音轨都要校验，不能只修改 MP4 头中的总时长。
+    durations = (video.duration, video.video_duration, *video.audio_durations)
+    return (
+        all(value == seconds for value in durations)
+        and video.frame_rate > 0
+        and video.frame_count is not None
+        and video.frame_count == seconds * video.frame_rate
+    )
 
 
 def normalize_generated_video(
@@ -123,6 +138,7 @@ def normalize_generated_video(
     max_bytes: int = GENERATED_VIDEO_MAX_BYTES,
     max_duration_seconds: float | None = GENERATED_VIDEO_MAX_SECONDS,
     allow_mov: bool = False,
+    target_duration_seconds: int | None = None,
 ) -> NormalizedGeneratedVideo:
     """Fit existing MP4 display pixels into a square-pixel canvas without cropping.
 
@@ -139,6 +155,12 @@ def normalize_generated_video(
         raise MediaValidationFailed("目标视频尺寸必须为有效的偶数尺寸")
     if max_bytes <= 0 or (max_duration_seconds is not None and max_duration_seconds <= 0):
         raise MediaValidationFailed("视频规范化资源限制无效")
+    if target_duration_seconds is not None and (
+        isinstance(target_duration_seconds, bool)
+        or not isinstance(target_duration_seconds, int)
+        or not 4 <= target_duration_seconds <= 30
+    ):
+        raise MediaValidationFailed("目标成片时长必须为 4 至 30 的整数秒")
     # 三种拒绝原因分开报：50MB 上限挡住 2K 成片时，运维要能从日志直接看出是大小问题
     # （FIX-15），而不是笼统的「不规范」。
     if not content:
@@ -163,6 +185,13 @@ def normalize_generated_video(
             source = _probe_generated_geometry(
                 ffprobe, source_path, deadline, max_duration_seconds=max_duration_seconds
             )
+            if (
+                target_duration_seconds is not None
+                and source.video_duration is not None
+                and source.video_duration < target_duration_seconds
+            ):
+                # 不用静止尾帧补足短片，短片必须如实报错并保留原片。
+                raise MediaValidationFailed("原片视频轨不足目标时长，无法交付完整成片")
             is_hdr = source.color_transfer in {"smpte2084", "arib-std-b67"}
             # Callers commonly only know coded dimensions.  Rotation is display
             # metadata, therefore that coded target must be rotated as well;
@@ -184,6 +213,10 @@ def normalize_generated_video(
                 or source.pixel_format != "yuv420p"
                 or is_hdr
                 or (bool(source.audio_codecs) and source.audio_codecs != ("aac",))
+                or (
+                    target_duration_seconds is not None
+                    and not _has_exact_duration(source, target_duration_seconds)
+                )
             )
             if transformed:
                 fitted_width, fitted_height = _fit_generated_display(
@@ -200,6 +233,21 @@ def normalize_generated_video(
                     f"scale={fitted_width}:{fitted_height}:flags=lanczos,setsar=1,"
                     f"pad={display_target_width}:{display_target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
                 )
+                duration_args: list[str] = []
+                if target_duration_seconds is not None:
+                    # 整秒与整帧对齐，同时重置时间戳，防止 AAC 尾包把容器再次撑长。
+                    fps = source.frame_rate if source.frame_rate in {24, 25, 30, 48, 50, 60} else 24
+                    frames = int(fps * target_duration_seconds)
+                    filters += (
+                        f",setpts=PTS-STARTPTS,fps={fps},trim=end_frame={frames},"
+                        f"setpts=N/({fps}*TB)"
+                    )
+                    duration_args = ["-t", str(target_duration_seconds)]
+                    if source.audio_codecs:
+                        duration_args += [
+                            "-af",
+                            f"apad,atrim=duration={target_duration_seconds},asetpts=PTS-STARTPTS",
+                        ]
                 _run_generated_tool(
                     [
                         ffmpeg,
@@ -247,6 +295,7 @@ def normalize_generated_video(
                         "rotate=0",
                         "-movflags",
                         "+faststart",
+                        *duration_args,
                         "-fs",
                         str(max_bytes + 1),
                         str(output_path),
@@ -264,7 +313,11 @@ def normalize_generated_video(
                     or result.sar != 1
                     or result.rotation != 0
                     or result.dar != Fraction(display_target_width, display_target_height)
-                    or abs(result.duration - source.duration) > 0.05
+                    or (
+                        not _has_exact_duration(result, target_duration_seconds)
+                        if target_duration_seconds is not None
+                        else abs(result.duration - source.duration) > 0.05
+                    )
                     or result.video_codec != "h264"
                     or result.pixel_format != "yuv420p"
                     or result.color_transfer in {"smpte2084", "arib-std-b67"}
@@ -359,7 +412,8 @@ def _probe_generated_geometry(
             "-protocol_whitelist",
             "file,pipe",
             "-show_entries",
-            "stream=codec_type,codec_name,pix_fmt,color_transfer,width,height,sample_aspect_ratio:"
+            "stream=codec_type,codec_name,pix_fmt,color_transfer,width,height,sample_aspect_ratio,"
+            "duration,avg_frame_rate,nb_frames:"
             "stream_tags=rotate:stream_side_data=rotation:format=duration,format_name",
             "-of",
             "json",
@@ -409,6 +463,23 @@ def _probe_generated_geometry(
         pixel_format = str(video.get("pix_fmt") or "")
         if not pixel_format:
             raise ValueError("missing pixel format")
+
+        def stream_duration(stream: dict[str, object]) -> float | None:
+            value = stream.get("duration")
+            if value in (None, "N/A"):
+                return None
+            number = float(str(value))
+            if not math.isfinite(number) or number <= 0:
+                raise ValueError("invalid stream duration")
+            return number
+
+        frame_rate_text = video.get("avg_frame_rate")
+        frame_rate = (
+            Fraction(str(frame_rate_text))
+            if frame_rate_text not in (None, "N/A", "0/0")
+            else Fraction(0)
+        )
+        frame_count_text = video.get("nb_frames")
         return _GeneratedVideoGeometry(
             str(video["codec_name"]),
             pixel_format,
@@ -420,6 +491,10 @@ def _probe_generated_geometry(
             rotation,
             duration,
             audio_codecs,
+            stream_duration(video),
+            tuple(stream_duration(s) for s in streams if s.get("codec_type") == "audio"),
+            frame_rate,
+            int(frame_count_text) if frame_count_text not in (None, "N/A") else None,
         )
     except (
         ValueError,

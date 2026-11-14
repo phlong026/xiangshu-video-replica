@@ -2179,6 +2179,9 @@ def test_direct_generation_archive_is_owned_idempotent_and_does_not_rebill(
         "other-ratio",
         "missing-ratio",
         "expired",
+        "strict30-failed",
+        "strict30-wrong-duration",
+        "strict30-revoked",
     ],
 )
 def test_archive_http_rechecks_before_commit_and_preserves_billing(
@@ -2214,7 +2217,9 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
         "claim-stolen-at-put",
     }
     snapshot: object = {}
-    if outcome in normalized_outcomes:
+    if outcome.startswith("strict30-"):
+        snapshot = {"output_duration_seconds": 30, "resolution": "768P", "ratio": "9:16"}
+    elif outcome in normalized_outcomes:
         snapshot = {"resolution": "2K", "ratio": "9:16"}
     elif outcome == "adaptive":
         snapshot = {"resolution": "2K", "ratio": "adaptive"}
@@ -2239,6 +2244,8 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
         def write(self):
             with pg_transaction() as raw:
                 if outcome in {"revoked", "normalized-revoked"} and downloads:
+                    raise HTTPException(401, detail={"code": "SESSION_REPLACED"})
+                if outcome == "strict30-revoked" and normalization_calls:
                     raise HTTPException(401, detail={"code": "SESSION_REPLACED"})
                 yield BusinessConnection.postgres(raw), actor("employee_1", "employee")
                 if outcome == "renew-commit-failed" and downloads:
@@ -2272,9 +2279,12 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
         target_width: int,
         target_height: int,
         max_duration_seconds: float | None,
+        target_duration_seconds: int | None = None,
     ):
         normalization_calls.append((content, target_width, target_height, max_duration_seconds))
-        if outcome in {"normalization-failed", "normalization-61-seconds"}:
+        if outcome.startswith("strict30-"):
+            assert target_duration_seconds == 30
+        if outcome in {"normalization-failed", "normalization-61-seconds", "strict30-failed"}:
             assert max_duration_seconds == 60
             raise MediaValidationFailed("invalid decoded video")
         if outcome == "claim-stolen":
@@ -2285,7 +2295,7 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
             )
         return SimpleNamespace(
             content=normalized_content,
-            duration_seconds=4.0,
+            duration_seconds=30.0 if outcome == "strict30-revoked" else 4.0,
             width=1440,
             height=2560,
             source_sample_aspect_ratio="64:63",
@@ -2305,7 +2315,9 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
     monkeypatch.setattr("app.generation_routes.normalize_generated_video", normalize, raising=False)
     monkeypatch.setattr(
         "app.generation_routes.FFprobeVideoProbe.probe",
-        lambda *_args, **_kwargs: VideoMetadata(float("nan") if outcome == "nan" else 4.0),
+        lambda *_args, **_kwargs: VideoMetadata(
+            float("nan") if outcome == "nan" else 4.0, width=160, height=96
+        ),
     )
     app.dependency_overrides[get_business_db] = TestDb
     storage = FakeStorageAdapter(provider="cos", bucket="http-archive-test")
@@ -2346,6 +2358,8 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
                 "claim-stolen": 409,
                 "claim-stolen-at-put": 409,
                 "renew-commit-failed": 401,
+                "strict30-wrong-duration": 409,
+                "strict30-revoked": 401,
                 # 直链失效：如实告知文件已失效，而不是 503「请重试」（FIX-02）。
                 "expired": 410,
             }.get(outcome, 503)
@@ -2387,6 +2401,10 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
         else:
             if outcome in {"normalization-failed", "normalization-61-seconds", "claim-stolen"}:
                 assert uploaded_content == []
+            if outcome in {"strict30-failed", "strict30-revoked"}:
+                assert uploaded_content == []
+            if outcome == "strict30-wrong-duration":
+                assert result.json()["detail"]["code"] == "RESULT_DURATION_INVALID"
             assert pg.execute("SELECT count(*) FROM assets").fetchone()[0] == 0
             assert (
                 pg.execute(
@@ -2466,6 +2484,162 @@ def test_preview_url_verify_reports_expired_direct_result(
             assert response.json()["detail"]["code"] == "RESULT_URL_EXPIRED"
         else:
             assert response.json()["url"] == "https://cdn.example/result.mp4"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("legacy_asset", [False, True])
+def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
+    lane_env: str,
+    pg: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    legacy_asset: bool,
+) -> None:
+    from contextlib import contextmanager
+
+    from app.auth import get_current_user
+    from app.customer_fence import get_business_db
+    from app.generation import claim_generation_result_archive
+    from app.main import app
+    from app.media_routes import get_media_storage
+    from app.media_tools import resolve_media_binary
+
+    original_path = tmp_path / "original.mp4"
+    subprocess.run(
+        [
+            resolve_media_binary("ffmpeg"),
+            "-v",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x96:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "30.675",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "2",
+            "-c:a",
+            "aac",
+            str(original_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    original = original_path.read_bytes()
+    owner = actor("employee_1", "employee")
+    seed_project(pg, "strict-project", owner.id)
+    pg.execute(
+        "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+        "request_hash,request_snapshot_json,status) VALUES "
+        "('strict-batch','strict-project','employee_1','strict-key','h','{}','SUCCEEDED')"
+    )
+    pg.execute(
+        "INSERT INTO generation_tasks(id,batch_id,provider,model,status,archive_status,"
+        "provider_result_url,billed_seconds,prompt_snapshot_json,actual_cost) VALUES "
+        "('strict-task','strict-batch','metaso','MiniMax-H3','SUCCEEDED','DIRECT',"
+        "'https://cdn.example/original.mp4',30,%s,600)",
+        (json.dumps({"output_duration_seconds": 30, "resolution": "768P", "ratio": "9:16"}),),
+    )
+    if legacy_asset:
+        pg.execute(
+            "INSERT INTO assets(id,project_id,kind,storage_uri,sha256,size_bytes,content_type,"
+            "metadata_json,created_by_user_id) VALUES ('old-result','strict-project',"
+            "'material_video','cos://strict-test/old.mp4','old-sha',100,'video/mp4',"
+            "'{\"duration_seconds\":30.675}','employee_1')"
+        )
+        pg.execute(
+            "UPDATE generation_tasks SET archive_status='ARCHIVED',result_asset_id='old-result' "
+            "WHERE id='strict-task'"
+        )
+    calls: list[str] = []
+
+    def check_concurrent_claim() -> None:
+        # 并发请求不能越过正在进行的校验，也不能释放它的处理租约。
+        with pg_transaction() as raw:
+            with pytest.raises(HTTPException) as raised:
+                claim_generation_result_archive(
+                    BusinessConnection.postgres(raw), actor=owner, task_id="strict-task"
+                )
+            assert raised.value.detail["code"] == "RESULT_ARCHIVE_IN_PROGRESS"
+
+    class Provider:
+        def download_result(self, url: str) -> bytes:
+            assert not legacy_asset
+            calls.append(url)
+            check_concurrent_claim()
+            return original
+
+    class TestDb:
+        @contextmanager
+        def write(self):
+            with pg_transaction() as raw:
+                yield BusinessConnection.postgres(raw), owner
+
+    storage = FakeStorageAdapter(provider="cos", bucket="strict-test")
+    if legacy_asset:
+        storage.put_object("old.mp4", original, content_type="video/mp4")
+        get_object = storage.get_object
+
+        def read_old_source(key: str) -> bytes:
+            calls.append(f"cos://strict-test/{key}")
+            check_concurrent_claim()
+            return get_object(key)
+
+        monkeypatch.setattr(storage, "get_object", read_old_source)
+        monkeypatch.setattr("app.generation_routes.storage_for_asset", lambda *_a: storage)
+    monkeypatch.setattr("app.generation_routes.h3_provider_for_task", lambda *_a, **_kw: Provider())
+    monkeypatch.setattr("app.generation_routes.store_video_thumbnail", lambda *_a: None)
+    app.dependency_overrides[get_business_db] = TestDb
+    app.dependency_overrides[get_current_user] = lambda: owner
+    app.dependency_overrides[get_media_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        # 任何未校验的 30 秒成片都不能泄露原始直链。
+        preview = client.get("/api/generation-tasks/strict-task/preview-url")
+        assert preview.status_code == 409
+        assert preview.json()["detail"]["code"] == "RESULT_DURATION_PREPARATION_REQUIRED"
+        assert "cdn.example" not in preview.text
+        result = client.post("/api/generation-tasks/strict-task/archive")
+        assert result.status_code == 200, result.text
+        asset_id = result.json()["result_asset_id"]
+        assert asset_id and asset_id != "old-result"
+        replay = client.post("/api/generation-tasks/strict-task/archive")
+        assert replay.status_code == 200
+        assert replay.json()["result_asset_id"] == asset_id
+        assert calls == [
+            "cos://strict-test/old.mp4" if legacy_asset else "https://cdn.example/original.mp4"
+        ]
+        metadata = json.loads(
+            pg.execute("SELECT metadata_json FROM assets WHERE id=%s", (asset_id,)).fetchone()[0]
+        )
+        assert metadata["duration_seconds"] == 30
+        normalized = metadata["video_normalization"]
+        assert normalized["policy"] == "strict_duration_v1"
+        assert normalized["target_duration_seconds"] == 30
+        assert normalized["source_sha256"] == hashlib.sha256(original).hexdigest()
+        assert normalized["source_duration_seconds"] == 30.675
+        assert normalized["transformed"]
+        assert pg.execute(
+            "SELECT provider_result_url,billed_seconds,actual_cost,locked_by,locked_until "
+            "FROM generation_tasks WHERE id='strict-task'"
+        ).fetchone() == ("https://cdn.example/original.mp4", 30, 600, None, None)
+        assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
+        assert pg.execute("SELECT count(*) FROM assets").fetchone()[0] == (2 if legacy_asset else 1)
+        if legacy_asset:
+            assert pg.execute("SELECT sha256 FROM assets WHERE id='old-result'").fetchone() == (
+                "old-sha",
+            )
+        assert original_path.read_bytes() == original
+        app.dependency_overrides[get_current_user] = lambda: actor("employee_2", "employee")
+        assert client.get("/api/generation-tasks/strict-task/preview-url").status_code == 404
     finally:
         app.dependency_overrides.clear()
 
