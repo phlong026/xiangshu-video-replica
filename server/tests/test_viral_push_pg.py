@@ -339,7 +339,8 @@ def test_auto_publish_homepage_capacity_evicts_oldest(route_state: str) -> None:
         ).fetchone()
         assert new_row[0] == 1 and new_row[1] is not None and new_row[1] < 5
         old_row = raw.execute(
-            "SELECT homepage_featured, homepage_rank FROM viral_videos WHERE video_id='capacity-old'"
+            "SELECT homepage_featured, homepage_rank FROM viral_videos "
+            "WHERE video_id='capacity-old'"
         ).fetchone()
         assert (old_row[0], old_row[1]) == (0, None)
 
@@ -429,9 +430,7 @@ def test_mark_viral_push_published_refuses_hidden_video(route_state: str) -> Non
         assert (row[0], row[1]) == (0, None)
 
 
-def test_push_restores_hidden_video_but_not_blocked(
-    client: TestClient, route_state: str
-) -> None:
+def test_push_restores_hidden_video_but_not_blocked(client: TestClient, route_state: str) -> None:
     """「下架」可逆：push 清除 HIDDEN 后照常上架（自动上架体系里的唯一恢复
     入口）；屏蔽（UNAVAILABLE）仍拒绝，防止绕过内容审核."""
     require_pg_or_explicit_skip()

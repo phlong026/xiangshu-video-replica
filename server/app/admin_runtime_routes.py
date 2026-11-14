@@ -1648,7 +1648,11 @@ def import_viral_link_for_admin(
                 "xiaohongshu",
                 "wechat_channels",
             ):
-                raise http_error(422, "VIRAL_PLATFORM_INVALID", "暂时只支持抖音、小红书、视频号采集。")
+                raise http_error(
+                    422,
+                    "VIRAL_PLATFORM_INVALID",
+                    "暂时只支持抖音、小红书、视频号采集。",
+                )
             # 限时外呼与管理端搜索同一纪律：解析通道各有传输超时，不能让
             # 外呼挂在写事务里无限等待。
             resolver: DouyidouLinkClient | WechatLinkClient
