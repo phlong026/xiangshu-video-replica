@@ -34,8 +34,8 @@ from app.viral_content_observations import record_content_source, record_content
 from app.viral_media import viral_cover_key
 from app.viral_media_preparation import ViralMediaPreparation
 from app.viral_push import auto_publish_viral_video
-from app.viral_store import MAX_TAGS, update_viral_cover, upsert_viral_videos
-from app.viral_tikhub import ViralVideo
+from app.viral_store import update_viral_cover, upsert_viral_videos
+from app.viral_tikhub import MAX_TAGS, ViralVideo
 
 router = APIRouter()
 
@@ -57,11 +57,7 @@ def _parse_published(raw: str) -> int | None:
     if not raw:
         return None
     try:
-        return int(
-            datetime.strptime(raw, "%Y-%m-%d")
-            .replace(hour=12, tzinfo=UTC)
-            .timestamp()
-        )
+        return int(datetime.strptime(raw, "%Y-%m-%d").replace(hour=12, tzinfo=UTC).timestamp())
     except ValueError:
         return None
 
