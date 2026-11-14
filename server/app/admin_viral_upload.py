@@ -23,6 +23,7 @@ from app.media import MAX_UPLOAD_BYTES, FFprobeVideoProbe, probe_video, validate
 from app.media_tools import MediaValidationFailed, normalize_generated_video
 from app.storage import StoredObject
 from app.viral_content_observations import record_content_source, record_content_stage
+from app.viral_media import viral_cover_key
 from app.viral_media_preparation import ViralMediaPreparation
 from app.viral_store import update_viral_cover, upsert_viral_videos
 from app.viral_tikhub import ViralVideo
@@ -113,6 +114,15 @@ def upload_viral_video(
             prepare=prepare,
         )
         cover_key = thumbnail_key_for(stored.key)
+        # 封面公开副本：/api/viral/covers 与管理端封面路由都按确定性 key
+        # （viral_cover_key）取对象，不读 DB cover_key。采集链路写入的就是
+        # 这个位置；管理员上传此前只落了 prepared 归档同址缩略图，公开
+        # 路径缺对象 → 封面 404（黑屏卡片）。这里同步写公开副本。
+        storage.put_object(
+            viral_cover_key(platform, video_id),
+            thumbnail,
+            content_type="image/jpeg",
+        )
         video = ViralVideo(
             platform=platform,
             video_id=video_id,
