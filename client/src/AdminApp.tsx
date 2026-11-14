@@ -27,11 +27,6 @@ import { TeamManagementSection } from "./admin/TeamManagementSection";
 import { TrainingMaterialsPage } from "./admin/TrainingMaterialsPage";
 import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralAcquirePage } from "./admin/ViralAcquirePage";
-import { ViralCollectionPage } from "./admin/ViralCollectionPage";
-import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
-import { ViralHomepagePage } from "./admin/ViralHomepagePage";
-import { ViralOverviewPage } from "./admin/ViralOverviewPage";
-import { ViralVideosPage } from "./admin/ViralVideosPage";
 import { WorkerObservationsPage } from "./admin/WorkerObservationsPage";
 import "./admin/admin-login.css";
 import { PageBanner } from "./admin/ui/PageBanner";
@@ -58,19 +53,14 @@ import chartPieIcon from "./assets/icons/chart-pie.svg";
 import clapperboardIcon from "./assets/icons/clapperboard.svg";
 import fileSpreadsheetIcon from "./assets/icons/file-spreadsheet.svg";
 import flameIcon from "./assets/icons/flame.svg";
-import gaugeIcon from "./assets/icons/gauge.svg";
 import trainingIcon from "./assets/icons/graduation-cap.svg";
-import houseIcon from "./assets/icons/house.svg";
 import dashboardIcon from "./assets/icons/layout-dashboard.svg";
-import listVideoIcon from "./assets/icons/list-video.svg";
 import megaphoneIcon from "./assets/icons/megaphone.svg";
 import ticketIcon from "./assets/icons/message-square-warning.svg";
 import radarIcon from "./assets/icons/radar.svg";
 import scrollIcon from "./assets/icons/scroll-text.svg";
-import searchCheckIcon from "./assets/icons/search-check.svg";
 import serverCogIcon from "./assets/icons/server-cog.svg";
 import settingsIcon from "./assets/icons/settings.svg";
-import collectionSettingsIcon from "./assets/icons/settings-2.svg";
 import shieldUserIcon from "./assets/icons/shield-user.svg";
 import smartphoneIcon from "./assets/icons/smartphone.svg";
 import alertIcon from "./assets/icons/triangle-alert.svg";
@@ -115,11 +105,6 @@ export type AdminTab =
   | "generationFailures"
   | "workerObservations"
   | "externalCalls"
-  | "viralOverview"
-  | "viralHomepage"
-  | "viralCollection"
-  | "viralVideos"
-  | "viralDiscoveries"
   | "viralAcquire"
   | "auditCenter"
   | "alerts"
@@ -224,22 +209,6 @@ const tabGroups: Array<{
     label: "内容",
     tabs: [
       {
-        id: "viralOverview",
-        label: "内容概览",
-        helper: "库存、效果与运营待办",
-      },
-      { id: "viralVideos", label: "视频库", helper: "挑选内容与批量上首页" },
-      {
-        id: "viralHomepage",
-        label: "首页编排",
-        helper: "调整顺序与定时上下线",
-      },
-      {
-        id: "viralDiscoveries",
-        label: "客户需求洞察",
-        helper: "搜索需求与内容补货",
-      },
-      {
         id: "viralAcquire",
         label: "爆款视频获取",
         helper: "链接采集与上传，自动上架",
@@ -248,11 +217,6 @@ const tabGroups: Array<{
         id: "trainingMaterials",
         label: "培训素材库",
         helper: "后台统一上传，客户只读",
-      },
-      {
-        id: "viralCollection",
-        label: "采集设置",
-        helper: "计划、关键词、质量与预算",
       },
     ],
   },
@@ -295,11 +259,6 @@ const tabPageTitles: Record<AdminTab, string> = {
   generationFailures: "失败诊断",
   workerObservations: "队列观测",
   externalCalls: "接口调用日志",
-  viralOverview: "内容概览",
-  viralHomepage: "首页编排",
-  viralCollection: "采集设置",
-  viralVideos: "视频库",
-  viralDiscoveries: "客户需求洞察",
   viralAcquire: "爆款视频获取",
   auditCenter: "管理操作日志",
   alerts: "告警总览",
@@ -325,11 +284,6 @@ const tabReadPoints: Partial<Record<AdminTab, string>> = {
   workerObservations: "generation.read",
   alerts: "generation.read",
   externalCalls: "generation.read",
-  viralOverview: "content.read",
-  viralHomepage: "content.read",
-  viralCollection: "content.read",
-  viralVideos: "content.read",
-  viralDiscoveries: "content.read",
   viralAcquire: "content.read",
   auditCenter: "audit.read",
   systemSettings: "settings.read",
@@ -355,11 +309,6 @@ const navigationIcons: Record<AdminTab, string> = {
   generationFailures: alertIcon,
   workerObservations: activityIcon,
   externalCalls: serverCogIcon,
-  viralOverview: gaugeIcon,
-  viralHomepage: houseIcon,
-  viralCollection: collectionSettingsIcon,
-  viralVideos: listVideoIcon,
-  viralDiscoveries: searchCheckIcon,
   viralAcquire: flameIcon,
   auditCenter: scrollIcon,
   alerts: bellIcon,
@@ -434,10 +383,6 @@ export function AdminApp() {
   const [businessTarget, setBusinessTarget] = useState(
     () => new URLSearchParams(window.location.hash.split("?")[1] ?? ""),
   );
-  const [viralDemandSearch, setViralDemandSearch] = useState<{
-    keyword: string;
-    platform: "douyin" | "wechat_channels";
-  } | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
@@ -1220,8 +1165,11 @@ export function AdminApp() {
                       target: { status: "unresolved" },
                     },
                     contentFailed: {
-                      tab: "viralVideos",
-                      target: { listQuery: "libraryStatus=failed" },
+                      // 视频库随内容组精简移除：内容待办落到「爆款视频获取」
+                      // （转存失败条目在卡片上带「转存失败」状态章，可重新提交
+                      // 链接或下架）。
+                      tab: "viralAcquire",
+                      target: {},
                     },
                     activeAlerts: { tab: "alerts", target: {} },
                   };
@@ -1409,54 +1357,6 @@ export function AdminApp() {
             ) : null}
             {viewTab === "auditCenter" ? (
               <AuditEventsPage readOnly={readOnly} />
-            ) : null}
-            {viewTab === "viralOverview" ? (
-              <ViralOverviewPage readOnly={readOnlyFor("content.write")} />
-            ) : null}
-            {viewTab === "viralHomepage" ? (
-              <ViralHomepagePage readOnly={readOnlyFor("content.write")} />
-            ) : null}
-            {viewTab === "viralCollection" ? (
-              <ViralCollectionPage
-                key={`collection:${businessTarget}`}
-                readOnly={readOnlyFor("content.write")}
-                initialBatchId={businessTarget.get("batchId") ?? ""}
-              />
-            ) : null}
-            {viewTab === "viralVideos" ? (
-              <ViralVideosPage
-                key={`videos:${businessTarget}`}
-                initialListQuery={businessTarget.get("listQuery") ?? ""}
-                onScopeChange={persistBusinessScope}
-                onCustomer={(userId) =>
-                  navigateAdmin("customersMgmt", "customer", { userId })
-                }
-                initialVideo={
-                  businessTarget.get("videoId")
-                    ? {
-                        video_id: businessTarget.get("videoId") ?? "",
-                        platform:
-                          businessTarget.get("platform") === "wechat_channels"
-                            ? "wechat_channels"
-                            : "douyin",
-                      }
-                    : null
-                }
-                readOnly={readOnlyFor("content.write")}
-                initialSearch={viralDemandSearch}
-              />
-            ) : null}
-            {viewTab === "viralDiscoveries" ? (
-              <ViralDiscoveriesPage
-                readOnly={readOnlyFor("content.write")}
-                onCustomer={(userId) => {
-                  navigateAdmin("customersMgmt", "demandCustomer", { userId });
-                }}
-                onSearch={(keyword, platform) => {
-                  setViralDemandSearch({ keyword, platform });
-                  navigateAdmin("viralVideos");
-                }}
-              />
             ) : null}
             {viewTab === "viralAcquire" ? (
               <ViralAcquirePage readOnly={readOnlyFor("content.write")} />

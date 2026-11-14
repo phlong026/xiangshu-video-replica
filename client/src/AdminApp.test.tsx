@@ -1530,7 +1530,8 @@ describe("AdminApp", () => {
     const icons = [
       ...nav.querySelectorAll<HTMLImageElement>(".admin-navigation-icon"),
     ].map((icon) => icon.getAttribute("src"));
-    expect(icons.length).toBeGreaterThan(20);
+    // 内容组精简后菜单 20 项：阈值跟随菜单规模防空图标集，唯一性是重点。
+    expect(icons.length).toBeGreaterThan(18);
     expect(new Set(icons).size).toBe(icons.length);
   });
 
@@ -1541,8 +1542,7 @@ describe("AdminApp", () => {
     ["workerObservations", "队列观测"],
     ["publishStats", "发布成效"],
     ["customerLifecycle", "客户运营"],
-    ["viralOverview", "内容概览"],
-    ["viralHomepage", "首页编排"],
+    ["viralAcquire", "爆款视频获取"],
     ["sessions", "登录与设备"],
   ])(
     "%s 页面只有一个页面级标题（外壳的 h1，页内不再重复）",
@@ -1654,13 +1654,8 @@ describe("AdminApp", () => {
         "队列观测",
         "告警总览",
         "接口调用日志",
-        "内容概览",
-        "视频库",
-        "首页编排",
-        "客户需求洞察",
         "爆款视频获取",
         "培训素材库",
-        "采集设置",
         "管理操作日志",
         "团队与权限",
         "系统设置",
@@ -1680,13 +1675,8 @@ describe("AdminApp", () => {
         "失败诊断",
         "队列观测",
         "告警总览",
-        "内容概览",
-        "视频库",
-        "首页编排",
-        "客户需求洞察",
         "爆款视频获取",
         "培训素材库",
-        "采集设置",
         "管理操作日志",
         "系统设置",
       ],
@@ -1714,13 +1704,8 @@ describe("AdminApp", () => {
         "失败诊断",
         "队列观测",
         "告警总览",
-        "内容概览",
-        "视频库",
-        "首页编排",
-        "客户需求洞察",
         "爆款视频获取",
         "培训素材库",
-        "采集设置",
       ],
       auditor: [
         "总览",
@@ -1737,13 +1722,8 @@ describe("AdminApp", () => {
         "失败诊断",
         "队列观测",
         "告警总览",
-        "内容概览",
-        "视频库",
-        "首页编排",
-        "客户需求洞察",
         "爆款视频获取",
         "培训素材库",
-        "采集设置",
         "管理操作日志",
         "系统设置",
       ],
