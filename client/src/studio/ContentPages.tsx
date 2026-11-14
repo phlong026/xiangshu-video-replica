@@ -1320,9 +1320,9 @@ function ViralCard({
 export function ViralPage() {
   const { data, review, updateData, user } = useStudio();
   const accountId = user.id;
-  const [platform, setPlatform] = useState<
-    "抖音" | "视频号" | "小红书"
-  >("抖音");
+  const [platform, setPlatform] = useState<"抖音" | "视频号" | "小红书">(
+    "抖音",
+  );
   const [sort, setSort] = useState<"热门优先" | "最新">("热门优先");
   const [scope, setScope] = useState<"all" | "favorites">("all");
   const [visibleCount, setVisibleCount] = useState(viralInitialCount);
