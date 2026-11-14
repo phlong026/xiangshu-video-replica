@@ -70,7 +70,6 @@
   opacity: 0.5;
   cursor: default;
 }
-.content-filters,
 .content-card-actions,
 .content-detail-actions,
 .content-publish-actions,
@@ -127,10 +126,6 @@
   color: #deded8;
   font: inherit;
   padding: 6px 10px;
-}
-.content-filters {
-  gap: 8px;
-  margin: 12px 0 14px;
 }
 .content-video-grid {
   display: grid;
