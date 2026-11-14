@@ -521,6 +521,50 @@ describe("长视频异步边界回归", () => {
     expect(screen.getByRole("status")).toHaveTextContent("00:02");
   });
 
+  it.each([
+    { label: "文件过大", size: 601 * 1024 * 1024, duration: 120 },
+    { label: "时长超限", size: 16, duration: 181 },
+  ])("再次选择$label素材不能让已有上传失去跟踪", async ({ size, duration }) => {
+    const upload = deferred<{ projectId: string; assetId: string }>();
+    uploadWorkbenchSourceVideo.mockReturnValue(upload.promise);
+    waitForReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+    });
+    render(<LongReplicaPage />);
+    await pickFile(makeFile());
+    const [, progress, signal] = uploadWorkbenchSourceVideo.mock.calls[0];
+    readVideoDuration.mockResolvedValueOnce(duration);
+    await pickFile(makeFile({ size }));
+    expect(signal?.aborted).toBe(false);
+    act(() => progress(61));
+    expect(screen.getByText(/正在上传视频.*61%/)).toBeInTheDocument();
+    await act(async () =>
+      upload.resolve({ projectId: "proj-1", assetId: "asset-1" }),
+    );
+    await screen.findByText(/庭院施工讲解视频/);
+    expect(uploadWorkbenchSourceVideo).toHaveBeenCalledTimes(1);
+    expect(startReplicaPromptTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("连续选择文件的时长探测乱序返回时只上传较新的有效选择", async () => {
+    const older = deferred<number>();
+    const newer = deferred<number>();
+    readVideoDuration
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const oldFile = new File(["old"], "old.mp4", { type: "video/mp4" });
+    const newFile = new File(["new"], "new.mp4", { type: "video/mp4" });
+    uploadWorkbenchSourceVideo.mockReturnValue(new Promise(() => {}));
+    render(<LongReplicaPage />);
+    await pickFile(oldFile);
+    await pickFile(newFile);
+    await act(async () => newer.resolve(120));
+    await act(async () => older.resolve(120));
+    expect(uploadWorkbenchSourceVideo).toHaveBeenCalledTimes(1);
+    expect(uploadWorkbenchSourceVideo.mock.calls[0][0]).toBe(newFile);
+  });
+
   it("服务端确认取消后显示取消态，迟到的成功轮询不能重新展示结果", async () => {
     const completion = pendingRun();
     const { notify } = useStudio();

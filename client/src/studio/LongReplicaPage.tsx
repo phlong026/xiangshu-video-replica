@@ -141,6 +141,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState("");
   const sessionRef = useRef(0);
+  const selectionRef = useRef(0);
   const mountedRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
@@ -336,8 +337,9 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
   }, [cache, resumeRun]);
 
   const handleUpload = async (file: File) => {
-    const session = ++sessionRef.current;
-    if (!isActive(session)) return;
+    const selection = ++selectionRef.current;
+    const validationSession = sessionRef.current;
+    if (!isActive(validationSession)) return;
     if (file.size > MAX_SOURCE_BYTES) {
       notify("长视频不能超过 600 MB，请压缩后再上传。");
       return;
@@ -349,7 +351,8 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
       duration = undefined;
     }
     // 读取本地时长期间也可能换账号，必须在发起任何上传前再次核对。
-    if (!isActive(session)) return;
+    if (!isActive(validationSession) || selection !== selectionRef.current)
+      return;
     if (typeof duration === "number") {
       if (duration > MAX_SOURCE_SECONDS + DURATION_TOLERANCE_SECONDS) {
         notify("长视频时长不能超过 180 秒，请裁剪后再上传。");
@@ -360,7 +363,10 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         return;
       }
     }
+    // 新文件通过校验才替换实际任务；无效选择不能让已有上传的回调失效。
+    const session = ++sessionRef.current;
     abortRef.current?.abort();
+    pollAbortRef.current?.abort();
     const abortController = new AbortController();
     abortRef.current = abortController;
     cache.run = null;
