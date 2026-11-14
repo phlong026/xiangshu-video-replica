@@ -242,7 +242,15 @@ def normalize_generated_video(
                         f",setpts=PTS-STARTPTS,fps={fps},trim=end_frame={frames},"
                         f"setpts=N/({fps}*TB)"
                     )
-                    duration_args = ["-t", str(target_duration_seconds)]
+                    # 输出也需声明恒定帧率，否则部分封装器会丢失末帧时长。
+                    duration_args = [
+                        "-r",
+                        str(fps),
+                        "-fps_mode",
+                        "cfr",
+                        "-t",
+                        str(target_duration_seconds),
+                    ]
                     if source.audio_codecs:
                         duration_args += [
                             "-af",

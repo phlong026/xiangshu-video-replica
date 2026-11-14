@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import replace
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -12,15 +13,24 @@ import pytest
 from app.media_tools import MediaValidationFailed, normalize_generated_video, resolve_media_binary
 
 
-def _probe(path: Path) -> dict:
+def _probe(path: Path, *, video_packets: bool = False) -> dict:
     return json.loads(
         subprocess.check_output(
             [
                 resolve_media_binary("ffprobe"),
                 "-v",
                 "error",
-                "-show_streams",
-                "-show_format",
+                *(
+                    [
+                        "-select_streams",
+                        "v:0",
+                        "-show_packets",
+                        "-show_entries",
+                        "packet=pts,duration",
+                    ]
+                    if video_packets
+                    else ["-show_streams", "-show_format"]
+                ),
                 "-of",
                 "json",
                 str(path),
@@ -60,7 +70,10 @@ def _source(path: Path, *, seconds: float, audio: bool = True, fps: int = 24) ->
     return path.read_bytes()
 
 
-@pytest.mark.parametrize(("audio", "fps"), [(True, 24), (False, 24), (True, 25), (True, 30)])
+@pytest.mark.parametrize(
+    ("audio", "fps"),
+    [(True, 24), (False, 24), (True, 25), (True, 30), (True, 48), (True, 50), (True, 60)],
+)
 def test_oversized_result_delivers_exactly_30_seconds(tmp_path: Path, audio: bool, fps: int):
     original_path = tmp_path / "original.mp4"
     original = _source(original_path, seconds=30.675, audio=audio, fps=fps)
@@ -84,9 +97,17 @@ def test_oversized_result_delivers_exactly_30_seconds(tmp_path: Path, audio: boo
     assert float(measured["format"]["duration"]) == 30
     video = next(s for s in measured["streams"] if s["codec_type"] == "video")
     assert int(video["nb_frames"]) == fps * 30
+    assert Fraction(video["avg_frame_rate"]) == fps
+    time_base = Fraction(video["time_base"])
+    assert int(video["duration_ts"]) * time_base == 30
     assert video["width"] == 160 and video["height"] == 96
     assert all(float(s["duration"]) == 30 for s in measured["streams"])
     assert len(measured["streams"]) == (2 if audio else 1)
+    # 容器时长不能掩盖末帧包时长丢失；每个真实视频包也必须保持恒定帧率。
+    packets = _probe(delivered, video_packets=True)["packets"]
+    assert len(packets) == fps * 30
+    assert {int(p["duration"]) * time_base for p in packets} == {Fraction(1, fps)}
+    assert max((int(p["pts"]) + int(p["duration"])) * time_base for p in packets) == 30
     # 归档重试必须复用完全相同的已校验字节。
     replay = normalize_generated_video(
         normalized.content,
