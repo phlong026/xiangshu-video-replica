@@ -4326,20 +4326,68 @@ export async function adminSearchViralVideos(
   return { ...result, items: result.items.map(withManagedCover) };
 }
 
+/** 解析预检结果（不入库）：确认弹窗的数据源。 */
+export type AdminViralLinkResolveResult = {
+  platform: "douyin" | "wechat_channels" | "xiaohongshu";
+  videoId: string;
+  title: string;
+  author: string;
+  authorAvatar: string | null;
+  verified: boolean;
+  coverUrl: string | null;
+  durationMs: number;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+  collects: number | null;
+  publishedAt: number | null;
+  tags: string[];
+};
+
+/**
+ * 管理端链接解析预检：只解析不入库，返回确认弹窗所需的全量字段
+ * （含豆一豆 other 子对象的互动计数）。与采集同量级的解析外呼.
+ */
+export async function adminResolveViralLink(
+  url: string,
+): Promise<AdminViralLinkResolveResult> {
+  const response = await requestControl(
+    "/api/control/viral/link-resolve",
+    { method: "POST", body: JSON.stringify({ url }) },
+    // 解析通道外呼（视频号为三步链）+ 短链 302 还原，同采集量级。
+    240_000,
+  );
+  if (!response.ok) throw await parseActivationError(response, "链接解析失败");
+  return response.json();
+}
+
+/** 确认弹窗回传的覆盖字段：留空的字段不传（沿用解析结果）。 */
+export type AdminViralLinkOverrides = {
+  title?: string;
+  author?: string;
+  likes?: number;
+  comments?: number;
+  shares?: number;
+  collects?: number;
+  tags?: string[];
+};
+
 /**
  * 管理端粘贴链接采集：解析（抖音 / 小红书 / 视频号）→ 入内容池 → 入队媒体
  * 转存主存储（转存完成自动上架），加盟商播放与复刻都走自有签名链接。不计
  * 客户积分；archiveQueued=false 表示平台转存槽位被占用，条目已入库、需稍后
- * 重新提交同一链接。
+ * 重新提交同一链接。overrides 为确认弹窗回传的覆盖字段.
  */
 export async function adminImportViralLink(
   url: string,
   reason: string,
   idempotencyKey: string,
+  overrides: AdminViralLinkOverrides = {},
 ): Promise<AdminViralLinkImportResult> {
+  const body: Record<string, unknown> = { url, ...overrides };
   const result = await adminWrite<AdminViralLinkImportResult>(
     "/api/control/viral/link-import",
-    { url },
+    body,
     reason,
     "链接采集失败",
     idempotencyKey,

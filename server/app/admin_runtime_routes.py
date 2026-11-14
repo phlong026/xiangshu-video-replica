@@ -24,7 +24,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 import psycopg
@@ -1408,6 +1408,110 @@ class ViralAdminLinkImportRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
 
     url: str = Field(min_length=1, max_length=2000)
+    # 「先解析后确认」弹窗回传的覆盖字段：运营在确认窗里改标题/补统计后才
+    # 入库。None 表示沿用解析结果；统计字段显式传入（含 0）以运营确认为准。
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    author: str | None = Field(default=None, max_length=120)
+    likes: int | None = Field(default=None, ge=0)
+    comments: int | None = Field(default=None, ge=0)
+    shares: int | None = Field(default=None, ge=0)
+    collects: int | None = Field(default=None, ge=0)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+
+
+class ViralAdminLinkResolveRequest(AdminWriteContract):
+    """解析预检（不入库）：「先解析后确认」弹窗的数据源."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=2000)
+
+
+def _link_overrides(payload: ViralAdminLinkImportRequest) -> dict[str, Any]:
+    """把确认弹窗回传的非空覆盖字段折算成 ViralVideo 替换项.
+
+    只覆盖显式传入的字段：留空表示沿用解析结果（含解析出的统计），运营
+    没填的互动项不会被 0 冒充.
+    """
+    from app.viral_tikhub import MAX_TAGS
+
+    overrides: dict[str, Any] = {}
+    if payload.title is not None and payload.title.strip():
+        overrides["title"] = payload.title.strip()
+    if payload.author is not None and payload.author.strip():
+        overrides["author"] = payload.author.strip()
+    for field in ("likes", "comments", "shares", "collects"):
+        value = getattr(payload, field)
+        if value is not None:
+            overrides[field] = value
+    tags = [tag.strip()[:30] for tag in payload.tags if tag.strip()]
+    if tags:
+        overrides["tags"] = tags[:MAX_TAGS]
+    return overrides
+
+
+@router.post("/viral/link-resolve")
+def resolve_viral_link_for_admin(
+    payload: ViralAdminLinkResolveRequest,
+    actor: ContentWriter,
+) -> dict[str, object]:
+    """管理端链接解析预检：只解析不入库，返回确认弹窗所需的全量字段.
+
+    限时外呼纪律同采集：resolver 各有传输超时，用只读事务读出上游配置后
+    解析，不挂写事务。解析结果（含豆一豆 other 子对象的互动计数）由弹窗
+    展示，运营可改可补，确认后走 ``/viral/link-import`` 带 override 入库.
+    """
+    from app.viral_link import (
+        DouyidouLinkClient,
+        ViralLinkError,
+        douyidou_link_client_from_settings,
+        normalize_supported_link,
+        supported_link_platform,
+    )
+    from app.viral_wechat_link import WechatLinkClient, wechat_link_client_from_settings
+
+    raw_url = payload.url.strip()
+    if not raw_url:
+        raise http_error(422, "VIRAL_LINK_INVALID", "请粘贴视频分享链接。")
+    try:
+        with pg_transaction() as pg:
+            conn = BusinessConnection.postgres(pg)
+            normalized_url = normalize_supported_link(raw_url)
+            platform = supported_link_platform(normalized_url)
+            if platform not in ("douyin", "xiaohongshu", "wechat_channels"):
+                raise http_error(
+                    422,
+                    "VIRAL_PLATFORM_INVALID",
+                    "暂时只支持抖音、小红书、视频号采集。",
+                )
+            resolver: DouyidouLinkClient | WechatLinkClient
+            if platform == "wechat_channels":
+                resolver = wechat_link_client_from_settings(conn)
+            else:
+                resolver = douyidou_link_client_from_settings(conn)
+            try:
+                resolved = resolver.resolve(normalized_url, purpose="replica")
+            except ViralLinkError as exc:
+                raise http_error(exc.status_code, exc.code, exc.message) from exc
+    except ViralLinkError as exc:
+        raise http_error(exc.status_code, exc.code, exc.message) from exc
+    meta = resolved.metadata
+    return {
+        "platform": resolved.platform,
+        "videoId": resolved.video_id,
+        "title": resolved.title,
+        "author": resolved.author,
+        "authorAvatar": meta.author_avatar,
+        "verified": meta.verified,
+        "coverUrl": resolved.cover_url,
+        "durationMs": resolved.duration_ms,
+        "likes": meta.likes,
+        "comments": meta.comments,
+        "shares": meta.shares,
+        "collects": meta.collects,
+        "publishedAt": meta.published_at,
+        "tags": list(meta.tags),
+    }
 
 
 @router.post("/viral/search")
@@ -1663,7 +1767,9 @@ def import_viral_link_for_admin(
             resolved = resolver.resolve(normalized_url, purpose="replica")
         except ViralLinkError as exc:
             raise http_error(exc.status_code, exc.code, exc.message) from exc
-        video = dataclass_replace(_resolved_video(resolved), category="")
+        video = dataclass_replace(
+            _resolved_video(resolved), category="", **_link_overrides(payload)
+        )
         storage = get_media_storage(business_conn)
         inserted = upsert_viral_videos(business_conn, [video], commit=False)
         # 管理端接管同链接时清掉客户导入残留的「链接导入」分类：通用 upsert 对
