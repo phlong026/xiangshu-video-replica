@@ -776,6 +776,33 @@ describe("长视频异步边界回归", () => {
     expect(getLatestReplicaPromptResult).toHaveBeenCalledTimes(1);
   });
 
+  it("恢复到服务端新任务后再次离页返回，不能把旧结果误当作新任务结果", async () => {
+    const cache = getLongReplicaSession("u-1");
+    cache.run = { projectId: "proj-1", assetId: "asset-1", taskId: "old-task" };
+    cache.result = resultPayload() as ReplicaPromptVersion;
+    getLatestReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      id: "new-task",
+    });
+    waitForReplicaPromptTask.mockReturnValue(new Promise(() => {}));
+    const view = render(<LongReplicaPage />);
+    await screen.findByRole("button", { name: "取消拆解" });
+    view.unmount();
+    getLatestReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      id: "new-task",
+      status: "SUCCEEDED",
+    });
+    getLatestReplicaPromptResult.mockResolvedValue({
+      ...resultPayload(),
+      id: "new-version",
+      payload: { ...RESULT_PAYLOAD, replica_prompt: "新任务的最新拆解结果" },
+    });
+    render(<LongReplicaPage />);
+    expect(await screen.findByText("新任务的最新拆解结果")).toBeInTheDocument();
+    expect(screen.queryByText(/一段庭院施工讲解视频/)).not.toBeInTheDocument();
+  });
+
   it("同一页面切换账号立即清空旧结果，切回原账号只恢复它自己的任务", async () => {
     pendingRun();
     waitForReplicaPromptTask.mockResolvedValue({

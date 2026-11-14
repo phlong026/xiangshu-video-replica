@@ -315,6 +315,12 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
             return;
           }
           const restoredRun = { ...run, taskId: task.id };
+          // 服务端可能已由另一个页面启动新任务；更新任务定位时不能保留旧任务的结果。
+          if (task.id !== run.taskId) {
+            cache.result = null;
+            resultTaskIdRef.current = null;
+            setResult(null);
+          }
           cache.run = restoredRun;
           setCurrentRun(restoredRun);
           if (task.status === "SUCCEEDED" || task.status === "FAILED") {
