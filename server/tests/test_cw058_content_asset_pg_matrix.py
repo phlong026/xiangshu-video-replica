@@ -2590,6 +2590,117 @@ def test_preview_refreshes_original_task_without_holding_locks_or_charging(
     )
 
 
+@pytest.mark.parametrize("claim_stage", ["before-query", "during-query"])
+@pytest.mark.parametrize("verify", [False, True])
+def test_preview_refresh_preserves_active_archive_source(
+    lane_env: str,
+    pg: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    claim_stage: str,
+    verify: bool,
+) -> None:
+    """预览续签不能改变在途保存的源记录；拿到新地址后仍能完成原归档租约。"""
+    import time
+    from contextlib import contextmanager
+
+    from fastapi import FastAPI
+
+    from app.customer_fence import get_business_db
+    from app.generation import (
+        H3QueryResult,
+        claim_generation_result_archive,
+        persist_generation_result_archive,
+        renew_generation_result_archive_claim,
+    )
+    from app.generation_routes import router
+
+    old_url = f"https://files.metaso.cn/result.mp4?expires={time.time() + 30}&signature=old"
+    fresh_url = "https://files.metaso.cn/result.mp4?expires=4102444800&signature=fresh"
+    seed_project(pg, "refresh-archive-project", "employee_1")
+    pg.execute(
+        "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+        "request_hash,request_snapshot_json,status) VALUES "
+        "('refresh-archive-batch','refresh-archive-project','employee_1',"
+        "'refresh-archive-key','h','{}','SUCCEEDED')"
+    )
+    pg.execute(
+        "INSERT INTO generation_tasks(id,batch_id,provider,model,status,archive_status,"
+        "provider_task_id,provider_result_url) VALUES "
+        "('refresh-archive-task','refresh-archive-batch','metaso','MiniMax-H3',"
+        "'SUCCEEDED','DIRECT','original-provider-task',%s)",
+        (old_url,),
+    )
+    pg.commit()
+    owner = actor("employee_1", "employee")
+    prepared: list[dict] = []
+    active = [False]
+    probes: list[str] = []
+
+    def claim() -> None:
+        with pg_transaction() as raw:
+            prepared.append(
+                claim_generation_result_archive(
+                    BusinessConnection.postgres(raw), actor=owner, task_id="refresh-archive-task"
+                )
+            )
+
+    if claim_stage == "before-query":
+        claim()
+
+    class PreviewDb:
+        @contextmanager
+        def write(self):
+            with pg_transaction() as raw:
+                active[0] = True
+                try:
+                    yield BusinessConnection.postgres(raw), owner
+                finally:
+                    active[0] = False
+
+    class Provider:
+        def query_image_to_video(self, provider_task_id: str) -> H3QueryResult:
+            assert not active[0]
+            assert provider_task_id == "original-provider-task"
+            if claim_stage == "during-query":
+                claim()
+            return H3QueryResult(status="SUCCEEDED", result_url=fresh_url)
+
+    def probe(url: str) -> bool:
+        assert not active[0]
+        probes.append(url)
+        return False
+
+    monkeypatch.setattr("app.generation_routes.h3_provider_for_task", lambda *_a, **_k: Provider())
+    monkeypatch.setattr("app.generation_routes.provider_result_url_expired", probe)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_business_db] = PreviewDb
+    response = TestClient(app, raise_server_exceptions=False).get(
+        "/api/generation-tasks/refresh-archive-task/preview-url", params={"verify": verify}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["url"] == fresh_url
+    assert probes == ([fresh_url] if verify else [])
+    assert pg.execute(
+        "SELECT provider_result_url FROM generation_tasks WHERE id='refresh-archive-task'"
+    ).fetchone() == (old_url,)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        renewed = renew_generation_result_archive_claim(conn, actor=owner, prepared=prepared[0])
+        stored = FakeStorageAdapter(provider="cos", bucket="refresh-archive-test").put_object(
+            "generation-results/refresh-archive-task/result.mp4", b"video", content_type="video/mp4"
+        )
+        archived = persist_generation_result_archive(
+            conn, actor=owner, prepared=renewed, stored=stored, duration_seconds=4
+        )
+        assert archived.archive_status == "ARCHIVED"
+    assert pg.execute("SELECT count(*) FROM assets").fetchone() == (1,)
+    assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone() == (0,)
+    assert pg.execute(
+        "SELECT count(*) FROM audit_logs WHERE action='generation_task.preview_url.refresh'"
+    ).fetchone() == (0,)
+
+
 @pytest.mark.parametrize(
     "url,expected",
     [

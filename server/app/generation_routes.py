@@ -815,17 +815,21 @@ def _generation_task_context(conn: Database, task_id: str) -> BusinessRow:
 
 
 def _generation_preview_task(
-    conn: BusinessConnection, *, actor: CurrentUser, task_id: str
+    conn: BusinessConnection, *, actor: CurrentUser, task_id: str, lock: bool = False
 ) -> BusinessRow:
     task = conn.execute(
         """
         SELECT batch.project_id, batch.created_by_user_id,
-               task.provider, task.provider_task_id, task.provider_result_url, task.status
+               task.provider, task.provider_task_id, task.provider_result_url, task.status,
+               COALESCE(task.locked_by IS NOT NULL
+                        AND task.locked_until::timestamptz > clock_timestamp(), FALSE)
+                   AS result_lease_active
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
         WHERE task.id = %s
           AND task.archive_status IN ('ARCHIVING', 'DIRECT', 'ARCHIVE_FAILED')
-        """,
+        """
+        + (" FOR UPDATE OF task" if lock else ""),
         (task_id,),
     ).fetchone()
     if task is None:
@@ -858,14 +862,15 @@ def read_generation_task_preview_url(
     provider = None
     with db.write() as (conn, actor):
         task = _generation_preview_task(conn, actor=actor, task_id=task_id)
-        result_url = str(task["provider_result_url"])
+        original_url = result_url = str(task["provider_result_url"])
         refresh = (
             task["provider"] == "metaso"
             and task["status"] == "SUCCEEDED"
             and bool(task["provider_task_id"])
             and provider_result_url_needs_refresh(result_url)
         )
-        if refresh or (task["provider"] == "fake_h3" and result_url.startswith("fake://")):
+        fake_result = task["provider"] == "fake_h3" and result_url.startswith("fake://")
+        if refresh or fake_result:
             try:
                 provider = h3_provider_for_task(conn, str(task["provider"]), task_id=task_id)
             except H3ProviderSettingsUnavailable as exc:
@@ -878,8 +883,8 @@ def read_generation_task_preview_url(
                 ) from exc
 
     # 外部查询必须在会话栅栏事务结束后执行，不能让刷新链接再次挡住首页媒体授权。
-    if refresh and provider is not None:
-        original_url = result_url
+    if refresh:
+        assert provider is not None
         try:
             current = provider.query_image_to_video(str(task["provider_task_id"]))
         except H3ProviderFailed as exc:
@@ -896,29 +901,9 @@ def read_generation_task_preview_url(
             or provider_result_url_needs_refresh(current.result_url)
         ):
             raise HTTPException(503, detail={"code": "RESULT_URL_REFRESH_NOT_READY"})
-        with db.write() as (conn, actor):
-            latest = _generation_preview_task(conn, actor=actor, task_id=task_id)
-            result_url = str(latest["provider_result_url"])
-            if (
-                result_url == original_url
-                and latest["provider_task_id"] == task["provider_task_id"]
-                and latest["status"] == "SUCCEEDED"
-            ):
-                conn.execute(
-                    "UPDATE generation_tasks SET provider_result_url=%s "
-                    "WHERE id=%s AND provider_result_url=%s",
-                    (current.result_url, task_id, original_url),
-                )
-                write_audit(
-                    conn,
-                    actor=actor,
-                    action="generation_task.preview_url.refresh",
-                    entity_type="generation_task",
-                    entity_id=task_id,
-                    metadata={"reason": "expired_signature"},
-                )
-                result_url = current.result_url
-    if task["provider"] == "fake_h3" and result_url.startswith("fake://"):
+        result_url = current.result_url
+    expired = None
+    if fake_result:
         # Browsers cannot fetch fake://; only the internal fixture is embedded.
         # The factory retains the production ban, and ownership was checked above.
         try:
@@ -930,8 +915,38 @@ def read_generation_task_preview_url(
                 status_code=503, detail={"code": "FAKE_RESULT_UNAVAILABLE"}
             ) from exc
         result_url = "data:video/mp4;base64," + base64.b64encode(content).decode("ascii")
-    elif verify and provider_result_url_expired(result_url):
-        raise result_url_expired_error()
+    elif verify:
+        expired = provider_result_url_expired(result_url)
+    if refresh or verify or fake_result:
+        # HEAD 探测和续签都可能阻塞；全部外部 I/O 结束后再核对会话、归属及源记录。
+        with db.write() as (conn, actor):
+            latest = _generation_preview_task(conn, actor=actor, task_id=task_id, lock=refresh)
+            if (
+                latest["provider_result_url"] != original_url
+                or latest["provider_task_id"] != task["provider_task_id"]
+                or latest["provider"] != task["provider"]
+                or latest["status"] != task["status"]
+            ):
+                # 其他请求已换源，旧地址的探测结论不能否定当前成片。
+                result_url = str(latest["provider_result_url"])
+            else:
+                if expired:
+                    raise result_url_expired_error()
+                if refresh and not latest["result_lease_active"]:
+                    # 归档持有租约时仅交付新签名，不改源记录，避免打断在途保存。
+                    conn.execute(
+                        "UPDATE generation_tasks SET provider_result_url=%s "
+                        "WHERE id=%s AND provider_result_url=%s",
+                        (result_url, task_id, original_url),
+                    )
+                    write_audit(
+                        conn,
+                        actor=actor,
+                        action="generation_task.preview_url.refresh",
+                        entity_type="generation_task",
+                        entity_id=task_id,
+                        metadata={"reason": "expired_signature"},
+                    )
     return GenerationTaskPreviewUrlResponse(url=result_url)
 
 

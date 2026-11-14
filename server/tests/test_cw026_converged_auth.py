@@ -531,6 +531,86 @@ def test_slow_response_releases_session_lock_before_media_grants(
             assert slow.result(timeout=5).status_code == 200
 
 
+@pytest.mark.parametrize("probe_result", [False, None, True])
+@pytest.mark.parametrize("change", ["logout", "new-url", "new-owner"])
+def test_preview_probe_rechecks_session_and_source_after_external_io(
+    customer_app: FastAPI,
+    route_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_result: bool | None,
+    change: str,
+) -> None:
+    """探测期间会话或成片归属变化，不能交付旧授权的地址或旧探测结论。"""
+    from app.generation_routes import router as generation_router
+
+    customer_app.include_router(generation_router)
+    entered, release = Event(), Event()
+    original_url = "https://cdn.example/original.mp4"
+    winning_url = "https://cdn.example/current.mp4"
+
+    def probe(url: str) -> bool | None:
+        assert url == original_url
+        entered.set()
+        if not release.wait(10):
+            raise RuntimeError("preview probe was not released")
+        return probe_result
+
+    monkeypatch.setattr("app.generation_routes.provider_result_url_expired", probe)
+    with TestClient(customer_app, raise_server_exceptions=False) as client:
+        customer = _activate_customer(client, route_state, suffix="a")
+        headers = _bearer(str(customer["session_token"]))
+        with psycopg.connect(route_state, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+                "request_hash,request_snapshot_json,status) VALUES "
+                "('probe-batch',NULL,%s,'probe-key','h','{}','SUCCEEDED')",
+                (customer["user_id"],),
+            )
+            conn.execute(
+                "INSERT INTO generation_tasks(id,batch_id,provider,model,status,archive_status,"
+                "provider_task_id,provider_result_url) VALUES "
+                "('probe-task','probe-batch','metaso','MiniMax-H3','SUCCEEDED','DIRECT',"
+                "'original-provider-task',%s)",
+                (original_url,),
+            )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(
+                client.get,
+                "/api/generation-tasks/probe-task/preview-url?verify=true",
+                headers=headers,
+            )
+            try:
+                assert entered.wait(5), "preview did not reach its external probe"
+                if change == "logout":
+                    signed_out = client.post(
+                        "/api/customer/sessions/logout",
+                        headers={**headers, IDEMPOTENCY_KEY_HEADER: "probe-logout"},
+                    )
+                    assert signed_out.status_code == 204, signed_out.text
+                else:
+                    with psycopg.connect(route_state, autocommit=True) as conn:
+                        if change == "new-url":
+                            conn.execute(
+                                "UPDATE generation_tasks SET provider_result_url=%s "
+                                "WHERE id='probe-task'",
+                                (winning_url,),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE generation_batches SET created_by_user_id='admin_zpay' "
+                                "WHERE id='probe-batch'"
+                            )
+            finally:
+                release.set()
+            result = pending.result(timeout=5)
+        if change == "new-url":
+            assert result.status_code == 200, result.text
+            assert result.json()["url"] == winning_url
+        else:
+            assert result.status_code == (401 if change == "logout" else 404), result.text
+            assert original_url not in result.text
+
+
 def test_project_write_is_scoped_to_the_fenced_session_owner(
     client: TestClient, route_state: str
 ) -> None:
