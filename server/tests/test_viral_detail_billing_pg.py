@@ -125,6 +125,34 @@ def _detail_operations(raw, source_id: str) -> list[tuple[str, int]]:
     return [(str(row[0]), int(row[1])) for row in rows]
 
 
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu"])
+def test_published_list_uses_one_database_connection(
+    detail_client, route_state: str, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """列表只读内容池；持有会话锁时再借连接会阻塞首页的并发预览请求。"""
+    from app.db_pg import close_pg_pool
+
+    headers, uid = account(detail_client, f"list_single_conn_{platform}")
+    video_id = f"single-connection-{platform}"
+    with psycopg.connect(route_state) as raw:
+        _seed_detail_video(raw, uid, platform=platform, video_id=video_id)
+
+    close_pg_pool()
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MIN", "1")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MAX", "1")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_TIMEOUT", "0.2")
+    try:
+        response = detail_client.get(
+            "/api/viral/videos", headers=headers, params={"platform": platform}
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["source"] == "database"
+        assert video_id in [item["videoId"] for item in payload["items"]]
+    finally:
+        close_pg_pool()
+
+
 def test_viral_detail_service_registered_in_billing_catalog() -> None:
     """viral_detail 科目：call/platform/viral，可客户收费、复用 viral_extract 折扣接口."""
     from app.billing_catalog import (
