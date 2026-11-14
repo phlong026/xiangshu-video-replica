@@ -2736,6 +2736,7 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
         ("still-expired", 503, "RESULT_URL_REFRESH_NOT_READY"),
         ("query-revoked", 401, "SESSION_REPLACED"),
         ("query-error-revoked", 401, "SESSION_REPLACED"),
+        ("refresh-commit-failed", 500, None),
         ("foreign", 404, None),
         ("lease-replaced", 409, "RESULT_ARCHIVE_LEASE_LOST"),
         ("lease-expired", 409, "RESULT_ARCHIVE_LEASE_LOST"),
@@ -2809,6 +2810,10 @@ def test_strict30_refresh_rechecks_authorization_source_and_live_claim_before_de
                 active[0] = True
                 try:
                     yield BusinessConnection.postgres(raw), current_actor[0]
+                    if outcome == "refresh-commit-failed" and queries:
+                        raise RuntimeError(
+                            "refresh verification transaction rolled back after yield"
+                        )
                 finally:
                     active[0] = False
 
@@ -2876,7 +2881,9 @@ def test_strict30_refresh_rechecks_authorization_source_and_live_claim_before_de
     app.include_router(router)
     app.dependency_overrides[get_business_db] = TestDb
     app.dependency_overrides[get_media_storage] = lambda: storage
-    response = TestClient(app).post("/api/generation-tasks/strict-refresh-task/archive")
+    response = TestClient(app, raise_server_exceptions=outcome != "refresh-commit-failed").post(
+        "/api/generation-tasks/strict-refresh-task/archive"
+    )
     assert response.status_code == expected, response.text
     if code is not None:
         assert response.json()["detail"]["code"] == code

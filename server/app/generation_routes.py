@@ -1011,9 +1011,10 @@ def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaSto
                 refresh_error = exc
             # 续签外呼期间可能退出账号、换源或失去租约；复核后才允许下载新签名。
             with db.write() as (conn, actor):
-                prepared = renew_generation_result_archive_claim(
+                renewed = renew_generation_result_archive_claim(
                     conn, actor=actor, prepared=prepared
                 )
+            prepared = renewed
             if refresh_error is not None:
                 raise HTTPException(
                     503,
