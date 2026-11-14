@@ -525,6 +525,13 @@
   margin-top: auto;
 }
 
+/* 多按钮（补转存/上架/下架）并排：caption 右侧容器。 */
+.viral-acquire-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
 .viral-acquire-takedown {
   background: none;
   border: 1px solid #3a3a40;

@@ -109,7 +109,7 @@ function installFetch(
   return fetchMock;
 }
 
-it("挂载即读取最近入库并渲染卡片；转存中不显示下架按钮", async () => {
+it("挂载即读取最近入库并渲染卡片；转存中卡片可补转存+删除", async () => {
   installFetch({
     list: () => ({
       items: [
@@ -123,6 +123,7 @@ it("挂载即读取最近入库并渲染卡片；转存中不显示下架按钮"
           homepage_featured: false,
           homepage_rank: null,
           pushed_at: null,
+          media_status: "NOT_STARTED",
         }),
       ],
       total: 2,
@@ -137,7 +138,12 @@ it("挂载即读取最近入库并渲染卡片；转存中不显示下架按钮"
   expect(screen.getAllByText("小红书").length).toBeGreaterThan(0);
   expect(screen.getByText("已就绪")).toBeTruthy();
   expect(screen.getByText("转存中")).toBeTruthy();
-  expect(screen.getAllByRole("button", { name: "下架" }).length).toBe(1);
+  // 修复后：转存中的条目提供「补转存」（修复永远卡在转存中的死状态）
+  // 与「删除」（软删出池，用户报告的"无法删除"）。
+  expect(screen.getByRole("button", { name: "补转存" })).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "删除" }).length).toBe(2);
+  // 已就绪且已上架：显示「下架」；就绪未上架的卡片显示「上架」。
+  expect(screen.getByRole("button", { name: "下架" })).toBeTruthy();
 });
 
 it("粘贴链接采集成功：调用 link-import、提示入库并刷新列表", async () => {
@@ -261,6 +267,99 @@ it("下架：对已就绪卡片调用 curation:batch hide 并刷新列表", asyn
   });
 });
 
+it("补转存：对转存中卡片调用 archive 端点入队媒体转存", async () => {
+  const fetchMock = installFetch({
+    list: () => ({
+      items: [
+        row({
+          content_state: "pending_prepare",
+          customer_visible: false,
+          homepage_featured: false,
+          homepage_rank: null,
+          pushed_at: null,
+          media_status: "NOT_STARTED",
+        }),
+      ],
+      total: 1,
+      categories: [],
+    }),
+  });
+  render(<ViralAcquirePage readOnly={false} />);
+  await waitFor(() => expect(screen.getByText("转存中")).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: "补转存" }));
+  await waitFor(() => expect(screen.getByText(/已排队媒体转存/)).toBeTruthy());
+  const archive = fetchMock.mock.calls.find(([url]) =>
+    String(url).includes("/archive"),
+  ) as unknown as [string, RequestInit] | undefined;
+  expect(archive).toBeTruthy();
+  expect(String(archive?.[0])).toContain(
+    "/api/control/viral/videos/douyin/acquire-1/archive",
+  );
+});
+
+it("删除：确认后对卡片调用 curation:batch delete，条目移出内容池", async () => {
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const fetchMock = installFetch();
+  render(<ViralAcquirePage readOnly={false} />);
+  await waitFor(() =>
+    expect(screen.getAllByText(/秋天第一杯奶茶/).length).toBeGreaterThan(0),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  expect(confirmSpy).toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByText(/已删除/)).toBeTruthy());
+  const curation = fetchMock.mock.calls.find(([url]) =>
+    String(url).includes("curation:batch"),
+  ) as unknown as [string, RequestInit];
+  const body = JSON.parse(String(curation?.[1].body));
+  expect(body.action).toBe("delete");
+  expect(body.items).toEqual([{ platform: "douyin", video_id: "acquire-1" }]);
+});
+
+it("删除需确认：取消 confirm 不发起请求", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(false);
+  const fetchMock = installFetch();
+  render(<ViralAcquirePage readOnly={false} />);
+  await waitFor(() =>
+    expect(screen.getAllByText(/秋天第一杯奶茶/).length).toBeGreaterThan(0),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  expect(
+    fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("curation:batch"),
+    ).length,
+  ).toBe(0);
+});
+
+it("上架：对已就绪但未上架卡片调用 curation:batch push", async () => {
+  const fetchMock = installFetch({
+    list: () => ({
+      items: [
+        row({
+          customer_visible: false,
+          homepage_featured: false,
+          homepage_rank: null,
+          pushed_at: null,
+          collection_published: false,
+        }),
+      ],
+      total: 1,
+      categories: [],
+    }),
+  });
+  render(<ViralAcquirePage readOnly={false} />);
+  await waitFor(() =>
+    expect(screen.getAllByText(/秋天第一杯奶茶/).length).toBeGreaterThan(0),
+  );
+  expect(screen.getByRole("button", { name: "上架" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "下架" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "上架" }));
+  await waitFor(() => expect(screen.getByText(/已上架/)).toBeTruthy());
+  const curation = fetchMock.mock.calls.find(([url]) =>
+    String(url).includes("curation:batch"),
+  ) as unknown as [string, RequestInit];
+  expect(JSON.parse(String(curation?.[1].body)).action).toBe("push");
+});
+
 it("重新上架：对已下架卡片调用 curation:batch push", async () => {
   const fetchMock = installFetch({
     list: () => ({
@@ -280,8 +379,9 @@ it("重新上架：对已下架卡片调用 curation:batch push", async () => {
   render(<ViralAcquirePage readOnly={false} />);
   await waitFor(() => expect(screen.getByText("已下架")).toBeTruthy());
   expect(screen.queryByRole("button", { name: "下架" })).toBeNull();
+  expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "重新上架" }));
-  await waitFor(() => expect(screen.getByText(/已重新上架/)).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/已上架/)).toBeTruthy());
   const curation = fetchMock.mock.calls.find(([url]) =>
     String(url).includes("curation:batch"),
   ) as unknown as [string, RequestInit];
