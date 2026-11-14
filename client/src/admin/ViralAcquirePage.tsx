@@ -15,6 +15,7 @@ import {
   adminActivationErrorMessage,
   adminImportViralLink,
   adminUploadViralVideo,
+  archiveCollectedViralVideo,
   type CollectedViralVideo,
   curateViralVideosBatch,
   listCollectedViralVideos,
@@ -101,15 +102,28 @@ function AcquireVideoCard({
   curateBusy,
   onTakedown,
   onReshow,
+  onArchive,
+  onDelete,
 }: {
   video: CollectedViralVideo;
   readOnly: boolean;
   curateBusy: boolean;
   onTakedown: (video: CollectedViralVideo) => void;
   onReshow: (video: CollectedViralVideo) => void;
+  onArchive: (video: CollectedViralVideo) => void;
+  onDelete: (video: CollectedViralVideo) => void;
 }) {
   const status = cardStatus(video);
   const cover = video.cover_url ?? "";
+  // 客户可见性：服务端下发 customer_visible；旧响应缺省时退化为上架标记。
+  const customerVisible =
+    video.customer_visible ??
+    Boolean(video.collection_published || video.pushed_at);
+  const blocked =
+    video.availability === "HIDDEN" || video.availability === "UNAVAILABLE";
+  const needsArchive =
+    video.content_state === "pending_prepare" ||
+    video.content_state === "prepare_failed";
   const stats: Array<
     ["heart" | "comment" | "share" | "star", string, number | null]
   > = [
@@ -181,25 +195,68 @@ function AcquireVideoCard({
         ) : null}
         <div className="viral-card-caption">
           <span>入库于 {formatAcquiredAt(video.created_at)}</span>
-          {!readOnly && status.tone === "cached" ? (
-            <button
-              className="viral-acquire-takedown"
-              disabled={curateBusy}
-              type="button"
-              onClick={() => onTakedown(video)}
-            >
-              下架
-            </button>
-          ) : null}
-          {!readOnly && video.availability === "HIDDEN" ? (
-            <button
-              className="viral-acquire-takedown"
-              disabled={curateBusy}
-              type="button"
-              onClick={() => onReshow(video)}
-            >
-              重新上架
-            </button>
+          {!readOnly && video.availability !== "UNAVAILABLE" ? (
+            <span className="viral-acquire-actions">
+              {needsArchive ? (
+                <button
+                  className="viral-acquire-takedown"
+                  disabled={curateBusy}
+                  title="排队媒体转存，完成后变为已就绪"
+                  type="button"
+                  onClick={() => onArchive(video)}
+                >
+                  {video.content_state === "prepare_failed"
+                    ? "重试转存"
+                    : "补转存"}
+                </button>
+              ) : null}
+              {blocked && video.availability === "HIDDEN" ? (
+                <button
+                  className="viral-acquire-takedown"
+                  disabled={curateBusy}
+                  type="button"
+                  onClick={() => onReshow(video)}
+                >
+                  重新上架
+                </button>
+              ) : null}
+              {!blocked && customerVisible ? (
+                <button
+                  className="viral-acquire-takedown"
+                  disabled={curateBusy}
+                  type="button"
+                  onClick={() => onTakedown(video)}
+                >
+                  下架
+                </button>
+              ) : null}
+              {!blocked && !customerVisible && status.tone === "cached" ? (
+                <button
+                  className="viral-acquire-takedown"
+                  disabled={curateBusy}
+                  type="button"
+                  onClick={() => onReshow(video)}
+                >
+                  上架
+                </button>
+              ) : null}
+              <button
+                className="viral-acquire-takedown"
+                disabled={curateBusy}
+                title="从内容池删除（软删）"
+                type="button"
+                onClick={(event) => {
+                  if (
+                    window.confirm("确认从内容池删除该条目？删除后不可恢复。")
+                  ) {
+                    onDelete(video);
+                    event.currentTarget.blur();
+                  }
+                }}
+              >
+                删除
+              </button>
+            </span>
           ) : null}
         </div>
       </div>
@@ -438,7 +495,7 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
 
   const curate = async (
     video: CollectedViralVideo,
-    action: "hide" | "push",
+    action: "hide" | "push" | "delete",
     fallbackError: string,
   ) => {
     if (readOnly || curateTarget) return;
@@ -448,17 +505,42 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
       await curateViralVideosBatch(
         [video],
         action,
-        action === "hide" ? "后台下架爆款视频" : "后台重新上架爆款视频",
+        action === "hide"
+          ? "后台下架爆款视频"
+          : action === "delete"
+            ? "后台删除爆款视频"
+            : "后台上架爆款视频",
         crypto.randomUUID(),
       );
       setNotice(
         action === "hide"
           ? "已下架，客户列表与首页已同步移除。"
-          : "已重新上架，客户即可播放与一键复刻。",
+          : action === "delete"
+            ? "已删除，条目移出内容池。"
+            : "已上架，客户即可播放与一键复刻。",
       );
       await reload();
     } catch (cause) {
       setError(adminActivationErrorMessage(cause, fallbackError));
+    } finally {
+      setCurateTarget(null);
+    }
+  };
+
+  const rearchive = async (video: CollectedViralVideo) => {
+    if (readOnly || curateTarget) return;
+    setCurateTarget(video);
+    setError("");
+    try {
+      await archiveCollectedViralVideo(
+        video,
+        "手动补转存",
+        crypto.randomUUID(),
+      );
+      setNotice("已排队媒体转存，转存完成后条目变为已就绪。");
+      await reload();
+    } catch (cause) {
+      setError(adminActivationErrorMessage(cause, "补转存失败"));
     } finally {
       setCurateTarget(null);
     }
@@ -557,7 +639,9 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
             <AcquireVideoCard
               key={`${video.platform}-${video.video_id}`}
               curateBusy={curateTarget !== null}
-              onReshow={(target) => void curate(target, "push", "重新上架失败")}
+              onArchive={(target) => void rearchive(target)}
+              onDelete={(target) => void curate(target, "delete", "删除失败")}
+              onReshow={(target) => void curate(target, "push", "上架失败")}
               onTakedown={(target) => void curate(target, "hide", "下架失败")}
               readOnly={readOnly}
               video={video}
