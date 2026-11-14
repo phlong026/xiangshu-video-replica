@@ -87,7 +87,7 @@ export function CustomerWelcomePage({ onLogin }: { onLogin(): void }) {
         <main className="studio-main studio-route-workbench">
           <div className="studio-topbar">
             <span style={{ flex: 1, color: "#a4a4ad" }}>
-              欢迎使用众墅之家 · AI 即创
+              AI 即创· {__APP_VERSION__}
             </span>
             <button
               type="button"
