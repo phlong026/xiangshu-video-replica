@@ -185,6 +185,30 @@ if not inventory:
   done
 }
 
+resolve_build_base_image() {
+  BUILD_BASE_IMAGE_REFERENCE="${VIDEO_REPLICA_BUILD_BASE_IMAGE:-$OLD_IMAGE}"
+  BUILD_BASE_IMAGE_ID=$(docker image inspect -f '{{.Id}}' "$BUILD_BASE_IMAGE_REFERENCE") || return 1
+  [[ "$BUILD_BASE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  BUILD_BASE_IMAGE_USER=$(docker image inspect -f '{{.Config.User}}' "$BUILD_BASE_IMAGE_ID") || return 1
+  [[ -z "$BUILD_BASE_IMAGE_USER" || "$BUILD_BASE_IMAGE_USER" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 1
+  BUILD_BASE_IMAGE="video-replica-rollback:$SHORT_SHA-$STAMP-build-base"
+}
+
+pin_build_base_image() {
+  # BuildKit 的 FROM 不识别本地镜像 ID；命名锚点必须固定到已校验的 ID。
+  docker image tag "$BUILD_BASE_IMAGE_ID" "$BUILD_BASE_IMAGE"
+  [[ "$(docker image inspect -f '{{.Id}}' "$BUILD_BASE_IMAGE")" == "$BUILD_BASE_IMAGE_ID" ]]
+  python3 - "$BACKUP/build-base-image.json" "$BUILD_BASE_IMAGE_REFERENCE" "$BUILD_BASE_IMAGE_ID" "$BUILD_BASE_IMAGE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(json.dumps(dict(zip(
+    ("reference", "image_id", "anchor"), sys.argv[2:], strict=True
+))) + "\n")
+PY
+}
+
 mkdir -p "$ROOT"
 exec > >(tee -a "$LOG") 2>&1
 
@@ -379,13 +403,10 @@ DB_CONTAINER=$(compose ps -q db)
 OLD_IMAGE_USER=$(docker image inspect -f '{{.Config.User}}' "$OLD_IMAGE")
 [[ -n "$OLD_IMAGE_DB_HEAD" ]]
 [[ -z "$OLD_IMAGE_USER" || "$OLD_IMAGE_USER" =~ ^[A-Za-z0-9_.:-]+$ ]]
-BUILD_BASE_IMAGE="${VIDEO_REPLICA_BUILD_BASE_IMAGE:-$OLD_IMAGE}"
-docker image inspect "$BUILD_BASE_IMAGE" >/dev/null
-BUILD_BASE_IMAGE_USER=$(docker image inspect -f '{{.Config.User}}' "$BUILD_BASE_IMAGE")
-[[ -z "$BUILD_BASE_IMAGE_USER" || "$BUILD_BASE_IMAGE_USER" =~ ^[A-Za-z0-9_.:-]+$ ]]
+resolve_build_base_image
 for dependency_file in server/pyproject.toml server/uv.lock; do
   source_hash=$(dependency_manifest_hash "$SOURCE/$dependency_file" "$dependency_file")
-  image_hash=$(docker run --rm --entrypoint sh "$BUILD_BASE_IMAGE" -c 'cat "$1"' sh "/opt/video-replica/$dependency_file" | dependency_manifest_hash - "$dependency_file")
+  image_hash=$(docker run --rm --entrypoint sh "$BUILD_BASE_IMAGE_ID" -c 'cat "$1"' sh "/opt/video-replica/$dependency_file" | dependency_manifest_hash - "$dependency_file")
   [[ "$source_hash" == "$image_hash" ]] || {
     echo "PRECHECK_FAILED: Python dependency change requires a base-image release: $dependency_file" >&2
     exit 1
@@ -410,6 +431,7 @@ if [[ -f "$IMAGE_OVERRIDE" ]]; then
   cp -a "$IMAGE_OVERRIDE" "$BACKUP/image-before.json"
 fi
 write_rollback_images
+pin_build_base_image
 # CW-032: pin the exact topology artifact this release rolled out with.
 sha256sum "$COMPOSE" > "$BACKUP/compose.sha256"
 printf '%s\n' "$OLD_IMAGE" > "$BACKUP/previous-image.txt"
@@ -428,7 +450,7 @@ compose exec -T db sh -lc \
 [[ -s "$BACKUP/database-before.dump" ]]
 docker exec -i "$DB_CONTAINER" pg_restore --list < "$BACKUP/database-before.dump" >/dev/null
 sha256sum "$BACKUP/site-before.tar.gz" "$BACKUP/database-before.dump" > "$BACKUP/BACKUP-SHA256SUMS"
-sha256sum "$BACKUP/running-images-before.json" "$BACKUP/rollback-images.json" >> "$BACKUP/BACKUP-SHA256SUMS"
+sha256sum "$BACKUP/running-images-before.json" "$BACKUP/rollback-images.json" "$BACKUP/build-base-image.json" >> "$BACKUP/BACKUP-SHA256SUMS"
 if [[ -s "$BACKUP/admin-site-before.tar.gz" ]]; then
   sha256sum "$BACKUP/admin-site-before.tar.gz" >> "$BACKUP/BACKUP-SHA256SUMS"
 fi
@@ -476,6 +498,7 @@ DOCKERFILE
   fi
 } > "$BUILD_CTX/Dockerfile"
 
+[[ "$(docker image inspect -f '{{.Id}}' "$BUILD_BASE_IMAGE")" == "$BUILD_BASE_IMAGE_ID" ]]
 docker build \
   --label "org.opencontainers.image.revision=$RELEASE_SHA" \
   --label "org.opencontainers.image.source-tree=$RELEASE_TREE" \

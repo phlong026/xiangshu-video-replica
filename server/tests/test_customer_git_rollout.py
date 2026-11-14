@@ -90,9 +90,23 @@ if args[0] == "inspect":
         "{{.State.Running}}": str(container["running"]).lower(),
     }[args[2]]
 elif args[:2] == ["image", "inspect"]:
-    result = state["heads"][args[-1]]
+    image = state["aliases"].get(args[-1], args[-1])
+    if args[3] == "{{.Id}}":
+        result = image
+    elif args[3] == "{{.Config.User}}":
+        result = "root"
+    else:
+        result = state["heads"][image]
 elif args[:2] == ["image", "tag"]:
     state["aliases"][args[-1]] = args[-2]
+elif args[0] == "build":
+    dockerfile = (Path(args[-1]) / "Dockerfile").read_text()
+    reference = dockerfile.splitlines()[0].removeprefix("FROM ")
+    if reference.startswith("sha256:"):
+        raise AssertionError("BuildKit FROM cannot resolve a local image ID")
+    state["built_from_id"] = state["aliases"][reference]
+    state["dockerfile"] = dockerfile
+    state["build_command"] = args
 elif args[0] == "compose":
     files = []
     i = 1
@@ -140,7 +154,9 @@ sys.exit(exit_code)
 """
 
 
-def _run_rollout_mock(tmp_path, *, mode="rollback", previous=False, failure="", incompatible=False):
+def _run_rollout_mock(
+    tmp_path, *, mode="rollback", previous=False, failure="", incompatible=False, base_override=""
+):
     import os
 
     services = _REQUIRED + _OPTIONAL
@@ -217,6 +233,8 @@ wait_ready() { [[ "$2" != not-ready ]]; }
             "verify_running_image_snapshot",
             "write_rollback_images",
             "write_image_override",
+            "resolve_build_base_image",
+            "pin_build_base_image",
             "rollback",
         )
     )
@@ -245,6 +263,31 @@ verify_running_image_snapshot
 write_image_override "$IMAGE_OVERRIDE" new "${SERVICES[@]}"
 IMAGE_SWITCHED=1
 """
+    if mode == "build":
+        invocation += r"""
+BUILD_CTX="$ROOT/build"
+mkdir "$BUILD_CTX"
+RELEASE_SHA=1234567890123456789012345678901234567890
+RELEASE_TREE=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+EXPECTED_DB_HEAD=schema1
+NEW_IMAGE=new
+resolve_build_base_image
+python3 - "$ROOT/docker-state.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+state = json.loads(path.read_text())
+for reference in ("api:stable", "worker:old"):
+    state["aliases"][reference] = state["drifted_image"]
+path.write_text(json.dumps(state))
+PY
+pin_build_base_image
+"""
+        script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text()
+        start = script.index("{\n  printf 'FROM ")
+        end = script.index('HEADS_OUTPUT=$(docker run --rm --entrypoint sh "$NEW_IMAGE"')
+        invocation += script[start:end]
     if mode == "site-rollback":
         invocation += "\nSITE_SWITCHED=1\n"
     if mode in {"rollback", "site-rollback"}:
@@ -253,10 +296,14 @@ ROLLOUT_STARTED=1
 compose up -d --no-deps api-1 worker-publish
 rollback 17 1 simulated-mid-rollout-failure
 """
+    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    environment.pop("VIDEO_REPLICA_BUILD_BASE_IMAGE", None)
+    if base_override:
+        environment["VIDEO_REPLICA_BUILD_BASE_IMAGE"] = base_override
     result = subprocess.run(
         ["bash", "-c", harness + functions + invocation, "test", str(tmp_path)],
         capture_output=True,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        env=environment,
     )
     assert (tmp_path / "compose.json").read_text() == topology
     expected_site = "previous-artifact" if mode == "site-rollback" else "current-artifact"
@@ -345,6 +392,33 @@ def test_rollout_restores_sites_only_after_switching_the_site_artifacts(tmp_path
     result, _ = _run_rollout_mock(tmp_path, mode="site-rollback")
     assert result.returncode == 17, result.stderr.decode()
     assert (tmp_path / "status").read_text().strip() == "FAILED_ROLLED_BACK"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="本地 Linux Docker mock 验证 POSIX 发布函数")
+@pytest.mark.parametrize(
+    "base_override,expected", [("", _API_IMAGE), ("worker:old", _WORKER_IMAGE)]
+)
+def test_build_dockerfile_uses_named_anchor_pinned_before_source_tag_drift(
+    tmp_path, base_override, expected
+) -> None:
+    result, _ = _run_rollout_mock(tmp_path, mode="build", base_override=base_override)
+    assert result.returncode == 0, result.stderr.decode()
+    state = json.loads((tmp_path / "docker-state.json").read_text())
+    assert state["aliases"]["api:stable"] == state["aliases"]["worker:old"] == _DRIFTED_IMAGE
+    assert state["built_from_id"] == expected
+    assert (
+        state["dockerfile"].splitlines()[0]
+        == "FROM video-replica-rollback:1234567-test-release-build-base"
+    )
+    assert "COPY server/app /opt/video-replica/server/app" in state["dockerfile"]
+    assert state["build_command"][-3:] == ["-t", "new", str(tmp_path / "build")]
+    assert (
+        "org.opencontainers.image.revision=1234567890123456789012345678901234567890"
+        in state["build_command"]
+    )
+    evidence = json.loads((tmp_path / "backup/build-base-image.json").read_text())
+    assert evidence["image_id"] == expected
+    assert evidence["reference"] == (base_override or _API_IMAGE)
 
 
 def test_customer_git_rollout_requires_an_exact_revision_before_any_mutation() -> None:
