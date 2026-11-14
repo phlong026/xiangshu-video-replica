@@ -80,8 +80,11 @@ router = APIRouter(prefix="/api/viral", tags=["viral"])
 SORT_HOT = "hot"
 SORT_LATEST = "latest"
 _VALID_SORTS = (SORT_HOT, SORT_LATEST)
-_VALID_PLATFORMS = (PLATFORM_DOUYIN, PLATFORM_WECHAT)
-_STORED_PLATFORMS = (*_VALID_PLATFORMS, PLATFORM_XIAOHONGSHU)
+# 小红书加入客户可浏览平台（2026-11 内容组精简）：管理端爆款获取采集的
+# 小红书条目自转入内容池，客户库/复刻管线（viral_import 早已支持）直接消费；
+# 库内容只读数据库，不触发上游采集，无历史快照的平台照常空列表起步。
+_VALID_PLATFORMS = (PLATFORM_DOUYIN, PLATFORM_WECHAT, PLATFORM_XIAOHONGSHU)
+_STORED_PLATFORMS = _VALID_PLATFORMS
 
 _DOUYIN_SORT_TYPE = {SORT_HOT: "1", SORT_LATEST: "2"}
 _WECHAT_SORT = {SORT_HOT: "hot", SORT_LATEST: "latest"}
