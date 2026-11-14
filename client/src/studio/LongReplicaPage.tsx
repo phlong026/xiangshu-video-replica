@@ -135,6 +135,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     cache.result,
   );
   const [currentRun, setCurrentRun] = useState(cache.run);
+  const resultTaskIdRef = useRef(cache.result ? cache.run?.taskId : null);
   const [uploadPercent, setUploadPercent] = useState(-1);
   const [elapsed, setElapsed] = useState(0);
   const [cancelling, setCancelling] = useState(false);
@@ -220,9 +221,17 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         );
         return;
       }
+      // 轮询可能先于取消回执拿到结果；同一成功终态直接复用，迟到回执不再发起可能失败的查询。
+      if (resultTaskIdRef.current === task.id && cache.result) {
+        setResult(cache.result);
+        setCancelError("");
+        setStage("ready");
+        return;
+      }
       const version = await getLatestReplicaPromptResult(run.projectId);
       if (!isActive(session)) return;
       cache.result = version;
+      resultTaskIdRef.current = version ? task.id : null;
       setResult(version);
       setCancelError("");
       setStage(version ? "ready" : "idle");
@@ -280,6 +289,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
   const resumeRun = useCallback(
     (run: LongReplicaRun) => {
       const session = ++sessionRef.current;
+      setCurrentRun({ ...run, taskId: "" });
       setStage("analyzing");
       setError("");
       void (async () => {
@@ -355,6 +365,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     abortRef.current = abortController;
     cache.run = null;
     cache.result = null;
+    resultTaskIdRef.current = null;
     cache.pendingAutoStart = false;
     cache.starting = null;
     setCurrentRun(null);
@@ -445,6 +456,10 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     const session = ++sessionRef.current;
     if (!isActive(session)) return;
     cache.result = null;
+    resultTaskIdRef.current = null;
+    const pendingRun = { ...previous, taskId: "" };
+    cache.run = pendingRun;
+    setCurrentRun(pendingRun);
     setResult(null);
     setStage("analyzing");
     setError("");

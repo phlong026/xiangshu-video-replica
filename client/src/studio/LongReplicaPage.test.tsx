@@ -665,15 +665,71 @@ describe("长视频异步边界回归", () => {
       assetId: "asset-1",
       taskId: "old-task",
     };
-    getLatestReplicaPromptTask.mockResolvedValue({
-      ...runningTask(),
-      id: "latest-task",
-    });
+    const latest = deferred<ReplicaPromptTask>();
+    getLatestReplicaPromptTask.mockReturnValue(latest.promise);
     waitForReplicaPromptTask.mockReturnValue(new Promise(() => {}));
     cancelReplicaPromptTask.mockResolvedValue(runningTask());
     render(<LongReplicaPage />);
+    expect(
+      screen.queryByRole("button", { name: "取消拆解" }),
+    ).not.toBeInTheDocument();
+    await act(async () =>
+      latest.resolve({ ...runningTask(), id: "latest-task" }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "取消拆解" }));
     expect(cancelReplicaPromptTask).toHaveBeenCalledWith("latest-task");
+  });
+
+  it("重试创建新任务期间不允许取消上一条已失败任务", async () => {
+    getLongReplicaSession("u-1").run = {
+      projectId: "proj-1",
+      assetId: "asset-1",
+      taskId: "old-task",
+    };
+    waitForReplicaPromptTask.mockReturnValue(new Promise(() => {}));
+    getLatestReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "FAILED",
+      error_code: "ANALYSIS_FAILED",
+      error_message: "分析失败",
+    });
+    const creation = deferred<ReplicaPromptTask>();
+    startReplicaPromptTask.mockReturnValue(creation.promise);
+    render(<LongReplicaPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "重新拆解" }));
+    expect(screen.getByText(/正在看片拆解/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "取消拆解" }),
+    ).not.toBeInTheDocument();
+    await act(async () =>
+      creation.resolve({ ...runningTask(), id: "retry-task" }),
+    );
+    cancelReplicaPromptTask.mockResolvedValue(runningTask());
+    fireEvent.click(await screen.findByRole("button", { name: "取消拆解" }));
+    expect(cancelReplicaPromptTask).toHaveBeenCalledExactlyOnceWith(
+      "retry-task",
+    );
+  });
+
+  it("轮询已展示成功结果后，迟到的成功取消回执不再查询并覆盖结果", async () => {
+    const completion = pendingRun();
+    const cancellation = deferred<ReplicaPromptTask>();
+    cancelReplicaPromptTask.mockReturnValue(cancellation.promise);
+    getLatestReplicaPromptResult
+      .mockResolvedValueOnce(resultPayload())
+      .mockRejectedValueOnce(new Error("重复查询断网"));
+    render(<LongReplicaPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "取消拆解" }));
+    await act(async () =>
+      completion.resolve({ ...runningTask(), status: "SUCCEEDED" }),
+    );
+    await screen.findByText(/庭院施工讲解视频/);
+    await act(async () =>
+      cancellation.resolve({ ...runningTask(), status: "SUCCEEDED" }),
+    );
+    expect(screen.getByText(/庭院施工讲解视频/)).toBeInTheDocument();
+    expect(screen.queryByText("重复查询断网")).not.toBeInTheDocument();
+    expect(getLatestReplicaPromptResult).toHaveBeenCalledTimes(1);
   });
 
   it("同一页面切换账号立即清空旧结果，切回原账号只恢复它自己的任务", async () => {
