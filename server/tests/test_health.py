@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from httpx import ASGITransport, AsyncClient, Response
 
 from app.main import app
@@ -45,6 +46,51 @@ def test_cors_allows_mutating_desktop_requests() -> None:
 
     assert response.status_code == 200
     assert "PATCH" in response.headers["access-control-allow-methods"]
+
+
+@pytest.mark.parametrize("origin", ["http://tauri.localhost", "tauri://localhost"])
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/assets/preview/download-url"),
+        ("POST", "/api/assets/preview/cached-url"),
+        ("GET", "/api/generation-tasks/preview/preview-url"),
+    ],
+)
+def test_media_preflight_allows_customer_web_transport(origin: str, method: str, path: str) -> None:
+    async def request() -> Response:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.options(
+                path,
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": method,
+                    "Access-Control-Request-Headers": "authorization,content-type,x-customer-web",
+                },
+            )
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 200, response.text
+    assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_media_preflight_still_rejects_untrusted_origins() -> None:
+    async def request() -> Response:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.options(
+                "/api/assets/preview/download-url",
+                headers={
+                    "Origin": "https://untrusted.example",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "authorization,x-customer-web",
+                },
+            )
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
 
 
 def test_openapi_exposes_health_contract() -> None:

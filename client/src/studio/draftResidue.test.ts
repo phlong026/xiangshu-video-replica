@@ -6,6 +6,11 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { clearAccountResidue, clearCreationDraftResidue } from "./draftResidue";
+import {
+  getLongReplicaSession,
+  handOffLongReplicaSource,
+  isCurrentLongReplicaSession,
+} from "./longReplicaSession";
 import { readPageCache, writePageCache } from "./pageCache";
 
 const ACCOUNT = "user-1";
@@ -137,5 +142,21 @@ describe("clearAccountResidue", () => {
     expect(
       window.localStorage.getItem(`wallet.pendingOrderNo:${ACCOUNT}`),
     ).toBe("order-9");
+  });
+
+  it("登出只清本账号的长视频来源，并使旧请求持有的会话失效", () => {
+    handOffLongReplicaSource(ACCOUNT, {
+      projectId: "project-a",
+      assetId: "asset-a",
+    });
+    handOffLongReplicaSource(OTHER, {
+      projectId: "project-b",
+      assetId: "asset-b",
+    });
+    const previous = getLongReplicaSession(ACCOUNT);
+    clearAccountResidue(ACCOUNT);
+    expect(isCurrentLongReplicaSession(ACCOUNT, previous)).toBe(false);
+    expect(getLongReplicaSession(ACCOUNT).run).toBeNull();
+    expect(getLongReplicaSession(OTHER).run?.projectId).toBe("project-b");
   });
 });

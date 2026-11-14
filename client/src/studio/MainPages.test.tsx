@@ -8,6 +8,7 @@ import {
 import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "../api";
+import { getLongReplicaSession } from "./longReplicaSession";
 import { createState, patchStudioDraft } from "./state";
 import type {
   StudioAsset,
@@ -1402,7 +1403,9 @@ describe("V1.4 工作台上传与创作入口", () => {
   });
 
   it(">15s 来源点开始复刻：补传整片（replica_prompt 用途）并跳长视频拆解页签", async () => {
-    const value = workbench();
+    const value = workbench({
+      user: { id: "account-long" } as StudioContextValue["user"],
+    });
     useStudio.mockReturnValue(value);
     readVideoDuration.mockResolvedValue(60);
     extractLocalVideoAudio.mockImplementation(
@@ -1441,6 +1444,11 @@ describe("V1.4 工作台上传与创作入口", () => {
     await waitFor(() =>
       expect(value.navigate).toHaveBeenCalledWith("long-replica"),
     );
+    expect(getLongReplicaSession(value.user.id).run).toEqual({
+      projectId: "project-long",
+      assetId: "asset-long",
+      taskId: "",
+    });
   });
 
   it(">180s 来源点开始复刻：本地拦截并提示，不补传也不跳转", async () => {

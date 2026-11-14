@@ -17,7 +17,6 @@ import {
 import { VideoPreview } from "../VideoPreview";
 import { useStudio } from "./context";
 import { LocalPublishAccountsPanel as PublishAccountsPanel } from "./LocalPublishAccountsPanel";
-import { handOffLongReplicaSource } from "./LongReplicaPage";
 import {
   cancelStudioTask,
   downloadStudioTaskResult,
@@ -32,6 +31,7 @@ import {
   studioVideoFromViral,
   uploadWorkbenchSourceVideo,
 } from "./live";
+import { handOffLongReplicaSource } from "./longReplicaSession";
 import { PlatformLogo } from "./PlatformLogo";
 import { readPageCache, writePageCache } from "./pageCache";
 import { createDraft, draftFromTask } from "./state";
@@ -568,7 +568,7 @@ export function WorkbenchPage() {
           : current,
       );
       longOriginalRef.current = null;
-      handOffLongReplicaSource({
+      handOffLongReplicaSource(accountId, {
         projectId: uploaded.projectId,
         assetId: uploaded.assetId,
       });

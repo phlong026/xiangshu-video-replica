@@ -18,6 +18,8 @@ export const REQUEST_TIMEOUT_MS = 10_000;
 // Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
 // may legitimately take much longer than a normal API round-trip.
 const CLOUD_OP_TIMEOUT_MS = 60_000;
+// 首次归档可能包含 30 秒成片转码，与服务端代理的五分钟等待窗口保持一致。
+const RESULT_ARCHIVE_TIMEOUT_MS = 5 * 60_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 let internalAccessToken: string | null = null;
 let customerSessionToken: string | null = null;
@@ -2317,7 +2319,7 @@ export async function archiveGenerationTask(
     `/api/generation-tasks/${encodeURIComponent(taskId)}/archive`,
     "保存结果暂未确认，请刷新任务核对；不会重新生成或扣费",
     { method: "POST" },
-    CLOUD_OP_TIMEOUT_MS,
+    RESULT_ARCHIVE_TIMEOUT_MS,
   );
 }
 
@@ -2405,14 +2407,31 @@ export async function createGenerationTaskPreviewUrl(
   taskId: string,
   options: { verify?: boolean } = {},
 ): Promise<string> {
-  const { url } = await requestGenerationJson<
-    components["schemas"]["GenerationTaskPreviewUrlResponse"]
-  >(
-    `/api/generation-tasks/${encodeURIComponent(taskId)}/preview-url${
-      options.verify ? "?verify=true" : ""
-    }`,
-    "获取生成结果播放地址失败",
-  );
+  let response: components["schemas"]["GenerationTaskPreviewUrlResponse"];
+  try {
+    response = await requestGenerationJson<
+      components["schemas"]["GenerationTaskPreviewUrlResponse"]
+    >(
+      `/api/generation-tasks/${encodeURIComponent(taskId)}/preview-url${
+        options.verify ? "?verify=true" : ""
+      }`,
+      "获取生成结果播放地址失败",
+    );
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      (error as { code?: unknown }).code !==
+        "RESULT_DURATION_PREPARATION_REQUIRED"
+    )
+      throw error;
+    // 复用现有原片完成时长校验，失败时不回退未经校验的直链。
+    const task = await archiveGenerationTask(taskId);
+    if (!task.result_asset_id)
+      throw new Error("成片交付校验尚未完成，请重试；不会重新生成或扣费。");
+    return createGenerationResultPreviewUrl(task.result_asset_id);
+  }
+  const { url } = response;
   if (!url) {
     throw new Error("预览链接获取失败，请重试。");
   }
@@ -3666,10 +3685,12 @@ export async function startReplicaPromptTask(
 
 export async function getReplicaPromptTask(
   taskId: string,
+  signal?: AbortSignal,
 ): Promise<ReplicaPromptTask> {
   return requestApiJson<ReplicaPromptTask>(
     `/api/replica-prompt-tasks/${encodeURIComponent(taskId)}`,
     "读取长视频拆解任务失败",
+    { signal },
   );
 }
 
@@ -3715,7 +3736,10 @@ const replicaPromptTaskObservers = new Map<
 export async function waitForReplicaPromptTask(
   taskId: string,
   onUpdate?: (task: ReplicaPromptTask) => void,
+  signal?: AbortSignal,
 ): Promise<ReplicaPromptTask> {
+  // 页面跟踪必须随账号/组件生命周期终止；不能复用旧账号尚未退出的共享轮询。
+  if (signal) return pollReplicaPromptTask(taskId, signal, onUpdate);
   const observers = replicaPromptTaskObservers.get(taskId) ?? new Set();
   replicaPromptTaskObservers.set(taskId, observers);
   if (onUpdate) observers.add(onUpdate);
@@ -3741,13 +3765,22 @@ export async function waitForReplicaPromptTask(
 
 async function pollReplicaPromptTask(
   taskId: string,
+  signal?: AbortSignal,
+  onUpdate?: (task: ReplicaPromptTask) => void,
 ): Promise<ReplicaPromptTask> {
   // 长视频拆解实测可达 5–15 分钟：轮询上限 30 分钟，超时提示可离开再回来恢复。
   const deadline = Date.now() + 30 * 60_000;
   const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
-    const task = await getReplicaPromptTask(taskId);
-    for (const observer of replicaPromptTaskObservers.get(taskId) ?? []) {
+    signal?.throwIfAborted();
+    const task = await getReplicaPromptTask(taskId, signal);
+    signal?.throwIfAborted();
+    const observers = signal
+      ? onUpdate
+        ? [onUpdate]
+        : []
+      : (replicaPromptTaskObservers.get(taskId) ?? []);
+    for (const observer of observers) {
       try {
         observer(task);
       } catch {

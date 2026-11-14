@@ -31,6 +31,7 @@ import {
   confirmSourceFrame,
   createGenerationBatch,
   createGenerationResultPreviewUrl,
+  createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
   createOralAvatarClone,
   createOralConsent,
@@ -111,9 +112,106 @@ import {
   waitForCharacterSheetTask,
   waitForFirstFrameTask,
   waitForGenerationReconcileOperation,
+  waitForReplicaPromptTask,
   waitForScriptRewriteTask,
   waitForSourceFrameTask,
 } from "./api";
+
+describe("长视频轮询的账号生命周期", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    setCustomerSessionToken(null);
+  });
+
+  it("已终止的页面不发出任务请求", async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    controller.abort();
+    await expect(
+      waitForReplicaPromptTask("aborted-task", undefined, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("切换账号终止正在进行的任务请求", async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | null | undefined;
+    const fetcher = vi.fn((_url: string, init: RequestInit) => {
+      requestSignal = init.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () =>
+          reject(new DOMException("Aborted", "AbortError")),
+        );
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const pending = waitForReplicaPromptTask(
+      "running-task",
+      undefined,
+      controller.signal,
+    );
+    const rejected = expect(pending).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    controller.abort();
+    await rejected;
+    expect(requestSignal?.aborted).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("旧账号在退避等待时退出后不再轮询，新账号的同ID查询不会复用旧请求", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "shared-id", status: "RUNNING" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "shared-id", status: "SUCCEEDED" }),
+      });
+    vi.stubGlobal("fetch", fetcher);
+    const first = new AbortController();
+    setCustomerSessionToken("test-session-a");
+    const previous = waitForReplicaPromptTask(
+      "shared-id",
+      undefined,
+      first.signal,
+    );
+    const rejected = expect(previous).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    first.abort();
+    setCustomerSessionToken("test-session-b");
+    const second = new AbortController();
+    await expect(
+      waitForReplicaPromptTask("shared-id", undefined, second.signal),
+    ).resolves.toMatchObject({ status: "SUCCEEDED" });
+    await vi.advanceTimersByTimeAsync(1500);
+    await rejected;
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(
+      new Headers(fetcher.mock.calls[1][1].headers).get("Authorization"),
+    ).toBe("Bearer test-session-b");
+  });
+
+  it("未绑定页面生命周期的兼容调用继续共享同一任务轮询", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "compat-task", status: "SUCCEEDED" }),
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await Promise.all([
+      waitForReplicaPromptTask("compat-task"),
+      waitForReplicaPromptTask("compat-task"),
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("素材持久缓存", () => {
   afterEach(() => {
@@ -1971,6 +2069,83 @@ describe("generation payload readers", () => {
     });
 
     expect(parsed?.original_script).toBe("回填后的文案");
+  });
+});
+
+describe("严格30秒成片交付", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const preparationRequired = () =>
+    new Response(
+      JSON.stringify({
+        detail: {
+          code: "RESULT_DURATION_PREPARATION_REQUIRED",
+          message: "需先完成交付校验",
+        },
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    );
+
+  it("预览先完成幂等校验并使用已归档资产，不重新生成", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(preparationRequired())
+      .mockResolvedValueOnce(
+        Response.json({ id: "task-30", result_asset_id: "strict-asset" }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ url: "https://cdn.example/strict-30.mp4" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createGenerationTaskPreviewUrl("task-30")).resolves.toBe(
+      "https://cdn.example/strict-30.mp4",
+    );
+    expect(
+      fetchMock.mock.calls.map(([url, init]) => [
+        String(url),
+        init?.method ?? "GET",
+      ]),
+    ).toEqual([
+      [expect.stringContaining("/generation-tasks/task-30/preview-url"), "GET"],
+      [expect.stringContaining("/generation-tasks/task-30/archive"), "POST"],
+      [expect.stringContaining("/assets/strict-asset/download-url"), "POST"],
+    ]);
+  });
+
+  it.each([401, 409, 503])(
+    "校验失败%s时不返回原片或触发生成",
+    async (status) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(preparationRequired())
+        .mockResolvedValueOnce(
+          Response.json(
+            {
+              detail: {
+                code: "RESULT_ARCHIVE_UNAVAILABLE",
+                message: "保存失败",
+              },
+            },
+            { status },
+          ),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(createGenerationTaskPreviewUrl("task-30")).rejects.toThrow();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("短档直链沿用现有播放流程", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ url: "https://cdn.example/short.mp4" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createGenerationTaskPreviewUrl("task-15")).resolves.toBe(
+      "https://cdn.example/short.mp4",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

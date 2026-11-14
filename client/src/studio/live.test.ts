@@ -66,6 +66,7 @@ const api = vi.hoisted(() => ({
   putMaterial: vi.fn(),
   cancelGenerationBatch: vi.fn(),
   cancelOralTask: vi.fn(),
+  capturePromptSession: vi.fn<() => () => boolean>(() => () => true),
   deleteGenerationBatch: vi.fn(),
   deleteOralTask: vi.fn(),
   retryOralTaskArchive: vi.fn(),
@@ -882,6 +883,74 @@ describe("真实 Studio 只读适配器", () => {
       source: "任务中心",
       saved: true,
     });
+  });
+
+  it.each([true, false])(
+    "30秒任务在已有归档=%s时都返回校验后的新资产",
+    async (saved) => {
+      api.getGenerationBatch.mockResolvedValue(
+        generationBatch([
+          generationTask({
+            id: "task-30",
+            result_asset_id: saved ? "legacy-asset" : null,
+            direct_result_available: !saved,
+            archive_status: saved ? "ARCHIVED" : "DIRECT",
+            prompt_snapshot: { output_duration_seconds: 30 },
+          }),
+        ]),
+      );
+      api.archiveGenerationTask.mockResolvedValue(
+        generationTask({ result_asset_id: "strict-asset" }),
+      );
+      const asset = await loadTaskPreview(studioTask);
+      expect(api.archiveGenerationTask).toHaveBeenCalledExactlyOnceWith(
+        "task-30",
+      );
+      expect(
+        api.createGenerationResultPreviewUrl,
+      ).toHaveBeenCalledExactlyOnceWith("strict-asset");
+      expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
+      expect(asset).toMatchObject({
+        id: "strict-asset",
+        saved: true,
+        url: "https://signed/result",
+      });
+      expect(api.createGenerationBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("旧30秒归档修复失败时不签发旧资产地址", async () => {
+    api.getGenerationBatch.mockResolvedValue(
+      generationBatch([
+        generationTask({
+          result_asset_id: "legacy-asset",
+          prompt_snapshot: { output_duration_seconds: 30 },
+        }),
+      ]),
+    );
+    api.archiveGenerationTask.mockRejectedValue(new Error("归档校验失败"));
+    await expect(loadTaskPreview(studioTask)).rejects.toThrow("归档校验失败");
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+    expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
+  });
+
+  it("30秒归档未返回资产时明确失败且不回退直链", async () => {
+    api.getGenerationBatch.mockResolvedValue(
+      generationBatch([
+        generationTask({
+          result_asset_id: "legacy-asset",
+          prompt_snapshot: { output_duration_seconds: 30 },
+        }),
+      ]),
+    );
+    api.archiveGenerationTask.mockResolvedValue(
+      generationTask({ result_asset_id: null }),
+    );
+    await expect(loadTaskPreview(studioTask)).rejects.toThrow(
+      "交付校验尚未完成",
+    );
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+    expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
   });
 
   it("没有直出结果时使用首个成功归档资产", async () => {
@@ -2532,6 +2601,97 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
     });
     api.deleteProject.mockResolvedValue(undefined);
   }
+
+  it("已取消的上传不创建项目", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(api.createProject).not.toHaveBeenCalled();
+  });
+
+  it("建项目期间换账号后不继续申请意图或以新身份删除旧项目", async () => {
+    const controller = new AbortController();
+    api.capturePromptSession.mockReturnValue(() => !controller.signal.aborted);
+    api.createProject.mockImplementation(async () => {
+      controller.abort();
+      return { id: "p-previous", name: "旧账号来源" };
+    });
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(api.createVideoUploadIntent).not.toHaveBeenCalled();
+    expect(api.deleteProject).not.toHaveBeenCalled();
+  });
+
+  it("取得上传意图后换账号不再上传文件", async () => {
+    const controller = new AbortController();
+    api.capturePromptSession.mockReturnValue(() => !controller.signal.aborted);
+    mockUploadStart("p-previous", "a-previous");
+    api.createVideoUploadIntent.mockImplementation(async () => {
+      controller.abort();
+      return { asset_id: "a-previous", method: "PUT", url: "/upload" };
+    });
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(api.uploadReferenceVideo).not.toHaveBeenCalled();
+    expect(api.deleteProject).not.toHaveBeenCalled();
+  });
+
+  it("上传完成时换账号不再提交旧素材完成请求", async () => {
+    const controller = new AbortController();
+    api.capturePromptSession.mockReturnValue(() => !controller.signal.aborted);
+    mockUploadStart("p-previous", "a-previous");
+    api.uploadReferenceVideo.mockImplementation(async () => controller.abort());
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(api.completeVideoUpload).not.toHaveBeenCalled();
+    expect(api.deleteProject).not.toHaveBeenCalled();
+  });
+
+  it("素材完成回执迟到且账号已切换时不再读取预览地址", async () => {
+    const controller = new AbortController();
+    api.capturePromptSession.mockReturnValue(() => !controller.signal.aborted);
+    mockUploadStart("p-previous", "a-previous");
+    api.uploadReferenceVideo.mockResolvedValue(undefined);
+    api.completeVideoUpload.mockImplementation(async () => {
+      controller.abort();
+      return { asset_id: "a-previous" };
+    });
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(api.getAssetDownloadUrl).not.toHaveBeenCalled();
+    expect(api.deleteProject).not.toHaveBeenCalled();
+  });
+
+  it("同账号离开页面中止上传时仍清理空项目", async () => {
+    const controller = new AbortController();
+    mockUploadStart("p-orphan", "a-orphan");
+    api.uploadReferenceVideo.mockImplementation(async () => controller.abort());
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(api.completeVideoUpload).not.toHaveBeenCalled();
+    expect(api.deleteProject).toHaveBeenCalledExactlyOnceWith("p-orphan");
+  });
+
+  it("账号变化后迟到的上传失败不借新身份清理旧项目", async () => {
+    mockUploadStart("p-previous", "a-previous");
+    let current = true;
+    api.capturePromptSession.mockReturnValue(() => current);
+    api.uploadReferenceVideo.mockImplementation(async () => {
+      current = false;
+      throw new Error("上传断线");
+    });
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}),
+    ).rejects.toThrow("上传断线");
+    expect(api.deleteProject).not.toHaveBeenCalled();
+  });
 
   it("上传失败时删除刚创建的项目，不留孤儿项目", async () => {
     mockUploadStart("p-orphan", "a-orphan");

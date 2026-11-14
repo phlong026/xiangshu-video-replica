@@ -12,6 +12,7 @@
  * - `wallet.pendingOrderNo:*`：待支付充值单的恢复凭据，与创作内容无关，
  *   清掉用户就找不回那笔充值。
  */
+import { clearLongReplicaSession } from "./longReplicaSession";
 import { clearPageCache } from "./pageCache";
 
 const LOCAL_DRAFT_SCRIPT_PREFIX = "generation.localDraft/script/";
@@ -53,6 +54,7 @@ export function clearCreationDraftResidue(accountId: string): void {
 /** 登出/切账号时的清理：创作草稿残留 + 任务中心的上次批次定位 + 页间缓存。
  * 页间缓存是模块级 Map，同一进程内换账号不清就会串数据。 */
 export function clearAccountResidue(accountId: string): void {
+  clearLongReplicaSession(accountId);
   clearCreationDraftResidue(accountId);
   const batchKey = `${BATCH_STORAGE_KEY_PREFIX}${encodeURIComponent(accountId)}`;
   removeKeys((key) => key === batchKey);

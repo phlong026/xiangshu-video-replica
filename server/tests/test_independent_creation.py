@@ -179,6 +179,8 @@ def _seed_scene(dsn: str) -> None:
             "('video_768p',true,1),('video_2k',true,1) ON CONFLICT(service) "
             "DO UPDATE SET enabled=true,unit_credits=1"
         )
+        # 价目不随用户级联清空，长档必须逐例复位，避免启用状态污染后续反例。
+        pg.execute("UPDATE billing_tariffs SET enabled=false WHERE service='video_768p_long'")
         with pg.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO operation_cost_rates "
@@ -663,6 +665,140 @@ def test_long_duration_2k_combination_is_rejected(scene: str) -> None:
         )
     assert create_exc.value.status_code == 422
     assert create_exc.value.detail["code"] == "DURATION_RESOLUTION_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("seconds", [25, 30])
+def test_r2v_long_duration_preserves_media_and_settles_once(scene: str, seconds: int) -> None:
+    """同一组图/4秒视频/4秒音频生成长片，时长、协议和真实PG账本一致。"""
+    _enable_long_tier(unit_credits=2)
+    reference_ids = ["material-video-owned", "frame-owned", "material-audio-owned"]
+    request = IndependentVideoRequest(
+        mode="r2v",
+        prompt_text=_ref2va_prompt(
+            "以图片@2的乡墅为主体，参考视频@1的运镜和音频@3的环境声。"
+            "At 00:10 [Shot 2] 镜头转向庭院。At 00:20 [Shot 3] 镜头停稳。"
+        ),
+        reference_asset_ids=reference_ids,
+        output_duration_seconds=seconds,
+        resolution="768P",
+        quantity=1,
+        idempotency_key=f"r2v-long-{seconds}",
+    )
+    credits = seconds * 2
+    quote = _price_quote(resolution="768P", duration_seconds=seconds)
+    assert quote.price_tier == "16-30s"
+    assert quote.estimated_credits == credits
+    batch = _create(request, EMPLOYEE_1)
+    assert _wallet(EMPLOYEE_1.id) == (1000 - credits, credits)
+    assert _create(request, EMPLOYEE_1).id == batch.id
+    assert _ledger_count("RESERVE") == 1
+
+    assert _run_worker(f"r2v-long-{seconds}") == 1
+    assert _wallet(EMPLOYEE_1.id) == (1000 - credits, 0)
+    assert _ledger_count("SETTLE") == 1
+    assert _ledger_count("RELEASE") == 0
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        row = conn.execute(
+            "SELECT t.status, t.billed_seconds, t.prompt_snapshot_json, "
+            "t.provider_request_json, b.request_snapshot_json "
+            "FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id "
+            "WHERE t.batch_id=%s",
+            (batch.id,),
+        ).fetchone()
+        operation = conn.execute(
+            "SELECT service, reserved_credits, charged_credits, actual_units, state "
+            "FROM billing_operations WHERE source_id=%s",
+            (batch.tasks[0].id,),
+        ).fetchone()
+    assert row is not None and str(row["status"]) == "SUCCEEDED"
+    assert int(row["billed_seconds"]) == seconds
+    assert json.loads(str(row["request_snapshot_json"]))["reference_asset_ids"] == reference_ids
+    snapshot = json.loads(str(row["prompt_snapshot_json"]))
+    assert snapshot["output_duration_seconds"] == seconds
+    assert snapshot["reference_videos"][0]["asset_id"] == "material-video-owned"
+    assert snapshot["reference_images"][0]["asset_id"] == "frame-owned"
+    assert snapshot["reference_audios"][0]["asset_id"] == "material-audio-owned"
+    payload = json.loads(str(row["provider_request_json"]))
+    assert payload["duration"] == seconds
+    assert payload["resolution"] == "768P"
+    assert [item["role"] for item in payload["content"][1:]] == [
+        "reference_image",
+        "reference_video",
+        "reference_audio",
+    ]
+    assert "<Video 1>" in payload["content"][0]["text"]
+    assert "<Picture 1>" in payload["content"][0]["text"]
+    assert "<Audio 1>" in payload["content"][0]["text"]
+    assert operation is not None
+    assert str(operation["service"]) == "video_768p_long"
+    assert int(operation["reserved_credits"]) == credits
+    assert int(operation["charged_credits"]) == credits
+    assert int(operation["actual_units"]) == seconds
+    assert str(operation["state"]) == "SUCCEEDED"
+    assert _create(request, EMPLOYEE_1).id == batch.id
+    assert _run_worker(f"r2v-long-idle-{seconds}") == 0
+    assert _ledger_count("SETTLE") == 1
+    assert _wallet(EMPLOYEE_1.id) == (1000 - credits, 0)
+
+
+@pytest.mark.parametrize("seconds", [25, 30])
+def test_r2v_long_duration_failure_releases_reserved_credits(
+    scene: str, monkeypatch: pytest.MonkeyPatch, seconds: int
+) -> None:
+    _enable_long_tier(unit_credits=2)
+    monkeypatch.setenv("VIDEO_REPLICA_FAKE_H3_OUTCOME", "provider_failed")
+    batch = _create(
+        IndependentVideoRequest(
+            mode="r2v",
+            prompt_text=_ref2va_prompt("参考@1的运镜、@2的建筑与@3的环境声。"),
+            reference_asset_ids=["material-video-owned", "frame-owned", "material-audio-owned"],
+            output_duration_seconds=seconds,
+            resolution="768P",
+            quantity=1,
+            idempotency_key=f"r2v-long-failure-{seconds}",
+        ),
+        EMPLOYEE_1,
+    )
+    assert _wallet(EMPLOYEE_1.id) == (1000 - seconds * 2, seconds * 2)
+    _run_worker(f"r2v-long-failure-{seconds}")
+    result = _get_batch(batch.id, EMPLOYEE_1)
+    assert result.status == "COMPLETED_WITH_FAILURES"
+    assert result.tasks[0].status == "FAILED"
+    assert _wallet(EMPLOYEE_1.id) == (1000, 0)
+    assert _ledger_count("SETTLE") == 0
+    assert _ledger_count("RELEASE") == 1
+
+
+@pytest.mark.parametrize("seconds", [25, 30])
+@pytest.mark.parametrize("resolution", ["768P", "2K"])
+def test_r2v_long_duration_unavailable_is_rejected_before_reserve(
+    scene: str, seconds: int, resolution: str
+) -> None:
+    if resolution == "2K":
+        _enable_long_tier()
+    expected = (
+        "DURATION_RESOLUTION_UNSUPPORTED" if resolution == "2K" else "LONG_DURATION_TIER_DISABLED"
+    )
+    with pytest.raises(HTTPException) as quote_error:
+        _price_quote(resolution=resolution, duration_seconds=seconds)
+    assert quote_error.value.detail["code"] == expected
+    with pytest.raises(HTTPException) as create_error:
+        _create(
+            IndependentVideoRequest(
+                mode="r2v",
+                prompt_text=_ref2va_prompt("参考图片@1的建筑风格。"),
+                reference_asset_ids=["frame-owned"],
+                output_duration_seconds=seconds,
+                resolution=cast(Literal["768P", "2K"], resolution),
+                quantity=1,
+                idempotency_key=f"r2v-long-unavailable-{resolution}-{seconds}",
+            ),
+            EMPLOYEE_1,
+        )
+    assert create_error.value.detail["code"] == expected
+    assert _wallet(EMPLOYEE_1.id) == (1000, 0)
+    assert _ledger_count("RESERVE") == 0
 
 
 def _price_quote(*, resolution: str, duration_seconds: int):

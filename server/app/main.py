@@ -369,6 +369,7 @@ app.add_middleware(
         "X-Admin-CSRF",
         "Idempotency-Key",
         "X-Request-Id",
+        "X-Customer-Web",
     ],
     # The same review's other half: browser JS must be able to read the
     # replay marker and the echoed request id on the activation response.

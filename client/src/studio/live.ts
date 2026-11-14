@@ -3,6 +3,7 @@ import {
   type CurrentUser,
   cancelGenerationBatch,
   cancelOralTask,
+  capturePromptSession,
   completeVideoUpload,
   createGenerationBatch,
   createGenerationResultPreviewUrl,
@@ -401,8 +402,18 @@ export async function loadTaskPreview(
     successful.find((candidate) => candidate.result_asset_id) ?? successful[0];
   if (!result) return undefined;
 
-  const direct = !result.result_asset_id && result.direct_result_available;
-  const assetId = result.result_asset_id;
+  let assetId = result.result_asset_id;
+  if (result.prompt_snapshot?.output_duration_seconds === 30) {
+    // 历史已保存成片也要过时长校验，并把新资产编号传给后续下载、发布。
+    const verified = await archiveGenerationTask(result.id);
+    if (!verified.result_asset_id) {
+      throw new Error(
+        "30 秒成片交付校验尚未完成，请重试；不会重新生成或扣费。",
+      );
+    }
+    assetId = verified.result_asset_id;
+  }
+  const direct = !assetId && result.direct_result_available;
   const url = direct
     ? await createGenerationTaskPreviewUrl(result.id)
     : await createGenerationResultPreviewUrl(assetId as string);
@@ -1077,9 +1088,13 @@ export async function uploadWorkbenchSourceVideo(
   analysisTaskStatus?: string;
 }> {
   const base = file.name.replace(/\.(mp4|mov|m4a|mp3|wav|aac)$/i, "").trim();
+  signal?.throwIfAborted();
+  const sessionCurrent = capturePromptSession();
   const project = await createProject((base || file.name).slice(0, 120));
   try {
+    signal?.throwIfAborted();
     const intent = await createVideoUploadIntent(project.id, file, purpose);
+    signal?.throwIfAborted();
     // 命中去重复用时没有 complete 这一步，自动拆解任务随意图回执带回（FIX-08）。
     let analysisTaskId: string | undefined =
       intent.analysis_task_id ?? undefined;
@@ -1088,7 +1103,9 @@ export async function uploadWorkbenchSourceVideo(
     let assetId = intent.asset_id;
     if (intent.upload_required !== false) {
       await uploadReferenceVideo(intent, file, onProgress, signal);
+      signal?.throwIfAborted();
       const completed = await completeVideoUpload(intent.asset_id);
+      signal?.throwIfAborted();
       assetId = completed.asset_id;
       analysisTaskId = completed.analysis_task_id ?? undefined;
       analysisTaskStatus = completed.analysis_task_status ?? undefined;
@@ -1108,6 +1125,7 @@ export async function uploadWorkbenchSourceVideo(
     const url = await signedUrl(assetId, getAssetDownloadUrl).catch(
       () => undefined,
     );
+    signal?.throwIfAborted();
     return {
       projectId: project.id,
       assetId,
@@ -1129,7 +1147,8 @@ export async function uploadWorkbenchSourceVideo(
   } catch (cause: unknown) {
     // 失败上传不留孤儿项目：项目只为这次上传而建，上传没成行就只是项目
     // 列表里的一个空壳。清理是尽力而为，不掩盖原始错误。
-    await deleteProject(project.id).catch(() => {});
+    // 离开页面或重选文件也会中止上传；身份未变时仍清理空项目，换账号则停止清理。
+    if (sessionCurrent()) await deleteProject(project.id).catch(() => {});
     throw cause;
   }
 }

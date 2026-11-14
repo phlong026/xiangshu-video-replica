@@ -2592,7 +2592,7 @@ describe("V1.4 创作页面", () => {
 
   // 供应商 ratio 契约（2026-09-19 真实付费核对）：图生比例由首帧决定，
   // 文生不支持自动。
-  it("长档开放时时长下拉到 30 并常驻 2 倍价备注；切 2K 上限钳回 15", () => {
+  it("长档开放时按独立价目提示计费；切 2K 上限钳回 15", () => {
     const value = studio({
       state: {
         ...studio().state,
@@ -2626,9 +2626,9 @@ describe("V1.4 创作页面", () => {
     expect(options.at(-1)).toBe(30);
     expect(options.some((seconds) => seconds > 15)).toBe(true);
     expect(screen.getByText(/长视频档/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/30\s*秒时总价即 15 秒成片的 2 倍/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/长视频档独立定价/)).toBeInTheDocument();
+    expect(screen.getByText(/按输出秒数和生成数量计费/)).toBeInTheDocument();
+    expect(screen.queryByText(/2\s*倍/)).not.toBeInTheDocument();
 
     // 切到 2K：上限回落 15，越界草稿被钳回，长档选项与备注一并消失。
     fireEvent.change(screen.getByRole("combobox", { name: "分辨率" }), {
