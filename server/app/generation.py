@@ -955,7 +955,7 @@ class GenerationPriceQuote(BaseModel):
     resolution: Literal["768P", "2K"]
     duration_seconds: int
     quantity: int
-    # 计价档位：16-30 秒走独立档（单价为 15 秒及以内档的 2 倍）。
+    # 16-30 秒使用后台独立配置的长档费率，不能假设固定倍数。
     price_tier: Literal["4-15s", "16-30s"] = "4-15s"
     unit_price_fen_per_second: int
     estimated_seconds: int

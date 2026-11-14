@@ -1048,6 +1048,91 @@ describe("TaskRecordsPanel", () => {
     );
   });
 
+  it.each([25, 30])(
+    "已归档%s秒任务使用正确的预览和下载入口",
+    async (seconds) => {
+      vi.mocked(api.getGenerationBatch).mockResolvedValue(
+        batch({
+          tasks: [
+            task({
+              result_asset_id: "legacy-asset",
+              prompt_snapshot: { output_duration_seconds: seconds },
+            }),
+          ],
+        }),
+      );
+      vi.mocked(api.createGenerationTaskPreviewUrl).mockResolvedValue(
+        "https://verified/strict-30.mp4",
+      );
+      render(
+        <TaskRecordsPanel
+          handoffBatch={null}
+          onHandoffConsumed={vi.fn()}
+          userRole="customer"
+        />,
+      );
+      const video = await screen.findByLabelText("结果预览 task-ok");
+      fireEvent.click(screen.getByRole("button", { name: "下载 MP4" }));
+      if (seconds === 30) {
+        expect(video).toHaveAttribute("src", "https://verified/strict-30.mp4");
+        expect(api.createGenerationTaskPreviewUrl).toHaveBeenCalledWith(
+          "task-ok",
+        );
+        expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+        await waitFor(() =>
+          expect(api.downloadGenerationTaskResult).toHaveBeenCalledWith(
+            "task-ok",
+            "task-ok.mp4",
+          ),
+        );
+        expect(api.downloadGenerationResult).not.toHaveBeenCalled();
+      } else {
+        expect(video).toHaveAttribute(
+          "src",
+          "https://stage-preview/legacy-asset",
+        );
+        expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
+        await waitFor(() =>
+          expect(api.downloadGenerationResult).toHaveBeenCalledWith(
+            "legacy-asset",
+            "task-ok.mp4",
+          ),
+        );
+        expect(api.downloadGenerationTaskResult).not.toHaveBeenCalled();
+      }
+      expect(api.regenerateGenerationTask).not.toHaveBeenCalled();
+      expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("旧30秒归档校验失败时不回退原资产播放", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        tasks: [
+          task({
+            result_asset_id: "legacy-asset",
+            prompt_snapshot: { output_duration_seconds: 30 },
+          }),
+        ],
+      }),
+    );
+    vi.mocked(api.createGenerationTaskPreviewUrl).mockRejectedValue(
+      new Error("校验失败"),
+    );
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="customer"
+      />,
+    );
+    expect(
+      await screen.findByText("预览链接获取失败，请重试。"),
+    ).toBeInTheDocument();
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("结果预览 task-ok")).not.toBeInTheDocument();
+  });
+
   it("shows a provider result while the task is preparing playback", async () => {
     vi.mocked(api.getGenerationBatch).mockResolvedValue(
       batch({

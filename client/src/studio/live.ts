@@ -401,8 +401,18 @@ export async function loadTaskPreview(
     successful.find((candidate) => candidate.result_asset_id) ?? successful[0];
   if (!result) return undefined;
 
-  const direct = !result.result_asset_id && result.direct_result_available;
-  const assetId = result.result_asset_id;
+  let assetId = result.result_asset_id;
+  if (result.prompt_snapshot?.output_duration_seconds === 30) {
+    // 历史已保存成片也要过时长校验，并把新资产编号传给后续下载、发布。
+    const verified = await archiveGenerationTask(result.id);
+    if (!verified.result_asset_id) {
+      throw new Error(
+        "30 秒成片交付校验尚未完成，请重试；不会重新生成或扣费。",
+      );
+    }
+    assetId = verified.result_asset_id;
+  }
+  const direct = !assetId && result.direct_result_available;
   const url = direct
     ? await createGenerationTaskPreviewUrl(result.id)
     : await createGenerationResultPreviewUrl(assetId as string);
