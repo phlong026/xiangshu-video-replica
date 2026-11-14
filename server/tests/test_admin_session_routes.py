@@ -5795,6 +5795,124 @@ def _stub_link_import_infra(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.pg
+@pytest.mark.parametrize(
+    "platform,url",
+    [
+        ("douyin", "https://www.douyin.com/video/7672703482771972081"),
+        ("xiaohongshu", "https://www.xiaohongshu.com/explore/66e012345678901234abcdef"),
+        ("wechat_channels", "https://channels.weixin.qq.com/share/resolve-test"),
+    ],
+)
+@pytest.mark.parametrize("outcome", ["success", "upstream-error"])
+def test_admin_link_resolve_releases_single_connection_before_external_io(
+    client: TestClient,
+    route_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    url: str,
+    outcome: str,
+) -> None:
+    """上游解析期间，单连接池仍可服务一次普通钱包查询；预检不写内容或扣费。"""
+    from app.db_pg import get_pg_pool, pg_transaction
+    from app.viral_link import ResolvedViralLink, ResolvedViralMetadata, ViralLinkError
+
+    headers = _admin_session(client)
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MIN", "0")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MAX", "1")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_TIMEOUT", "1")
+    close_pg_pool()
+    calls: list[str] = []
+    wallet_reads: list[int] = []
+    with psycopg.connect(route_state) as raw:
+        balances = raw.execute(
+            "SELECT user_id,available_credits,reserved_credits FROM wallets ORDER BY user_id"
+        ).fetchall()
+        videos = raw.execute("SELECT count(*) FROM viral_videos").fetchone()[0]
+        operations = raw.execute("SELECT count(*) FROM billing_operations").fetchone()[0]
+
+    class Resolver:
+        def resolve(self, raw_url: str, *, purpose: str) -> ResolvedViralLink:
+            assert purpose == "replica"
+            calls.append(raw_url)
+            assert get_pg_pool().max_size == 1
+            # 使用真实池再次借用连接：若外呼还处在配置读取事务内，这里会超时。
+            with pg_transaction() as ordinary:
+                wallet_reads.append(ordinary.execute("SELECT count(*) FROM wallets").fetchone()[0])
+            if outcome == "upstream-error":
+                raise ViralLinkError(503, "LINK_RESOLVE_TEMPORARY", "解析暂时不可用")
+            return ResolvedViralLink(
+                platform=platform,  # type: ignore[arg-type]
+                video_id="resolve-only-1",
+                title="仅预检视频",
+                author="作者",
+                cover_url=None,
+                video_url="https://cdn.example/resolve.mp4",
+                audio_url=None,
+                duration_ms=12_000,
+                source_description="",
+                metadata=ResolvedViralMetadata(likes=0, comments=2, published_at=1788700000),
+            )
+
+    def factory(conn):
+        assert conn.execute("SELECT 1 AS ready").fetchone()["ready"] == 1
+        return Resolver()
+
+    monkeypatch.setattr("app.viral_link.douyidou_link_client_from_settings", factory)
+    monkeypatch.setattr("app.viral_wechat_link.wechat_link_client_from_settings", factory)
+    try:
+        response = client.post(
+            "/api/control/viral/link-resolve",
+            headers=headers,
+            json={"url": url, "confirm": True, "reason": "采集预检"},
+        )
+        assert response.status_code == (503 if outcome == "upstream-error" else 200), response.text
+        assert calls == [url] and len(wallet_reads) == 1
+        if outcome == "upstream-error":
+            assert response.json()["detail"]["code"] == "LINK_RESOLVE_TEMPORARY"
+        else:
+            assert response.json()["platform"] == platform
+            assert response.json()["likes"] == 0
+            assert response.json()["publishedAt"] == 1788700000
+        with psycopg.connect(route_state) as raw:
+            assert (
+                raw.execute(
+                    "SELECT user_id,available_credits,reserved_credits FROM wallets "
+                    "ORDER BY user_id"
+                ).fetchall()
+                == balances
+            )
+            assert raw.execute("SELECT count(*) FROM viral_videos").fetchone()[0] == videos
+            assert (
+                raw.execute("SELECT count(*) FROM billing_operations").fetchone()[0] == operations
+            )
+    finally:
+        close_pg_pool()
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("identity,expected", [(None, 401), ("auditor_u", 403)])
+def test_admin_link_resolve_keeps_content_writer_authorization(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, identity, expected: int
+) -> None:
+    headers = {} if identity is None else _admin_session(client, identity)
+
+    def forbidden_factory(_conn):
+        pytest.fail("未授权预检不得读取上游配置或调用解析服务")
+
+    monkeypatch.setattr("app.viral_link.douyidou_link_client_from_settings", forbidden_factory)
+    response = client.post(
+        "/api/control/viral/link-resolve",
+        headers=headers,
+        json={
+            "url": "https://www.douyin.com/video/7672703482771972081",
+            "confirm": True,
+            "reason": "无权限预检",
+        },
+    )
+    assert response.status_code == expected, response.text
+
+
+@pytest.mark.pg
 def test_admin_link_import_resolves_upserts_and_queues_archive(
     client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

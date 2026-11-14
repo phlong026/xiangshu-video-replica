@@ -12,14 +12,19 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  type AdminViralLinkOverrides,
+  type AdminViralLinkResolveResult,
   adminActivationErrorMessage,
   adminImportViralLink,
+  adminResolveViralLink,
   adminUploadViralVideo,
   archiveCollectedViralVideo,
   type CollectedViralVideo,
   curateViralVideosBatch,
   listCollectedViralVideos,
+  previewCollectedViralVideo,
 } from "../api.admin";
+import { VideoPreview } from "../VideoPreview";
 import { PageBanner } from "./ui/PageBanner";
 import "./viral-acquire.css";
 
@@ -100,6 +105,7 @@ function AcquireVideoCard({
   video,
   readOnly,
   curateBusy,
+  onDetail,
   onTakedown,
   onReshow,
   onArchive,
@@ -108,6 +114,7 @@ function AcquireVideoCard({
   video: CollectedViralVideo;
   readOnly: boolean;
   curateBusy: boolean;
+  onDetail: (video: CollectedViralVideo) => void;
   onTakedown: (video: CollectedViralVideo) => void;
   onReshow: (video: CollectedViralVideo) => void;
   onArchive: (video: CollectedViralVideo) => void;
@@ -195,69 +202,78 @@ function AcquireVideoCard({
         ) : null}
         <div className="viral-card-caption">
           <span>入库于 {formatAcquiredAt(video.created_at)}</span>
-          {!readOnly && video.availability !== "UNAVAILABLE" ? (
-            <span className="viral-acquire-actions">
-              {needsArchive ? (
+          <span className="viral-acquire-actions">
+            <button
+              className="viral-acquire-takedown"
+              type="button"
+              onClick={() => onDetail(video)}
+            >
+              详情
+            </button>
+            {!readOnly && video.availability !== "UNAVAILABLE" ? (
+              <>
+                {needsArchive ? (
+                  <button
+                    className="viral-acquire-takedown"
+                    disabled={curateBusy}
+                    title="排队媒体转存，完成后变为已就绪"
+                    type="button"
+                    onClick={() => onArchive(video)}
+                  >
+                    {video.content_state === "prepare_failed"
+                      ? "重试转存"
+                      : "补转存"}
+                  </button>
+                ) : null}
+                {blocked && video.availability === "HIDDEN" ? (
+                  <button
+                    className="viral-acquire-takedown"
+                    disabled={curateBusy}
+                    type="button"
+                    onClick={() => onReshow(video)}
+                  >
+                    重新上架
+                  </button>
+                ) : null}
+                {!blocked && customerVisible ? (
+                  <button
+                    className="viral-acquire-takedown"
+                    disabled={curateBusy}
+                    type="button"
+                    onClick={() => onTakedown(video)}
+                  >
+                    下架
+                  </button>
+                ) : null}
+                {!blocked && !customerVisible && status.tone === "cached" ? (
+                  <button
+                    className="viral-acquire-takedown"
+                    disabled={curateBusy}
+                    type="button"
+                    onClick={() => onReshow(video)}
+                  >
+                    上架
+                  </button>
+                ) : null}
                 <button
                   className="viral-acquire-takedown"
                   disabled={curateBusy}
-                  title="排队媒体转存，完成后变为已就绪"
+                  title="从内容池删除（软删）"
                   type="button"
-                  onClick={() => onArchive(video)}
+                  onClick={(event) => {
+                    if (
+                      window.confirm("确认从内容池删除该条目？删除后不可恢复。")
+                    ) {
+                      onDelete(video);
+                      event.currentTarget.blur();
+                    }
+                  }}
                 >
-                  {video.content_state === "prepare_failed"
-                    ? "重试转存"
-                    : "补转存"}
+                  删除
                 </button>
-              ) : null}
-              {blocked && video.availability === "HIDDEN" ? (
-                <button
-                  className="viral-acquire-takedown"
-                  disabled={curateBusy}
-                  type="button"
-                  onClick={() => onReshow(video)}
-                >
-                  重新上架
-                </button>
-              ) : null}
-              {!blocked && customerVisible ? (
-                <button
-                  className="viral-acquire-takedown"
-                  disabled={curateBusy}
-                  type="button"
-                  onClick={() => onTakedown(video)}
-                >
-                  下架
-                </button>
-              ) : null}
-              {!blocked && !customerVisible && status.tone === "cached" ? (
-                <button
-                  className="viral-acquire-takedown"
-                  disabled={curateBusy}
-                  type="button"
-                  onClick={() => onReshow(video)}
-                >
-                  上架
-                </button>
-              ) : null}
-              <button
-                className="viral-acquire-takedown"
-                disabled={curateBusy}
-                title="从内容池删除（软删）"
-                type="button"
-                onClick={(event) => {
-                  if (
-                    window.confirm("确认从内容池删除该条目？删除后不可恢复。")
-                  ) {
-                    onDelete(video);
-                    event.currentTarget.blur();
-                  }
-                }}
-              >
-                删除
-              </button>
-            </span>
-          ) : null}
+              </>
+            ) : null}
+          </span>
         </div>
       </div>
     </article>
@@ -333,6 +349,23 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
     null,
   );
   const [modalOpen, setModalOpen] = useState(false);
+  // 链接采集确认弹窗：解析预检结果 + 可改可补的字段。
+  const [linkResolve, setLinkResolve] =
+    useState<AdminViralLinkResolveResult | null>(null);
+  const [linkModalOpen, setLinkModalOpen] = useState(false);
+  const [linkEditTitle, setLinkEditTitle] = useState("");
+  const [linkEditAuthor, setLinkEditAuthor] = useState("");
+  const [linkEditLikes, setLinkEditLikes] = useState("");
+  const [linkEditComments, setLinkEditComments] = useState("");
+  const [linkEditShares, setLinkEditShares] = useState("");
+  const [linkEditCollects, setLinkEditCollects] = useState("");
+  const [linkEditTags, setLinkEditTags] = useState("");
+  // 详情弹窗：视频预览（媒体就绪时）+ 完整字段。
+  const [detailVideo, setDetailVideo] = useState<CollectedViralVideo | null>(
+    null,
+  );
+  const [detailPreviewUrl, setDetailPreviewUrl] = useState("");
+  const [detailPreviewError, setDetailPreviewError] = useState("");
   const [modalFile, setModalFile] = useState<File | null>(null);
   const [probe, setProbe] = useState<{
     durationMs: number;
@@ -398,13 +431,73 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
     setError("");
     setNotice("");
     try {
+      // 两段式：先解析预检（不入库）→ 弹确认窗（可改可补统计）→ 确认后入库.
+      const resolved = await adminResolveViralLink(url);
+      setLinkResolve(resolved);
+      setLinkEditTitle(resolved.title);
+      setLinkEditAuthor(resolved.author);
+      setLinkEditLikes(resolved.likes == null ? "" : String(resolved.likes));
+      setLinkEditComments(
+        resolved.comments == null ? "" : String(resolved.comments),
+      );
+      setLinkEditShares(resolved.shares == null ? "" : String(resolved.shares));
+      setLinkEditCollects(
+        resolved.collects == null ? "" : String(resolved.collects),
+      );
+      setLinkEditTags(resolved.tags.join(" "));
+      setLinkModalOpen(true);
+    } catch (cause) {
+      setError(adminActivationErrorMessage(cause, "链接解析失败"));
+    } finally {
+      setLinkBusy(false);
+    }
+  };
+
+  const confirmLinkImport = async () => {
+    if (linkBusy || !linkResolve) return;
+    setLinkBusy(true);
+    setError("");
+    try {
+      const overrides: AdminViralLinkOverrides = {};
+      if (linkEditTitle.trim() && linkEditTitle.trim() !== linkResolve.title) {
+        overrides.title = linkEditTitle.trim();
+      }
+      if (
+        linkEditAuthor.trim() &&
+        linkEditAuthor.trim() !== linkResolve.author
+      ) {
+        overrides.author = linkEditAuthor.trim();
+      }
+      const metric = (raw: string) => {
+        const value = Number(raw);
+        return raw.trim() && Number.isFinite(value) && value >= 0
+          ? Math.round(value)
+          : undefined;
+      };
+      const linkMetrics = [
+        ["likes", linkEditLikes],
+        ["comments", linkEditComments],
+        ["shares", linkEditShares],
+        ["collects", linkEditCollects],
+      ] as const;
+      for (const [field, raw] of linkMetrics) {
+        const value = metric(raw);
+        if (value !== undefined) overrides[field] = value;
+      }
+      const tags = linkEditTags
+        .split(/[\s,，#]+/)
+        .map((tag) => tag.trim().replace(/^#/, ""))
+        .filter(Boolean);
+      if (tags.length > 0) overrides.tags = tags;
       const result = await adminImportViralLink(
-        url,
+        linkUrl.trim(),
         "粘贴链接采集",
         linkKeyRef.current,
+        overrides,
       );
       linkKeyRef.current = crypto.randomUUID();
       setLinkUrl("");
+      closeLinkModal();
       const label =
         PLATFORM_LABELS[result.platform as CollectedViralVideo["platform"]] ??
         result.platform;
@@ -527,6 +620,35 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
     }
   };
 
+  const closeLinkModal = useCallback(() => {
+    setLinkModalOpen(false);
+    setLinkResolve(null);
+    setLinkEditTitle("");
+    setLinkEditAuthor("");
+    setLinkEditLikes("");
+    setLinkEditComments("");
+    setLinkEditShares("");
+    setLinkEditCollects("");
+    setLinkEditTags("");
+  }, []);
+
+  const openDetail = useCallback(async (video: CollectedViralVideo) => {
+    setDetailVideo(video);
+    setDetailPreviewUrl("");
+    setDetailPreviewError("");
+    // 只有媒体就绪的条目才有可播放预览；未就绪静默展示占位文案。
+    if (video.content_state !== "ready") {
+      setDetailPreviewError("媒体尚未就绪，转存完成后可在此播放。");
+      return;
+    }
+    try {
+      const { url } = await previewCollectedViralVideo(video);
+      setDetailPreviewUrl(url);
+    } catch {
+      setDetailPreviewError("预览暂不可用");
+    }
+  }, []);
+
   const rearchive = async (video: CollectedViralVideo) => {
     if (readOnly || curateTarget) return;
     setCurateTarget(video);
@@ -640,6 +762,7 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
               key={`${video.platform}-${video.video_id}`}
               curateBusy={curateTarget !== null}
               onArchive={(target) => void rearchive(target)}
+              onDetail={(target) => void openDetail(target)}
               onDelete={(target) => void curate(target, "delete", "删除失败")}
               onReshow={(target) => void curate(target, "push", "上架失败")}
               onTakedown={(target) => void curate(target, "hide", "下架失败")}
@@ -847,6 +970,277 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
               {uploadBusy ? "上传处理中…" : "确认上传入库"}
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* 链接采集确认弹窗：解析预检结果展示 + 可改可补统计，确认后入库。 */}
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: 遮罩是 aria-modal dialog 模式的标准视觉层，键盘经 Esc 与对话框内控件交互 */}
+      <div
+        className="viral-acquire-modal-backdrop"
+        hidden={!linkModalOpen}
+        onClick={(event) => {
+          if (event.target === event.currentTarget && !linkBusy) {
+            closeLinkModal();
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !linkBusy) closeLinkModal();
+        }}
+        role="presentation"
+      >
+        <div
+          aria-label="链接采集 · 确认信息"
+          aria-modal="true"
+          className="viral-acquire-modal"
+          role="dialog"
+        >
+          <div className="viral-acquire-modal-head">
+            <h3>链接采集 · 确认信息</h3>
+            <button
+              aria-label="关闭"
+              className="viral-acquire-modal-close"
+              disabled={linkBusy}
+              type="button"
+              onClick={closeLinkModal}
+            >
+              ×
+            </button>
+          </div>
+          {linkResolve ? (
+            <>
+              <div className="um-auto">
+                <div className="viral-acquire-thumb">
+                  {linkResolve.coverUrl ? (
+                    <img alt="" src={linkResolve.coverUrl} />
+                  ) : (
+                    <span aria-hidden="true">▶</span>
+                  )}
+                </div>
+                <div>
+                  <div className="viral-acquire-facts">
+                    {PLATFORM_LABELS[linkResolve.platform] ??
+                      linkResolve.platform}{" "}
+                    · {formatDuration(linkResolve.durationMs)}
+                  </div>
+                  <div className="viral-acquire-facts-sub">
+                    解析结果已按上游返回预填；统计缺失时可手动补填后入库.
+                  </div>
+                </div>
+              </div>
+              <div className="viral-acquire-fields" style={{ marginTop: 14 }}>
+                <label className="viral-acquire-grow">
+                  视频标题
+                  <input
+                    disabled={linkBusy}
+                    maxLength={200}
+                    value={linkEditTitle}
+                    onChange={(event) => setLinkEditTitle(event.target.value)}
+                  />
+                </label>
+                <label>
+                  作者
+                  <input
+                    disabled={linkBusy}
+                    maxLength={120}
+                    value={linkEditAuthor}
+                    onChange={(event) => setLinkEditAuthor(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="viral-acquire-fields" style={{ marginTop: 12 }}>
+                <label>
+                  点赞
+                  <input
+                    disabled={linkBusy}
+                    inputMode="numeric"
+                    min={0}
+                    placeholder="选填"
+                    type="number"
+                    value={linkEditLikes}
+                    onChange={(event) => setLinkEditLikes(event.target.value)}
+                  />
+                </label>
+                <label>
+                  评论
+                  <input
+                    disabled={linkBusy}
+                    inputMode="numeric"
+                    min={0}
+                    placeholder="选填"
+                    type="number"
+                    value={linkEditComments}
+                    onChange={(event) =>
+                      setLinkEditComments(event.target.value)
+                    }
+                  />
+                </label>
+                <label>
+                  转发
+                  <input
+                    disabled={linkBusy}
+                    inputMode="numeric"
+                    min={0}
+                    placeholder="选填"
+                    type="number"
+                    value={linkEditShares}
+                    onChange={(event) => setLinkEditShares(event.target.value)}
+                  />
+                </label>
+                <label>
+                  收藏
+                  <input
+                    disabled={linkBusy}
+                    inputMode="numeric"
+                    min={0}
+                    placeholder="选填"
+                    type="number"
+                    value={linkEditCollects}
+                    onChange={(event) =>
+                      setLinkEditCollects(event.target.value)
+                    }
+                  />
+                </label>
+                <label className="viral-acquire-grow">
+                  标签
+                  <input
+                    disabled={linkBusy}
+                    maxLength={300}
+                    placeholder="选填，如 #探店 #vlog"
+                    value={linkEditTags}
+                    onChange={(event) => setLinkEditTags(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="viral-acquire-modal-actions">
+                <button
+                  className="viral-acquire-cancel"
+                  disabled={linkBusy}
+                  type="button"
+                  onClick={closeLinkModal}
+                >
+                  取消
+                </button>
+                <button
+                  className="viral-acquire-confirm"
+                  disabled={linkBusy}
+                  type="button"
+                  onClick={() => void confirmLinkImport()}
+                >
+                  {linkBusy ? "入库处理中…" : "确认采集入库"}
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* 详情弹窗：媒体就绪时播放预览 + 完整字段。 */}
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: 遮罩是 aria-modal dialog 模式的标准视觉层，键盘经 Esc 与对话框内控件交互 */}
+      <div
+        className="viral-acquire-modal-backdrop"
+        hidden={!detailVideo}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) setDetailVideo(null);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setDetailVideo(null);
+        }}
+        role="presentation"
+      >
+        <div
+          aria-label="视频详情"
+          aria-modal="true"
+          className="viral-acquire-modal"
+          role="dialog"
+        >
+          <div className="viral-acquire-modal-head">
+            <h3>视频详情</h3>
+            <button
+              aria-label="关闭"
+              className="viral-acquire-modal-close"
+              type="button"
+              onClick={() => setDetailVideo(null)}
+            >
+              ×
+            </button>
+          </div>
+          {detailVideo ? (
+            <>
+              {detailPreviewUrl ? (
+                <VideoPreview
+                  controls
+                  playsInline
+                  src={detailPreviewUrl}
+                  style={{
+                    background: "#000",
+                    borderRadius: 10,
+                    maxHeight: 380,
+                    width: "100%",
+                  }}
+                />
+              ) : (
+                <div
+                  className="viral-acquire-thumb"
+                  style={{ height: 140, width: "100%" }}
+                >
+                  {detailPreviewError || "…"}
+                </div>
+              )}
+              <div className="um-section">基本信息</div>
+              <table style={{ width: "100%", fontSize: 13 }}>
+                <tbody>
+                  <tr>
+                    <td>标题</td>
+                    <td>{detailVideo.title || detailVideo.video_id}</td>
+                  </tr>
+                  <tr>
+                    <td>平台 / 作者</td>
+                    <td>
+                      {PLATFORM_LABELS[detailVideo.platform] ??
+                        detailVideo.platform}{" "}
+                      · {detailVideo.author || "佚名"}
+                      {detailVideo.verified ? " ✓" : ""}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>时长 / 发布时间</td>
+                    <td>
+                      {formatDuration(detailVideo.duration_ms)}
+                      {detailVideo.published_display
+                        ? ` · ${detailVideo.published_display}`
+                        : ""}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>转存状态</td>
+                    <td>{cardStatus(detailVideo).label}</td>
+                  </tr>
+                  <tr>
+                    <td>点赞 / 评论</td>
+                    <td>
+                      {formatCount(detailVideo.likes)} /{" "}
+                      {formatCount(detailVideo.comments)}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>转发 / 收藏</td>
+                    <td>
+                      {formatCount(detailVideo.shares)} /{" "}
+                      {formatCount(detailVideo.collects)}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>标签</td>
+                    <td>
+                      {detailVideo.tags && detailVideo.tags.length > 0
+                        ? detailVideo.tags.map((tag) => `#${tag}`).join(" ")
+                        : "—"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </>
+          ) : null}
         </div>
       </div>
     </section>
