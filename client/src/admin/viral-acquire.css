@@ -1,0 +1,545 @@
+/* 爆款视频获取页样式.
+ *
+ * .viral-card* 与 client/src/studio/content.css 的同名类保持同值——后台卡片
+ * 与客户工作台视觉一致是产品要求（2026-11 内容组精简评审记录）。若调整
+ * 卡片视觉，两处必须同步改；source-input 条同理对应 studio.css。
+ */
+
+/* ---- 获取输入条（与客户端工作台 .studio-source-input 同构同值） ---- */
+.viral-acquire-bar {
+  align-items: center;
+  background: #101111;
+  border: 1px solid #6c5120;
+  border-radius: 12px;
+  display: flex;
+  gap: 10px;
+  min-height: 62px;
+  padding: 6px 7px 6px 12px;
+}
+
+.viral-acquire-upload {
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: #eec237;
+  cursor: pointer;
+  display: grid;
+  flex-shrink: 0;
+  height: 36px;
+  min-width: 36px;
+  padding: 0;
+  place-items: center;
+  width: 36px;
+}
+
+.viral-acquire-upload:hover:not(:disabled) {
+  background: #262922;
+}
+
+.viral-acquire-bar input:not([type="file"]) {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: var(--font-body, 14px);
+  min-width: 0;
+  padding: 5px 0;
+  width: 100%;
+}
+
+.viral-acquire-bar input::placeholder {
+  color: #77796f;
+}
+
+.viral-acquire-bar input:focus {
+  outline: none;
+}
+
+.viral-acquire-bar .viral-acquire-go {
+  background: linear-gradient(180deg, #f6c453, #e5a332);
+  border: none;
+  border-radius: 10px;
+  color: #231703;
+  cursor: pointer;
+  flex: none;
+  font-size: var(--font-body, 14px);
+  font-weight: 600;
+  min-height: 48px;
+  padding: 8px 18px;
+  white-space: nowrap;
+}
+
+.viral-acquire-bar .viral-acquire-go:disabled {
+  opacity: 0.6;
+}
+
+.viral-acquire-helper {
+  color: #999c93;
+  font-size: 13px;
+  margin: 10px 2px 0;
+}
+
+.viral-acquire-status {
+  font-size: 13px;
+  margin: 9px 2px 0;
+}
+
+/* ---- 上传信息确认弹窗 ---- */
+.viral-acquire-modal-backdrop {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.62);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 60;
+}
+
+.viral-acquire-modal-backdrop[hidden] {
+  display: none;
+}
+
+.viral-acquire-modal {
+  background: #141416;
+  border: 1px solid #2e2e33;
+  border-radius: 14px;
+  max-height: 90vh;
+  max-width: 640px;
+  overflow-y: auto;
+  padding: 20px 22px;
+  width: 620px;
+}
+
+.viral-acquire-modal-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.viral-acquire-modal-head h3 {
+  color: #f0ede6;
+  font-size: 16px;
+  margin: 0;
+}
+
+.viral-acquire-modal-close {
+  background: none;
+  border: none;
+  color: #8f8c84;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.viral-acquire-file {
+  align-items: center;
+  background: #0f0f11;
+  border: 1px solid #26262b;
+  border-radius: 10px;
+  color: #d6d3cb;
+  display: flex;
+  font-size: 13.5px;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.viral-acquire-file-size {
+  color: #77796f;
+  font-size: 12.5px;
+  margin-left: auto;
+}
+
+.viral-acquire-section {
+  color: #8f8c84;
+  font-size: 12px;
+  letter-spacing: 2px;
+  margin: 16px 0 8px;
+}
+
+.viral-acquire-auto {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+}
+
+.viral-acquire-thumb {
+  background: #171817;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6d6a63;
+  flex: none;
+  height: 96px;
+  overflow: hidden;
+  width: 56px;
+}
+
+.viral-acquire-thumb img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.viral-acquire-facts {
+  color: #f0ede6;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.viral-acquire-facts-sub {
+  color: #999c93;
+  font-size: 12.5px;
+  margin-top: 5px;
+}
+
+.viral-acquire-fields {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.viral-acquire-fields label {
+  color: #b9b6ae;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.viral-acquire-fields input,
+.viral-acquire-fields select {
+  background: #0f0f11;
+  border: 1px solid #2a2a2e;
+  border-radius: 10px;
+  color: inherit;
+  font-size: 14px;
+  padding: 10px 12px;
+}
+
+.viral-acquire-fields input[type="number"] {
+  width: 110px;
+}
+
+.viral-acquire-fields input[type="date"] {
+  color-scheme: dark;
+}
+
+.viral-acquire-fields input[type="checkbox"] {
+  accent-color: #e5a332;
+  height: 15px;
+  width: 15px;
+}
+
+/* 后置规则同特异性覆盖上一条的 column 方向，无需 !important。 */
+.viral-acquire-fields label.viral-acquire-check {
+  align-items: center;
+  flex-direction: row;
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
+.viral-acquire-grow input {
+  width: 320px;
+  max-width: 100%;
+}
+
+.viral-acquire-modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.viral-acquire-modal-actions button {
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  min-height: 44px;
+  padding: 8px 18px;
+}
+
+.viral-acquire-modal-actions .viral-acquire-cancel {
+  background: #1f201d;
+  color: #d6d3cb;
+}
+
+.viral-acquire-modal-actions .viral-acquire-confirm {
+  background: linear-gradient(180deg, #f6c453, #e5a332);
+  color: #231703;
+}
+
+.viral-acquire-modal-actions button:disabled {
+  opacity: 0.6;
+}
+
+/* ---- 获取结果卡片（.viral-card* 与 studio/content.css 同值） ---- */
+.viral-acquire-results {
+  align-items: center;
+  color: #b9b6ae;
+  display: flex;
+  font-size: 14px;
+  font-weight: 600;
+  gap: 12px;
+  margin: 22px 2px 12px;
+}
+
+.viral-acquire-refresh {
+  background: #131316;
+  border: 1px solid #2a2a2e;
+  border-radius: 8px;
+  color: #c9c6be;
+  cursor: pointer;
+  font-size: 12.5px;
+  margin-left: auto;
+  padding: 5px 14px;
+}
+
+.viral-acquire-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
+}
+
+.viral-card {
+  background: #101111;
+  border: 1px solid #292a27;
+  border-radius: 11px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+.viral-card-cover {
+  aspect-ratio: 9 / 16;
+  background: #171817;
+  flex-shrink: 0;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.viral-card-cover-img {
+  display: block;
+  height: 100%;
+  inset: 0;
+  object-fit: cover;
+  position: absolute;
+  width: 100%;
+  z-index: 0;
+}
+
+.viral-card-cover-empty {
+  align-items: center;
+  aspect-ratio: 9 / 16;
+  color: #55564f;
+  display: flex;
+  justify-content: center;
+  position: relative;
+}
+
+.viral-card-scrim {
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.18),
+    transparent 32%,
+    transparent 64%,
+    rgba(0, 0, 0, 0.3)
+  );
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1;
+}
+
+.viral-card-platform,
+.viral-card-duration,
+.viral-card-cache {
+  background: #080909cc;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 12px;
+  padding: 3px 7px;
+  position: absolute;
+  z-index: 2;
+}
+
+.viral-card-platform {
+  color: #e5aa36;
+  left: 8px;
+  top: 8px;
+}
+
+.viral-card-duration {
+  right: 8px;
+  top: 8px;
+}
+
+.viral-card-cache {
+  right: 8px;
+  top: 34px;
+}
+
+.viral-card-cache.is-cached {
+  color: #7fc47f;
+}
+
+.viral-card-cache.is-unready {
+  color: #d8b976;
+}
+
+.viral-card-cache.is-failed {
+  color: #e07b6a;
+}
+
+.viral-card-overlay {
+  background: linear-gradient(to top, #080909f2, #08090980 55%, transparent);
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  left: 0;
+  padding: 26px 10px 8px;
+  position: absolute;
+  right: 0;
+  z-index: 2;
+}
+
+.viral-card-stats {
+  color: #fff;
+  display: flex;
+  font-size: 12px;
+  gap: 9px;
+}
+
+.viral-card-stats span {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.viral-card-stats svg {
+  color: #e6e7e2;
+  flex: none;
+}
+
+.viral-card-overlay-author {
+  align-items: center;
+  color: #d8d8d2;
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.viral-card-overlay-author i,
+.viral-card-overlay-author img {
+  background: #23241f;
+  border-radius: 50%;
+  color: #e5aa36;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  font-style: normal;
+  height: 18px;
+  object-fit: cover;
+  width: 18px;
+}
+
+.viral-card-overlay-author > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viral-card-overlay-author em {
+  color: #e5aa36;
+  flex: none;
+  font-style: normal;
+}
+
+.viral-card-overlay-author time {
+  color: #b3b5ae;
+  flex: none;
+}
+
+.viral-card-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px 12px;
+}
+
+.viral-card-body h3 {
+  color: #ecece8;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  margin: 0;
+  min-height: 2.9em;
+}
+
+.viral-card-title {
+  color: inherit;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font: inherit;
+  overflow: hidden;
+  text-align: left;
+  width: 100%;
+}
+
+.viral-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.viral-card-tags span {
+  border: 1px solid #292a27;
+  border-radius: 999px;
+  color: #999b95;
+  font-size: 12px;
+  max-width: 96px;
+  overflow: hidden;
+  padding: 2px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viral-card-caption {
+  align-items: center;
+  color: #77796f;
+  display: flex;
+  font-size: 12px;
+  justify-content: space-between;
+  margin-top: auto;
+}
+
+.viral-acquire-takedown {
+  background: none;
+  border: 1px solid #3a3a40;
+  border-radius: 7px;
+  color: #8f8c84;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+.viral-acquire-takedown:hover:not(:disabled) {
+  border-color: #e07b6a66;
+  color: #e07b6a;
+}
+
+.viral-acquire-takedown:disabled {
+  opacity: 0.6;
+}

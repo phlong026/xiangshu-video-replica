@@ -1347,7 +1347,11 @@ export function ViralPage() {
   const listReloadRevisionRef = useRef(listReloadRevision);
   listReloadRevisionRef.current = listReloadRevision;
   const platformKey: ViralPlatform =
-    platform === "抖音" ? "douyin" : "wechat_channels";
+    platform === "抖音"
+      ? "douyin"
+      : platform === "小红书"
+        ? "xiaohongshu"
+        : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
   const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}`;
   const paginationContextKeyRef = useRef(paginationContextKey);
@@ -1897,7 +1901,7 @@ export function ViralPage() {
     return () => observer.disconnect();
   }, [canLoadMore, loadMore]);
 
-  const platformTabs = (["抖音", "视频号"] as const).map((item) => ({
+  const platformTabs = (["抖音", "视频号", "小红书"] as const).map((item) => ({
     id: item,
     label: `${item} ${
       review

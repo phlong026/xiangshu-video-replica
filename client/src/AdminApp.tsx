@@ -26,6 +26,7 @@ import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { TeamManagementSection } from "./admin/TeamManagementSection";
 import { TrainingMaterialsPage } from "./admin/TrainingMaterialsPage";
 import { shanghaiDate } from "./admin/ui/vocabulary";
+import { ViralAcquirePage } from "./admin/ViralAcquirePage";
 import { ViralCollectionPage } from "./admin/ViralCollectionPage";
 import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
 import { ViralHomepagePage } from "./admin/ViralHomepagePage";
@@ -56,6 +57,7 @@ import chartIcon from "./assets/icons/chart-no-axes-combined.svg";
 import chartPieIcon from "./assets/icons/chart-pie.svg";
 import clapperboardIcon from "./assets/icons/clapperboard.svg";
 import fileSpreadsheetIcon from "./assets/icons/file-spreadsheet.svg";
+import flameIcon from "./assets/icons/flame.svg";
 import gaugeIcon from "./assets/icons/gauge.svg";
 import trainingIcon from "./assets/icons/graduation-cap.svg";
 import houseIcon from "./assets/icons/house.svg";
@@ -118,6 +120,7 @@ export type AdminTab =
   | "viralCollection"
   | "viralVideos"
   | "viralDiscoveries"
+  | "viralAcquire"
   | "auditCenter"
   | "alerts"
   | "team"
@@ -237,6 +240,11 @@ const tabGroups: Array<{
         helper: "搜索需求与内容补货",
       },
       {
+        id: "viralAcquire",
+        label: "爆款视频获取",
+        helper: "链接采集与上传，自动上架",
+      },
+      {
         id: "trainingMaterials",
         label: "培训素材库",
         helper: "后台统一上传，客户只读",
@@ -292,6 +300,7 @@ const tabPageTitles: Record<AdminTab, string> = {
   viralCollection: "采集设置",
   viralVideos: "视频库",
   viralDiscoveries: "客户需求洞察",
+  viralAcquire: "爆款视频获取",
   auditCenter: "管理操作日志",
   alerts: "告警总览",
   team: "团队与权限",
@@ -321,6 +330,7 @@ const tabReadPoints: Partial<Record<AdminTab, string>> = {
   viralCollection: "content.read",
   viralVideos: "content.read",
   viralDiscoveries: "content.read",
+  viralAcquire: "content.read",
   auditCenter: "audit.read",
   systemSettings: "settings.read",
 };
@@ -350,6 +360,7 @@ const navigationIcons: Record<AdminTab, string> = {
   viralCollection: collectionSettingsIcon,
   viralVideos: listVideoIcon,
   viralDiscoveries: searchCheckIcon,
+  viralAcquire: flameIcon,
   auditCenter: scrollIcon,
   alerts: bellIcon,
   team: shieldUserIcon,
@@ -1446,6 +1457,9 @@ export function AdminApp() {
                   navigateAdmin("viralVideos");
                 }}
               />
+            ) : null}
+            {viewTab === "viralAcquire" ? (
+              <ViralAcquirePage readOnly={readOnlyFor("content.write")} />
             ) : null}
             {viewTab === "alerts" ? (
               <AdminAlertsSection readOnly={readOnlyFor("settings.write")} />
