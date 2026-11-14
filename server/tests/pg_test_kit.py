@@ -251,6 +251,11 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # the 按任务编号/问题编号直查失败历史矩阵
         # (test_analysis_diagnostics_pg.py), migrated to alembic head.
         "billing_obs_diag_test",
+        # E2E-DEFECT-1-20261114 upload-intent 去重复用绑定语义：dedicated
+        # database for the 跨项目复用新建绑定/同项目复用用途跟随/孤儿asset
+        # 不进候选 三条回归 (test_asset_intent_dedup_reuse_pg.py), migrated
+        # to alembic head.
+        "asset_intent_dedup_test",
         # ADMIN-PROVIDER-PROBES-20260922 管理端付费探针入口：dedicated database
         # for the /api/control/settings/providers/{provider}/paid-test 写契约 /
         # 幂等重放 / 审计矩阵 (test_admin_provider_paid_probe.py), migrated to

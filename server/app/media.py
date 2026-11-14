@@ -394,6 +394,16 @@ def reuse_owned_completed_upload(
                 actor.id,
             ),
         )
+    else:
+        # 同项目复用：用途可能已变（先「提取文案」后「复刻」），metadata 的
+        # upload_purpose 必须跟随本次 intent——后续 complete 幂等重试按它
+        # 校验时长门禁、判定是否自动拆解；用途残留会让这两处走错车道。
+        reused_metadata = dict(source_metadata)
+        reused_metadata["upload_purpose"] = purpose
+        conn.execute(
+            "UPDATE assets SET metadata_json = %s WHERE id = %s",
+            (json.dumps(reused_metadata, sort_keys=True), asset_id),
+        )
     conn.execute(
         "UPDATE projects SET status = 'REFERENCE_READY', updated_at = CURRENT_TIMESTAMP "
         "WHERE id = %s",
