@@ -3300,6 +3300,119 @@ describe("视频生成（C2 独立创作）", () => {
     ).toBeInTheDocument();
   });
 
+  it.each([25, 30])(
+    "同一组合规参考素材生成 %i 秒时，报价与提交保留准确时长和长档费用",
+    async (seconds) => {
+      const references = [
+        {
+          id: "long-ref-image",
+          name: "乡墅外立面.jpg",
+          kind: "image" as const,
+          group: "参考素材",
+          source: "素材库",
+          saved: true,
+        },
+        {
+          id: "long-ref-video",
+          name: "庭院运镜.mp4",
+          kind: "video" as const,
+          durationSeconds: 4,
+          group: "参考素材",
+          source: "素材库",
+          saved: true,
+        },
+        {
+          id: "long-ref-audio",
+          name: "庭院环境声.wav",
+          kind: "audio" as const,
+          durationSeconds: 4,
+          group: "参考素材",
+          source: "素材库",
+          saved: true,
+        },
+      ];
+      const capabilities = {
+        extended_modes_enabled: true,
+        t2v_enabled: true,
+        i2v_enabled: true,
+        r2v_enabled: true,
+        last_frame_enabled: true,
+        max_reference_images: 8,
+        max_reference_videos: 3,
+        max_reference_audios: 3,
+        max_quantity: 4,
+        max_output_duration_seconds: 30,
+      };
+      api.getIndependentCapabilities.mockResolvedValue(capabilities);
+      live.loadStudioData.mockResolvedValue({
+        ...emptyStudioData,
+        assets: references,
+      });
+      const quote = {
+        resolution: "768P",
+        duration_seconds: seconds,
+        quantity: 1,
+        price_tier: "16-30s",
+        unit_price_fen_per_second: 20,
+        estimated_seconds: seconds,
+        estimated_price_fen: seconds * 20,
+        unit_credits: 2,
+        estimated_credits: seconds * 2,
+        quote_token: `r2v-long-quote-${seconds}`,
+        quote_expires_at: Math.floor(Date.now() / 1000) + 300,
+        max_credits: seconds * 2,
+      };
+      api.getGenerationPriceQuote.mockResolvedValue(quote);
+      api.createIndependentVideoTask.mockResolvedValue({
+        id: `r2v-long-${seconds}`,
+      });
+      const state = createState("reference");
+      state.draft.referenceIds = references.map((item) => item.id);
+      state.draft.referencePrompt = REF2VA_PROMPT;
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      await findEnabledButton("生成视频");
+      fireEvent.change(screen.getByRole("combobox", { name: "时长" }), {
+        target: { value: String(seconds) },
+      });
+      expect(screen.getByRole("combobox", { name: "时长" })).toHaveValue(
+        String(seconds),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+      const dialog = await screen.findByRole("dialog", {
+        name: "生成确认 · 视频生成",
+      });
+      const submit = await findEnabledButton("确认费用并提交", dialog);
+      expect(dialog).toHaveTextContent(`${seconds * 2} 积分`);
+      expect(dialog).toHaveTextContent("按输出秒数和生成数量计费");
+      expect(dialog).not.toHaveTextContent(/2\s*倍/);
+      fireEvent.click(submit);
+
+      await waitFor(() =>
+        expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
+      );
+      expect(api.getGenerationPriceQuote).toHaveBeenCalledWith({
+        resolution: "768P",
+        duration_seconds: seconds,
+        quantity: 1,
+      });
+      expect(api.createIndependentVideoTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode: "r2v",
+          reference_asset_ids: references.map((item) => item.id),
+          first_frame_asset_id: null,
+          last_frame_asset_id: null,
+          output_duration_seconds: seconds,
+          resolution: "768P",
+          quantity: 1,
+          quote_token: `r2v-long-quote-${seconds}`,
+          max_credits: seconds * 2,
+          idempotency_key: expect.any(String),
+        }),
+      );
+    },
+  );
+
   it("非法草稿时长钳位到 15 秒提交，不再静默回落 8 秒（preflight P1-4）", async () => {
     // 上线前检查 P1-4：云草稿恢复链不校验 duration，旧客户端写入的超界值
     // 到达独立创作页后，提交/报价必须按 4–15 钳位（20 → 15），与复刻路径

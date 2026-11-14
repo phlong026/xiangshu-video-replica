@@ -939,7 +939,10 @@ export function TaskRecordsPanel({
       setResultErrors((current) => ({ ...current, [task.id]: "" }));
       try {
         let previewUrl: string;
-        if (task.direct_result_available) {
+        if (
+          task.direct_result_available ||
+          readSnapshotNumber(task, "output_duration_seconds") === 30
+        ) {
           previewUrl = await createGenerationTaskPreviewUrl(task.id);
         } else if (task.result_asset_id) {
           previewUrl = await createGenerationResultPreviewUrl(
@@ -1020,12 +1023,14 @@ export function TaskRecordsPanel({
       [actionKey]: { status: "pending" },
     }));
     try {
-      const result = task.direct_result_available
-        ? await downloadGenerationTaskResult(task.id, `${task.id}.mp4`)
-        : await downloadGenerationResult(
-            task.result_asset_id ?? "",
-            `${task.id}.mp4`,
-          );
+      const result =
+        task.direct_result_available ||
+        readSnapshotNumber(task, "output_duration_seconds") === 30
+          ? await downloadGenerationTaskResult(task.id, `${task.id}.mp4`)
+          : await downloadGenerationResult(
+              task.result_asset_id ?? "",
+              `${task.id}.mp4`,
+            );
       if (isMountedRef.current) {
         setDownloadFeedback((current) => ({ ...current, [actionKey]: result }));
       }

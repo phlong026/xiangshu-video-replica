@@ -31,6 +31,7 @@ import {
   confirmSourceFrame,
   createGenerationBatch,
   createGenerationResultPreviewUrl,
+  createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
   createOralAvatarClone,
   createOralConsent,
@@ -2068,6 +2069,83 @@ describe("generation payload readers", () => {
     });
 
     expect(parsed?.original_script).toBe("回填后的文案");
+  });
+});
+
+describe("严格30秒成片交付", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const preparationRequired = () =>
+    new Response(
+      JSON.stringify({
+        detail: {
+          code: "RESULT_DURATION_PREPARATION_REQUIRED",
+          message: "需先完成交付校验",
+        },
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    );
+
+  it("预览先完成幂等校验并使用已归档资产，不重新生成", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(preparationRequired())
+      .mockResolvedValueOnce(
+        Response.json({ id: "task-30", result_asset_id: "strict-asset" }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ url: "https://cdn.example/strict-30.mp4" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createGenerationTaskPreviewUrl("task-30")).resolves.toBe(
+      "https://cdn.example/strict-30.mp4",
+    );
+    expect(
+      fetchMock.mock.calls.map(([url, init]) => [
+        String(url),
+        init?.method ?? "GET",
+      ]),
+    ).toEqual([
+      [expect.stringContaining("/generation-tasks/task-30/preview-url"), "GET"],
+      [expect.stringContaining("/generation-tasks/task-30/archive"), "POST"],
+      [expect.stringContaining("/assets/strict-asset/download-url"), "POST"],
+    ]);
+  });
+
+  it.each([401, 409, 503])(
+    "校验失败%s时不返回原片或触发生成",
+    async (status) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(preparationRequired())
+        .mockResolvedValueOnce(
+          Response.json(
+            {
+              detail: {
+                code: "RESULT_ARCHIVE_UNAVAILABLE",
+                message: "保存失败",
+              },
+            },
+            { status },
+          ),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(createGenerationTaskPreviewUrl("task-30")).rejects.toThrow();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("短档直链沿用现有播放流程", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ url: "https://cdn.example/short.mp4" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createGenerationTaskPreviewUrl("task-15")).resolves.toBe(
+      "https://cdn.example/short.mp4",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

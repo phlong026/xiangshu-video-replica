@@ -74,7 +74,7 @@ describe("desktop video download feedback", () => {
     vi.useRealTimers();
   });
 
-  it("waits for slow cloud archiving beyond the ordinary five-second timeout", async () => {
+  it("waits for result normalization beyond the old one-minute cloud timeout", async () => {
     vi.useFakeTimers();
     fetchMock.mockReset().mockImplementationOnce(
       (_url, init: RequestInit) =>
@@ -88,12 +88,12 @@ describe("desktop video download feedback", () => {
                 ok: true,
                 json: async () => ({ result_asset_id: "saved-asset" }),
               }),
-            12_000,
+            90_000,
           );
         }),
     );
     const archived = archiveGenerationTask("slow-archive");
-    await vi.advanceTimersByTimeAsync(12_001);
+    await vi.advanceTimersByTimeAsync(90_001);
     await expect(archived).resolves.toMatchObject({
       result_asset_id: "saved-asset",
     });
@@ -113,9 +113,50 @@ describe("desktop video download feedback", () => {
     const rejected = expect(
       archiveGenerationTask("timed-out-archive"),
     ).rejects.toThrow("保存结果暂未确认，请刷新任务核对");
-    await vi.advanceTimersByTimeAsync(60_001);
+    await vi.advanceTimersByTimeAsync(300_001);
     await rejected;
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("downloads the verified 30-second asset after normalization", async () => {
+    fetchMock
+      .mockReset()
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            detail: {
+              code: "RESULT_DURATION_PREPARATION_REQUIRED",
+              message: "需完成交付校验",
+            },
+          },
+          { status: 409 },
+        ),
+      )
+      .mockResolvedValueOnce(Response.json({ result_asset_id: "strict-asset" }))
+      .mockResolvedValueOnce(
+        Response.json({ url: "https://storage.example/strict-30.mp4" }),
+      )
+      .mockResolvedValueOnce({
+        ok: true,
+        blob: async () => new Blob([mp4HeaderFixture], { type: "video/mp4" }),
+      });
+    const download = downloadGenerationTaskResult("task-30", "video.mp4");
+    await vi.waitFor(() =>
+      expect(native.invoke).toHaveBeenCalledWith(
+        "start_video_download",
+        expect.any(Object),
+      ),
+    );
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining("/generation-tasks/task-30/preview-url"),
+      expect.stringContaining("/generation-tasks/task-30/archive"),
+      expect.stringContaining("/assets/strict-asset/download-url"),
+      "https://storage.example/strict-30.mp4",
+    ]);
+    finish({
+      payload: { download_id: "download-1", success: true, path, error: null },
+    });
+    await expect(download).resolves.toMatchObject({ status: "saved", path });
   });
 
   it("allows choosing a destination before fetching and cancelling without a request", async () => {

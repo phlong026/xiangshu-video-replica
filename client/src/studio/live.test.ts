@@ -885,6 +885,74 @@ describe("真实 Studio 只读适配器", () => {
     });
   });
 
+  it.each([true, false])(
+    "30秒任务在已有归档=%s时都返回校验后的新资产",
+    async (saved) => {
+      api.getGenerationBatch.mockResolvedValue(
+        generationBatch([
+          generationTask({
+            id: "task-30",
+            result_asset_id: saved ? "legacy-asset" : null,
+            direct_result_available: !saved,
+            archive_status: saved ? "ARCHIVED" : "DIRECT",
+            prompt_snapshot: { output_duration_seconds: 30 },
+          }),
+        ]),
+      );
+      api.archiveGenerationTask.mockResolvedValue(
+        generationTask({ result_asset_id: "strict-asset" }),
+      );
+      const asset = await loadTaskPreview(studioTask);
+      expect(api.archiveGenerationTask).toHaveBeenCalledExactlyOnceWith(
+        "task-30",
+      );
+      expect(
+        api.createGenerationResultPreviewUrl,
+      ).toHaveBeenCalledExactlyOnceWith("strict-asset");
+      expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
+      expect(asset).toMatchObject({
+        id: "strict-asset",
+        saved: true,
+        url: "https://signed/result",
+      });
+      expect(api.createGenerationBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("旧30秒归档修复失败时不签发旧资产地址", async () => {
+    api.getGenerationBatch.mockResolvedValue(
+      generationBatch([
+        generationTask({
+          result_asset_id: "legacy-asset",
+          prompt_snapshot: { output_duration_seconds: 30 },
+        }),
+      ]),
+    );
+    api.archiveGenerationTask.mockRejectedValue(new Error("归档校验失败"));
+    await expect(loadTaskPreview(studioTask)).rejects.toThrow("归档校验失败");
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+    expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
+  });
+
+  it("30秒归档未返回资产时明确失败且不回退直链", async () => {
+    api.getGenerationBatch.mockResolvedValue(
+      generationBatch([
+        generationTask({
+          result_asset_id: "legacy-asset",
+          prompt_snapshot: { output_duration_seconds: 30 },
+        }),
+      ]),
+    );
+    api.archiveGenerationTask.mockResolvedValue(
+      generationTask({ result_asset_id: null }),
+    );
+    await expect(loadTaskPreview(studioTask)).rejects.toThrow(
+      "交付校验尚未完成",
+    );
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+    expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
+  });
+
   it("没有直出结果时使用首个成功归档资产", async () => {
     api.getGenerationBatch.mockResolvedValue(
       generationBatch([

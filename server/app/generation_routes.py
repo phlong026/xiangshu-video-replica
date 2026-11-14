@@ -17,6 +17,7 @@ from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection, BusinessRow
 from app.generation import (
     RESULT_URL_EXPIRED_STATUSES,
+    STRICT_DURATION_POLICY,
     ApplySavedPromptRequest,
     BatchResult,
     BatchStatusFilter,
@@ -52,6 +53,7 @@ from app.generation import (
     enqueue_generation_reconcile_operation,
     generation_price_quote,
     generation_regeneration_price_quote,
+    generation_result_archive_ready,
     generation_runtime_limits,
     get_generation_batch,
     get_task_result,
@@ -71,6 +73,7 @@ from app.generation import (
     rename_generation_batch,
     renew_generation_result_archive_claim,
     require_batch_access,
+    requires_strict_generation_duration,
     result_url_expired_error,
     retry_generation_task,
     revise_prompt_version,
@@ -79,8 +82,14 @@ from app.generation import (
     version_state,
 )
 from app.material_thumbs import store_video_thumbnail
-from app.media import MAX_UPLOAD_BYTES, FFprobeVideoProbe, VideoProbeFailed, VideoProbeUnavailable
-from app.media_routes import MediaStorage
+from app.media import (
+    MAX_UPLOAD_BYTES,
+    FFprobeVideoProbe,
+    VideoProbeFailed,
+    VideoProbeUnavailable,
+    storage_key_from_uri,
+)
+from app.media_routes import MediaStorage, storage_for_asset
 from app.media_tools import (
     MediaToolFailed,
     MediaToolUnavailable,
@@ -88,6 +97,7 @@ from app.media_tools import (
     normalize_generated_video,
 )
 from app.permissions import (
+    require_asset_access,
     require_not_auditor,
     require_project_access,
     require_role,
@@ -106,7 +116,7 @@ from app.script_rewrite import (
     script_rewrite_task_result,
     validated_script_rewrite_request,
 )
-from app.storage import StorageBackendUnavailable
+from app.storage import StorageAdapter, StorageBackendUnavailable
 
 router = APIRouter(prefix="/api", tags=["generation"])
 GENERATION_RESULT_MAX_DURATION_SECONDS = 60
@@ -821,13 +831,15 @@ def _generation_preview_task(
         """
         SELECT batch.project_id, batch.created_by_user_id,
                task.provider, task.provider_task_id, task.provider_result_url, task.status,
+               task.billed_seconds, task.prompt_snapshot_json,
                COALESCE(task.locked_by IS NOT NULL
                         AND task.locked_until::timestamptz > clock_timestamp(), FALSE)
                    AS result_lease_active
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
         WHERE task.id = %s
-          AND task.archive_status IN ('ARCHIVING', 'DIRECT', 'ARCHIVE_FAILED')
+          AND (task.archive_status IN ('ARCHIVING', 'DIRECT', 'ARCHIVE_FAILED')
+               OR (task.archive_status='ARCHIVED' AND task.billed_seconds=30))
         """
         + (" FOR UPDATE OF task" if lock else ""),
         (task_id,),
@@ -841,6 +853,15 @@ def _generation_preview_task(
         created_by_user_id=str(task["created_by_user_id"]),
         action="generation_task.preview",
     )
+    if requires_strict_generation_duration(dict(task)):
+        # 只读入口不转码；客户端先走幂等归档，再使用已校验资产的授权链接。
+        raise HTTPException(
+            409,
+            detail={
+                "code": "RESULT_DURATION_PREPARATION_REQUIRED",
+                "message": "30 秒成片需先完成交付校验；不会重新生成或扣费。",
+            },
+        )
     result_url = task["provider_result_url"]
     if not isinstance(result_url, str) or not result_url.strip():
         raise HTTPException(status_code=409, detail={"code": "RESULT_URL_NOT_READY"})
@@ -953,15 +974,81 @@ def read_generation_task_preview_url(
 @router.post("/generation-tasks/{task_id}/archive", response_model=TaskResult)
 def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaStorage) -> TaskResult:
     prepared = None
+    source_storage: StorageAdapter | None = None
+    source_key = ""
     try:
         with db.write() as (conn, actor):
             prepared = claim_generation_result_archive(conn, actor=actor, task_id=task_id)
-            if prepared["result_asset_id"]:
+            if generation_result_archive_ready(conn, prepared):
                 return get_task_result(conn, task_id)
-            provider = h3_provider_for_task(conn, str(prepared["provider"]), task_id=task_id)
+            if prepared["result_asset_id"]:
+                # 已归档原片从自己的云资产修复，不依赖可能过期的原始直链。
+                source_asset = require_asset_access(
+                    conn,
+                    actor=actor,
+                    asset_id=str(prepared["result_asset_id"]),
+                    action="generation_task.archive",
+                )
+                source_uri = str(source_asset["storage_uri"])
+                source_storage = storage_for_asset(conn, source_uri)
+                source_key = storage_key_from_uri(source_uri)
+            else:
+                provider = h3_provider_for_task(conn, str(prepared["provider"]), task_id=task_id)
+        download_url = str(prepared["provider_result_url"] or "")
+        if (
+            source_storage is None
+            and requires_strict_generation_duration(prepared)
+            and prepared["provider"] == "metaso"
+            and prepared.get("provider_task_id")
+            and provider_result_url_needs_refresh(download_url)
+        ):
+            # 严格交付入口不返回原片直链；这里只查询同一已完成任务，保留续签能力。
+            refreshed = None
+            refresh_error = None
+            try:
+                refreshed = provider.query_image_to_video(str(prepared["provider_task_id"]))
+            except H3ProviderFailed as exc:
+                refresh_error = exc
+            # 续签外呼期间可能退出账号、换源或失去租约；复核后才允许下载新签名。
+            with db.write() as (conn, actor):
+                renewed = renew_generation_result_archive_claim(
+                    conn, actor=actor, prepared=prepared
+                )
+            prepared = renewed
+            if refresh_error is not None:
+                raise HTTPException(
+                    503,
+                    detail={
+                        "code": "RESULT_URL_REFRESH_FAILED",
+                        "message": "成片播放地址刷新失败，请稍后重试。",
+                    },
+                ) from refresh_error
+            if (
+                refreshed is None
+                or refreshed.status != "SUCCEEDED"
+                or not refreshed.result_url
+                or provider_result_url_needs_refresh(refreshed.result_url)
+            ):
+                raise HTTPException(503, detail={"code": "RESULT_URL_REFRESH_NOT_READY"})
+            # 不改任务源记录，避免续签打断保存租约；新地址仅用于本次原片读取。
+            download_url = refreshed.result_url
         # Download only the existing result; no generation submission or billing operation.
         try:
-            content = provider.download_result(str(prepared["provider_result_url"]))
+            if source_storage is not None:
+                chunks = source_storage.iter_object(source_key, end=MAX_UPLOAD_BYTES)
+                buffer = bytearray()
+                try:
+                    for chunk in chunks:
+                        if len(buffer) + len(chunk) > MAX_UPLOAD_BYTES:
+                            raise VideoProbeFailed("成片超过归档大小上限")
+                        buffer.extend(chunk)
+                finally:
+                    close = getattr(chunks, "close", None)
+                    if callable(close):
+                        close()
+                content = bytes(buffer)
+            else:
+                content = provider.download_result(download_url)
         except H3ProviderFailed as exc:
             # 直链已失效时重试必然失败：如实告知「文件已失效」，不再提示「请重试」。
             if exc.http_status in RESULT_URL_EXPIRED_STATUSES:
@@ -979,9 +1066,29 @@ def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaSto
         duration_seconds = metadata.duration_seconds
         normalization_metadata = None
         snapshot = json.loads(str(prepared["prompt_snapshot_json"] or "{}"))
+        if requires_strict_generation_duration(prepared):
+            source_digest = hashlib.sha256(content).hexdigest()
+            normalized = normalize_generated_video(
+                content,
+                target_width=metadata.width or 0,
+                target_height=metadata.height or 0,
+                target_duration_seconds=30,
+                max_duration_seconds=GENERATION_RESULT_MAX_DURATION_SECONDS,
+            )
+            content = normalized.content
+            duration_seconds = normalized.duration_seconds
+            normalization_metadata = {
+                "policy": STRICT_DURATION_POLICY,
+                "target_duration_seconds": 30,
+                "source_sha256": source_digest,
+                "source_duration_seconds": metadata.duration_seconds,
+                "width": normalized.width,
+                "height": normalized.height,
+                "transformed": normalized.transformed,
+            }
         # Only this explicitly requested profile has a confirmed pixel mapping.
         # Adaptive and other profiles retain the supplier's original result.
-        if (
+        elif (
             isinstance(snapshot, dict)
             and snapshot.get("resolution") == "2K"
             and snapshot.get("ratio") == "9:16"
@@ -1051,7 +1158,7 @@ def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaSto
             },
         ) from exc
     finally:
-        if prepared is not None and not prepared["result_asset_id"]:
+        if prepared is not None and prepared.get("_archive_claim_acquired"):
             try:
                 # A revoked session must not strand its claim. This internal
                 # transaction can only release the exact server-created lease.
