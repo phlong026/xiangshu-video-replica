@@ -2691,7 +2691,7 @@ function isOfficeDoc(item: TrainingMaterialPublicItem): boolean {
 export function MaterialsPage() {
   const { notify } = useStudio();
   const [tab, setTab] = useState("");
-  const [tag, setTag] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [data, setData] = useState<TrainingMaterialPublicPage | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2705,13 +2705,13 @@ export function MaterialsPage() {
     useState<TrainingMaterialPublicItem | null>(null);
 
   const load = useCallback(
-    async (kind: string, tagFilter: string, targetPage: number) => {
+    async (kind: string, tagFilter: string[], targetPage: number) => {
       try {
         setLoading(true);
         setError("");
         const result = await listTrainingMaterials({
           kind: kind || undefined,
-          tag: tagFilter || undefined,
+          tags: tagFilter.length ? tagFilter : undefined,
           page: targetPage,
           pageSize: TRAINING_PAGE_SIZE,
         });
@@ -2727,8 +2727,8 @@ export function MaterialsPage() {
 
   // 换账号时按 key 重挂载由调用方保证（与旧页同语义）；这里随筛选与页码重拉。
   useEffect(() => {
-    void load(tab, tag, page);
-  }, [load, tab, tag, page]);
+    void load(tab, tags, page);
+  }, [load, tab, tags, page]);
 
   async function ensurePreviewUrl(
     item: TrainingMaterialPublicItem,
@@ -2812,7 +2812,6 @@ export function MaterialsPage() {
               className={tab === entry.id ? "is-active" : undefined}
               onClick={() => {
                 setTab(entry.id);
-                setTag("");
                 setPage(1);
               }}
             >
@@ -2827,20 +2826,39 @@ export function MaterialsPage() {
           aria-label="按标签筛选"
           style={{ border: 0, padding: 0, margin: 0 }}
         >
-          {tagFacet.map((entry) => (
+          {tagFacet.map((entry) => {
+            const active = tags.includes(entry);
+            return (
+              <button
+                key={entry}
+                type="button"
+                aria-pressed={active}
+                className={active ? "is-active" : undefined}
+                onClick={() => {
+                  setTags((current) =>
+                    current.includes(entry)
+                      ? current.filter((t) => t !== entry)
+                      : [...current, entry],
+                  );
+                  setPage(1);
+                }}
+              >
+                #{entry}
+              </button>
+            );
+          })}
+          {tags.length > 0 ? (
             <button
-              key={entry}
               type="button"
-              aria-pressed={tag === entry}
-              className={tag === entry ? "is-active" : undefined}
+              aria-label="清除全部标签筛选"
               onClick={() => {
-                setTag(tag === entry ? "" : entry);
+                setTags([]);
                 setPage(1);
               }}
             >
-              #{entry}
+              清除标签
             </button>
-          ))}
+          ) : null}
         </fieldset>
       ) : null}
       {error ? <p className="le-hint le-hint--error">{error}</p> : null}
@@ -2853,7 +2871,11 @@ export function MaterialsPage() {
           {items.map((item) => {
             const url = previewUrls[item.id];
             return (
-              <article key={item.id} className="content-asset">
+              <article
+                key={item.id}
+                className="content-asset"
+                data-kind={item.kind}
+              >
                 {item.kind === "image" && url ? (
                   <img
                     alt={item.title}
