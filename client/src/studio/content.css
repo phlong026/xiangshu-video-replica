@@ -520,7 +520,9 @@
   align-content: stretch;
   cursor: default;
   grid-template-rows: minmax(0, 1fr) auto;
-  transition: border-color 0.15s ease, transform 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease;
 }
 .content-asset-grid .content-asset:hover {
   border-color: #3d3e39;
