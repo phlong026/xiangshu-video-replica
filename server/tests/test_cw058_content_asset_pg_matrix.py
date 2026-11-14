@@ -2497,23 +2497,31 @@ def test_preview_url_verify_reports_expired_direct_result(
         app.dependency_overrides.clear()
 
 
-@pytest.mark.parametrize("legacy_asset", [False, True])
+@pytest.mark.parametrize("source", ["direct", "archived", "expired-direct"])
 def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
     lane_env: str,
     pg: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
-    legacy_asset: bool,
+    source: str,
 ) -> None:
     from contextlib import contextmanager
 
     from app.auth import get_current_user
     from app.customer_fence import get_business_db
-    from app.generation import claim_generation_result_archive
+    from app.generation import H3QueryResult, claim_generation_result_archive
     from app.main import app
     from app.media_routes import get_media_storage
     from app.media_tools import resolve_media_binary
 
+    legacy_asset = source == "archived"
+    expired_direct = source == "expired-direct"
+    source_url = (
+        "https://files.metaso.cn/strict.mp4?expires=1&signature=old"
+        if expired_direct
+        else "https://cdn.example/original.mp4"
+    )
+    fresh_url = "https://files.metaso.cn/strict.mp4?expires=4102444800&signature=fresh"
     original_path = tmp_path / "original.mp4"
     subprocess.run(
         [
@@ -2553,10 +2561,14 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
     )
     pg.execute(
         "INSERT INTO generation_tasks(id,batch_id,provider,model,status,archive_status,"
-        "provider_result_url,billed_seconds,prompt_snapshot_json,actual_cost) VALUES "
+        "provider_result_url,provider_task_id,billed_seconds,prompt_snapshot_json,actual_cost) "
+        "VALUES "
         "('strict-task','strict-batch','metaso','MiniMax-H3','SUCCEEDED','DIRECT',"
-        "'https://cdn.example/original.mp4',30,%s,600)",
-        (json.dumps({"output_duration_seconds": 30, "resolution": "768P", "ratio": "9:16"}),),
+        "%s,'existing-provider-task',30,%s,600)",
+        (
+            source_url,
+            json.dumps({"output_duration_seconds": 30, "resolution": "768P", "ratio": "9:16"}),
+        ),
     )
     if legacy_asset:
         pg.execute(
@@ -2570,6 +2582,8 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
             "WHERE id='strict-task'"
         )
     calls: list[str] = []
+    queries: list[str] = []
+    active = [False]
 
     def check_concurrent_claim() -> None:
         # 并发请求不能越过正在进行的校验，也不能释放它的处理租约。
@@ -2581,8 +2595,18 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
             assert raised.value.detail["code"] == "RESULT_ARCHIVE_IN_PROGRESS"
 
     class Provider:
+        def create_image_to_video(self, _request):
+            pytest.fail("保存已有成片不能重新提交生成")
+
+        def query_image_to_video(self, provider_task_id: str) -> H3QueryResult:
+            assert expired_direct and not active[0]
+            queries.append(provider_task_id)
+            check_concurrent_claim()
+            return H3QueryResult(status="SUCCEEDED", result_url=fresh_url)
+
         def download_result(self, url: str) -> bytes:
-            assert not legacy_asset
+            assert not legacy_asset and not active[0]
+            assert url == (fresh_url if expired_direct else source_url)
             calls.append(url)
             check_concurrent_claim()
             return original
@@ -2591,7 +2615,11 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
         @contextmanager
         def write(self):
             with pg_transaction() as raw:
-                yield BusinessConnection.postgres(raw), current_actor[0]
+                active[0] = True
+                try:
+                    yield BusinessConnection.postgres(raw), current_actor[0]
+                finally:
+                    active[0] = False
 
     storage = FakeStorageAdapter(provider="cos", bucket="strict-test")
     if legacy_asset:
@@ -2599,14 +2627,17 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
         get_object = storage.get_object
 
         def read_old_source(key: str) -> bytes:
-            calls.append(f"cos://strict-test/{key}")
-            check_concurrent_claim()
+            if key == "old.mp4":
+                calls.append(f"cos://strict-test/{key}")
+                check_concurrent_claim()
             return get_object(key)
 
         monkeypatch.setattr(storage, "get_object", read_old_source)
         monkeypatch.setattr("app.generation_routes.storage_for_asset", lambda *_a: storage)
     monkeypatch.setattr("app.generation_routes.h3_provider_for_task", lambda *_a, **_kw: Provider())
     monkeypatch.setattr("app.generation_routes.store_video_thumbnail", lambda *_a: None)
+    monkeypatch.setattr("app.rbac_routes.storage_for_asset", lambda *_a: storage)
+    monkeypatch.setattr("app.media_routes.storage_for_asset", lambda *_a: storage)
     app.dependency_overrides[get_business_db] = TestDb
     app.dependency_overrides[get_current_user] = lambda: owner
     app.dependency_overrides[get_media_storage] = lambda: storage
@@ -2617,6 +2648,7 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
         assert preview.status_code == 409
         assert preview.json()["detail"]["code"] == "RESULT_DURATION_PREPARATION_REQUIRED"
         assert "cdn.example" not in preview.text
+        assert queries == []
         result = client.post("/api/generation-tasks/strict-task/archive")
         assert result.status_code == 200, result.text
         asset_id = result.json()["result_asset_id"]
@@ -2625,8 +2657,47 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
         assert replay.status_code == 200
         assert replay.json()["result_asset_id"] == asset_id
         assert calls == [
-            "cos://strict-test/old.mp4" if legacy_asset else "https://cdn.example/original.mp4"
+            "cos://strict-test/old.mp4"
+            if legacy_asset
+            else fresh_url
+            if expired_direct
+            else source_url
         ]
+        assert queries == (["existing-provider-task"] if expired_direct else [])
+        # 正常预览与下载入口均签发校验后的同一资产，实际取到的也是严格 30 秒字节。
+        grant = client.post(f"/api/assets/{asset_id}/download-url")
+        assert grant.status_code == 200, grant.text
+        preview_url = grant.json()["url"]
+        assert "files.metaso.cn" not in preview_url
+        ranged = client.get(preview_url, headers={"Range": "bytes=0-31"})
+        assert ranged.status_code == 206, ranged.text
+        delivered = client.get(preview_url)
+        assert delivered.status_code == 200, delivered.text
+        assert ranged.content == delivered.content[:32]
+        delivered_path = tmp_path / "delivered.mp4"
+        delivered_path.write_bytes(delivered.content)
+        measured = json.loads(
+            subprocess.run(
+                [
+                    resolve_media_binary("ffprobe"),
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration:stream=codec_type,duration,nb_frames,avg_frame_rate",
+                    "-of",
+                    "json",
+                    str(delivered_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        assert float(measured["format"]["duration"]) == 30
+        assert {s["codec_type"] for s in measured["streams"]} == {"video", "audio"}
+        assert all(float(s["duration"]) == 30 for s in measured["streams"])
+        video = next(s for s in measured["streams"] if s["codec_type"] == "video")
+        assert video["avg_frame_rate"] == "24/1" and video["nb_frames"] == "720"
         metadata = json.loads(
             pg.execute("SELECT metadata_json FROM assets WHERE id=%s", (asset_id,)).fetchone()[0]
         )
@@ -2640,7 +2711,9 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
         assert pg.execute(
             "SELECT provider_result_url,billed_seconds,actual_cost,locked_by,locked_until "
             "FROM generation_tasks WHERE id='strict-task'"
-        ).fetchone() == ("https://cdn.example/original.mp4", 30, 600, None, None)
+        ).fetchone() == (source_url, 30, 600, None, None)
+        assert pg.execute("SELECT count(*) FROM generation_tasks").fetchone()[0] == 1
+        assert pg.execute("SELECT count(*) FROM billing_operations").fetchone()[0] == 0
         assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
         assert pg.execute("SELECT count(*) FROM assets").fetchone()[0] == (2 if legacy_asset else 1)
         if legacy_asset:
@@ -2653,6 +2726,187 @@ def test_30_second_delivery_normalizes_once_and_preserves_source_and_billing(
         assert client.get("/api/generation-tasks/strict-task/preview-url").status_code == 404
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    "outcome,expected,code",
+    [
+        ("query-failed", 503, "RESULT_URL_REFRESH_FAILED"),
+        ("not-ready", 503, "RESULT_URL_REFRESH_NOT_READY"),
+        ("still-expired", 503, "RESULT_URL_REFRESH_NOT_READY"),
+        ("query-revoked", 401, "SESSION_REPLACED"),
+        ("query-error-revoked", 401, "SESSION_REPLACED"),
+        ("foreign", 404, None),
+        ("lease-replaced", 409, "RESULT_ARCHIVE_LEASE_LOST"),
+        ("lease-expired", 409, "RESULT_ARCHIVE_LEASE_LOST"),
+        ("task-changed", 409, "RESULT_CHANGED"),
+        ("provider-changed", 409, "RESULT_CHANGED"),
+        ("url-changed", 409, "RESULT_CHANGED"),
+        ("download-expired", 410, "RESULT_URL_EXPIRED"),
+        ("download-revoked", 401, "SESSION_REPLACED"),
+        ("download-lease-replaced", 409, "RESULT_ARCHIVE_LEASE_LOST"),
+    ],
+)
+def test_strict30_refresh_rechecks_authorization_source_and_live_claim_before_delivery(
+    lane_env: str,
+    pg: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    expected: int,
+    code: str | None,
+) -> None:
+    from contextlib import contextmanager
+
+    from fastapi import FastAPI
+
+    from app.customer_fence import get_business_db
+    from app.generation import H3ProviderFailed, H3QueryResult
+    from app.generation_routes import router
+    from app.media_routes import get_media_storage
+
+    old_url = "https://files.metaso.cn/strict.mp4?expires=1&signature=old"
+    fresh_url = "https://files.metaso.cn/strict.mp4?expires=4102444800&signature=fresh"
+    owner = actor("employee_1", "employee")
+    current_actor = [owner]
+    revoked = [False]
+    active = [False]
+    queries: list[str] = []
+    downloads: list[str] = []
+    seed_project(pg, "strict-refresh-project", owner.id)
+    pg.execute(
+        "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+        "request_hash,request_snapshot_json,status) VALUES "
+        "('strict-refresh-batch','strict-refresh-project','employee_1',"
+        "'strict-refresh-key','h','{}','SUCCEEDED')"
+    )
+    pg.execute(
+        "INSERT INTO generation_tasks(id,batch_id,provider,model,status,archive_status,"
+        "provider_task_id,provider_result_url,billed_seconds,prompt_snapshot_json,"
+        "actual_cost,attempt) "
+        "VALUES ('strict-refresh-task','strict-refresh-batch','metaso','MiniMax-H3',"
+        "'SUCCEEDED','DIRECT','original-paid-task',%s,30,%s,600,1)",
+        (old_url, json.dumps({"output_duration_seconds": 30})),
+    )
+    pg.commit()
+    balances = pg.execute(
+        "SELECT user_id,available_credits,reserved_credits FROM wallets ORDER BY user_id"
+    ).fetchall()
+
+    def replace_lease() -> None:
+        pg.execute(
+            "UPDATE generation_tasks SET locked_by='archive:replacement',"
+            "locked_until=(clock_timestamp()+interval '300 seconds')::text "
+            "WHERE id='strict-refresh-task'"
+        )
+        pg.commit()
+
+    class TestDb:
+        @contextmanager
+        def write(self):
+            if revoked[0]:
+                raise HTTPException(401, detail={"code": "SESSION_REPLACED"})
+            with pg_transaction() as raw:
+                active[0] = True
+                try:
+                    yield BusinessConnection.postgres(raw), current_actor[0]
+                finally:
+                    active[0] = False
+
+    class Provider:
+        def create_image_to_video(self, _request):
+            pytest.fail("续签已有成片不能重新提交生成")
+
+        def query_image_to_video(self, provider_task_id: str) -> H3QueryResult:
+            assert not active[0]
+            queries.append(provider_task_id)
+            if outcome in {"query-revoked", "query-error-revoked"}:
+                revoked[0] = True
+            if outcome == "foreign":
+                current_actor[0] = actor("employee_2", "employee")
+            if outcome == "lease-replaced":
+                replace_lease()
+            if outcome == "lease-expired":
+                pg.execute(
+                    "UPDATE generation_tasks "
+                    "SET locked_until=(clock_timestamp()-interval '1 second')::text "
+                    "WHERE id='strict-refresh-task'"
+                )
+            if outcome in {"task-changed", "provider-changed", "url-changed"}:
+                assignments = {
+                    "task-changed": "provider_task_id='replacement-task'",
+                    "provider-changed": "provider='fake_h3'",
+                    "url-changed": "provider_result_url='https://cdn.example/winner.mp4'",
+                }
+                pg.execute(
+                    "UPDATE generation_tasks SET " + assignments[outcome] + " WHERE id=%s",
+                    ("strict-refresh-task",),
+                )
+            pg.commit()
+            if outcome in {"query-failed", "query-error-revoked"}:
+                raise H3ProviderFailed("query unavailable")
+            if outcome == "not-ready":
+                return H3QueryResult(status="RUNNING")
+            return H3QueryResult(
+                status="SUCCEEDED", result_url=old_url if outcome == "still-expired" else fresh_url
+            )
+
+        def download_result(self, url: str) -> bytes:
+            assert not active[0] and url == fresh_url
+            downloads.append(url)
+            if outcome == "download-expired":
+                raise H3ProviderFailed("result unavailable", http_status=410)
+            if outcome == "download-revoked":
+                revoked[0] = True
+            if outcome == "download-lease-replaced":
+                replace_lease()
+            return b"\x00\x00\x00\x18ftypstub"
+
+    def forbidden_work(*_args, **_kwargs):
+        pytest.fail("鉴权、源或租约失效后不得转码或上传，也不能回退原片")
+
+    storage = FakeStorageAdapter(provider="cos", bucket="strict-refresh-test")
+    monkeypatch.setattr("app.generation_routes.h3_provider_for_task", lambda *_a, **_k: Provider())
+    monkeypatch.setattr(
+        "app.generation_routes.FFprobeVideoProbe.probe",
+        lambda *_a, **_k: VideoMetadata(duration_seconds=30.675, width=160, height=96),
+    )
+    monkeypatch.setattr("app.generation_routes.normalize_generated_video", forbidden_work)
+    monkeypatch.setattr(storage, "put_object", forbidden_work)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_business_db] = TestDb
+    app.dependency_overrides[get_media_storage] = lambda: storage
+    response = TestClient(app).post("/api/generation-tasks/strict-refresh-task/archive")
+    assert response.status_code == expected, response.text
+    if code is not None:
+        assert response.json()["detail"]["code"] == code
+    assert "files.metaso.cn" not in response.text
+    assert queries == ["original-paid-task"]
+    assert downloads == ([fresh_url] if outcome.startswith("download-") else [])
+    assert pg.execute("SELECT count(*) FROM assets").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM generation_tasks").fetchone()[0] == 1
+    assert pg.execute("SELECT count(*) FROM billing_operations").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
+    assert pg.execute(
+        "SELECT billed_seconds,actual_cost,attempt FROM generation_tasks "
+        "WHERE id='strict-refresh-task'"
+    ).fetchone() == (30, 600, 1)
+    assert (
+        pg.execute(
+            "SELECT user_id,available_credits,reserved_credits FROM wallets ORDER BY user_id"
+        ).fetchall()
+        == balances
+    )
+    lease = pg.execute(
+        "SELECT locked_by,locked_until::timestamptz < clock_timestamp() "
+        "FROM generation_tasks WHERE id='strict-refresh-task'"
+    ).fetchone()
+    if outcome in {"lease-replaced", "download-lease-replaced"}:
+        assert lease == ("archive:replacement", False)
+    elif outcome == "lease-expired":
+        assert str(lease[0]).startswith("archive:") and lease[1] is True
+    else:
+        assert lease == (None, None)
 
 
 @pytest.mark.parametrize(

@@ -6765,7 +6765,14 @@ def claim_generation_result_archive(
 def _require_archive_source_unchanged(current: dict[str, Any], prepared: dict[str, Any]) -> None:
     if any(
         current[key] != prepared[key]
-        for key in ("provider_result_url", "project_id", "prompt_snapshot_json", "result_asset_id")
+        for key in (
+            "provider",
+            "provider_task_id",
+            "provider_result_url",
+            "project_id",
+            "prompt_snapshot_json",
+            "result_asset_id",
+        )
     ):
         raise generation_error(409, "RESULT_CHANGED", "成片记录已变化，请刷新后重试。")
 

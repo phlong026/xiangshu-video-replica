@@ -994,6 +994,43 @@ def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaSto
                 source_key = storage_key_from_uri(source_uri)
             else:
                 provider = h3_provider_for_task(conn, str(prepared["provider"]), task_id=task_id)
+        download_url = str(prepared["provider_result_url"] or "")
+        if (
+            source_storage is None
+            and requires_strict_generation_duration(prepared)
+            and prepared["provider"] == "metaso"
+            and prepared.get("provider_task_id")
+            and provider_result_url_needs_refresh(download_url)
+        ):
+            # 严格交付入口不返回原片直链；这里只查询同一已完成任务，保留续签能力。
+            refreshed = None
+            refresh_error = None
+            try:
+                refreshed = provider.query_image_to_video(str(prepared["provider_task_id"]))
+            except H3ProviderFailed as exc:
+                refresh_error = exc
+            # 续签外呼期间可能退出账号、换源或失去租约；复核后才允许下载新签名。
+            with db.write() as (conn, actor):
+                prepared = renew_generation_result_archive_claim(
+                    conn, actor=actor, prepared=prepared
+                )
+            if refresh_error is not None:
+                raise HTTPException(
+                    503,
+                    detail={
+                        "code": "RESULT_URL_REFRESH_FAILED",
+                        "message": "成片播放地址刷新失败，请稍后重试。",
+                    },
+                ) from refresh_error
+            if (
+                refreshed is None
+                or refreshed.status != "SUCCEEDED"
+                or not refreshed.result_url
+                or provider_result_url_needs_refresh(refreshed.result_url)
+            ):
+                raise HTTPException(503, detail={"code": "RESULT_URL_REFRESH_NOT_READY"})
+            # 不改任务源记录，避免续签打断保存租约；新地址仅用于本次原片读取。
+            download_url = refreshed.result_url
         # Download only the existing result; no generation submission or billing operation.
         try:
             if source_storage is not None:
@@ -1010,7 +1047,7 @@ def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaSto
                         close()
                 content = bytes(buffer)
             else:
-                content = provider.download_result(str(prepared["provider_result_url"]))
+                content = provider.download_result(download_url)
         except H3ProviderFailed as exc:
             # 直链已失效时重试必然失败：如实告知「文件已失效」，不再提示「请重试」。
             if exc.http_status in RESULT_URL_EXPIRED_STATUSES:
