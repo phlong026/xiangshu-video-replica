@@ -58,15 +58,22 @@ REQUIRED_SERVICES=(api-1 api-2 worker-1 worker-2 worker-3 worker-4)
 OPTIONAL_SERVICES=(worker-viral worker-publish)
 WORKER_SERVICES=(worker-1 worker-2 worker-3 worker-4)
 SERVICES=("${REQUIRED_SERVICES[@]}")
-ROLLBACK_SERVICES=("${REQUIRED_SERVICES[@]}")
+ROLLBACK_SERVICES=()
+declare -A ROLLBACK_IMAGE_IDS=()
+ROLLBACK_IMAGE_ROWS=""
+ROLLBACK_PINNED=0
 ROLLOUT_STARTED=0
 IMAGE_SWITCHED=0
+SITE_SWITCHED=0
 umask 077
 
 compose() {
   local files=(-f "$COMPOSE")
   if [[ -f "$IMAGE_OVERRIDE" ]]; then
     files+=(-f "$IMAGE_OVERRIDE")
+  fi
+  if [[ "$ROLLBACK_PINNED" == "1" ]]; then
+    files+=(-f "$BACKUP/rollback-images.json")
   fi
   docker compose --env-file "$COMPOSE_ENV" "${files[@]}" "$@"
 }
@@ -91,6 +98,91 @@ with temporary.open("w", encoding="utf-8") as stream:
     stream.write("\n")
 temporary.replace(path)
 PY
+}
+
+snapshot_running_images() {
+  local service cid image reference head running
+  ROLLBACK_SERVICES=()
+  ROLLBACK_IMAGE_IDS=()
+  ROLLBACK_IMAGE_ROWS=""
+  OLD_IMAGE=""
+  OLD_IMAGE_DB_HEAD=""
+  for service in "${SERVICES[@]}"; do
+    cid=$(compose ps -q "$service") || return 1
+    if [[ -z "$cid" ]]; then
+      if printf '%s\n' "${REQUIRED_SERVICES[@]}" | grep -Fxq "$service"; then
+        echo "PRECHECK_FAILED: required service is not running: $service" >&2
+        return 1
+      fi
+      continue
+    fi
+    running=$(docker inspect -f '{{.State.Running}}' "$cid") || return 1
+    [[ "$running" == "true" ]] || return 1
+    image=$(docker inspect -f '{{.Image}}' "$cid") || return 1
+    [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    reference=$(docker inspect -f '{{.Config.Image}}' "$cid") || return 1
+    head=$(docker image inspect -f '{{index .Config.Labels "video-replica.database-head"}}' "$image") || return 1
+    if [[ -z "$OLD_IMAGE" ]]; then
+      OLD_IMAGE="$image"
+      OLD_IMAGE_DB_HEAD="$head"
+    fi
+    # 热修可能只发布 API；允许镜像不同，但未知或不同 schema 契约不能自动恢复。
+    if [[ -z "$head" || "$head" == "<no value>" || "$head" != "$OLD_IMAGE_DB_HEAD" ]]; then
+      echo "PRECHECK_FAILED: incompatible running image database head: $service" >&2
+      return 1
+    fi
+    ROLLBACK_SERVICES+=("$service")
+    ROLLBACK_IMAGE_IDS["$service"]="$image"
+    ROLLBACK_IMAGE_ROWS+=$(printf '%s\t%s\t%s\t%s' "$service" "$image" "$reference" "$head")$'\n'
+  done
+}
+
+verify_running_image_snapshot() {
+  local service cid image expected
+  for service in "${SERVICES[@]}"; do
+    cid=$(compose ps -q "$service") || return 1
+    expected="${ROLLBACK_IMAGE_IDS[$service]:-}"
+    if [[ -z "$expected" && -z "$cid" ]]; then
+      continue
+    fi
+    if [[ -z "$expected" || -z "$cid" ]]; then
+      echo "PRECHECK_FAILED: running service changed after snapshot: $service" >&2
+      return 1
+    fi
+    image=$(docker inspect -f '{{.Image}}' "$cid") || return 1
+    if [[ "$image" != "$expected" ]]; then
+      echo "PRECHECK_FAILED: running image changed after snapshot: $service" >&2
+      return 1
+    fi
+  done
+}
+
+write_rollback_images() {
+  printf '%s' "$ROLLBACK_IMAGE_ROWS" | python3 -c '
+import json
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+inventory = {}
+for line in sys.stdin:
+    service, image, reference, head = line.rstrip("\n").split("\t")
+    if not re.fullmatch(r"[a-z0-9-]+", service) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise SystemExit("invalid rollback image inventory")
+    inventory[service] = {"image_id": image, "reference": reference, "database_head": head}
+if not inventory:
+    raise SystemExit("empty rollback image inventory")
+(root / "running-images-before.json").write_text(json.dumps(inventory, sort_keys=True) + "\n")
+(root / "rollback-images.json").write_text(json.dumps({"services": {
+    service: {"image": row["image_id"]} for service, row in inventory.items()
+}}, sort_keys=True) + "\n")
+' "$BACKUP"
+  # stable 等标签可能随后漂移；保留发布回滚锚点，避免旧镜像失去引用。
+  local service
+  for service in "${ROLLBACK_SERVICES[@]}"; do
+    docker image tag "${ROLLBACK_IMAGE_IDS[$service]}" "video-replica-rollback:$SHORT_SHA-$STAMP-$service"
+  done
 }
 
 mkdir -p "$ROOT"
@@ -121,6 +213,7 @@ rollback() {
   local failed_line="$2"
   local failed_command="$3"
   trap - ERR
+  local recovery_failed=0 cid restored_image
   printf 'DEPLOY_FAILED exit=%s line=%s command=%q\n' "$code" "$failed_line" "$failed_command"
   mark ROLLING_BACK
   # Stop only newly introduced optional roles; restore those previously running.
@@ -128,43 +221,56 @@ rollback() {
     for service in "${OPTIONAL_SERVICES[@]}"; do
       if printf '%s\n' "${SERVICES[@]}" | grep -Fxq "$service" &&
          ! printf '%s\n' "${ROLLBACK_SERVICES[@]}" | grep -Fxq "$service"; then
-        compose stop "$service" || true
+        if ! compose stop "$service"; then
+          recovery_failed=1
+        fi
+        if ! cid=$(compose ps -q "$service") || [[ -n "$cid" ]]; then
+          recovery_failed=1
+        fi
       fi
     done
   fi
   if [[ "$IMAGE_SWITCHED" == "1" ]]; then
     if [[ -f "$BACKUP/image-before.json" ]]; then
-      cp -a "$BACKUP/image-before.json" "$IMAGE_OVERRIDE"
+      cp -a "$BACKUP/image-before.json" "$IMAGE_OVERRIDE" || recovery_failed=1
     else
-      rm -f -- "$IMAGE_OVERRIDE"
+      rm -f -- "$IMAGE_OVERRIDE" || recovery_failed=1
     fi
   fi
-  if [[ -f "$BACKUP/site-before.tar.gz" ]]; then
-    find "$SITE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-    tar -xzf "$BACKUP/site-before.tar.gz" -C "$SITE"
-  fi
-  # CW-019: restore the admin artifact only when this run actually backed one up.
-  # The first release that introduces dist-admin has no prior admin site, so a
-  # missing archive means "nothing to roll back to", not "skip silently".
-  if [[ -f "$BACKUP/admin-site-before.tar.gz" ]]; then
-    find "$ADMIN_SITE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-    tar -xzf "$BACKUP/admin-site-before.tar.gz" -C "$ADMIN_SITE"
+  if [[ "$SITE_SWITCHED" == "1" ]]; then
+    if [[ -f "$BACKUP/site-before.tar.gz" ]]; then
+      find "$SITE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || recovery_failed=1
+      tar -xzf "$BACKUP/site-before.tar.gz" -C "$SITE" || recovery_failed=1
+    fi
+    # CW-019: 首次引入管理站点时没有旧制品；仅恢复本轮实际备份的管理站点。
+    if [[ -f "$BACKUP/admin-site-before.tar.gz" ]]; then
+      find "$ADMIN_SITE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || recovery_failed=1
+      tar -xzf "$BACKUP/admin-site-before.tar.gz" -C "$ADMIN_SITE" || recovery_failed=1
+    fi
   fi
   if [[ "$ROLLOUT_STARTED" == "1" ]]; then
-    if ! compose up -d --no-deps "${ROLLBACK_SERVICES[@]}"; then
-      mark FAILED_ROLLBACK_INCOMPLETE
-      exit "$code"
+    # 恢复原覆盖文件后，额外用只读快照固定每个角色的真实镜像 ID。
+    ROLLBACK_PINNED=1
+    if [[ ! -s "$BACKUP/rollback-images.json" ]] ||
+       ! compose up -d --no-deps "${ROLLBACK_SERVICES[@]}"; then
+      recovery_failed=1
+    else
+      for service in "${ROLLBACK_SERVICES[@]}"; do
+        if ! wait_ready "$service" || ! cid=$(compose ps -q "$service") || [[ -z "$cid" ]] ||
+           ! restored_image=$(docker inspect -f '{{.Image}}' "$cid") ||
+           [[ "$restored_image" != "${ROLLBACK_IMAGE_IDS[$service]}" ]]; then
+          recovery_failed=1
+        fi
+      done
     fi
-    for service in "${ROLLBACK_SERVICES[@]}"; do
-      if ! wait_ready "$service"; then
-        mark FAILED_ROLLBACK_INCOMPLETE
-        exit "$code"
-      fi
-    done
+  fi
+  if [[ "$recovery_failed" != "0" ]]; then
+    mark FAILED_ROLLBACK_INCOMPLETE
+    exit "$code"
   fi
   mark FAILED_ROLLED_BACK
-  printf 'ROLLBACK_IMAGE=%s\nDATABASE_BACKUP=%s\nDATABASE_HEAD_LEFT_FORWARD_COMPATIBLE=%s\n' \
-    "${OLD_IMAGE:-unknown}" "$BACKUP/database-before.dump" "${IMAGE_DB_HEAD:-unknown}"
+  printf 'ROLLBACK_IMAGES=%s\nDATABASE_BACKUP=%s\nDATABASE_HEAD_LEFT_FORWARD_COMPATIBLE=%s\n' \
+    "$BACKUP/running-images-before.json" "$BACKUP/database-before.dump" "${IMAGE_DB_HEAD:-unknown}"
   exit "$code"
 }
 trap 'rollback "$?" "$LINENO" "$BASH_COMMAND"' ERR
@@ -229,6 +335,7 @@ for service in "${OPTIONAL_SERVICES[@]}"; do
     WORKER_SERVICES+=("$service")
   fi
 done
+snapshot_running_images
 curl -fsS --max-time 20 "$PUBLIC_ORIGIN/health?preflight=$STAMP" >/dev/null
 id "$SERVICE_USER" >/dev/null
 docker image inspect "$NODE_BUILD_IMAGE" >/dev/null 2>&1 || docker pull "$NODE_BUILD_IMAGE"
@@ -269,18 +376,7 @@ EXPECTED_ADMIN_ASSET=$(grep -oE 'assets/[^" ]+\.js' "$SOURCE/client/dist-admin/i
 API_CONTAINER=$(compose ps -q api-1)
 DB_CONTAINER=$(compose ps -q db)
 [[ -n "$API_CONTAINER" && -n "$DB_CONTAINER" ]]
-OLD_IMAGE=$(docker inspect -f '{{.Config.Image}}' "$API_CONTAINER")
-for service in "${OPTIONAL_SERVICES[@]}"; do
-  if printf '%s\n' "${SERVICES[@]}" | grep -Fxq "$service"; then
-    cid=$(compose ps -q "$service")
-    if [[ -n "$cid" ]]; then
-      [[ "$(docker inspect -f '{{.Config.Image}}' "$cid")" == "$OLD_IMAGE" ]]
-      ROLLBACK_SERVICES+=("$service")
-    fi
-  fi
-done
 OLD_IMAGE_USER=$(docker image inspect -f '{{.Config.User}}' "$OLD_IMAGE")
-OLD_IMAGE_DB_HEAD=$(docker image inspect -f '{{index .Config.Labels "video-replica.database-head"}}' "$OLD_IMAGE")
 [[ -n "$OLD_IMAGE_DB_HEAD" ]]
 [[ -z "$OLD_IMAGE_USER" || "$OLD_IMAGE_USER" =~ ^[A-Za-z0-9_.:-]+$ ]]
 BUILD_BASE_IMAGE="${VIDEO_REPLICA_BUILD_BASE_IMAGE:-$OLD_IMAGE}"
@@ -300,6 +396,12 @@ HEADS_OUTPUT=$(docker run --rm -v "$SOURCE/server:/source:ro" --entrypoint sh "$
 HEAD_COUNT=$(printf '%s\n' "$HEADS_OUTPUT" | awk '/\(head\)/ {count++} END {print count + 0}')
 EXPECTED_DB_HEAD=$(printf '%s\n' "$HEADS_OUTPUT" | awk '/\(head\)/ {print $1}' | tail -n 1)
 [[ "$HEAD_COUNT" == "1" && -n "$EXPECTED_DB_HEAD" ]]
+CURRENT_HEAD_BEFORE=$(compose exec -T db sh -lc \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version"')
+if [[ "$CURRENT_HEAD_BEFORE" != "$OLD_IMAGE_DB_HEAD" && "$CURRENT_HEAD_BEFORE" != "$EXPECTED_DB_HEAD" ]]; then
+  echo "PRECHECK_FAILED: database revision is neither the active image head nor the target release head" >&2
+  exit 1
+fi
 
 mark BACKUP
 mkdir -p "$BACKUP"
@@ -307,6 +409,7 @@ cp -a "$COMPOSE" "$BACKUP/compose-before.yaml"
 if [[ -f "$IMAGE_OVERRIDE" ]]; then
   cp -a "$IMAGE_OVERRIDE" "$BACKUP/image-before.json"
 fi
+write_rollback_images
 # CW-032: pin the exact topology artifact this release rolled out with.
 sha256sum "$COMPOSE" > "$BACKUP/compose.sha256"
 printf '%s\n' "$OLD_IMAGE" > "$BACKUP/previous-image.txt"
@@ -319,18 +422,13 @@ tar -czf "$BACKUP/site-before.tar.gz" -C "$SITE" .
 if [[ -d "$ADMIN_SITE" ]]; then
   tar -czf "$BACKUP/admin-site-before.tar.gz" -C "$ADMIN_SITE" .
 fi
-CURRENT_HEAD_BEFORE=$(compose exec -T db sh -lc \
-  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version"')
-if [[ "$CURRENT_HEAD_BEFORE" != "$OLD_IMAGE_DB_HEAD" && "$CURRENT_HEAD_BEFORE" != "$EXPECTED_DB_HEAD" ]]; then
-  echo "PRECHECK_FAILED: database revision is neither the active image head nor the target release head" >&2
-  exit 1
-fi
 printf '%s\n' "$CURRENT_HEAD_BEFORE" > "$BACKUP/database-revision-before.txt"
 compose exec -T db sh -lc \
   'pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > "$BACKUP/database-before.dump"
 [[ -s "$BACKUP/database-before.dump" ]]
 docker exec -i "$DB_CONTAINER" pg_restore --list < "$BACKUP/database-before.dump" >/dev/null
 sha256sum "$BACKUP/site-before.tar.gz" "$BACKUP/database-before.dump" > "$BACKUP/BACKUP-SHA256SUMS"
+sha256sum "$BACKUP/running-images-before.json" "$BACKUP/rollback-images.json" >> "$BACKUP/BACKUP-SHA256SUMS"
 if [[ -s "$BACKUP/admin-site-before.tar.gz" ]]; then
   sha256sum "$BACKUP/admin-site-before.tar.gz" >> "$BACKUP/BACKUP-SHA256SUMS"
 fi
@@ -389,6 +487,14 @@ HEAD_COUNT=$(printf '%s\n' "$HEADS_OUTPUT" | awk '/\(head\)/ {count++} END {prin
 IMAGE_DB_HEAD=$(printf '%s\n' "$HEADS_OUTPUT" | awk '/\(head\)/ {print $1}' | tail -n 1)
 [[ "$HEAD_COUNT" == "1" && "$IMAGE_DB_HEAD" == "$EXPECTED_DB_HEAD" ]]
 
+# 构建期间发生其他发布时，不以过期快照覆盖或回滚新的线上版本。
+verify_running_image_snapshot
+sha256sum --check "$BACKUP/compose.sha256"
+if [[ -f "$BACKUP/image-before.json" ]]; then
+  cmp -- "$BACKUP/image-before.json" "$IMAGE_OVERRIDE"
+else
+  [[ ! -e "$IMAGE_OVERRIDE" ]]
+fi
 mark MIGRATE
 MIGRATION_SERVICE=api-1
 IMAGE_SERVICES=("${SERVICES[@]}")
@@ -432,6 +538,7 @@ cp -a "$SOURCE/client/dist"/. "$STAGE_SITE"/
 grep -q "$EXPECTED_ASSET" "$STAGE_SITE/index.html"
 cp -a "$SOURCE/client/dist-admin"/. "$STAGE_ADMIN_SITE"/
 grep -q "$EXPECTED_ADMIN_ASSET" "$STAGE_ADMIN_SITE/index.html"
+SITE_SWITCHED=1
 find "$SITE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -a "$STAGE_SITE"/. "$SITE"/
 # CW-019: replace the admin artifact immediately after the customer one, both from

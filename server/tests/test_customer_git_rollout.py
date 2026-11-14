@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -53,53 +54,297 @@ def test_bootstrap_records_the_database_head_required_by_first_upgrade() -> None
     assert "org.opencontainers.image.revision=$RELEASE_SHA" in script
 
 
-@pytest.mark.parametrize("has_previous", [False, True])
-@pytest.mark.parametrize("recovery_ready", [False, True])
-def test_rollout_restores_image_selection_and_checks_recovery(
-    tmp_path, has_previous: bool, recovery_ready: bool
-) -> None:
+def _rollout_function(name: str) -> str:
     script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text(encoding="utf-8")
-    start = script.index("rollback() {")
-    function = script[start : script.index("\n}\n", start) + 3]
-    (tmp_path / "backup").mkdir()
-    (tmp_path / "image.json").write_text('{"services":{"api-1":{"image":"new"}}}')
-    previous = '{"services":{"api-1":{"image":"old"}}}'
-    if has_previous:
-        (tmp_path / "backup/image-before.json").write_text(previous)
-    harness = """
+    start = script.index(f"{name}() {{")
+    return script[start : script.index("\n}\n", start) + 3]
+
+
+_API_IMAGE = "sha256:" + "a" * 64
+_WORKER_IMAGE = "sha256:" + "b" * 64
+_NEW_IMAGE = "sha256:" + "c" * 64
+_DRIFTED_IMAGE = "sha256:" + "d" * 64
+_REQUIRED = ["api-1", "api-2", "worker-1", "worker-2", "worker-3", "worker-4"]
+_OPTIONAL = ["worker-viral", "worker-publish"]
+
+# 真实执行发布函数，Docker 边界用本地进程模拟；不连接守护进程或生产服务。
+_MOCK_DOCKER = r"""#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["ROLLOUT_TEST_ROOT"])
+path = root / "docker-state.json"
+state = json.loads(path.read_text())
+args = sys.argv[1:]
+with (root / "docker-commands.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+result = ""
+exit_code = 0
+if args[0] == "inspect":
+    container = state["containers"][args[-1]]
+    result = {
+        "{{.Image}}": container["image"],
+        "{{.Config.Image}}": container["reference"],
+        "{{.State.Running}}": str(container["running"]).lower(),
+    }[args[2]]
+elif args[:2] == ["image", "inspect"]:
+    result = state["heads"][args[-1]]
+elif args[:2] == ["image", "tag"]:
+    state["aliases"][args[-1]] = args[-2]
+elif args[0] == "compose":
+    files = []
+    i = 1
+    while args[i].startswith("-"):
+        if args[i] == "-f":
+            files.append(args[i + 1])
+        i += 2
+    command = args[i:]
+    if command[:2] == ["ps", "-q"]:
+        service = command[-1]
+        if state["containers"][service]["running"]:
+            result = service
+    elif command[0] == "stop":
+        if state["failure"] == "stop":
+            exit_code = 1
+        else:
+            state["containers"][command[-1]]["running"] = False
+    elif command[0] == "up":
+        rollback = any(f.endswith("rollback-images.json") for f in files)
+        if rollback and state["failure"] == "up":
+            exit_code = 1
+        else:
+            images = {}
+            for file in files:
+                document = json.loads(Path(file).read_text())
+                images.update({k: v["image"] for k, v in document["services"].items()})
+            for service in command[3:]:
+                reference = images[service]
+                image = state["aliases"].get(reference, reference)
+                if rollback and state["failure"] == "wrong-image" and service == "worker-1":
+                    image = state["aliases"]["new"]
+                state["containers"][service] = {
+                    "reference": reference, "image": image, "running": True,
+                }
+            if not rollback:
+                state["aliases"]["api:stable"] = state["drifted_image"]
+    else:
+        raise AssertionError(command)
+else:
+    raise AssertionError(args)
+path.write_text(json.dumps(state))
+if result:
+    print(result)
+sys.exit(exit_code)
+"""
+
+
+def _run_rollout_mock(tmp_path, *, mode="rollback", previous=False, failure="", incompatible=False):
+    import os
+
+    services = _REQUIRED + _OPTIONAL
+    baseline = {
+        service: {
+            "reference": "api:stable" if service.startswith("api-") else "worker:old",
+            "image": _API_IMAGE if service.startswith("api-") else _WORKER_IMAGE,
+            "running": service != "worker-publish",
+        }
+        for service in services
+    }
+    if mode == "missing-required":
+        baseline["worker-1"]["running"] = False
+    state = {
+        "containers": baseline,
+        "heads": {
+            _API_IMAGE: "schema1",
+            _WORKER_IMAGE: ""
+            if incompatible == "missing"
+            else "schema2"
+            if incompatible
+            else "schema1",
+        },
+        "aliases": {"api:stable": _API_IMAGE, "worker:old": _WORKER_IMAGE, "new": _NEW_IMAGE},
+        "failure": failure,
+        "drifted_image": _DRIFTED_IMAGE,
+    }
+    (tmp_path / "docker-state.json").write_text(json.dumps(state))
+    topology = json.dumps({"services": {k: {"image": v["reference"]} for k, v in baseline.items()}})
+    (tmp_path / "compose.json").write_text(topology)
+    previous_text = '{"services":{"api-1":{"image":"api:stable"}},"x-keep":{"value":42}}'
+    if previous:
+        (tmp_path / "image.json").write_text(previous_text)
+    previous_site = tmp_path / "previous-index.html"
+    previous_site.write_text("previous-artifact")
+    for name in ("site", "admin"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "index.html").write_text("current-artifact")
+        with tarfile.open(tmp_path / f"{name}-before.tar.gz", "w:gz") as archive:
+            archive.add(previous_site, arcname="index.html")
+    (tmp_path / "bin").mkdir()
+    docker = tmp_path / "bin/docker"
+    docker.write_text(_MOCK_DOCKER)
+    docker.chmod(0o700)
+    harness = r"""
 set -Eeuo pipefail
 ROOT="$1"
+export ROLLOUT_TEST_ROOT="$ROOT"
+export PATH="$ROOT/bin:$PATH"
 BACKUP="$ROOT/backup"
 IMAGE_OVERRIDE="$ROOT/image.json"
+COMPOSE="$ROOT/compose.json"
+COMPOSE_ENV="$ROOT/compose.env"
 SITE="$ROOT/site"
 ADMIN_SITE="$ROOT/admin"
-ROLLOUT_STARTED=1
-IMAGE_SWITCHED=1
+SHORT_SHA=1234567
+STAMP=test-release
+ROLLOUT_STARTED=0
+IMAGE_SWITCHED=0
+SITE_SWITCHED=0
+ROLLBACK_PINNED=0
+declare -A ROLLBACK_IMAGE_IDS=()
 REQUIRED_SERVICES=(api-1 api-2 worker-1 worker-2 worker-3 worker-4)
 OPTIONAL_SERVICES=(worker-viral worker-publish)
 SERVICES=("${REQUIRED_SERVICES[@]}" worker-viral worker-publish)
-ROLLBACK_SERVICES=("${REQUIRED_SERVICES[@]}" worker-viral)
 mark() { echo "$1" > "$ROOT/status"; }
-compose() { echo "$*" >> "$ROOT/commands"; }
-wait_ready() { return "$2"; }
-""".replace('return "$2"', f"return {0 if recovery_ready else 1}")
-    result = subprocess.run(
-        ["bash", "-c", harness + function + "\nrollback 17 1 fake-command", "test", str(tmp_path)],
-        capture_output=True,
+wait_ready() { [[ "$2" != not-ready ]]; }
+""".replace('[[ "$2" != not-ready ]]', f'[[ "{failure}" != not-ready ]]')
+    functions = "\n".join(
+        _rollout_function(name)
+        for name in (
+            "compose",
+            "snapshot_running_images",
+            "verify_running_image_snapshot",
+            "write_rollback_images",
+            "write_image_override",
+            "rollback",
+        )
     )
+    invocation = r"""
+snapshot_running_images
+mkdir "$BACKUP"
+write_rollback_images
+cp "$ROOT/site-before.tar.gz" "$BACKUP/site-before.tar.gz"
+cp "$ROOT/admin-before.tar.gz" "$BACKUP/admin-site-before.tar.gz"
+if [[ -f "$IMAGE_OVERRIDE" ]]; then cp -a "$IMAGE_OVERRIDE" "$BACKUP/image-before.json"; fi
+"""
+    if mode == "drift":
+        invocation += r"""
+python3 - "$ROOT/docker-state.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+state = json.loads(path.read_text())
+state["containers"]["api-1"]["image"] = state["aliases"]["new"]
+path.write_text(json.dumps(state))
+PY
+"""
+    invocation += r"""
+verify_running_image_snapshot
+write_image_override "$IMAGE_OVERRIDE" new "${SERVICES[@]}"
+IMAGE_SWITCHED=1
+"""
+    if mode == "site-rollback":
+        invocation += "\nSITE_SWITCHED=1\n"
+    if mode in {"rollback", "site-rollback"}:
+        invocation += r"""
+ROLLOUT_STARTED=1
+compose up -d --no-deps api-1 worker-publish
+rollback 17 1 simulated-mid-rollout-failure
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness + functions + invocation, "test", str(tmp_path)],
+        capture_output=True,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert (tmp_path / "compose.json").read_text() == topology
+    expected_site = "previous-artifact" if mode == "site-rollback" else "current-artifact"
+    for name in ("site", "admin"):
+        assert (tmp_path / name / "index.html").read_text() == expected_site
+    return result, previous_text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="本地 Linux Docker mock 验证 POSIX 发布函数")
+def test_rollout_accepts_mixed_images_and_pins_actual_running_ids(tmp_path) -> None:
+    result, _ = _run_rollout_mock(tmp_path, mode="select")
+    assert result.returncode == 0, result.stderr.decode()
+    inventory = json.loads((tmp_path / "backup/running-images-before.json").read_text())
+    assert set(inventory) == set(_REQUIRED + ["worker-viral"])
+    assert inventory["api-1"]["image_id"] == _API_IMAGE
+    assert inventory["worker-1"]["image_id"] == _WORKER_IMAGE
+    selected = json.loads((tmp_path / "image.json").read_text())
+    assert selected == {"services": {s: {"image": "new"} for s in _REQUIRED + _OPTIONAL}}
+    commands = [
+        json.loads(line) for line in (tmp_path / "docker-commands.jsonl").read_text().splitlines()
+    ]
+    first_tag = next(i for i, c in enumerate(commands) if c[:2] == ["image", "tag"])
+    assert all(
+        c[0] == "inspect" or c[:2] == ["image", "inspect"] or "ps" in c
+        for c in commands[:first_tag]
+    )
+    assert len([c for c in commands if c[:2] == ["image", "tag"]]) == 7
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="本地 Linux Docker mock 验证 POSIX 发布函数")
+@pytest.mark.parametrize("has_previous", [False, True])
+@pytest.mark.parametrize("failure", ["", "not-ready", "up", "wrong-image", "stop"])
+def test_rollout_restores_image_selection_and_checks_recovery(
+    tmp_path, has_previous, failure
+) -> None:
+    result, previous = _run_rollout_mock(tmp_path, previous=has_previous, failure=failure)
     assert result.returncode == 17, result.stderr.decode()
     if has_previous:
         assert (tmp_path / "image.json").read_text() == previous
     else:
         assert not (tmp_path / "image.json").exists()
-    expected = "FAILED_ROLLED_BACK" if recovery_ready else "FAILED_ROLLBACK_INCOMPLETE"
+    expected = "FAILED_ROLLBACK_INCOMPLETE" if failure else "FAILED_ROLLED_BACK"
     assert (tmp_path / "status").read_text().strip() == expected
-    commands = (tmp_path / "commands").read_text().splitlines()
-    assert "stop worker-publish" in commands
-    assert "stop worker-viral" not in commands
-    assert any(
-        line.startswith("up -d --no-deps api-1") and "worker-viral" in line for line in commands
-    )
+    state = json.loads((tmp_path / "docker-state.json").read_text())
+    assert state["aliases"]["api:stable"] == _DRIFTED_IMAGE
+    if failure != "up":
+        assert state["containers"]["api-1"]["image"] == _API_IMAGE
+        assert state["containers"]["worker-2"]["image"] == _WORKER_IMAGE
+        assert state["containers"]["worker-viral"]["running"] is True
+    if failure != "stop":
+        assert state["containers"]["worker-publish"]["running"] is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="本地 Linux Docker mock 验证 POSIX 发布函数")
+@pytest.mark.parametrize("incompatible", ["different", "missing"])
+def test_rollout_rejects_incompatible_running_schema_before_mutation(
+    tmp_path, incompatible
+) -> None:
+    result, _ = _run_rollout_mock(tmp_path, incompatible=incompatible)
+    assert result.returncode != 0
+    assert b"incompatible running image database head" in result.stderr
+    assert not (tmp_path / "backup").exists()
+    assert not (tmp_path / "image.json").exists()
+    commands = [
+        json.loads(line) for line in (tmp_path / "docker-commands.jsonl").read_text().splitlines()
+    ]
+    assert all(c[0] == "inspect" or c[:2] == ["image", "inspect"] or "ps" in c for c in commands)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="本地 Linux Docker mock 验证 POSIX 发布函数")
+@pytest.mark.parametrize("mode", ["missing-required", "drift"])
+def test_rollout_refuses_missing_or_changed_baseline_without_switching_override(
+    tmp_path, mode
+) -> None:
+    result, previous = _run_rollout_mock(tmp_path, mode=mode, previous=True)
+    assert result.returncode != 0
+    assert (tmp_path / "image.json").read_text() == previous
+    if mode == "missing-required":
+        assert b"required service is not running" in result.stderr
+    else:
+        assert b"running image changed after snapshot" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="本地 Linux Docker mock 验证 POSIX 发布函数")
+def test_rollout_restores_sites_only_after_switching_the_site_artifacts(tmp_path) -> None:
+    result, _ = _run_rollout_mock(tmp_path, mode="site-rollback")
+    assert result.returncode == 17, result.stderr.decode()
+    assert (tmp_path / "status").read_text().strip() == "FAILED_ROLLED_BACK"
 
 
 def test_customer_git_rollout_requires_an_exact_revision_before_any_mutation() -> None:
