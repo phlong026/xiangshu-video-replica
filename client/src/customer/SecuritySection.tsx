@@ -121,10 +121,7 @@ export function SecuritySection({
       <h2>
         <Icon name="shield" size={18} /> 账号安全
       </h2>
-      <p>
-        怀疑账号被盗用时，按顺序做三件事：改密码、让所有设备下线、撤销已发出的
-        Token。三项操作都不可撤销。
-      </p>
+      <p>以下安全操作立即生效且不可撤销。</p>
       <ChangePasswordForm
         credential={credential}
         onChanged={async (sessionsRevoked) => {

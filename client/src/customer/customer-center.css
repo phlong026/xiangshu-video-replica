@@ -442,6 +442,11 @@
   gap: 22px;
   align-items: start;
 }
+/* 资料与偏好都是轻卡；安全区（改密+危险动作+登录历史）内容最重，
+   独占一整行，避免双列高度差把右下掏空。 */
+.uc-settings .uc-security {
+  grid-column: 1 / -1;
+}
 .uc-settings form {
   margin-top: 24px;
 }

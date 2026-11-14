@@ -43,6 +43,10 @@ export function AccountPasswordSetup({
       active = false;
     };
   }, [credential, refresh]);
+  // 已设密码的账号不需要这张卡：「已设置登录密码」是一句废话——用户正在登录
+  // 状态里，用户名又在身份卡与资料表单里各出现了一次。卡片只在**没有**密码
+  // （引导首次设置）或读取失败（保留错误与重试）时才渲染。
+  if (state?.has_password) return null;
   return (
     <section className="uc-card">
       <h2>账号登录</h2>
