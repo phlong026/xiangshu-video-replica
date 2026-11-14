@@ -21,7 +21,7 @@ from math import floor, isfinite
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request
 from uuid import uuid4
 
@@ -470,6 +470,29 @@ def result_url_expired_error() -> HTTPException:
         status_code=410,
         detail={"code": RESULT_URL_EXPIRED_CODE, "message": RESULT_URL_EXPIRED_MESSAGE},
     )
+
+
+def provider_result_url_needs_refresh(url: str) -> bool:
+    """成片文件仍保留时，刷新即将过期的访问签名，无需重新生成。"""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or parsed.hostname != "files.metaso.cn":
+        return False
+    query = parse_qs(parsed.query)
+    expires = query.get("expires", [])
+    if len(expires) != 1 or not query.get("signature"):
+        return False
+    try:
+        deadline = float(expires[0])
+    except ValueError:
+        return False
+    if not isfinite(deadline):
+        return False
+    if deadline > 1_000_000_000_000:
+        deadline /= 1000
+    return deadline <= time.time() + 60
 
 
 def provider_result_url_expired(url: str) -> bool | None:

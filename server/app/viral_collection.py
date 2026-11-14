@@ -372,6 +372,24 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
         config, progress = json.loads(row[0]), json.loads(row[1])
     if config.get("kind") == "single_archive":
         _run_single_archive(lease, storage, str(config["video_id"]))
+        # 采集即发布：管理端粘贴链接时登记 publish_after 意图，转存完成即
+        # 自动上架（列表 + 首页置顶）。与 archive_batch 的 publish_after 同一
+        # 纪律：advisory lock 串行化、租约校验、守卫未过不算任务失败。
+        publish_after = config.get("publish_after") or None
+        if publish_after:
+            with _connection() as conn:
+                conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
+                _require_lease(conn, lease)
+                from app.viral_push import auto_publish_viral_video
+
+                auto_publish_viral_video(
+                    conn,
+                    platform=lease.platform,
+                    video_id=str(config["video_id"]),
+                    actor_user_id=str(publish_after.get("actor_user_id") or ""),
+                    reason=str(publish_after.get("reason") or ""),
+                    request_id=str(publish_after.get("request_id") or ""),
+                )
         return
     if config.get("kind") == "archive_batch":
         # 批量素材准备（方案 P1 内容模块 C-2）：逐条复用单条转存管线；
