@@ -2664,15 +2664,25 @@ def curate_collected_viral_videos_batch(
                         f"「{title}」是链接导入的素材，不进客户爆款列表，批量操作未执行。",
                     )
                 hidden = conn.execute(
-                    "SELECT 1 FROM viral_video_visibility WHERE platform=%s AND video_id=%s "
-                    "AND status!='AVAILABLE'",
+                    "SELECT status FROM viral_video_visibility WHERE platform=%s "
+                    "AND video_id=%s AND status!='AVAILABLE'",
                     (target.platform, target.video_id),
                 ).fetchone()
                 if hidden:
-                    raise http_error(
-                        409,
-                        "VIRAL_VIDEO_UNAVAILABLE",
-                        f"「{title}」已下架或隐藏，批量操作未执行。",
+                    # 「下架」可逆（2026-11 内容组精简：自动上架体系里 push 是
+                    # 唯一恢复入口）：HIDDEN 的条目允许推送时清除隐藏态后照常
+                    # 上架；屏蔽（UNAVAILABLE）仍拒绝，防止绕过内容审核。
+                    if payload.action != "push" or str(hidden[0]) != "HIDDEN":
+                        raise http_error(
+                            409,
+                            "VIRAL_VIDEO_UNAVAILABLE",
+                            f"「{title}」已下架或屏蔽，批量操作未执行。",
+                        )
+                    conn.execute(
+                        "UPDATE viral_video_visibility SET status='AVAILABLE', reason='', "
+                        "updated_by_user_id=%s, updated_at=now() "
+                        "WHERE platform=%s AND video_id=%s",
+                        (actor.user_id, target.platform, target.video_id),
                     )
                 media_ready = (
                     conn.execute(

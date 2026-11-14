@@ -98,13 +98,15 @@ function statIcon(name: "heart" | "comment" | "share" | "star") {
 function AcquireVideoCard({
   video,
   readOnly,
-  takedownBusy,
+  curateBusy,
   onTakedown,
+  onReshow,
 }: {
   video: CollectedViralVideo;
   readOnly: boolean;
-  takedownBusy: boolean;
+  curateBusy: boolean;
   onTakedown: (video: CollectedViralVideo) => void;
+  onReshow: (video: CollectedViralVideo) => void;
 }) {
   const status = cardStatus(video);
   const cover = video.cover_url ?? "";
@@ -179,14 +181,24 @@ function AcquireVideoCard({
         ) : null}
         <div className="viral-card-caption">
           <span>入库于 {formatAcquiredAt(video.created_at)}</span>
-          {status.tone === "cached" && !readOnly ? (
+          {!readOnly && status.tone === "cached" ? (
             <button
               className="viral-acquire-takedown"
-              disabled={takedownBusy}
+              disabled={curateBusy}
               type="button"
               onClick={() => onTakedown(video)}
             >
               下架
+            </button>
+          ) : null}
+          {!readOnly && video.availability === "HIDDEN" ? (
+            <button
+              className="viral-acquire-takedown"
+              disabled={curateBusy}
+              type="button"
+              onClick={() => onReshow(video)}
+            >
+              重新上架
             </button>
           ) : null}
         </div>
@@ -260,8 +272,9 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
   const [error, setError] = useState("");
   const [items, setItems] = useState<CollectedViralVideo[] | null>(null);
   const [listLoading, setListLoading] = useState(false);
-  const [takedownTarget, setTakedownTarget] =
-    useState<CollectedViralVideo | null>(null);
+  const [curateTarget, setCurateTarget] = useState<CollectedViralVideo | null>(
+    null,
+  );
   const [modalOpen, setModalOpen] = useState(false);
   const [modalFile, setModalFile] = useState<File | null>(null);
   const [probe, setProbe] = useState<{
@@ -423,22 +436,31 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
     }
   };
 
-  const takedown = async (video: CollectedViralVideo) => {
-    if (readOnly || takedownTarget) return;
-    setTakedownTarget(video);
+  const curate = async (
+    video: CollectedViralVideo,
+    action: "hide" | "push",
+    fallbackError: string,
+  ) => {
+    if (readOnly || curateTarget) return;
+    setCurateTarget(video);
     setError("");
     try {
       await curateViralVideosBatch(
         [video],
-        "hide",
-        "后台下架爆款视频",
+        action,
+        action === "hide" ? "后台下架爆款视频" : "后台重新上架爆款视频",
         crypto.randomUUID(),
+      );
+      setNotice(
+        action === "hide"
+          ? "已下架，客户列表与首页已同步移除。"
+          : "已重新上架，客户即可播放与一键复刻。",
       );
       await reload();
     } catch (cause) {
-      setError(adminActivationErrorMessage(cause, "下架失败"));
+      setError(adminActivationErrorMessage(cause, fallbackError));
     } finally {
-      setTakedownTarget(null);
+      setCurateTarget(null);
     }
   };
 
@@ -534,9 +556,10 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
           {items.map((video) => (
             <AcquireVideoCard
               key={`${video.platform}-${video.video_id}`}
-              onTakedown={(target) => void takedown(target)}
+              curateBusy={curateTarget !== null}
+              onReshow={(target) => void curate(target, "push", "重新上架失败")}
+              onTakedown={(target) => void curate(target, "hide", "下架失败")}
               readOnly={readOnly}
-              takedownBusy={takedownTarget !== null}
               video={video}
             />
           ))}
@@ -547,11 +570,13 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
       <div
         className="viral-acquire-modal-backdrop"
         hidden={!modalOpen}
-        onClick={(event) => {
-          if (event.target === event.currentTarget) closeUploadModal();
-        }}
         onKeyDown={(event) => {
           if (event.key === "Escape" && !uploadBusy) closeUploadModal();
+        }}
+        onClick={(event) => {
+          if (event.target === event.currentTarget && !uploadBusy) {
+            closeUploadModal();
+          }
         }}
         role="presentation"
       >
@@ -566,6 +591,7 @@ export function ViralAcquirePage({ readOnly }: { readOnly: boolean }) {
             <button
               aria-label="关闭"
               className="viral-acquire-modal-close"
+              disabled={uploadBusy}
               type="button"
               onClick={closeUploadModal}
             >

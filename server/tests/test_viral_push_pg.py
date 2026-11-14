@@ -429,6 +429,54 @@ def test_mark_viral_push_published_refuses_hidden_video(route_state: str) -> Non
         assert (row[0], row[1]) == (0, None)
 
 
+def test_push_restores_hidden_video_but_not_blocked(
+    client: TestClient, route_state: str
+) -> None:
+    """「下架」可逆：push 清除 HIDDEN 后照常上架（自动上架体系里的唯一恢复
+    入口）；屏蔽（UNAVAILABLE）仍拒绝，防止绕过内容审核."""
+    require_pg_or_explicit_skip()
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as raw:
+        _reset_video(raw)
+        _seed_ready_media(raw)
+        raw.execute(
+            "INSERT INTO viral_video_visibility(platform,video_id,status,reason) "
+            "VALUES('douyin',%s,'HIDDEN','误下架')",
+            (VIDEO_ID,),
+        )
+
+    result = _push(client, headers)
+    assert result["items"][0]["published"] is True
+    with psycopg.connect(route_state) as raw:
+        row = raw.execute(
+            "SELECT status, pushed_at IS NOT NULL FROM viral_video_visibility vis "
+            "JOIN viral_videos v ON v.platform=vis.platform AND v.video_id=vis.video_id "
+            "WHERE vis.video_id=%s",
+            (VIDEO_ID,),
+        ).fetchone()
+        assert (row[0], row[1]) == ("AVAILABLE", True)
+
+    # 屏蔽不可通过 push 绕过。
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE viral_video_visibility SET status='UNAVAILABLE', reason='违规' "
+            "WHERE video_id=%s",
+            (VIDEO_ID,),
+        )
+    blocked = client.post(
+        PUSH_PATH,
+        headers={**headers, "Idempotency-Key": "push-blocked"},
+        json={
+            "action": "push",
+            "reason": "尝试恢复屏蔽",
+            "confirm": True,
+            "items": [{"platform": "douyin", "video_id": VIDEO_ID}],
+        },
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"]["code"] == "VIRAL_VIDEO_UNAVAILABLE"
+
+
 def test_push_rejects_link_imported_video(client: TestClient, route_state: str) -> None:
     """链接导入素材不得推送到前端：与「上首页」同一理由——那是单个客户的自有
     素材，推送会让它绕过采集质量门槛出现在所有客户的爆款列表里。"""

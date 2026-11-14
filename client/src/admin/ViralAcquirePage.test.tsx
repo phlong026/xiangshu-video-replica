@@ -261,6 +261,33 @@ it("下架：对已就绪卡片调用 curation:batch hide 并刷新列表", asyn
   });
 });
 
+it("重新上架：对已下架卡片调用 curation:batch push", async () => {
+  const fetchMock = installFetch({
+    list: () => ({
+      items: [
+        row({
+          availability: "HIDDEN",
+          customer_visible: false,
+          homepage_featured: false,
+          homepage_rank: null,
+          pushed_at: null,
+        }),
+      ],
+      total: 1,
+      categories: [],
+    }),
+  });
+  render(<ViralAcquirePage readOnly={false} />);
+  await waitFor(() => expect(screen.getByText("已下架")).toBeTruthy());
+  expect(screen.queryByRole("button", { name: "下架" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "重新上架" }));
+  await waitFor(() => expect(screen.getByText(/已重新上架/)).toBeTruthy());
+  const curation = fetchMock.mock.calls.find(([url]) =>
+    String(url).includes("curation:batch"),
+  ) as unknown as [string, RequestInit];
+  expect(JSON.parse(String(curation?.[1].body)).action).toBe("push");
+});
+
 it("只读视图：采集与上传入口禁用，卡片不提供下架", async () => {
   installFetch();
   render(<ViralAcquirePage readOnly={true} />);
