@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.customer_fence import BusinessDbDep
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection, BusinessRow
@@ -64,6 +64,7 @@ from app.generation import (
     persist_generation_result_archive,
     preview_prompt_text,
     provider_result_url_expired,
+    provider_result_url_needs_refresh,
     regenerate_generation_batch,
     regenerate_generation_task,
     release_generation_result_archive_claim,
@@ -813,23 +814,13 @@ def _generation_task_context(conn: Database, task_id: str) -> BusinessRow:
     return cast(BusinessRow, row)
 
 
-@router.get(
-    "/generation-tasks/{task_id}/preview-url",
-    response_model=GenerationTaskPreviewUrlResponse,
-)
-def read_generation_task_preview_url(
-    task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
-    verify: bool = Query(
-        default=False,
-        description="播放/下载失败后由客户端带上：服务端探测直链是否已失效。",
-    ),
-) -> GenerationTaskPreviewUrlResponse:
+def _generation_preview_task(
+    conn: BusinessConnection, *, actor: CurrentUser, task_id: str
+) -> BusinessRow:
     task = conn.execute(
         """
         SELECT batch.project_id, batch.created_by_user_id,
-               task.provider, task.provider_result_url
+               task.provider, task.provider_task_id, task.provider_result_url, task.status
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
         WHERE task.id = %s
@@ -849,11 +840,89 @@ def read_generation_task_preview_url(
     result_url = task["provider_result_url"]
     if not isinstance(result_url, str) or not result_url.strip():
         raise HTTPException(status_code=409, detail={"code": "RESULT_URL_NOT_READY"})
+    return cast(BusinessRow, task)
+
+
+@router.get(
+    "/generation-tasks/{task_id}/preview-url",
+    response_model=GenerationTaskPreviewUrlResponse,
+)
+def read_generation_task_preview_url(
+    task_id: str,
+    db: BusinessDbDep,
+    verify: bool = Query(
+        default=False,
+        description="播放/下载失败后由客户端带上：服务端探测直链是否已失效。",
+    ),
+) -> GenerationTaskPreviewUrlResponse:
+    provider = None
+    with db.write() as (conn, actor):
+        task = _generation_preview_task(conn, actor=actor, task_id=task_id)
+        result_url = str(task["provider_result_url"])
+        refresh = (
+            task["provider"] == "metaso"
+            and task["status"] == "SUCCEEDED"
+            and bool(task["provider_task_id"])
+            and provider_result_url_needs_refresh(result_url)
+        )
+        if refresh or (task["provider"] == "fake_h3" and result_url.startswith("fake://")):
+            try:
+                provider = h3_provider_for_task(conn, str(task["provider"]), task_id=task_id)
+            except H3ProviderSettingsUnavailable as exc:
+                raise HTTPException(
+                    503,
+                    detail={
+                        "code": "RESULT_URL_REFRESH_UNAVAILABLE",
+                        "message": "成片播放地址暂时无法刷新，请稍后重试。",
+                    },
+                ) from exc
+
+    # 外部查询必须在会话栅栏事务结束后执行，不能让刷新链接再次挡住首页媒体授权。
+    if refresh and provider is not None:
+        original_url = result_url
+        try:
+            current = provider.query_image_to_video(str(task["provider_task_id"]))
+        except H3ProviderFailed as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "RESULT_URL_REFRESH_FAILED",
+                    "message": "成片播放地址刷新失败，请稍后重试。",
+                },
+            ) from exc
+        if (
+            current.status != "SUCCEEDED"
+            or not current.result_url
+            or provider_result_url_needs_refresh(current.result_url)
+        ):
+            raise HTTPException(503, detail={"code": "RESULT_URL_REFRESH_NOT_READY"})
+        with db.write() as (conn, actor):
+            latest = _generation_preview_task(conn, actor=actor, task_id=task_id)
+            result_url = str(latest["provider_result_url"])
+            if (
+                result_url == original_url
+                and latest["provider_task_id"] == task["provider_task_id"]
+                and latest["status"] == "SUCCEEDED"
+            ):
+                conn.execute(
+                    "UPDATE generation_tasks SET provider_result_url=%s "
+                    "WHERE id=%s AND provider_result_url=%s",
+                    (current.result_url, task_id, original_url),
+                )
+                write_audit(
+                    conn,
+                    actor=actor,
+                    action="generation_task.preview_url.refresh",
+                    entity_type="generation_task",
+                    entity_id=task_id,
+                    metadata={"reason": "expired_signature"},
+                )
+                result_url = current.result_url
     if task["provider"] == "fake_h3" and result_url.startswith("fake://"):
         # Browsers cannot fetch fake://; only the internal fixture is embedded.
         # The factory retains the production ban, and ownership was checked above.
         try:
-            provider = h3_provider_for_task(conn, "fake_h3")
+            assert provider is not None
             content = provider.download_result(result_url)
         except H3ProviderSettingsUnavailable as exc:
             logger.warning("fake result unavailable for task %s: %s", task_id, exc)

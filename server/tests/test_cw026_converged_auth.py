@@ -26,15 +26,18 @@ Also covered here (the CW-026 acceptance delta):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import secrets
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import psycopg
 import pytest
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.testclient import TestClient
 from pg_test_kit import require_pg_or_explicit_skip
 
@@ -469,6 +472,63 @@ def test_customer_session_reads_resolve_to_session_owner_only(
     stale = client.get("/api/wallet", headers=_bearer(str(first["session_token"])))
     assert stale.status_code == 401, stale.text
     assert stale.json()["detail"]["code"] == "SESSION_REPLACED"
+
+
+def test_slow_response_releases_session_lock_before_media_grants(
+    customer_app: FastAPI, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """慢客户端收包不能继续占用会话行锁，阻断并发媒体授权和任务读取。"""
+    from app import db_pg
+    from app.storage import STORAGE_ROOT_ENV
+
+    monkeypatch.setenv(STORAGE_ROOT_ENV, str(tmp_path))
+    monkeypatch.setattr(db_pg, "PG_POOL_OPTIONS", db_pg.PG_POOL_OPTIONS + " -c lock_timeout=200ms")
+    ready, release = Event(), Event()
+
+    @customer_app.middleware("http")
+    async def hold_response(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        response = await call_next(request)
+        if request.headers.get("X-Test-Hold-Response") == "1":
+            ready.set()
+            if not await asyncio.to_thread(release.wait, 8):
+                raise RuntimeError("test did not release the response")
+        return response
+
+    with TestClient(customer_app, raise_server_exceptions=False) as test_client:
+        customer = _activate_customer(test_client, route_state, suffix="a")
+        headers = _bearer(str(customer["session_token"]))
+        project = test_client.post(
+            "/api/projects", json={"name": "媒体授权行锁回归"}, headers=headers
+        )
+        assert project.status_code == 201, project.text
+        with psycopg.connect(route_state, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+                "content_type, created_by_user_id) VALUES "
+                "('media-lock-preview', %s, 'reference_video', 'local://regression/video.mp4', "
+                "'test-header', 32, 'video/mp4', %s)",
+                (project.json()["id"], customer["user_id"]),
+            )
+        with ThreadPoolExecutor(max_workers=3) as workers:
+            slow = workers.submit(
+                test_client.get, "/api/projects", headers={**headers, "X-Test-Hold-Response": "1"}
+            )
+            try:
+                assert ready.wait(5), "the authenticated response never started"
+                read = workers.submit(test_client.get, "/api/projects", headers=headers)
+                grant = workers.submit(
+                    test_client.post, "/api/assets/media-lock-preview/download-url", headers=headers
+                )
+                response = read.result(timeout=5)
+                granted = grant.result(timeout=5)
+                assert response.status_code == 200, response.text
+                assert granted.status_code == 200, granted.text
+                assert "/api/assets/signed-objects/" in granted.json()["url"]
+            finally:
+                release.set()
+            assert slow.result(timeout=5).status_code == 200
 
 
 def test_project_write_is_scoped_to_the_fenced_session_owner(
