@@ -77,7 +77,7 @@ export function ChangePasswordForm({
 
   return (
     <form className="uc-security__password" onSubmit={submit}>
-      <p>修改后当前登录状态会立即失效，需要用新密码重新登录。</p>
+      <p>修改后需用新密码重新登录。</p>
       <label htmlFor="uc-current-password">当前密码</label>
       <input
         autoComplete="current-password"

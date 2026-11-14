@@ -146,6 +146,11 @@ export function EmailBindingSection({
     }
   }
 
+  // 服务未开通且名下没有已绑定邮箱时整卡隐藏：一张永远显示「暂不可用，
+  // 请联系客服」的卡片不提供任何可执行动作，只消耗设置页的注意力。
+  // 已绑定邮箱的账号即使服务暂停也保留展示（那是一条已验证的回家路）。
+  if (state && !state.service_available && !state.email) return null;
+
   return (
     <section className="uc-card uc-email">
       <h2>
@@ -169,33 +174,49 @@ export function EmailBindingSection({
               </button>
             </p>
           ) : null}
-          {!state.service_available ? (
-            <p className="uc-muted">
-              邮件服务暂未开通，绑定邮箱暂不可用，请联系客服。
-            </p>
-          ) : !state.can_bind ? (
+          {!state.can_bind ? (
             <p className="uc-muted">
               子账号无需绑定邮箱：密码由主账号统一管理。
             </p>
           ) : mode === "idle" ? (
-            <div className="uc-preference">
-              <Icon name="mail" />
-              <div>
-                <strong>{state.email ?? "未绑定邮箱"}</strong>
-                <p>
-                  {state.email
-                    ? `已验证${state.verified_at ? ` · ${timeLabel(state.verified_at)}` : ""}`
-                    : "绑定后可用邮箱找回密码。"}
-                </p>
+            state.email ? (
+              <div className="uc-preference">
+                <Icon name="mail" />
+                <div>
+                  <strong>{state.email}</strong>
+                  <p>
+                    {`已验证${state.verified_at ? ` · ${timeLabel(state.verified_at)}` : ""}`}
+                    {!state.service_available
+                      ? " · 邮件服务暂未开通，暂时无法更换邮箱。"
+                      : ""}
+                  </p>
+                </div>
+                {state.service_available ? (
+                  <button
+                    className="uc-outline"
+                    type="button"
+                    onClick={startBinding}
+                  >
+                    更换邮箱
+                  </button>
+                ) : null}
               </div>
-              <button
-                className={state.email ? "uc-outline" : "uc-primary"}
-                type="button"
-                onClick={startBinding}
-              >
-                {state.email ? "更换邮箱" : "绑定邮箱"}
-              </button>
-            </div>
+            ) : (
+              <div className="uc-preference">
+                <Icon name="mail" />
+                <div>
+                  <strong>未绑定邮箱</strong>
+                  <p>绑定后可用邮箱找回密码。</p>
+                </div>
+                <button
+                  className="uc-primary"
+                  type="button"
+                  onClick={startBinding}
+                >
+                  绑定邮箱
+                </button>
+              </div>
+            )
           ) : mode === "email" ? (
             <form onSubmit={sendCode}>
               <label htmlFor="uc-email">邮箱地址</label>

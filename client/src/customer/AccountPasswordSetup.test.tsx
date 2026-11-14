@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { AccountPasswordSetup } from "./AccountPasswordSetup";
 
@@ -41,4 +41,24 @@ it("输入密码时实时给出强度提示（P1#12）", async () => {
 
   fireEvent.change(input, { target: { value: "Abcdefg1!xyz" } });
   expect(screen.getByText(/强度：强/)).toBeVisible();
+});
+
+it("已设密码的账号不渲染卡片：登录状态不需要一张只说废话的卡", async () => {
+  const { customerPasswordState } = await import("../api");
+  vi.mocked(customerPasswordState).mockResolvedValue({
+    user_id: "u",
+    username: "legacy",
+    has_password: true,
+  });
+  const { container } = render(
+    <AccountPasswordSetup
+      credential={async () => ({ kind: "session", token: "local" })}
+      onComplete={() => {}}
+    />,
+  );
+
+  await waitFor(() =>
+    expect(screen.queryByText(/正在读取账号状态/)).toBeNull(),
+  );
+  expect(container.firstChild).toBeNull();
 });

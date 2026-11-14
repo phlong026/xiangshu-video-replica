@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { CustomerApiError } from "../api";
 import { EmailBindingSection } from "./EmailBindingSection";
@@ -99,12 +99,30 @@ test("子账号不进入绑定流程：密码由主账号管理", async () => {
   expect(screen.queryByRole("button", { name: "绑定邮箱" })).toBeNull();
 });
 
-test("发信未开通时说明原因，不摆注定失败的按钮", async () => {
+test("发信未开通且未绑定时整卡隐藏：死卡片不占设置页注意力", async () => {
   mocks.state.mockResolvedValue({ ...unbound, service_available: false });
   render(<EmailBindingSection credential={credential} />);
 
-  expect(await screen.findByText(/邮件服务暂未开通/)).toBeVisible();
+  // 加载态消失即状态已读取；此后卡片不渲染，标题与按钮都不出现。
+  await waitFor(() =>
+    expect(screen.queryByText(/正在读取绑定邮箱/)).toBeNull(),
+  );
+  expect(screen.queryByText(/绑定邮箱/)).toBeNull();
   expect(screen.queryByRole("button", { name: "绑定邮箱" })).toBeNull();
+});
+
+test("服务未开通但已绑定邮箱时保留卡片：地址可见且不摆换绑按钮", async () => {
+  mocks.state.mockResolvedValue({
+    email: "alice@example.com",
+    verified_at: "2026-09-28T04:00:00Z",
+    can_bind: true,
+    service_available: false,
+  });
+  render(<EmailBindingSection credential={credential} />);
+
+  expect(await screen.findByText("alice@example.com")).toBeVisible();
+  expect(screen.getByText(/邮件服务暂未开通/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "更换邮箱" })).toBeNull();
 });
 
 test("服务端 409 冲突文案原样转述，表单保持可改", async () => {
