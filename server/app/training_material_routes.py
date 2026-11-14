@@ -207,9 +207,12 @@ def _visible_filters(kind: str, tag: str) -> tuple[str, tuple[object, ...]]:
     if kind:
         clauses.append("kind = %s")
         params.append(kind)
-    if tag:
+    # tag 支持逗号分隔多值：jsonb 包含数组即「同时含全部标签」的 AND 语义；
+    # 单值时与旧行为完全一致。
+    tag_values = [t.strip() for t in tag.split(",") if t.strip()]
+    if tag_values:
         clauses.append("tags @> %s::jsonb")
-        params.append(json.dumps([tag], ensure_ascii=False))
+        params.append(json.dumps(tag_values, ensure_ascii=False))
     return " AND ".join(clauses), tuple(params)
 
 

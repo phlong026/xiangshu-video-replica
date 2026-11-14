@@ -2972,14 +2972,15 @@ export interface TrainingMaterialPublicPage {
 export async function listTrainingMaterials(
   options: {
     kind?: string;
-    tag?: string;
+    /** 多选标签（AND 语义）；逗号拼接传给后端 tag 参数，单值向后兼容。 */
+    tags?: string[];
     page?: number;
     pageSize?: number;
   } = {},
 ): Promise<TrainingMaterialPublicPage> {
   const params = new URLSearchParams();
   if (options.kind) params.set("kind", options.kind);
-  if (options.tag) params.set("tag", options.tag);
+  if (options.tags?.length) params.set("tag", options.tags.join(","));
   if (options.page) params.set("page", String(options.page));
   if (options.pageSize) params.set("page_size", String(options.pageSize));
   const query = params.toString();
