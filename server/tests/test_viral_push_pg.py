@@ -196,6 +196,154 @@ def test_push_unready_video_enqueues_publish_after_and_worker_publishes(
         assert (row[0], row[1]) == (1, True)
 
 
+def test_single_archive_publish_after_auto_publishes_and_tops_homepage(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """链接采集的 ``single_archive`` + publish_after：转存完成即自动上架并置顶首页.
+
+    管理端「爆款视频获取」粘贴链接后走的就是这条链路：任务配置带
+    ``publish_after`` 意图，worker 转存成功后调用 auto_publish_viral_video
+    ——列表上架（pushed_at）+ 首页推荐位置顶（homepage_featured/rank），
+    审计落在真实操作人头上。
+    """
+    require_pg_or_explicit_skip()
+    with psycopg.connect(route_state) as raw:
+        _reset_video(raw)
+        raw.execute("UPDATE viral_videos SET cover_key=NULL WHERE video_id=%s", (VIDEO_ID,))
+        raw.execute("DELETE FROM viral_refresh_tasks")
+        raw.execute(
+            "INSERT INTO viral_refresh_tasks(id,platform,sort,collection_config_json) "
+            "VALUES('task-single-archive','douyin','latest',%s)",
+            (
+                json.dumps(
+                    {
+                        "kind": "single_archive",
+                        "video_id": VIDEO_ID,
+                        "publish_after": {
+                            "actor_user_id": "admin_u",
+                            "reason": "采集后自动上架",
+                            "request_id": "link-import-req-1",
+                        },
+                    }
+                ),
+            ),
+        )
+        raw.execute(
+            "UPDATE viral_refresh_tasks SET status='RUNNING', attempt=1, "
+            "locked_by='test-worker', locked_until=%s, started_at=%s "
+            "WHERE id='task-single-archive'",
+            (
+                _future_lock(),
+                datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+
+    from app import viral_collection
+
+    def fake_archive(lease: object, storage: object, video_id: str) -> None:
+        # 转存成功的两个落库效果（publish_after 守卫靠它放行）。
+        with psycopg.connect(route_state) as raw:
+            raw.execute(
+                "DELETE FROM viral_media_preparations WHERE platform='douyin' AND video_id=%s",
+                (video_id,),
+            )
+            raw.execute(
+                "INSERT INTO viral_media_preparations"
+                "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+                "(%s,'douyin',%s,'video','SUCCEEDED','fake://test/video.mp4')",
+                (f"push-media-{video_id}", video_id),
+            )
+            raw.execute(
+                "UPDATE viral_videos SET cover_key='viral/cover/douyin/ready' WHERE video_id=%s",
+                (video_id,),
+            )
+
+    monkeypatch.setattr(viral_collection, "_run_single_archive", fake_archive)
+    lease = ViralRefreshLease(
+        id="task-single-archive",
+        worker_id="test-worker",
+        platform="douyin",
+        sort="latest",
+        attempt=1,
+    )
+    viral_collection.run_viral_collection(lease, FakeStorageAdapter(provider="fake", bucket="t"))
+    with psycopg.connect(route_state) as raw:
+        row = raw.execute(
+            "SELECT collection_published, pushed_at IS NOT NULL, homepage_featured, "
+            "homepage_rank FROM viral_videos WHERE video_id=%s",
+            (VIDEO_ID,),
+        ).fetchone()
+        assert (row[0], row[1]) == (1, True)
+        assert row[2] == 1 and row[3] is not None
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM audit_logs WHERE action='viral_video.push' AND entity_id=%s",
+                (f"douyin:{VIDEO_ID}",),
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_auto_publish_homepage_capacity_evicts_oldest(route_state: str) -> None:
+    """首页容量（viral_runtime_controls.homepage_capacity）：置顶新条目时自动
+    撤出最旧的推荐位（条目仍在客户列表，只是不再占首页）."""
+    require_pg_or_explicit_skip()
+    from app.viral_push import auto_publish_viral_video
+    from app.viral_store import upsert_viral_videos
+
+    with psycopg.connect(route_state) as raw:
+        _reset_video(raw)
+        _seed_ready_media(raw)
+        raw.execute("UPDATE viral_runtime_controls SET homepage_capacity=1 WHERE id=1")
+        conn = BusinessConnection.postgres(raw)
+        upsert_viral_videos(
+            conn,
+            [
+                ViralVideo(
+                    platform="douyin",
+                    video_id="capacity-old",
+                    category="",
+                    title="更早的推荐视频",
+                    author="旧作者",
+                    author_avatar=None,
+                    verified=False,
+                    cover_url=None,
+                    duration_ms=9000,
+                    likes=None,
+                    comments=None,
+                    shares=None,
+                    collects=None,
+                    published_at=None,
+                    published_display=None,
+                    like_display=None,
+                    native={},
+                )
+            ],
+            commit=False,
+        )
+        raw.execute(
+            "UPDATE viral_videos SET homepage_featured=1, homepage_rank=5, pushed_at=now() "
+            "WHERE video_id='capacity-old'"
+        )
+        published = auto_publish_viral_video(
+            BusinessConnection.postgres(raw),
+            platform="douyin",
+            video_id=VIDEO_ID,
+            actor_user_id="admin_u",
+        )
+        assert published is True
+    with psycopg.connect(route_state) as raw:
+        new_row = raw.execute(
+            "SELECT homepage_featured, homepage_rank FROM viral_videos WHERE video_id=%s",
+            (VIDEO_ID,),
+        ).fetchone()
+        assert new_row[0] == 1 and new_row[1] is not None and new_row[1] < 5
+        old_row = raw.execute(
+            "SELECT homepage_featured, homepage_rank FROM viral_videos WHERE video_id='capacity-old'"
+        ).fetchone()
+        assert (old_row[0], old_row[1]) == (0, None)
+
+
 def test_pushed_video_visible_beyond_publish_window(route_state: str) -> None:
     require_pg_or_explicit_skip()
     from app.viral_content_state import customer_visible_sql

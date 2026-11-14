@@ -1611,7 +1611,8 @@ def import_viral_link_for_admin(
     ``single_archive`` 把媒体转存主存储（``viral/prepared/...``），加盟商
     在线播放与一键复刻都走自有签名链接；不计客户积分。条目不落「链接导入」
     分类——那是客户导入的待补全标记，管理端采集带着完整元数据，推送/上首页
-    不应被它拦住。
+    不应被它拦住。转存任务携带 ``publish_after`` 意图：媒体就绪即自动上架
+    （客户列表 + 首页推荐位置顶），不再依赖「视频库」人工推送。
 
     外呼失败走 http_error 抛出：整个事务回滚（含入队），幂等键保持可用。
     平台转存槽位被占用时不回滚：条目保留在内容池，响应里标注转存未入队，
@@ -1642,8 +1643,12 @@ def import_viral_link_for_admin(
             raise http_error(422, "VIRAL_LINK_INVALID", "请粘贴视频分享链接。")
         try:
             normalized_url = normalize_supported_link(raw_url)
-            if supported_link_platform(normalized_url) not in ("douyin", "wechat_channels"):
-                raise http_error(422, "VIRAL_PLATFORM_INVALID", "暂时只支持抖音和视频号采集。")
+            if supported_link_platform(normalized_url) not in (
+                "douyin",
+                "xiaohongshu",
+                "wechat_channels",
+            ):
+                raise http_error(422, "VIRAL_PLATFORM_INVALID", "暂时只支持抖音、小红书、视频号采集。")
             # 限时外呼与管理端搜索同一纪律：解析通道各有传输超时，不能让
             # 外呼挂在写事务里无限等待。
             resolver: DouyidouLinkClient | WechatLinkClient
@@ -1693,22 +1698,67 @@ def import_viral_link_for_admin(
                 video.video_id,
                 type(exc).__name__,
             )
-        # 入队单条转存：与人工转存共用 latest 槽位；槽位被别的任务占用时只
-        # 跳过入队，不让整次采集回滚。同视频已在队即视为已转存。
+        # 入队单条转存：与人工转存共用 latest 槽位；槽位被占用时让本条搭车
+        # （PENDING 单条任务原地扩成批量），不让整次采集回滚，也不给内容池
+        # 留"永远等不到转存"的死角——手动转存入口已随视频库页面移除。
+        publish_intent = {
+            "actor_user_id": actor.user_id,
+            "reason": payload.reason.strip() or "采集后自动上架",
+            "request_id": request_id,
+        }
         archive_queued = False
         active = conn.execute(
-            "SELECT id,collection_config_json FROM viral_refresh_tasks "
+            "SELECT id,status,collection_config_json FROM viral_refresh_tasks "
             "WHERE platform=%s AND status IN ('PENDING','RUNNING') FOR UPDATE",
             (video.platform,),
         ).fetchall()
         already_queued = any(
-            json.loads(task[1]).get("kind") == "single_archive"
-            and json.loads(task[1]).get("video_id") == video.video_id
+            json.loads(task[2]).get("kind") == "single_archive"
+            and json.loads(task[2]).get("video_id") == video.video_id
             for task in active
         )
         if already_queued:
             archive_queued = True
-        elif not active:
+            for task_id, task_status, task_config_raw in active:
+                task_config = json.loads(task_config_raw or "{}")
+                if (
+                    task_status == "PENDING"
+                    and task_config.get("kind") == "single_archive"
+                    and task_config.get("video_id") == video.video_id
+                    and not task_config.get("publish_after")
+                ):
+                    # 同视频旧任务缺自动上架意图（如更早的纯转存）：就地补登记。
+                    task_config["publish_after"] = publish_intent
+                    conn.execute(
+                        "UPDATE viral_refresh_tasks SET collection_config_json=%s WHERE id=%s",
+                        (json.dumps(task_config, ensure_ascii=False), task_id),
+                    )
+                    break
+        elif active:
+            # 本条未在队，但槽位被上一条采集占用（连续粘贴同平台链接）：把
+            # PENDING 单条任务原地扩成批量，本条搭车一起转存并共用最新上架
+            # 意图——否则它永远没有转存/上架机会（手动转存入口已随视频库
+            # 页面移除）。RUNNING 任务已读过配置，不在此列，维持跳过语义。
+            for task_id, task_status, task_config_raw in active:
+                task_config = json.loads(task_config_raw or "{}")
+                if task_status != "PENDING" or task_config.get("kind") != "single_archive":
+                    continue
+                queued_video_id = str(task_config.get("video_id") or "")
+                task_config.clear()
+                task_config.update(
+                    {
+                        "kind": "archive_batch",
+                        "video_ids": [queued_video_id, video.video_id],
+                        "publish_after": publish_intent,
+                    }
+                )
+                conn.execute(
+                    "UPDATE viral_refresh_tasks SET collection_config_json=%s WHERE id=%s",
+                    (json.dumps(task_config, ensure_ascii=False), task_id),
+                )
+                archive_queued = True
+                break
+        else:
             queued = conn.execute(
                 """INSERT INTO viral_refresh_tasks(id,platform,sort,collection_config_json)
                 VALUES(%s,%s,'latest',%s) ON CONFLICT(platform,sort) DO UPDATE SET
@@ -1719,7 +1769,14 @@ def import_viral_link_for_admin(
                 (
                     str(uuid.uuid4()),
                     video.platform,
-                    json.dumps({"kind": "single_archive", "video_id": video.video_id}),
+                    json.dumps(
+                        {
+                            "kind": "single_archive",
+                            "video_id": video.video_id,
+                            "publish_after": publish_intent,
+                        },
+                        ensure_ascii=False,
+                    ),
                 ),
             ).fetchone()
             if queued is None:
