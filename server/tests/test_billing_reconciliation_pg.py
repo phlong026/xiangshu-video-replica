@@ -447,9 +447,7 @@ def test_escalated_item_is_not_duplicated_by_rescan(reconcile_db: str) -> None:
         source_id="video_dup",
         age_hours=25.0,
     )
-    _seed_video_task(
-        dsn, task_id="video_dup", status="SUBMISSION_UNCERTAIN", seconds=None
-    )
+    _seed_video_task(dsn, task_id="video_dup", status="SUBMISSION_UNCERTAIN", seconds=None)
     with pg_transaction() as raw:
         enqueue_stuck_billing_operations(BusinessConnection.postgres(raw))
     with pg_transaction() as raw:
@@ -474,9 +472,7 @@ def test_escalated_item_is_not_duplicated_by_rescan(reconcile_db: str) -> None:
     assert len(_queue_rows(dsn)) == 1
 
 
-def test_recheck_cap_stops_rechecking(
-    reconcile_db: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_recheck_cap_stops_rechecking(reconcile_db: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """熔断只限 ESCALATED：到限的升级条目退出重查集；OPEN 条目不受影响。"""
     dsn = reconcile_db
     _reset(dsn)
@@ -488,9 +484,7 @@ def test_recheck_cap_stops_rechecking(
         source_id="video_cap",
         age_hours=25.0,
     )
-    _seed_video_task(
-        dsn, task_id="video_cap", status="SUBMISSION_UNCERTAIN", seconds=None
-    )
+    _seed_video_task(dsn, task_id="video_cap", status="SUBMISSION_UNCERTAIN", seconds=None)
     _seed_pending_operation(
         dsn,
         operation_id="op_open",
