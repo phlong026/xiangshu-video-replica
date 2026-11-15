@@ -6,10 +6,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Annotated, Any, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.analysis import (
@@ -598,6 +598,43 @@ def read_latest_project_analysis(
             detail={"code": "ANALYSIS_NOT_FOUND", "message": "Project has no analysis version."},
         )
     return version_response(row)
+
+
+@router.get("/projects/{project_id}/analysis/versions")
+def list_project_analysis_versions(
+    project_id: str,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> dict[str, object]:
+    """拆解历史：本项目全部拆解版本（新→旧），供复刻页「拆解历史」弹窗。
+
+    只回轻量元数据（版本号/时间/来源资产），不回 payload_json——单个拆解
+    结果可能数百 KB，列表用不到；逐条载入走既有 GET /analysis/{id}。
+    """
+    require_project_access(conn, actor=actor, project_id=project_id, action="analysis.read")
+    rows = conn.execute(
+        """
+        SELECT id, version_number, asset_id, created_at
+        FROM versions
+        WHERE project_id = %s AND kind = %s
+        ORDER BY version_number DESC
+        LIMIT %s
+        """,
+        (project_id, ANALYSIS_KIND, limit),
+    ).fetchall()
+    items = [
+        {
+            "id": str(row["id"]),
+            "version_number": int(row["version_number"]),
+            "asset_id": str(row["asset_id"]),
+            "created_at": row["created_at"].isoformat()
+            if hasattr(row["created_at"], "isoformat")
+            else str(row["created_at"]),
+        }
+        for row in rows
+    ]
+    return {"items": items, "total": len(items)}
 
 
 @router.get("/projects/{project_id}/shot-cards/latest", response_model=VersionResponse | None)

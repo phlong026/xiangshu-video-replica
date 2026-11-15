@@ -3506,6 +3506,19 @@ export async function startVideoAnalysis(
   }
 }
 
+export async function fetchDisplaySetting(key: string): Promise<string> {
+  try {
+    const response = await requestApiJson<{ key: string; value: string }>(
+      `/api/studio/display-settings/${encodeURIComponent(key)}`,
+      "读取展示配置失败",
+    );
+    return response.value;
+  } catch {
+    // 配置读取失败（未部署新表/网络抖动）按未配置处理：按钮走占位弹窗。
+    return "";
+  }
+}
+
 export async function getAnalysisTask(taskId: string): Promise<AnalysisTask> {
   return requestApiJson<AnalysisTask>(
     `/api/analysis-tasks/${encodeURIComponent(taskId)}`,
@@ -3596,6 +3609,34 @@ export async function getLatestProjectAnalysis(
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/analysis/latest`,
     "读取视频拆解失败",
+  );
+}
+
+/** 拆解历史：项目全部拆解版本的轻量列表（新→旧，不含 payload）。 */
+export async function fetchAnalysisVersions(projectId: string): Promise<{
+  items: Array<{
+    id: string;
+    version_number: number;
+    asset_id: string;
+    created_at: string;
+  }>;
+  total: number;
+}> {
+  return requestApiJson(
+    `/api/projects/${encodeURIComponent(projectId)}/analysis/versions`,
+    "读取拆解历史失败",
+  );
+}
+
+/** 按版本号载入任一拆解版本（复刻页「拆解历史」→ 载入此版本）。 */
+export async function fetchAnalysisVersionById(
+  projectId: string,
+  analysisId: string,
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    // 既有按版本读接口（服务端含项目归属校验）。
+    `/api/analysis/${encodeURIComponent(analysisId)}`,
+    "读取拆解版本失败",
   );
 }
 

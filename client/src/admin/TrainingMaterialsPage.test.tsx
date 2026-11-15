@@ -98,11 +98,14 @@ it("培训素材页：渲染清单与上下架状态，下架走确认原因提�
   // 「上架」同时出现在状态徽章与操作按钮上，按多重匹配断言。
   expect(screen.getAllByText("上架").length).toBe(2);
   expect(screen.getByText("已下架")).toBeInTheDocument();
-  expect(screen.getByText("12.00 MB")).toBeInTheDocument();
-  expect(screen.getByText("300.0 KB")).toBeInTheDocument();
-  expect(screen.getByText("7")).toBeInTheDocument();
-  // 标签列与筛选 chips（分页前聚合面）。
-  expect(screen.getByText("#入门教程 #剪映")).toBeInTheDocument();
+  expect(screen.getByText(/12\.00 MB/)).toBeInTheDocument();
+  expect(screen.getByText(/300\.0 KB/)).toBeInTheDocument();
+  // 卡片视图：下载次数与排序并入信息行。
+  expect(screen.getByText(/7 次下载/)).toBeInTheDocument();
+  expect(screen.getByText(/排序 10/)).toBeInTheDocument();
+  // 卡片标签逐枚渲染 + 筛选 chips（分页前聚合面）。
+  expect(screen.getAllByText("#入门教程").length).toBeGreaterThan(1);
+  expect(screen.getAllByText("#剪映").length).toBeGreaterThan(1);
   expect(screen.getByRole("button", { name: "#结算" })).toBeInTheDocument();
 
   // 下架是固定原因的即时开关（与公告置顶同款），直接发 PATCH visible:false。

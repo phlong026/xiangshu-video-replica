@@ -50,6 +50,13 @@ class RuntimeSettingsRequest(BaseModel):
     fair_queue_enabled: bool | None = None
 
 
+class DisplaySettingWriteRequest(BaseModel):
+    # 展示配置自由文本（URL/文案），strip 后 ≤2000 字；写路径走管理端
+    # 鉴权 + 审计，confirm 与全仓管理端写契约一致防 CSRF。
+    value: str
+    confirm: bool = False
+
+
 class BillingSettingsRequest(BaseModel):
     internal_base_unit_price_fen: StrictInt
     oral_unit_price_fen: StrictInt
@@ -297,6 +304,42 @@ def update_billing_settings(
         metadata_json='{"setting":"internal_billing"}',
     )
     return result
+
+
+@router.get("/display/{key}")
+def read_display_setting_admin(
+    key: str,
+    conn: Database,
+    _: TechnicalSettingsAdmin,
+) -> dict[str, str]:
+    from app.display_settings import read_display_setting
+
+    return {"key": key, "value": read_display_setting(conn, key)}
+
+
+@router.put("/display/{key}")
+def update_display_setting_admin(
+    key: str,
+    payload: DisplaySettingWriteRequest,
+    conn: Database,
+    admin: TechnicalSettingsAdmin,
+) -> dict[str, str]:
+    from app.display_settings import PUBLIC_KEYS, save_display_setting, write_display_audit
+
+    if key not in PUBLIC_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DISPLAY_SETTING_KEY_UNSUPPORTED", "message": "不支持的展示配置键。"},
+        )
+    value = payload.value.strip()
+    if len(value) > 2000:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DISPLAY_SETTING_VALUE_TOO_LONG", "message": "配置值超过 2000 字。"},
+        )
+    save_display_setting(conn, key=key, value=value, actor_user_id=admin.id)
+    write_display_audit(conn, key=key, actor_user_id=admin.id)
+    return {"key": key, "value": value}
 
 
 @router.post(

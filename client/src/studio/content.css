@@ -1877,9 +1877,47 @@
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding: 26px 10px 8px;
-  background: linear-gradient(to top, #080909f2, #08090980 55%, transparent);
+  padding: 46px 10px 8px;
+  background: linear-gradient(to top, #080909f2, #080909a6 62%, transparent);
   pointer-events: none;
+}
+
+/* 布局重设计（用户拍板 2026-11-15）：标题/标签浮层压图。标题可点进详情；
+   pointer-events 在 overlay 关闭，单独给标题按钮与标签开回来。 */
+.viral-card-overlay-text {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.viral-card-overlay-text h3 {
+  font-size: var(--font-body);
+  line-height: 1.4;
+  margin: 0;
+}
+
+.viral-card-overlay-text .viral-card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #f2f2ee;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  pointer-events: auto;
+}
+
+.viral-card-overlay-text .viral-card-title:hover {
+  color: #e5aa36;
+}
+
+.viral-card-overlay-text .viral-card-tags {
+  pointer-events: auto;
 }
 
 .viral-card-stats {
@@ -1913,6 +1951,15 @@
 
 .viral-card-overlay .viral-card-stats svg {
   color: #e6e7e2;
+}
+
+.viral-card-overlay-text .viral-card-tags span {
+  background: #080909b3;
+  border-radius: 999px;
+  color: #c9cac2;
+  font-size: 11px;
+  padding: 1px 8px;
+  white-space: nowrap;
 }
 
 .viral-card-overlay-author {
@@ -1981,12 +2028,13 @@
 }
 
 .viral-card-body {
+  /* 文字已全部浮层压图：body 只剩按钮区，高度固定，卡片不再参差。 */
   display: flex;
   flex-direction: column;
   flex: 1;
   min-width: 0;
-  gap: 8px;
-  padding: 10px 12px 12px;
+  gap: 0;
+  padding: 8px 10px 10px;
 }
 
 .viral-card-body h3 {

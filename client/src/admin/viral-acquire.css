@@ -517,19 +517,26 @@
 }
 
 .viral-card-caption {
-  align-items: center;
+  /* 方案C（用户拍板 2026-11-15）：日期行 + 按钮行两行式——日期不再与
+     多按钮挤一行被硬折行；按钮行等宽撑满，多按钮（详情/补转存/上架/删除）
+     也不挤。 */
   color: #77796f;
   display: flex;
+  flex-direction: column;
   font-size: 12px;
-  justify-content: space-between;
+  gap: 6px;
   margin-top: auto;
 }
 
-/* 多按钮（补转存/上架/下架）并排：caption 右侧容器。 */
+.viral-card-caption > span:first-child {
+  white-space: nowrap;
+}
+
+/* 多按钮（补转存/上架/下架）等宽撑满：caption 按钮行。 */
 .viral-acquire-actions {
-  display: flex;
-  flex: none;
+  display: grid;
   gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
 }
 
 .viral-acquire-takedown {

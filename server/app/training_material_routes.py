@@ -321,6 +321,7 @@ def list_training_materials_admin(
     include_hidden: bool = True,
     kind: str = "",
     tag: str = "",
+    search: str = "",
     limit: int = 20,
     offset: int = 0,
 ) -> dict[str, object]:
@@ -338,6 +339,15 @@ def list_training_materials_admin(
     if tag:
         clauses.append("m.tags @> %s::jsonb")
         params.append(json.dumps([tag], ensure_ascii=False))
+    # 标题/说明模糊搜索（与客户端素材库同款口径）。创建者账号可能已被删除，
+    # 这里必须 LEFT JOIN 而非 INNER JOIN：管理端要看到全部素材才能管理，
+    # INNER JOIN 会把孤儿创建者的行静默吞掉，而 count 不 JOIN——这正是
+    # 「还没有培训素材 + 共 4 条」生产矛盾的根源（2026-11-15 实锤）。
+    search_text = search.strip()
+    if search_text:
+        clauses.append("(m.title ILIKE %s OR m.description ILIKE %s)")
+        like = f"%{search_text}%"
+        params.extend([like, like])
     where = " AND ".join(clauses)
     try:
         with pg_transaction() as pg:
@@ -346,7 +356,7 @@ def list_training_materials_admin(
                 f"""
                 SELECT m.*, creator.username AS created_by
                 FROM training_materials m
-                JOIN users creator ON creator.id = m.created_by_user_id
+                LEFT JOIN users creator ON creator.id = m.created_by_user_id
                 WHERE {where}
                 ORDER BY m.sort_order DESC, m.created_at DESC
                 LIMIT %s OFFSET %s
