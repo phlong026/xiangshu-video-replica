@@ -20,7 +20,11 @@ ENV CROSS_PREFIX=x86_64-w64-mingw32-
 
 ARG ZLIB_VERSION=1.3.1
 WORKDIR /tmp/zlib
-RUN curl -fsSL "https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz" \
+# zlib.net 源站多次拉取失败（CI 实锤 2026-11-15），主源改用 GitHub 官方仓库
+# 发行包并保留 fossils 兜底重试；两源都挂才算失败。
+RUN curl -fsSL "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" \
+      | tar -xz --strip-components=1 \
+  || curl -fsSL --retry 3 "https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz" \
       | tar -xz --strip-components=1 && \
     CC="${CROSS_PREFIX}gcc" AR="${CROSS_PREFIX}ar" RANLIB="${CROSS_PREFIX}ranlib" \
       ./configure --static --prefix=/opt/zlib && \

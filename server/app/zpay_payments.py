@@ -14,12 +14,17 @@ from app.wechat_native_client import (
     NATIVE_RECONCILIATION_GRACE_SECONDS,
     WeChatOrderQueryResult,
 )
-from app.zpay import ALLOWED_ZPAY_CHANNELS
+from app.zpay import ALLOWED_ZPAY_CHANNELS, ZPayOrderQueryResult
 
 logger = logging.getLogger(__name__)
 
 ZPAY_NOTIFY_BUSY_TIMEOUT_MS = 1000
 RechargeStatus = Literal["PENDING", "PAID", "FAILED", "CLOSED"]
+
+# ZPay 表单不带 time_expire，二维码本身长期可扫；但放着一笔没人付也没人问的
+# PENDING 订单挂在列表和对账报表里没有任何价值。24 小时后由 sweep 关闭——
+# 关闭只是记账动作，迟到支付仍走 confirm_recharge_payment 的幂等入账。
+ZPAY_ORDER_VALIDITY_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -258,34 +263,52 @@ def count_blocking_native_orders(
 
 
 def list_stale_pending_native_orders(
-    conn: BusinessConnection, *, grace_seconds: int, limit: int
+    conn: BusinessConnection, *, grace_seconds: int, limit: int, offset: int = 0
 ) -> list[str]:
     """Order numbers of the oldest Native orders still PENDING past the grace.
 
     Read-only and lock-free on purpose: the caller must have no transaction open
     that would span the external query-order calls, so a concurrently arriving
-    callback never waits on the sweep's snapshot.
+    callback never waits on the sweep's snapshot. ``offset`` 供 sweep 轮转游标
+    使用：固定取最老一批会让持续查单失败的单饿死后面的掉单。
     """
     rows = conn.execute(
         f"""
         SELECT merchant_order_no FROM recharge_orders
         WHERE {_PENDING_NATIVE_OLDER_THAN}
         ORDER BY created_at
-        LIMIT %s
+        LIMIT %s OFFSET %s
         """,  # noqa: S608
-        (float(grace_seconds), limit),
+        (float(grace_seconds), limit, max(0, offset)),
     ).fetchall()
     return [str(row[0]) for row in rows]
 
 
+def count_stale_pending_zpay_orders(conn: BusinessConnection, *, grace_seconds: int) -> int:
+    """Backlog size of the ZPay reconciliation sweep (rotation page count)."""
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_PENDING_ZPAY_OLDER_THAN}",
+        (float(grace_seconds),),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 @dataclass(frozen=True)
 class NativeReconciliationOutcome:
-    """Counts-only result of one reconciliation sweep pass (the CLI prints these)."""
+    """Counts-only result of one reconciliation sweep pass (the CLI prints these).
+
+    ``unpaid_order_nos`` 带出本轮确认"网关说没付"的单号：过期关闭必须只关
+    这些单。查单失败或没轮到查的单若被关闭，reconcile 只看 PENDING、管理端
+    补单只收 PENDING，那笔可能已付的钱就永远失去补账机会（2026-11-15 审计
+    M3 评审发现）。
+    """
 
     queried: int
     settled: int
     unpaid: int
     skipped: int
+    unpaid_order_nos: tuple[str, ...] = ()
 
 
 def reconcile_stale_pending_native_orders(
@@ -294,6 +317,7 @@ def reconcile_stale_pending_native_orders(
     query_order: Callable[[str], WeChatOrderQueryResult],
     grace_seconds: int = NATIVE_RECONCILIATION_GRACE_SECONDS,
     limit: int = 200,
+    offset: int = 0,
 ) -> NativeReconciliationOutcome:
     """Recover Native orders WeChat has paid but no callback ever confirmed.
 
@@ -311,10 +335,14 @@ def reconcile_stale_pending_native_orders(
     drive the whole pass inside one outer transaction. A query that fails,
     answers for a different order, or is refused by the settlement guards is
     skipped with a warning and retried on the next run; an unpaid answer stays
-    PENDING for the expiry sweep to retire.
+    PENDING and its order number is reported via ``unpaid_order_nos``——过期
+    关闭只允许针对这些"确认没付"的单（见 NativeReconciliationOutcome）。
     """
-    order_nos = list_stale_pending_native_orders(conn, grace_seconds=grace_seconds, limit=limit)
+    order_nos = list_stale_pending_native_orders(
+        conn, grace_seconds=grace_seconds, limit=limit, offset=offset
+    )
     queried = settled = unpaid = skipped = 0
+    unpaid_order_nos: list[str] = []
     for order_no in order_nos:
         try:
             answer = query_order(order_no)
@@ -337,6 +365,7 @@ def reconcile_stale_pending_native_orders(
             continue
         if not answer.paid:
             unpaid += 1
+            unpaid_order_nos.append(order_no)
             continue
         if answer.transaction_id is None or answer.amount_fen is None:
             logger.warning(
@@ -365,8 +394,180 @@ def reconcile_stale_pending_native_orders(
             continue
         settled += 1
     return NativeReconciliationOutcome(
-        queried=queried, settled=settled, unpaid=unpaid, skipped=skipped
+        queried=queried,
+        settled=settled,
+        unpaid=unpaid,
+        skipped=skipped,
+        unpaid_order_nos=tuple(unpaid_order_nos),
     )
+
+
+# ZPay 侧的对账/过期兜底与 WeChat Native 完全同构（2026-11-15 审计 M3：生产
+# 上 systemd maintenance timer 不在 compose 部署里跑，挂单 8 天无人处理；
+# sweep 进 worker 常驻循环后两个 provider 一并覆盖）。计数结构沿用
+# NativeReconciliationOutcome——它只是四个 int。
+_PENDING_ZPAY_OLDER_THAN = (
+    "provider = 'zpay' AND status = 'PENDING' "
+    "AND created_at::timestamptz + make_interval(secs => %s) <= now()"
+)
+
+
+def list_stale_pending_zpay_orders(
+    conn: BusinessConnection, *, grace_seconds: int, limit: int, offset: int = 0
+) -> list[str]:
+    """Order numbers of the oldest ZPay orders still PENDING past the grace.
+
+    Read-only and lock-free on purpose, same as the Native twin: the caller must
+    have no transaction open that would span the external query-order call.
+    ``offset`` 同 Native 版——sweep 轮转游标防饿死。
+    """
+    rows = conn.execute(
+        f"""
+        SELECT merchant_order_no FROM recharge_orders
+        WHERE {_PENDING_ZPAY_OLDER_THAN}
+        ORDER BY created_at
+        LIMIT %s OFFSET %s
+        """,  # noqa: S608
+        (float(grace_seconds), limit, max(0, offset)),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def close_expired_zpay_orders(
+    conn: BusinessConnection,
+    *,
+    limit: int,
+    validity_seconds: int = ZPAY_ORDER_VALIDITY_SECONDS,
+) -> int:
+    """Retire ZPay orders nobody paid within their window; return the count.
+
+    Same semantics as the Native expiry sweep: CLOSED stays settleable for late
+    payments, ``SKIP LOCKED`` leaves orders a callback is currently settling to
+    that callback.
+    """
+    updated = conn.execute(
+        f"""
+        UPDATE recharge_orders SET status = 'CLOSED'
+        WHERE id IN (
+            SELECT id FROM recharge_orders
+            WHERE {_PENDING_ZPAY_OLDER_THAN}
+            ORDER BY created_at
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        """,  # noqa: S608
+        (float(validity_seconds), limit),
+    )
+    return int(updated.rowcount)
+
+
+def reconcile_stale_pending_zpay_orders(
+    conn: BusinessConnection,
+    *,
+    query_order: Callable[[str], ZPayOrderQueryResult],
+    grace_seconds: int,
+    limit: int = 200,
+    allowed_channels: Collection[str] | None = None,
+    offset: int = 0,
+) -> NativeReconciliationOutcome:
+    """Recover ZPay orders the gateway has marked paid but no callback confirmed.
+
+    与 Native 版逐语义对齐：paid 且字段齐全才走 ``confirm_recharge_payment``
+    （ZPAY_SETTLEMENT_SPEC，凭证落 provider_trade_no 列）；查不到/unpaid/
+    守卫拒绝分别计数跳过，绝不代答。连接契约也一致——调用方用 autocommit
+    连接，结算各自成为短事务，外呼期间不持任何锁。
+    """
+    order_nos = list_stale_pending_zpay_orders(
+        conn, grace_seconds=grace_seconds, limit=limit, offset=offset
+    )
+    queried = settled = unpaid = skipped = 0
+    unpaid_order_nos: list[str] = []
+    for order_no in order_nos:
+        try:
+            answer = query_order(order_no)
+        except Exception as exc:  # noqa: BLE001 - one dead order must not strand the rest
+            logger.warning(
+                "zpay reconciliation query for order %s failed (%s); it stays PENDING",
+                order_no,
+                exc,
+            )
+            skipped += 1
+            continue
+        queried += 1
+        if answer.merchant_order_no != order_no:
+            logger.warning(
+                "zpay reconciliation query answered for %s while asking about %s; settling nothing",
+                answer.merchant_order_no,
+                order_no,
+            )
+            skipped += 1
+            continue
+        if not answer.paid:
+            unpaid += 1
+            unpaid_order_nos.append(order_no)
+            continue
+        if answer.provider_trade_no is None or answer.amount_fen is None or answer.channel is None:
+            logger.warning(
+                "zpay reconciliation query for order %s is paid but incomplete; settling nothing",
+                order_no,
+            )
+            skipped += 1
+            continue
+        try:
+            confirm_recharge_payment(
+                conn,
+                merchant_order_no=order_no,
+                provider_trade_no=answer.provider_trade_no,
+                amount_fen=answer.amount_fen,
+                channel=answer.channel,
+                source_digest=answer.response_digest,
+                allowed_channels=allowed_channels,
+                provider_spec=ZPAY_SETTLEMENT_SPEC,
+            )
+        except PaymentConfirmationError as exc:
+            logger.warning(
+                "zpay reconciliation refused to settle order %s: %s; it stays PENDING",
+                order_no,
+                exc.code,
+            )
+            skipped += 1
+            continue
+        settled += 1
+    return NativeReconciliationOutcome(
+        queried=queried,
+        settled=settled,
+        unpaid=unpaid,
+        skipped=skipped,
+        unpaid_order_nos=tuple(unpaid_order_nos),
+    )
+
+
+def close_lapsed_orders_by_no(
+    conn: BusinessConnection,
+    *,
+    provider: str,
+    merchant_order_nos: Collection[str],
+    validity_seconds: int,
+) -> int:
+    """只关闭"本轮确认网关说没付"的过期单；查单失败/没轮到查的一律不动。
+
+    全量 close_expired_* 的危险面：它不区分"查过说没付"和"根本没查过"——
+    后者可能是已付款的掉单，一旦 CLOSED，reconcile 与管理端补单都不再受理。
+    sweep 的关闭阶段必须走这里（CLI 的每日 close 保留原样，那是既有部署契约）。
+    """
+    order_nos = list(merchant_order_nos)
+    if not order_nos:
+        return 0
+    updated = conn.execute(
+        """
+        UPDATE recharge_orders SET status = 'CLOSED'
+        WHERE provider = %s AND status = 'PENDING'
+          AND merchant_order_no = ANY(%s)
+          AND created_at::timestamptz + make_interval(secs => %s) <= now()
+        """,
+        (provider, order_nos, float(validity_seconds)),
+    )
+    return int(updated.rowcount)
 
 
 def confirm_recharge_payment(

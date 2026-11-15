@@ -593,7 +593,7 @@ export function BusinessDashboard({
                 </table>
               </div>
               <p className="admin-hint">
-                月份为上海自然月；证据缺失的月份保留待核对，不当作零。
+                月份为北京时间自然月；证据缺失的月份保留待核对，不当作零。
               </p>
             </section>
           )}
@@ -619,7 +619,7 @@ export function BusinessDashboard({
                     <td>
                       {formatFen(module.cost_fen)}
                       {module.unknown_cost_count > 0 && (
-                        <>（含 {module.unknown_cost_count} 项待核对）</>
+                        <>（另有 {module.unknown_cost_count} 项待核对）</>
                       )}
                     </td>
                     <td>

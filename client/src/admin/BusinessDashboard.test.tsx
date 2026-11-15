@@ -106,7 +106,7 @@ describe("BusinessDashboard", () => {
     expect(
       within(modules).getByRole("cell", { name: "视频生成 · 768P" }),
     ).toBeInTheDocument();
-    expect(within(modules).getAllByText(/含 1 项待核对/).length).toBe(2);
+    expect(within(modules).getAllByText(/另有 1 项待核对/).length).toBe(2);
     const top = screen.getByRole("table", { name: "Top 10 客户" });
     expect(within(top).getByText("客户一公司")).toBeInTheDocument();
   });

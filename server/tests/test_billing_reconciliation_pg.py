@@ -428,3 +428,90 @@ def test_next_step_copy_never_promises_refund(reconcile_db: str) -> None:
     assert "退分" in next_step_for("ESCALATED", "ORPHAN_SOURCE_MISSING")
     assert "自动退" not in next_step_for("ESCALATED", "UNKNOWN_TIMEOUT")
     assert "人工" in next_step_for("ESCALATED", "UNKNOWN_TIMEOUT")
+
+
+def test_escalated_item_is_not_duplicated_by_rescan(reconcile_db: str) -> None:
+    """升级后的条目必须留在冲突目标里：重扫只刷新证据，绝不另建新行。
+
+    生产事故（2026-09-30 起）：旧实现的部分唯一索引只护 OPEN，条目升级成
+    ESCALATED 后即脱离保护，扫描每轮为同一卡单重建新行，新行继承计费行的
+    created_at 后首轮重查即再升级，46 天放大出两万余条。回归锁：升级后再扫
+    依然只有一条，且状态保持 ESCALATED（不复活成 OPEN 重走升级计时）。
+    """
+    dsn = reconcile_db
+    _reset(dsn)
+    _seed_pending_operation(
+        dsn,
+        operation_id="op_dup",
+        service="video_768p",
+        source_id="video_dup",
+        age_hours=25.0,
+    )
+    _seed_video_task(dsn, task_id="video_dup", status="SUBMISSION_UNCERTAIN", seconds=None)
+    with pg_transaction() as raw:
+        enqueue_stuck_billing_operations(BusinessConnection.postgres(raw))
+    with pg_transaction() as raw:
+        stats = process_reconciliation_items(BusinessConnection.postgres(raw))
+    assert stats["escalated"] == 1
+    rows = _queue_rows(dsn)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "ESCALATED"
+
+    # 升级后重扫：命中 ESCALATED 冲突目标，原地更新，不新建、不重置状态。
+    with pg_transaction() as raw:
+        enqueued = enqueue_stuck_billing_operations(BusinessConnection.postgres(raw))
+    assert enqueued == 0
+    rows = _queue_rows(dsn)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "ESCALATED"
+    assert rows[0]["reason"] == "UNKNOWN_TIMEOUT"
+
+    # 再走一轮重查也不产生第二条。
+    with pg_transaction() as raw:
+        process_reconciliation_items(BusinessConnection.postgres(raw))
+    assert len(_queue_rows(dsn)) == 1
+
+
+def test_recheck_cap_stops_rechecking(reconcile_db: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """熔断只限 ESCALATED：到限的升级条目退出重查集；OPEN 条目不受影响。"""
+    dsn = reconcile_db
+    _reset(dsn)
+    # 升级条目（25h 前的未知结果）+ 活跃 OPEN 条目（2h 前的成功缺证据）。
+    _seed_pending_operation(
+        dsn,
+        operation_id="op_cap",
+        service="video_768p",
+        source_id="video_cap",
+        age_hours=25.0,
+    )
+    _seed_video_task(dsn, task_id="video_cap", status="SUBMISSION_UNCERTAIN", seconds=None)
+    _seed_pending_operation(
+        dsn,
+        operation_id="op_open",
+        service="video_768p",
+        source_id="video_open",
+        age_hours=2.0,
+    )
+    _seed_video_task(dsn, task_id="video_open", status="SUCCEEDED", seconds=None)
+    with pg_transaction() as raw:
+        enqueue_stuck_billing_operations(BusinessConnection.postgres(raw))
+    monkeypatch.setenv("VIDEO_REPLICA_BILLING_RECHECK_MAX_COUNT", "1")
+    with pg_transaction() as raw:
+        first = process_reconciliation_items(BusinessConnection.postgres(raw))
+    assert first["escalated"] == 1
+    assert first["rechecked"] == 1
+    rows = {str(r["source_id"]): r for r in _queue_rows(dsn)}
+    assert rows["video_cap"]["state"] == "ESCALATED"
+    assert int(rows["video_cap"]["check_count"]) == 1
+    assert rows["video_open"]["state"] == "OPEN"
+    assert int(rows["video_open"]["check_count"]) == 1
+
+    # ESCALATED 已到上限 1：第二轮不再选中；OPEN 不看上限，照常重查。
+    with pg_transaction() as raw:
+        second = process_reconciliation_items(BusinessConnection.postgres(raw))
+    assert second["rechecked"] == 1
+    assert second["resolved"] == 0
+    assert second["escalated"] == 0
+    rows = {str(r["source_id"]): r for r in _queue_rows(dsn)}
+    assert int(rows["video_cap"]["check_count"]) == 1
+    assert int(rows["video_open"]["check_count"]) == 2

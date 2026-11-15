@@ -2299,3 +2299,107 @@ def test_reconcile_releases_stale_search_operations(client, route_state):
                 "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s", (uid,)
             ).fetchone()
         ) == (8, 2)
+
+
+def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, route_state, capsys):
+    """M2（2026-11-15 审计修复）：目录配好单价后，历史 UNKNOWN 调用可批量补录。
+
+    - dry-run（默认）只报规模，不写任何行；
+    - --apply 按 usage × unit_cost_fen 补记 billing_evidence + 审计，与人工
+      单条补录同表同审计动作；
+    - usage 为空的调用只计数不代答；已有成本的调用天然幂等跳过。
+    """
+    from scripts.backfill_operation_costs import main as backfill_main
+
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        # 质检目录先不配单价：begin_attempt 快照到 NULL，complete_attempt 落 UNKNOWN。
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('first_frame',true,5,2),('quality_inspection',false,NULL,NULL)"
+        )
+        op = accept_operation(
+            conn, user_id=uid, service="first_frame", source_id="bfill-1", units=1
+        )
+        record_attempt(conn, operation_id=op, attempt_key="primary", usage=1)
+        insp_unknown = record_attempt(
+            conn,
+            operation_id=op,
+            attempt_key="insp-unknown",
+            usage=1,
+            service="quality_inspection",
+        )
+        # usage 为空的 UNKNOWN 调用：无法推算，脚本只报告。
+        insp_unmetered = begin_attempt(
+            conn, operation_id=op, attempt_key="insp-null", service="quality_inspection"
+        )
+        complete_attempt(conn, attempt_id=insp_unmetered, usage=None)
+        finish_operation(conn, operation_id=op, units=1, succeeded=True)
+        # 配单价后的新调用走运行时快照路径，成本已知，脚本不得碰它。
+        raw.execute("UPDATE billing_tariffs SET unit_cost_fen=7 WHERE service='quality_inspection'")
+        op2 = accept_operation(
+            conn, user_id=uid, service="first_frame", source_id="bfill-2", units=1
+        )
+        record_attempt(
+            conn,
+            operation_id=op2,
+            attempt_key="insp-known",
+            usage=1,
+            service="quality_inspection",
+        )
+        finish_operation(conn, operation_id=op2, units=1, succeeded=True)
+        # 在途请求：质检 attempt 挂在未完成的 operation 上，统计应单独计数。
+        op3 = accept_operation(
+            conn, user_id=uid, service="first_frame", source_id="bfill-3", units=1
+        )
+        record_attempt(
+            conn,
+            operation_id=op3,
+            attempt_key="insp-pending",
+            usage=1,
+            service="quality_inspection",
+        )
+
+    base_args = [
+        "--service",
+        "quality_inspection",
+        "--actor-user-id",
+        uid,
+        "--reason",
+        "质检单价已配置为 7 分/次，按目录批量补录历史调用",
+        "--database-url",
+        route_state,
+    ]
+
+    # dry-run（默认）：零写入；统计里在途请求单独计数，不混进可补桶。
+    assert backfill_main(base_args) == 0
+    captured = capsys.readouterr()
+    assert "backfillable=1" in captured.out
+    assert "unmetered=1" in captured.out
+    assert "pending=1" in captured.out
+    assert "total_finished=3" in captured.out
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0
+
+    # --apply：恰好补 1 条（usage=NULL 的跳过，已知成本的不动），金额 = 1×7。
+    assert backfill_main([*base_args, "--apply"]) == 0
+    with psycopg.connect(route_state) as raw:
+        rows = raw.execute("SELECT attempt_id, cost_fen FROM billing_evidence").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == insp_unknown
+        assert rows[0][1] == Decimal(7)
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM audit_logs WHERE "
+                "action='billing.evidence.append' AND "
+                "metadata_json::text LIKE '%backfill_operation_costs%'"
+            ).fetchone()[0]
+            == 1
+        )
+
+    # 幂等重跑：没有可补的行。
+    assert backfill_main([*base_args, "--apply"]) == 0
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 1

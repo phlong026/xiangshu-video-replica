@@ -395,4 +395,8 @@
   color: inherit;
   cursor: pointer;
   text-decoration: underline dotted;
+  flex: none;
+}
+.admin-recon-line button small {
+  white-space: nowrap;
 }

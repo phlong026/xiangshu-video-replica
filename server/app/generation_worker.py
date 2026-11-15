@@ -1288,6 +1288,146 @@ def _reconcile_due() -> bool:
     return True
 
 
+# 待支付充值订单兜底 sweep（审计修复 M3）。与对账分开节流：对账是 30 秒级的
+# 纯 DB 兜底，这里要外呼支付网关查单，默认 10 分钟一轮足够（回调正常到达时
+# 根本轮不到 sweep 收口）。
+_RECHARGE_SWEEP_INTERVAL_ENV = "VIDEO_REPLICA_RECHARGE_SWEEP_INTERVAL_SECONDS"
+_DEFAULT_RECHARGE_SWEEP_INTERVAL_SECONDS = 600.0
+# 会话级 advisory lock（autocommit 连接上 try/unlock）：sweep 内部外呼网关，
+# 事务级锁会跨外呼持锁，绝不可用。沿用 hashtext('域:用途') 约定。
+_RECHARGE_SWEEP_LOCK_NAMESPACE = "recharge:orders:sweep"
+
+_recharge_sweep_deadline = 0.0
+
+
+def _recharge_sweep_interval_seconds() -> float:
+    raw = os.environ.get(_RECHARGE_SWEEP_INTERVAL_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_RECHARGE_SWEEP_INTERVAL_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r, falling back to %.0fs",
+            _RECHARGE_SWEEP_INTERVAL_ENV,
+            raw,
+            _DEFAULT_RECHARGE_SWEEP_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_RECHARGE_SWEEP_INTERVAL_SECONDS
+
+
+def _recharge_sweep_due() -> bool:
+    global _recharge_sweep_deadline
+    now = time.monotonic()
+    if now < _recharge_sweep_deadline:
+        return False
+    _recharge_sweep_deadline = now + _recharge_sweep_interval_seconds()
+    return True
+
+
+def _run_recharge_order_sweep_once() -> None:
+    """跑一轮待支付订单兜底（查单补账 + 过期关闭），失败只记日志不打断任务。
+
+    自管 autocommit 连接：结算/关闭各自成为短事务，网关查单期间不持任何
+    事务；会话级 advisory lock 保证同一时刻全集群只有一个 worker 在跑。
+    通道闭包都走 provider 抽象（query_order 在 provider 内部做专有配置的
+    适配）——直接构造底层 client 会拿到通用 MerchantConfig/DeploymentConfig
+    而缺 pid/key/query_url，查单必然失败（评审 P1）。provider 注册发生在
+    模块导入副作用里，独立进程必须显式导入。
+    """
+    import psycopg
+
+    import app.zpay_provider  # noqa: F401 - 注册 provider（独立进程无路由导入）
+    from app.payment_provider import get_payment_provider
+    from app.recharge_order_sweep import sweep_pending_recharge_orders
+    from app.settings import SettingsRepository
+    from app.wechat_native_client import (
+        WeChatNativeClient,
+        merchant_config_from_settings,
+    )
+    from app.zpay import ZPayOrderQueryResult
+
+    try:
+        config = resolve_database_config()
+        if config.mode is not DatabaseMode.POSTGRESQL or not config.dsn:
+            return
+        with psycopg.connect(config.dsn, autocommit=True) as raw:
+            lock_row = raw.execute(
+                "SELECT pg_try_advisory_lock(hashtext(%s))",
+                (_RECHARGE_SWEEP_LOCK_NAMESPACE,),
+            ).fetchone()
+            if lock_row is None or not lock_row[0]:
+                return
+            try:
+                conn = BusinessConnection.postgres(raw)
+                # 两个通道的查询闭包各自构建；配置缺失的通道传 None 整段跳过，
+                # 不让一个未配置的通道拖垮另一个的正常兜底。
+                wechat_query = None
+                try:
+                    wechat_merchant = merchant_config_from_settings(
+                        SettingsRepository(conn).load_wechat_native_config()
+                    )
+                    wechat_client = WeChatNativeClient()
+                    wechat_query = lambda order_no: wechat_client.query_order(  # noqa: E731
+                        merchant=wechat_merchant, out_trade_no=order_no
+                    )
+                except ValueError:
+                    logger.info("recharge sweep: wechat_native channel not configured")
+                zpay_query = None
+                zpay_allowed_channels = None
+                try:
+                    zpay_provider = get_payment_provider("zpay")
+                    zpay_merchant = zpay_provider.load_merchant_config(conn)
+                    zpay_deployment = zpay_provider.load_deployment_config()
+                    zpay_allowed_channels = zpay_merchant.allowed_channels
+
+                    def zpay_query(order_no: str) -> ZPayOrderQueryResult:
+                        # provider 返回通用 OrderQueryResult；这里显式适配成
+                        # sweep 契约的专有应答类（字段逐一搬运，类型全程具体）。
+                        generic = zpay_provider.query_order(
+                            merchant=zpay_merchant,
+                            deployment=zpay_deployment,
+                            merchant_order_no=order_no,
+                        )
+                        return ZPayOrderQueryResult(
+                            paid=generic.paid,
+                            merchant_order_no=generic.merchant_order_no,
+                            provider_trade_no=generic.provider_trade_no,
+                            amount_fen=generic.amount_fen,
+                            channel=generic.channel,
+                            response_digest=generic.response_digest,
+                        )
+
+                except ValueError:
+                    logger.info("recharge sweep: zpay channel not configured")
+                outcome = sweep_pending_recharge_orders(
+                    conn,
+                    wechat_query_order=wechat_query,
+                    zpay_query_order=zpay_query,
+                    zpay_allowed_channels=tuple(zpay_allowed_channels)
+                    if zpay_allowed_channels
+                    else None,
+                    # 轮转游标缺省随机页（sweep 内部生成）：查单失败的单不会
+                    # 饿死后面的掉单，且不与调度节奏走样。
+                )
+            finally:
+                raw.execute(
+                    "SELECT pg_advisory_unlock(hashtext(%s))",
+                    (_RECHARGE_SWEEP_LOCK_NAMESPACE,),
+                )
+    except Exception as exc:  # noqa: BLE001 - 兜底维护失败绝不打断任务循环
+        logger.warning("recharge order sweep failed: %s", type(exc).__name__)
+        return
+    logger.info(
+        "recharge order sweep: %d queried, %d settled, %d unpaid, %d skipped, %d closed",
+        outcome.queried,
+        outcome.settled,
+        outcome.unpaid,
+        outcome.skipped,
+        outcome.closed,
+    )
+
+
 def _worker_concurrency(cli_value: int | None = None) -> int:
     """单进程可同时推进的任务数：CLI 优先，其次环境变量，默认 1（串行）。"""
     if cli_value is not None:
@@ -1380,6 +1520,12 @@ def run_pg_worker_once(
                         max_reopens=params["max_reopens"],
                     )
         processed_round = False
+        # 待支付充值订单兜底（2026-11-15 审计 M3）：查单补账 + 过期关闭。
+        # compose 部署没有 systemd maintenance timer，CLI 版 sweep 在生产从未
+        # 跑过，挂单 8 天无人处理；这里挂进常驻循环，按自己的周期节流。外呼
+        # 支付网关期间不持事务，函数内部自管 autocommit 连接与会话级锁。
+        if _recharge_sweep_due():
+            _run_recharge_order_sweep_once()
         from app.prompt_optimizer import run_prompt_task
 
         if run_prompt_task(_pg_audio_connection, worker_id=worker_id, storage=storage):
