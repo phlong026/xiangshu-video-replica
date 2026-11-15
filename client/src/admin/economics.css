@@ -829,3 +829,16 @@
 .admin-shell--control .admin-workspace .cost-queues button :is(span, small) {
   color: #d5c7a4;
 }
+
+/* 卡单队列行内收口表单（2026-11-15 审计补闭环）：
+   备注输入与确认/取消按钮在一格里纵向排布，不把整行撑爆。 */
+.admin-resolve-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.admin-resolve-form input {
+  width: 100%;
+}

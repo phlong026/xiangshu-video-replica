@@ -10,9 +10,10 @@ GET 出队给运营看：等待时长用 created_at 原文交前端换算，原�
 from __future__ import annotations
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from app.admin_auth_routes import AdminReader, AdminWriter, admin_to_current_user
+from app.admin_write_contract import AdminWriteContract
 from app.billing_reconciliation import (
     enqueue_stuck_billing_operations,
     list_reconciliation_items,
@@ -26,9 +27,10 @@ from app.permissions import write_audit
 router = APIRouter(prefix="/api/control/billing-reconciliation", tags=["admin-billing"])
 
 
-class ReconciliationResolveRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ReconciliationResolveRequest(AdminWriteContract):
+    # 与其他管理端写操作同一份契约（confirm + reason + Idempotency-Key 信封）。
+    # 2026-11-15 审计发现队列页此前根本没有收口入口，而独立 extra="forbid"
+    # 模型还会让走标准 adminWrite 信封的调用 422——闭环从两头断死。
     note: str = Field(min_length=1, max_length=2000)
 
 

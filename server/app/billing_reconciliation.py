@@ -52,6 +52,11 @@ _REASON_LABELS = {
 _STUCK_MINUTES_ENV = "VIDEO_REPLICA_BILLING_STUCK_AFTER_MINUTES"
 _RECHECK_MINUTES_ENV = "VIDEO_REPLICA_BILLING_RECHECK_AFTER_MINUTES"
 _ESCALATE_HOURS_ENV = "VIDEO_REPLICA_BILLING_ESCALATE_AFTER_HOURS"
+# 重查熔断：ESCALATED 条目被重查这么多次后就不再自动重查（默认 96 次 ≈ 30 分钟
+# 间隔下两昼夜）。升级后条目的唯一自动出路是"底层计费已终态时被动对齐"，长期
+# 无证据的卡单继续每半小时烧一轮查询没有意义；人工收口与专项对账不受影响。
+_RECHECK_MAX_COUNT_ENV = "VIDEO_REPLICA_BILLING_RECHECK_MAX_COUNT"
+_RECHECK_MAX_COUNT_DEFAULT = 96
 
 
 def _env_number(name: str, default: float) -> float:
@@ -76,6 +81,10 @@ def _recheck_after_minutes() -> float:
 
 def _escalate_after_hours() -> float:
     return _env_number(_ESCALATE_HOURS_ENV, 24.0)
+
+
+def _recheck_max_count() -> int:
+    return int(max(1, _env_number(_RECHECK_MAX_COUNT_ENV, _RECHECK_MAX_COUNT_DEFAULT)))
 
 
 def next_step_for(state: str, reason: str) -> str:
@@ -149,9 +158,13 @@ def _classify(
 def enqueue_stuck_billing_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
     """把卡了超过时限的 PENDING 计费收进核对队列，返回新建条数。
 
-    已在队列里的条目只刷新原因与证据快照（部分唯一索引兜底，不会重复建）；
-    队列已收口的轮次若再出现新的 PENDING（新一轮预留），部分唯一索引不约束
-    已 RESOLVED 行，会另建新条目。供应商请求号不进扫描查询——task_diagnostic_refs
+    已在队列里的条目只刷新原因与证据快照：冲突目标覆盖 OPEN 与 ESCALATED
+    两种活跃状态（20261115T1900 迁移把部分唯一索引从只护 OPEN 扩到全部活跃
+    态）——若只护 OPEN，条目升级后即脱离索引保护，下一轮扫描会为同一卡单
+    无限重建新行（新行继承计费行的 created_at，首轮重查即再升级，循环自我
+    放大；生产曾因此把一个卡单放大成两万余条）。升级态的行只更新证据快照，
+    不把状态重置回 OPEN。队列已收口的轮次若再出现新的 PENDING（新一轮预留），
+    键上已无活跃行，会另建新条目。供应商请求号不进扫描查询——task_diagnostic_refs
     的主键是 (task_type, task_id)，按 task_id 单列捞会让卡单存续期内的每轮
     扫描都退化为全表扫；这里只对已判定的卡单行（每轮最多 limit 条）按
     (task_type, task_id) 做主键点查。
@@ -214,7 +227,8 @@ def enqueue_stuck_billing_operations(conn: BusinessConnection, *, limit: int = 1
                 provider_receipt_id, state, created_at, updated_at
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN',
                       %s, now())
-            ON CONFLICT (service, source_id, billing_round) WHERE state = 'OPEN'
+            ON CONFLICT (service, source_id, billing_round)
+                WHERE state IN ('OPEN', 'ESCALATED')
             DO UPDATE SET reason = EXCLUDED.reason,
                           detail_json = EXCLUDED.detail_json,
                           updated_at = now()
@@ -274,7 +288,10 @@ def process_reconciliation_items(conn: BusinessConnection, *, limit: int = 50) -
     """重查到期条目：证据齐了自动收口，超时升级人工，终态只写一次。
 
     升级只改变队列状态（提醒人工接手），绝不代替人做退分或调账；ESCALATED
-    条目停止自动收口，只在底层计费已终态时被动对齐（迟到回调场景）。
+    条目停止自动收口，只在底层计费已终态时被动对齐（迟到回调场景）。重查
+    次数达到熔断上限（VIDEO_REPLICA_BILLING_RECHECK_MAX_COUNT，默认 96）的
+    条目不再进入重查集——继续烧查询不会产生新信息，条目保持 ESCALATED 等
+    人工收口。
     """
     rows = conn.execute(
         """
@@ -282,13 +299,14 @@ def process_reconciliation_items(conn: BusinessConnection, *, limit: int = 50) -
                created_at
         FROM billing_reconciliation_items
         WHERE state IN ('OPEN', 'ESCALATED')
+          AND check_count < %s
           AND (last_checked_at IS NULL
                OR last_checked_at < now() - (%s * interval '1 minute'))
         ORDER BY created_at, id
         LIMIT %s
         FOR UPDATE SKIP LOCKED
         """,
-        (_recheck_after_minutes(), limit),
+        (_recheck_max_count(), _recheck_after_minutes(), limit),
     ).fetchall()
     stats = {"resolved": 0, "escalated": 0, "rechecked": 0}
     for item in rows:

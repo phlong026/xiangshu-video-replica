@@ -107,9 +107,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261016T1000_replica_prompt_tasks（长视频复刻提示词任务族）追加其上；
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
-# 列）追加其上；20261113T1000_replica_pipeline_submit_intents（M6b 发送意图
+# 列）追加其上；20261115T1900_billing_reconciliation_active_dedupe（M6b 发送意图
 # 表）再追加，故链尾为该值。
-HEAD_REVISION = "20261113T1000_replica_pipeline_submit_intents"
+HEAD_REVISION = "20261115T1900_billing_reconciliation_active_dedupe"
 
 
 @pytest.mark.pg
@@ -439,13 +439,18 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # unique_constraints 各 +1、columns +6、check_constraints +1、
 # timestamptz_columns +1（created_at）；digest 在空库→新 head 的 PG16 探针
 # 库（m6b_schema_probe）重算。
+# - 本分支 20261115T1900_billing_reconciliation_active_dedupe（卡单队列去重，
+#   审计修复 2026-11-15）：billing_reconciliation_items 上新增一条活跃态部分
+#   唯一索引（(service, source_id, billing_round) WHERE state IN
+#   ('OPEN','ESCALATED')）——partial_indexes +1=49；不加表不加列不加约束，
+#   digest 由 --print-schema 在全新迁移到 head 的 PG16 库上重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "check_constraints": 409,
     "columns": 1581,
     "foreign_keys": 221,
     "identity_columns": 0,
     "jsonb_columns": 16,
-    "partial_indexes": 48,
+    "partial_indexes": 49,
     "primary_keys": 139,
     "sequences": 8,
     "tables": 139,
@@ -715,7 +720,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
 # 2026-11-13 M6b 发送意图表追加后，在空库→新 head 的 PG16 探针库再重算。
-HEAD_SCHEMA_DIGEST = "621c790357b434a1e94a7dee59e4c6dc394fd9ebf705788284023a693d4baa16"
+HEAD_SCHEMA_DIGEST = "aeb1f9f4227baba3197d8802c82532b71c679bc1027fa9c0d9428099718103b8"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
