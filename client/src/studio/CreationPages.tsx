@@ -14,6 +14,7 @@ import {
   capturePromptSession,
   customerVisibleErrorMessage,
   DIRECT_RESULT_RETENTION_HINT,
+  deleteStudioSavedScript,
   fetchViralCopyExtractions,
   type GenerationRatio,
   type GenerationVersionState,
@@ -61,6 +62,7 @@ import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { useCopyExtractionProgress } from "./copyExtractionProgress";
 import {
+  fallbackCopyTitle,
   loadDraftMaterials,
   loadSavedScriptList,
   readAudioDuration,
@@ -178,6 +180,13 @@ const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
 // 否则超长转写稿只会在生成按钮旁看到一个没有上下文的「不能超过 20000 字符」。
 const COPY_SOURCE_TEXT_LIMIT = 20000;
 
+// 参考生视频提示词教程（用户拍板 2026-11-15：先飞书文档外链，运营改内容
+// 不发版；内容稳定后再考虑站内页）。TODO(上线前): 把下面的占位地址换成
+// 正式飞书分享链接，并把分享权限设为「互联网上获得链接的人可阅读」，
+// 否则客户打开会是飞书登录墙。
+const PROMPT_TUTORIAL_URL =
+  "https://feishu.cn/docx/TODO-replace-with-official-tutorial-link";
+
 // 清空页面与云端取消是两件事；只有服务端明确返回取消终态才可告知已取消。
 async function cancelPreviousAnalysisTask(taskId: string): Promise<string> {
   try {
@@ -226,6 +235,24 @@ function nearestSourceRatio(aspect: number): GenerationRatio {
     }
   }
   return best;
+}
+
+/** 提取记录元信息里展示的视频 ID：平台 ID 常是 19 位长数字，全量展示会把
+ * 元信息行顶爆，中间省略成 `770610…9675` 只保留可辨认的头尾。 */
+function shortVideoId(videoId: string): string {
+  return videoId.length > 14
+    ? `${videoId.slice(0, 6)}…${videoId.slice(-4)}`
+    : videoId;
+}
+
+/** 提取记录标题：平台视频标题为空（缓存未带标题）时退回正文首行，
+ * 再退回「平台 · 短 ID」——不再把裸长数字当标题展示。 */
+function extractionDisplayTitle(record: ViralCopyExtractionRecord): string {
+  if (record.title) return record.title;
+  return fallbackCopyTitle(
+    record.text,
+    `${record.platform} · ${shortVideoId(record.videoId)}`,
+  );
 }
 
 function findSource(
@@ -459,6 +486,10 @@ export function CopyPage() {
   const [candidate, setCandidate] = useState(state.draft.rewriteCandidate);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState("");
+  // 「打开查看」弹窗：列表里只露预览，全文进弹层（用户要求两列表都可查看）。
+  const [viewingScript, setViewingScript] = useState<StudioScript | null>(null);
+  const [viewingExtraction, setViewingExtraction] =
+    useState<ViralCopyExtractionRecord | null>(null);
   const savedOperation = useRef(0);
   const current = useRef({ state, patchDraft, patchState, notify });
   current.current = { state, patchDraft, patchState, notify };
@@ -910,6 +941,22 @@ export function CopyPage() {
     });
     setTab("rewrite");
   };
+  const removeSavedScript = async (script: StudioScript) => {
+    if (readOnly) return;
+    // 删除不可逆且不进回收站，与内容发布页同一确认口径（window.confirm）。
+    const title =
+      script.title && script.title !== "未命名文案"
+        ? script.title
+        : fallbackCopyTitle(script.text);
+    if (!window.confirm(`删除「${title}」？删除后不可恢复。`)) return;
+    try {
+      await deleteStudioSavedScript(script.id);
+      notify("已删除该文案。");
+      void refreshSaved();
+    } catch (cause: unknown) {
+      notify(customerVisibleErrorMessage(cause, "删除失败，请重试。"));
+    }
+  };
   const source = findSource(
     data.assets,
     data.videos,
@@ -986,32 +1033,46 @@ export function CopyPage() {
           ) : extractions?.length ? (
             extractions.map((record) => (
               <div
-                className="creation-extraction-row"
+                className="creation-extraction-card"
                 key={`${record.platform}:${record.videoId}`}
               >
-                <div className="creation-extraction-row-head">
-                  <strong>
-                    {record.title || `${record.platform} · ${record.videoId}`}
+                <div className="creation-extraction-card__head">
+                  <span className="creation-extraction-card__platform">
+                    {record.platform}
+                  </span>
+                  <strong className="creation-extraction-card__title">
+                    {extractionDisplayTitle(record)}
                   </strong>
-                  <small>
-                    {record.lastExtractedAt.slice(0, 16).replace("T", " ")}
-                    {record.times > 1 ? ` · 提取 ${record.times} 次` : ""}
-                  </small>
                 </div>
-                <p>
+                <p className="creation-extraction-card__preview">
                   {record.text
-                    ? record.text.length > 120
-                      ? `${record.text.slice(0, 120)}…`
+                    ? record.text.length > 200
+                      ? `${record.text.slice(0, 200)}…`
                       : record.text
                     : "暂无正文，可重新提取。"}
                 </p>
-                <Button
-                  variant="outline"
-                  disabled={readOnly || !record.text}
-                  onClick={() => reuseExtraction(record)}
-                >
-                  复用到工坊
-                </Button>
+                <div className="creation-extraction-card__meta">
+                  <small>
+                    {record.lastExtractedAt.slice(0, 16).replace("T", " ")}
+                    {record.times > 1 ? ` · 提取 ${record.times} 次` : ""}
+                    {` · ${shortVideoId(record.videoId)}`}
+                  </small>
+                  <span className="creation-script-card__meta-actions">
+                    <button
+                      onClick={() => setViewingExtraction(record)}
+                      type="button"
+                    >
+                      查看
+                    </button>
+                    <Button
+                      variant="outline"
+                      disabled={readOnly || !record.text}
+                      onClick={() => reuseExtraction(record)}
+                    >
+                      复用到工坊
+                    </Button>
+                  </span>
+                </div>
               </div>
             ))
           ) : !extractionsLoading ? (
@@ -1043,18 +1104,70 @@ export function CopyPage() {
               }
             />
           ) : saved.length ? (
-            saved.map((script) => (
-              <button
-                className="creation-script-row"
-                disabled={readOnly}
-                key={script.id}
-                onClick={() => applySavedScript(script)}
-                type="button"
-              >
-                <span>{script.title}</span>
-                <small>{script.confirmed ? "已确认" : "草稿"}</small>
-              </button>
-            ))
+            saved.map((script) => {
+              // 老数据可能存了「未命名文案」或空标题：展示层用正文首行兜底，
+              // 不再让列表被无意义的重复标题填满。
+              const displayTitle =
+                script.title && script.title !== "未命名文案"
+                  ? script.title
+                  : fallbackCopyTitle(script.text);
+              const metaParts = [
+                script.updatedAt
+                  ? script.updatedAt.slice(0, 16).replace("T", " ")
+                  : "",
+                `${script.text.length} 字`,
+              ].filter(Boolean);
+              return (
+                <div className="creation-script-card" key={script.id}>
+                  <button
+                    className="creation-script-card__main"
+                    disabled={readOnly}
+                    onClick={() => applySavedScript(script)}
+                    type="button"
+                  >
+                    <span className="creation-script-card__head">
+                      <span className="creation-script-card__title">
+                        {displayTitle}
+                      </span>
+                      <span
+                        className={`creation-script-card__badge${
+                          script.confirmed
+                            ? " creation-script-card__badge--confirmed"
+                            : ""
+                        }`}
+                      >
+                        {script.confirmed ? "已确认" : "草稿"}
+                      </span>
+                    </span>
+                    {script.text ? (
+                      <span className="creation-script-card__preview">
+                        {script.text}
+                      </span>
+                    ) : null}
+                  </button>
+                  <div className="creation-script-card__meta">
+                    <small>{metaParts.join(" · ")}</small>
+                    <span className="creation-script-card__meta-actions">
+                      <button
+                        onClick={() => setViewingScript(script)}
+                        type="button"
+                      >
+                        查看
+                      </button>
+                      <button
+                        aria-label={`删除${displayTitle}`}
+                        className="creation-script-card__delete"
+                        disabled={readOnly}
+                        type="button"
+                        onClick={() => void removeSavedScript(script)}
+                      >
+                        删除
+                      </button>
+                    </span>
+                  </div>
+                </div>
+              );
+            })
           ) : !savedLoading ? (
             <Empty
               title="还没有保存的文案"
@@ -1442,6 +1555,83 @@ export function CopyPage() {
           ) : null}
         </>
       )}
+      {viewingScript ? (
+        <StudioDialog
+          title={viewingScript.title || "查看文案"}
+          onClose={() => setViewingScript(null)}
+        >
+          <div className="creation-copy-viewer">
+            <p className="creation-copy-viewer__meta">
+              {viewingScript.updatedAt
+                ? `${viewingScript.updatedAt.slice(0, 16).replace("T", " ")} · `
+                : ""}
+              {`${viewingScript.text.length} 字 · `}
+              {viewingScript.confirmed ? "已确认" : "草稿"}
+            </p>
+            <pre className="creation-copy-viewer__text">
+              {viewingScript.text}
+            </pre>
+            <div className="creation-copy-viewer__actions">
+              <Button
+                variant="primary"
+                disabled={readOnly}
+                onClick={() => {
+                  applySavedScript(viewingScript);
+                  setViewingScript(null);
+                }}
+              >
+                载入工坊编辑
+              </Button>
+              <Button variant="outline" onClick={() => setViewingScript(null)}>
+                关闭
+              </Button>
+            </div>
+          </div>
+        </StudioDialog>
+      ) : null}
+      {viewingExtraction ? (
+        <StudioDialog
+          title="提取记录详情"
+          onClose={() => setViewingExtraction(null)}
+        >
+          <div className="creation-copy-viewer">
+            <p className="creation-copy-viewer__meta">
+              {`${viewingExtraction.platform} · `}
+              {viewingExtraction.lastExtractedAt.slice(0, 16).replace("T", " ")}
+              {viewingExtraction.times > 1
+                ? ` · 提取 ${viewingExtraction.times} 次`
+                : ""}
+              {` · ${shortVideoId(viewingExtraction.videoId)}`}
+            </p>
+            {viewingExtraction.title ? (
+              <p className="creation-copy-viewer__headline">
+                {viewingExtraction.title}
+              </p>
+            ) : null}
+            <pre className="creation-copy-viewer__text">
+              {viewingExtraction.text || "暂无正文。"}
+            </pre>
+            <div className="creation-copy-viewer__actions">
+              <Button
+                variant="primary"
+                disabled={readOnly || !viewingExtraction.text}
+                onClick={() => {
+                  reuseExtraction(viewingExtraction);
+                  setViewingExtraction(null);
+                }}
+              >
+                复用到工坊
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setViewingExtraction(null)}
+              >
+                关闭
+              </Button>
+            </div>
+          </div>
+        </StudioDialog>
+      ) : null}
     </section>
   );
 }
@@ -4857,16 +5047,32 @@ export function VideoPage() {
       aria-label="AI 视频"
     >
       <CreationNavigation />
-      <Tabs
-        items={[
-          { id: "video", label: "文/图生视频" },
-          { id: "reference", label: "参考生视频" },
-        ]}
-        value={referenceMode ? "reference" : "video"}
-        onChange={(value) =>
-          navigate(value === "reference" ? "reference" : "video")
-        }
-      />
+      <div className="creation-reference-toolbar">
+        <Tabs
+          items={[
+            { id: "video", label: "文/图生视频" },
+            { id: "reference", label: "参考生视频" },
+          ]}
+          value={referenceMode ? "reference" : "video"}
+          onChange={(value) =>
+            navigate(value === "reference" ? "reference" : "video")
+          }
+        />
+        {referenceMode ? (
+          // 教程是参考生视频六段式提示词的玩法说明，只在参考生视频页签展示；
+          // 外链新窗口打开，运营在飞书侧更新内容无需发版。
+          <button
+            className="creation-prompt-tutorial"
+            type="button"
+            onClick={() =>
+              window.open(PROMPT_TUTORIAL_URL, "_blank", "noopener,noreferrer")
+            }
+          >
+            <Icon aria-hidden="true" name="info" size={14} />
+            提示词教程
+          </button>
+        ) : null}
+      </div>
       <div
         className={`creation-video-grid ${referenceMode ? "reference" : ""}`}
       >

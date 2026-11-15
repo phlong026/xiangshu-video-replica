@@ -2255,6 +2255,305 @@ def cleanup_deleted_character_objects(
     )
 
 
+def delete_simple_scene_look(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+    contact_sheet_asset_id: str,
+    storage_for_uri: StorageResolver,
+) -> CharacterStorageCleanupPlan:
+    """Delete one scene look: its scene persona, published version and assets.
+
+    Same rigor as ``delete_simple_character_identity``, scoped to a single
+    scene persona. In-flight generation tasks and unsettled character billing
+    block; project character selections block outright (v1 keeps the release
+    explicit at identity level — the user removes the scene from the project
+    first). Storage targets are resolved while the rows still exist and object
+    I/O runs only after the transaction commits (mirrors the identity route).
+    """
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="simple_character.scene_look.delete",
+        entity_type="character_version",
+        entity_id=identity_id,
+    )
+    identity = read_identity_row(conn, identity_id)
+    if actor.role != "admin" and str(identity["owner_user_id"]) != actor.id:
+        raise character_error(
+            404,
+            "PERSON_IDENTITY_NOT_FOUND",
+            "人物身份不存在或不可用。",
+        )
+    if str(identity["status"]) == "ARCHIVED":
+        raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能修改。")
+
+    # 场景造型 = appearance_type=scene 的 persona + 其 PUBLISHED 版本；
+    # 路由只拿到 contact_sheet_asset_id（列表契约的唯一业务键），在此反查。
+    appearance_type = (
+        "persona.appearance_constraints_json::jsonb ->> 'appearance_type'"
+        if conn.is_postgres
+        else "json_extract(persona.appearance_constraints_json, '$.appearance_type')"
+    )
+    rows = conn.execute(
+        f"""
+        SELECT persona.id AS persona_id, persona.name,
+               version.id AS version_id, version.version_number,
+               version.publication_snapshot_json AS snapshot_json
+        FROM character_personas AS persona
+        JOIN character_versions AS version ON version.persona_id = persona.id
+        WHERE persona.identity_id = %s
+          AND version.status = 'PUBLISHED'
+          AND {appearance_type} = 'scene'
+        """,  # noqa: S608
+        (identity_id,),
+    ).fetchall()
+    target: BusinessRow | None = None
+    for row in rows:
+        if (
+            _snapshot_value(str(row["snapshot_json"]), "contact_sheet_asset_id")
+            != contact_sheet_asset_id
+        ):
+            continue
+        # 同一 contact sheet 命中多个发布版本时取最新（正常只会有一条）。
+        if target is None or int(row["version_number"]) > int(target["version_number"]):
+            target = row
+    if target is None:
+        raise character_error(
+            404,
+            "SCENE_LOOK_NOT_FOUND",
+            "场景造型不存在或不可用。",
+        )
+    persona_id = str(target["persona_id"])
+
+    # 进行中的场景生成任务：删版本会失去其回写目标，必须先等收口。
+    active_task = conn.execute(
+        """
+        SELECT 1
+        FROM character_generation_tasks AS task
+        JOIN character_versions AS version ON version.id = task.character_version_id
+        WHERE version.persona_id = %s
+          AND task.status IN ('PENDING', 'RUNNING')
+        LIMIT 1
+        """,
+        (persona_id,),
+    ).fetchone()
+    if active_task is not None:
+        raise character_error(
+            409,
+            "SCENE_LOOK_HAS_ACTIVE_TASKS",
+            "该场景造型存在进行中的生成任务，请等待任务结束后再删除。",
+        )
+
+    # 未闭合计费（PENDING 预留 / UNKNOWN 供应商轮次）按 identity 同款口径
+    # 拒绝：删除会让预留失去常规核对入口。
+    persona_task_ids_sql = """
+        SELECT task.id
+        FROM character_generation_tasks AS task
+        JOIN character_versions AS version ON version.id = task.character_version_id
+        WHERE version.persona_id = %s
+    """
+    unsettled_billing = conn.execute(
+        f"""
+        SELECT 1 WHERE EXISTS(
+            SELECT 1 FROM billing_operations AS op
+            WHERE op.service = 'character' AND op.state = 'PENDING'
+              AND op.source_id IN ({persona_task_ids_sql})
+        ) OR EXISTS(
+            SELECT 1
+            FROM billing_attempts AS att
+            JOIN billing_operations AS op ON op.id = att.operation_id
+            WHERE op.service = 'character' AND att.state = 'UNKNOWN'
+              AND op.source_id IN ({persona_task_ids_sql})
+        )
+        LIMIT 1
+        """,  # noqa: S608,E501
+        # persona_task_ids_sql 的 %s 在两个 EXISTS 中各出现一次，共两个。
+        (persona_id, persona_id),
+    ).fetchone()
+    if unsettled_billing is not None:
+        raise character_error(
+            409,
+            "SCENE_LOOK_HAS_UNSETTLED_BILLING",
+            "该场景造型存在未核对完成的积分预留或未知供应商轮次，"
+            "为保留对账证据暂不可删除；请先等待任务核对收口，再删除。",
+        )
+
+    # 项目选用按 RESTRICT 外键挂在 character_versions 上，直接拦下并给出
+    # 项目名（v1 不做自动解除：移除选用是项目侧的显式动作）。
+    blocking_projects = conn.execute(
+        """
+        SELECT DISTINCT project.name AS project_name
+        FROM character_reference_selections AS selection
+        JOIN character_versions AS version ON version.id = selection.character_version_id
+        JOIN projects AS project ON project.id = selection.project_id
+        WHERE version.persona_id = %s
+        """,
+        (persona_id,),
+    ).fetchall()
+    if blocking_projects:
+        raise character_error(
+            409,
+            "SCENE_LOOK_IN_USE",
+            _project_list_message(
+                [str(row["project_name"]) for row in blocking_projects],
+                "场景造型已被项目{names}选用，请先在项目中移除该场景后再删除。",
+            ),
+        )
+
+    # 场景资产 = 该 persona 全部版本的 character_assets 视图 + 快照里的
+    # contact sheet + 发布资产的 generated 候选（镜像 _identity_asset_ids 的
+    # 相关分支，不包含授权/源上传与口播产物——它们属于身份而非场景）。
+    scene_asset_ids: set[str] = {
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT view.asset_id
+            FROM character_assets AS view
+            JOIN character_versions AS version ON version.id = view.character_version_id
+            WHERE version.persona_id = %s AND view.asset_id IS NOT NULL
+            """,
+            (persona_id,),
+        ).fetchall()
+    }
+    if scene_asset_ids:
+        placeholders = ",".join("%s" for _ in scene_asset_ids)
+        for row in conn.execute(
+            f"SELECT metadata_json FROM assets WHERE id IN ({placeholders})",  # noqa: S608
+            tuple(scene_asset_ids),
+        ).fetchall():
+            try:
+                generated_asset_id = json.loads(str(row[0])).get("generated_asset_id")
+            except (TypeError, ValueError):
+                generated_asset_id = None
+            if generated_asset_id:
+                scene_asset_ids.add(str(generated_asset_id))
+    for row in conn.execute(
+        """
+        SELECT version.publication_snapshot_json AS snapshot_json
+        FROM character_versions AS version
+        WHERE version.persona_id = %s
+        """,
+        (persona_id,),
+    ).fetchall():
+        contact_id = _snapshot_contact_sheet_asset_id(row)
+        if contact_id is not None:
+            scene_asset_ids.add(contact_id)
+
+    placeholders = ",".join("%s" for _ in scene_asset_ids)
+    asset_rows = (
+        conn.execute(
+            f"SELECT id, storage_uri, content_object_id FROM assets WHERE id IN ({placeholders})",  # noqa: S608,E501
+            tuple(scene_asset_ids),
+        ).fetchall()
+        if scene_asset_ids
+        else []
+    )
+
+    # 与 identity 删除同一把扫帚：按对象去重、共享引用不回收、解析失败计数。
+    cleanup_targets_by_object: dict[tuple[str, str, str], CharacterStorageCleanupTarget] = {}
+    storage_resolution_failed_count = 0
+    for asset in asset_rows:
+        uri = str(asset["storage_uri"])
+        try:
+            storage = storage_for_uri(conn, uri)
+            key = storage_key_from_uri(uri)
+            own_content_id = asset["content_object_id"]
+            still_referenced = content_store.object_referenced_by_another_asset(
+                conn,
+                storage_uri=uri,
+                excluding_asset_ids=sorted(scene_asset_ids),
+            ) or content_store.object_referenced_by_content_registry(
+                conn,
+                provider=storage.provider,
+                bucket=storage.bucket,
+                object_key=key,
+                excluding_content_object_id=(
+                    None if own_content_id is None else str(own_content_id)
+                ),
+            )
+            object_identity = (storage.provider, storage.bucket, key)
+            existing_target = cleanup_targets_by_object.get(object_identity)
+            if existing_target is None or (
+                still_referenced and not existing_target.still_referenced
+            ):
+                cleanup_targets_by_object[object_identity] = CharacterStorageCleanupTarget(
+                    asset_id=str(asset["id"]),
+                    storage=storage,
+                    key=key,
+                    still_referenced=still_referenced,
+                )
+        except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
+            storage_resolution_failed_count += 1
+
+    persona_versions_sql = """
+        SELECT version.id FROM character_versions AS version
+        WHERE version.persona_id = %s
+    """
+    with conn:
+        # Registry 引用先释放，再让级联/显式删除收走资产行（同 identity 口径）。
+        content_store.release_assets_content_objects(conn, asset_ids=sorted(scene_asset_ids))
+        # persona_versions_sql 内嵌一个 %s，以下三条语句各传一次 persona_id。
+        conn.execute(
+            "DELETE FROM character_generation_tasks WHERE character_version_id IN "
+            f"({persona_versions_sql})",  # noqa: S608
+            (persona_id,),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM character_asset_reviews
+            WHERE character_asset_id IN (
+                SELECT view.id FROM character_assets AS view
+                WHERE view.character_version_id IN ({persona_versions_sql})
+            )
+            """,  # noqa: S608,E501
+            (persona_id,),
+        )
+        conn.execute(
+            f"DELETE FROM character_assets WHERE character_version_id IN ({persona_versions_sql})",  # noqa: S608
+            (persona_id,),
+        )
+        conn.execute(
+            "DELETE FROM character_versions WHERE persona_id = %s",
+            (persona_id,),
+        )
+        conn.execute(
+            "DELETE FROM character_personas WHERE id = %s",
+            (persona_id,),
+        )
+        if scene_asset_ids:
+            conn.execute(
+                f"DELETE FROM assets WHERE id IN ({placeholders})",
+                tuple(scene_asset_ids),
+            )
+
+    cleanup_targets = tuple(cleanup_targets_by_object.values())
+    shared_object_count = sum(1 for target in cleanup_targets if target.still_referenced)
+    write_audit(
+        conn,
+        actor=actor,
+        action="simple_character.scene_look.delete",
+        entity_type="character_personas",
+        entity_id=persona_id,
+        metadata={
+            "identity_id": identity_id,
+            "contact_sheet_asset_id": contact_sheet_asset_id,
+            "scene_name": str(target["name"]),
+            "deleted_asset_count": len(asset_rows),
+            "storage_cleanup_planned_count": len(cleanup_targets),
+            "shared_storage_object_count": shared_object_count,
+            "storage_resolution_failed_count": storage_resolution_failed_count,
+        },
+    )
+    return CharacterStorageCleanupPlan(
+        identity_id=identity_id,
+        actor_id=actor.id,
+        targets=cleanup_targets,
+        resolution_failed_count=storage_resolution_failed_count,
+    )
+
+
 def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
     """Collect every asset owned by an identity.
 

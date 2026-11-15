@@ -49,6 +49,7 @@ from app.simple_character import (
     cleanup_deleted_character_objects,
     create_simple_character,
     delete_simple_character_identity,
+    delete_simple_scene_look,
     list_simple_library_page,
     list_simple_scene_looks_page,
     normalize_simple_character_source,
@@ -824,6 +825,54 @@ def delete_identity(
     except Exception:  # noqa: BLE001 - primary database deletion already committed
         logger.warning(
             "unable to audit character storage cleanup identity=%s",
+            identity_id,
+            exc_info=True,
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/identities/{identity_id}/scene-looks/{contact_sheet_asset_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_scene_look(
+    identity_id: str,
+    contact_sheet_asset_id: str,
+    db: BusinessDbDep,
+) -> Response:
+    """删除单个场景造型（persona + PUBLISHED 版本 + 资产），守卫同人物删除。"""
+    cleanup_plan = None
+    delete_actor = None
+    with db.write() as (conn, actor):
+        cleanup_plan = delete_simple_scene_look(
+            conn,
+            actor=actor,
+            identity_id=identity_id,
+            contact_sheet_asset_id=contact_sheet_asset_id,
+            storage_for_uri=storage_for_asset,
+        )
+        delete_actor = actor
+
+    assert cleanup_plan is not None and delete_actor is not None
+    cleanup_result = cleanup_deleted_character_objects(cleanup_plan)
+    try:
+        with db.write() as (conn, _actor):
+            write_audit(
+                conn,
+                actor=delete_actor,
+                action="simple_character.scene_look.delete.storage_cleanup",
+                entity_type="character_personas",
+                entity_id=identity_id,
+                metadata={
+                    "contact_sheet_asset_id": contact_sheet_asset_id,
+                    "planned_count": len(cleanup_plan.targets),
+                    "deleted_count": cleanup_result.deleted_count,
+                    "failed_count": cleanup_result.failed_count,
+                },
+            )
+    except Exception:  # noqa: BLE001 - primary database deletion already committed
+        logger.warning(
+            "unable to audit scene look storage cleanup identity=%s",
             identity_id,
             exc_info=True,
         )

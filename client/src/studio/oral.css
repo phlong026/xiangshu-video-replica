@@ -402,35 +402,35 @@
   border: 1px solid #2e3128;
   border-radius: 7px;
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
+  /* 预览列宽随素材自适应（auto）：竖屏分身出窄列，横屏素材出宽列。 */
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: stretch;
 }
 .oral-library-preview {
   position: relative;
-  /* 高度跟随卡片行高（右栏内容决定，min-height 兜底）。预览不再用
-     aspect-ratio 自撑高度：9:16 的视频前景会把整卡拉成窄长条。 */
-  min-height: 150px;
+  display: grid;
+  place-items: center;
+  /* 高度钉在 150px；宽度由 Media 按素材自然宽高比写的内联样式决定，
+     不再强制 cover 裁切——竖屏分身保留头脚全貌（用户要求 2026-11-15）。 */
+  height: 150px;
+  min-width: 120px;
   background: #090b08;
   overflow: hidden;
 }
 .oral-library-preview .studio-media {
   margin: 0;
-  width: 100%;
-  height: 100%;
+  height: 150px;
+  width: auto;
+  max-width: 240px;
   min-height: 0;
   border-radius: 0;
-  aspect-ratio: auto;
+  /* 组件默认 aspect-ratio 9/16 的兜底保留；有素材时 Media 的内联比例
+     （自然宽高比）优先级更高，盒随素材比例走。 */
 }
-/* 前景默认 contain（video-preview.css，素材以竖屏为主防裁切）；分身卡是
-   横向布局的固定左列，要 cover 填满。多叠一层 .video-preview 抬高优先级，
-   压过同分量的 --fit 规则（与 video-preview.css 的既有重复类名手法一致）。 */
-.oral-library-preview
-  .video-preview.video-preview.video-preview
-  > .video-preview__foreground,
-.oral-library-preview
-  .video-preview.video-preview.video-preview
-  > .video-preview__backdrop {
-  object-fit: cover;
+/* 前景恢复 contain：盒比例=素材比例时不产生黑边；被 max-width 压宽的
+   横屏素材上下留黑边而不是裁切主体。 */
+.oral-library-preview .video-preview > .video-preview__foreground {
+  object-fit: contain;
 }
 .oral-demo-badge,
 .oral-video-badge {
@@ -562,25 +562,13 @@
   cursor: default;
   opacity: 0.6;
 }
-.oral-library-footer {
-  border-top: 1px solid #30332a;
-  padding-top: 22px;
-  margin-top: 46px;
-  display: flex;
-  gap: 14px;
-  color: #b2b6aa;
-  font-size: 14px;
-  line-height: 1.8;
-}
-.oral-library-footer p {
-  margin: 0 0 5px;
-}
-.oral-library-footer > .studio-icon {
-  flex-shrink: 0;
-  margin-top: 3px;
-}
-.oral-library-footer span {
+/* 分身页侧栏精简（2026-11-15）：分步教程与页脚提示语移除，拍摄建议压成
+   单行要点——老用户不受噪音干扰，创建弹窗内保留逐步引导。 */
+.oral-guide-compact {
+  color: #a5a99a;
   font-size: 13px;
+  line-height: 1.8;
+  margin: 0 0 22px;
 }
 .oral-library-guide {
   border-left: 1px solid #30332a;
@@ -607,78 +595,6 @@
   font-size: 17px;
   font-weight: 500;
   margin: 0 0 10px;
-}
-.oral-shooting-guide {
-  list-style: none;
-  padding: 0;
-  margin: 24px 0 36px;
-  display: grid;
-  gap: 24px;
-}
-.oral-shooting-guide li {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-}
-.oral-shooting-guide li > span {
-  display: grid;
-  place-items: center;
-  background: #242720;
-  border-radius: 50%;
-  color: #b4b9aa;
-  width: 46px;
-  height: 46px;
-  flex: 0 0 46px;
-}
-.oral-shooting-guide h4 {
-  font-size: 14px;
-  font-weight: 500;
-  margin: 0 0 5px;
-}
-.oral-shooting-guide p {
-  margin: 0;
-  color: #a5a99a;
-  font-size: 12px;
-  line-height: 1.8;
-}
-.oral-create-steps {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  padding: 0;
-  margin: 20px 0 28px;
-  list-style: none;
-  text-align: center;
-}
-.oral-create-steps li {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-.oral-create-steps li > span {
-  display: grid;
-  place-items: center;
-  background: #252820;
-  border-radius: 50%;
-  color: #aeb5a2;
-  width: 45px;
-  height: 45px;
-  margin-bottom: 2px;
-}
-.oral-create-steps li:first-child > span {
-  color: #e8b749;
-  background: #312b19;
-  border: 1px solid #856a2a;
-}
-.oral-create-steps strong {
-  font-size: 12px;
-  font-weight: 500;
-}
-.oral-create-steps small {
-  color: #a4a999;
-  font-size: 11px;
-  line-height: 1.7;
 }
 .oral-library-voice {
   border-top: 1px solid #30332a;

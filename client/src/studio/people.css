@@ -24,7 +24,8 @@
 }
 .people-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 每排 4 个人物卡（用户拍板 2026-11-15）：窄屏降级见下方 media query。 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
 }
 .person-card,
@@ -38,19 +39,22 @@
 .person-card {
   overflow: hidden;
 }
-/* 卡片尺寸固定：封面锁定 4:5 容器（内层 Media 走 fitContainer，跳过按图片
-   自然比例生成的内联样式），正文区行数与统计行高度钉死——三者缺一，网格里
-   的卡片高度都会随人物数据内容漂移。contain 保证人物不被裁头裁脚。 */
+/* 卡片尺寸固定：封面锁定 3:4 竖版容器（用户拍板 2026-11-15，四列网格下的
+   经典人像比例）；内层 Media 走 fitContainer，跳过按图片自然比例生成的内联
+   样式。封面图 cover 裁切并优先保头（object-position: top）——人物竖版图
+   多为 9:16，contain 会在 3:4 容器里留黑边，网格观感参差。正文区行数与统计
+   行高度钉死，三者缺一卡片高度都会随人物数据漂移。 */
 .person-card__portrait {
   width: 100%;
-  aspect-ratio: 4 / 5;
+  aspect-ratio: 3 / 4;
   background: #1d1d1b;
 }
 .person-card__portrait .studio-media,
 .person-card__portrait .studio-media img {
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  object-position: center top;
 }
 .person-card__body {
   padding: 18px;
@@ -83,6 +87,40 @@
 }
 .person-card__meta span.is-warning {
   color: #e5aa36;
+}
+/* 人物卡三动作按钮组（2026-11-15 用户拍板重新设计）：主操作金色、次操作
+   描边、删除弱化描边（默认灰字、悬停转红），三键等宽对齐——删除仍是
+   标准按钮但视觉权重最低，不与主操作抢视线。 */
+.person-card__actions .studio-button {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 8px;
+}
+.person-card__actions .studio-button--outline.person-card__actions__delete {
+  color: #969892;
+}
+.person-card__actions
+  .studio-button--outline.person-card__actions__delete:hover:not(:disabled) {
+  border-color: #8a4038;
+  color: #e5695f;
+}
+/* 场景造型卡动作组（场景删除 2026-11-15）：置换主操作 + 删除弱化描边，
+   与人物卡三键按钮组同一套语言。 */
+.scene-card__actions {
+  display: flex;
+  gap: 8px;
+}
+.scene-card__actions .studio-button {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 8px;
+}
+.scene-card__actions .studio-button--outline.scene-card__delete {
+  color: #969892;
+}
+.scene-card__actions .studio-button--outline.scene-card__delete:hover:not(:disabled) {
+  border-color: #8a4038;
+  color: #e5695f;
 }
 .person-card__actions,
 .panel-heading > div:last-child,

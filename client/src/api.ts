@@ -4305,6 +4305,23 @@ export async function deleteSimpleCharacterIdentity(
   }
 }
 
+/** 删除单个场景造型（persona + 发布版本 + 资产）。场景被项目选用或存在
+ * 进行中任务/未闭合计费时返回 409，message 已是可直接展示的中文原因。 */
+export async function deleteSimpleSceneLook(
+  identityId: string,
+  contactSheetAssetId: string,
+): Promise<void> {
+  const response = await requestApi(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks/${encodeURIComponent(contactSheetAssetId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await responseErrorMessage(response, "删除场景造型失败，请稍后重试。"),
+    );
+  }
+}
+
 export interface SimpleCharacterRegenerationResult {
   identity_id: string;
   persona_id: string;

@@ -30,6 +30,7 @@ const replicaApi = vi.hoisted(() => ({
   getLatestGenerationPrompt: vi.fn(),
   getLatestScriptVersion: vi.fn(),
   fetchViralCopyExtractions: vi.fn(),
+  deleteStudioSavedScript: vi.fn(),
   getLatestScriptRewriteTask: vi.fn<
     (...args: [string, string?, string?]) => Promise<unknown>
   >(async () => null),
@@ -1057,6 +1058,224 @@ describe("V1.4 创作页面", () => {
     expect(value.navigate).toHaveBeenCalledWith("oral", { returnTo: "copy" });
   });
 
+  it("我的文案：未命名标题按正文首行兜底，卡片展示时间与字数", async () => {
+    const value = studio({ review: false });
+    value.state.savedScripts = [
+      {
+        id: "saved-unnamed",
+        title: "未命名文案",
+        original: "",
+        text: "回老家修房子，这五步要千万不要做。\n第二步是不要做地下室。",
+        version: 1,
+        confirmed: false,
+        updatedAt: "2026-11-14T09:09:00+00:00",
+      },
+      {
+        id: "saved-titled",
+        title: "预算清单",
+        original: "",
+        text: "先讲预算。",
+        version: 2,
+        confirmed: true,
+        updatedAt: "2026-11-15T08:00:00+00:00",
+      },
+    ];
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "我的文案" }));
+
+    // 兜底标题 = 正文第一行（title 为空或「未命名文案」都算未命名）。
+    expect(
+      screen.getByText("回老家修房子，这五步要千万不要做。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("预算清单")).toBeInTheDocument();
+    expect(screen.getByText("2026-11-14 09:09 · 29 字")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^预算清单/ })).toHaveTextContent(
+      "已确认",
+    );
+  });
+
+  it("我的文案：删除需确认，确认后调删除接口并刷新列表", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    replicaApi.deleteStudioSavedScript.mockReset();
+    replicaApi.deleteStudioSavedScript.mockResolvedValue({ deleted: true });
+    const value = studio({ review: false });
+    value.state.savedScripts = [
+      {
+        id: "saved-delete-me",
+        title: "待删除的文案",
+        original: "",
+        text: "正文内容。",
+        version: 1,
+        confirmed: false,
+        updatedAt: "2026-11-15T08:00:00+00:00",
+      },
+    ];
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "我的文案" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除待删除的文案" }));
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("已删除该文案。"),
+    );
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining("待删除的文案"),
+    );
+    expect(replicaApi.deleteStudioSavedScript).toHaveBeenCalledWith(
+      "saved-delete-me",
+    );
+    // 删除后刷新列表：loadSavedScriptList 默认返回空数组。
+    await waitFor(() =>
+      expect(value.patchState).toHaveBeenCalledWith(
+        expect.objectContaining({ savedScripts: [] }),
+      ),
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it("我的文案：删除取消时不调删除接口", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    replicaApi.deleteStudioSavedScript.mockReset();
+    const value = studio({ review: false });
+    value.state.savedScripts = [
+      {
+        id: "saved-keep",
+        title: "保留的文案",
+        original: "",
+        text: "正文内容。",
+        version: 1,
+        confirmed: false,
+        updatedAt: "2026-11-15T08:00:00+00:00",
+      },
+    ];
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "我的文案" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除保留的文案" }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(replicaApi.deleteStudioSavedScript).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("提取记录：无标题记录按正文首行兜底，裸视频 ID 退到元信息行", async () => {
+    replicaApi.fetchViralCopyExtractions.mockReset().mockResolvedValue({
+      items: [
+        {
+          platform: "douyin",
+          videoId: "7706102670993509675",
+          title: "",
+          lastExtractedAt: "2026-11-14T09:09:00+00:00",
+          times: 3,
+          text: "放下你手里的东西。哎呦，你打我脸干嘛？我排了半天队，全街最好看的一盒。",
+          updatedAt: null,
+        },
+        {
+          platform: "kuaishou",
+          videoId: "kv-123",
+          title: "老家修房子，这五点千万不要做",
+          lastExtractedAt: "2026-10-15T13:14:00+00:00",
+          times: 1,
+          text: "回老家修房子，这五步要千万不要做。首先是能做坡屋顶。",
+          updatedAt: null,
+        },
+      ],
+    });
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "提取记录" }));
+
+    // 无标题 → 正文首行兜底（截 28 字加省略号）；有标题的原样保留。
+    expect(
+      await screen.findByText(
+        "放下你手里的东西。哎呦，你打我脸干嘛？我排了半天队，全街…",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("老家修房子，这五点千万不要做"),
+    ).toBeInTheDocument();
+    // 元信息：时间 · 提取次数 · 短 ID；裸 19 位长 ID 不再当标题出现。
+    expect(
+      screen.getByText("2026-11-14 09:09 · 提取 3 次 · 770610…9675"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2026-10-15 13:14 · kv-123")).toBeInTheDocument();
+    expect(screen.queryByText("douyin · 7706102670993509675")).toBeNull();
+  });
+
+  it("我的文案与提取记录都可打开查看全文并从弹窗直接使用", async () => {
+    // 用户要求两列表都能「打开查看」：列表露预览，全文进弹层，
+    // 弹窗内提供 载入工坊/复用 的直达动作，不必先回列表再点。
+    replicaApi.fetchViralCopyExtractions.mockReset().mockResolvedValue({
+      items: [
+        {
+          platform: "douyin",
+          videoId: "7706102670993509675",
+          title: "",
+          lastExtractedAt: "2026-11-14T09:09:00+00:00",
+          times: 2,
+          text: "放下你手里的东西。哎呦，你打我脸干嘛？我排了半天队。",
+          updatedAt: null,
+        },
+      ],
+    });
+    const value = studio({ review: false });
+    value.state.savedScripts = [
+      {
+        id: "saved-view",
+        title: "预算清单",
+        original: "",
+        text: "主体砖混每平米约1200元，框架结构每平米约1500元。",
+        version: 2,
+        confirmed: true,
+        updatedAt: "2026-11-15T08:00:00+00:00",
+      },
+    ];
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    // 我的文案：查看 → 全文弹窗 → 载入工坊会关闭弹窗并写入草稿。
+    fireEvent.click(await screen.findByRole("tab", { name: "我的文案" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+    const scriptDialog = await screen.findByRole("dialog", {
+      name: "预算清单",
+    });
+    expect(scriptDialog).toHaveTextContent(
+      "主体砖混每平米约1200元，框架结构每平米约1500元。",
+    );
+    fireEvent.click(
+      within(scriptDialog).getByRole("button", { name: "载入工坊编辑" }),
+    );
+    await waitFor(() => expect(scriptDialog).not.toBeInTheDocument());
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        script: expect.objectContaining({ id: "saved-view" }),
+      }),
+    );
+
+    // 提取记录：查看 → 全文弹窗 → 复用到工坊同样直达。
+    fireEvent.click(await screen.findByRole("tab", { name: "提取记录" }));
+    const viewButtons = await screen.findAllByRole("button", { name: "查看" });
+    fireEvent.click(viewButtons[0]);
+    const extractionDialog = await screen.findByRole("dialog", {
+      name: "提取记录详情",
+    });
+    expect(extractionDialog).toHaveTextContent(
+      "放下你手里的东西。哎呦，你打我脸干嘛？我排了半天队。",
+    );
+    fireEvent.click(
+      within(extractionDialog).getByRole("button", { name: "复用到工坊" }),
+    );
+    expect(value.notify).toHaveBeenCalledWith(
+      "已复用提取文案，请核对后确认终稿。",
+    );
+  });
+
   it("审计员可查看创作内容但文案、视频与口播提交控件只读", () => {
     const value = studio({
       review: false,
@@ -1088,10 +1307,14 @@ describe("V1.4 创作页面", () => {
     expect(value.openPicker).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("tab", { name: "我的文案" }));
+    // 锚定开头：卡片主按钮名以标题开头；删除按钮的 aria-label 是「删除…」开头。
     const savedScript = screen.getByRole("button", {
-      name: /审计历史文案/,
+      name: /^审计历史文案/,
     });
     expect(savedScript).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "删除审计历史文案" }),
+    ).toBeDisabled();
     fireEvent.click(savedScript);
     expect(value.patchDraft).not.toHaveBeenCalled();
 

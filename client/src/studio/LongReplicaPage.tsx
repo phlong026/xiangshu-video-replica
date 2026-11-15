@@ -526,26 +526,22 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
           }}
           type="file"
         />
-        <header className="long-replica-head">
-          <div>
-            <h2>长视频拆解</h2>
-            <p className="status-note">
-              上传 4–180 秒的爆款视频，AI
-              看完整片后产出一段可直接使用的复刻提示词、
-              逐句口播文案与全片摘要。拆解预计 5–15
-              分钟，可以离开本页稍后回来查看。
-            </p>
-          </div>
-          {stage === "idle" || stage === "failed" || stage === "cancelled" ? (
+        {/* 页签名已是「长视频拆解」，页内不再重复标题与长说明：产出/限制
+            信息收敛进空态描述（去冗余 2026-11-15），预计时长只在拆解进行态
+            提示。头部按钮仅失败/取消态保留——那是当时唯一的重传入口；
+            idle 态由空态卡 CTA 承接，避免同一屏两个 gold 按钮抢焦点。 */}
+        {stage === "failed" || stage === "cancelled" ? (
+          <header className="long-replica-head">
+            <span />
             <Button
               variant="primary"
               disabled={cancelling}
               onClick={() => fileInputRef.current?.click()}
             >
-              {stage === "failed" ? "重新上传视频" : "上传长视频"}
+              重新上传视频
             </Button>
-          ) : null}
-        </header>
+          </header>
+        ) : null}
 
         {stage === "uploading" ? (
           <Panel className="long-replica-progress">
@@ -678,7 +674,9 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                 选择 MP4 / MOV 文件
               </Button>
             }
-            description="支持 4–180 秒、600 MB 以内的 MP4 / MOV；提交后按次计费。"
+            // 空态只保留两句核心：产出什么 + 硬性限制/计费。预计时长与
+            // 「可离开本页」在拆解进行态提示，此处不再重复。
+            description="上传 4–180 秒的爆款视频，AI 拆解出复刻提示词、口播文案与全片摘要。支持 600 MB 内 MP4 / MOV，按次计费。"
             title="还没有上传长视频"
           />
         ) : null}

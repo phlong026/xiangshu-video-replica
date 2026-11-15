@@ -277,27 +277,218 @@
   display: block;
 }
 
-.creation-saved-list {
+/* 「我的文案」与「提取记录」列表：卡片化。此前提取记录行完全没有样式定义、
+ * 我的文案只有一行标题（未命名文案 × N），两处都按同行的素材库/云文档列表
+ * 惯例重排：标题 + 元信息 + 两行正文预览（line-clamp），卡片 hover 提亮。 */
+.creation-saved-list,
+.creation-extraction-list {
+  display: grid;
+  gap: 12px;
   margin-top: 16px;
 }
 
-.creation-script-row {
-  align-items: center;
-  background: none;
-  border: 0;
-  border-bottom: 1px solid #252723;
-  color: #e8e8e4;
-  cursor: pointer;
-  display: flex;
-  font: inherit;
-  justify-content: space-between;
-  padding: 16px 4px;
-  text-align: left;
-  width: 100%;
+.creation-script-card,
+.creation-extraction-card {
+  background: #0e100f;
+  border: 1px solid #242622;
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  transition: border-color 120ms ease;
 }
 
-.creation-script-row small {
+.creation-script-card:hover,
+.creation-extraction-card:hover {
+  border-color: #3a3d36;
+}
+
+.creation-script-card__main {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.creation-script-card__main:disabled {
+  cursor: default;
+}
+
+.creation-script-card__head,
+.creation-extraction-card__head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.creation-script-card__title,
+.creation-extraction-card__title {
+  flex: 1;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creation-script-card__badge {
+  border: 1px solid #3a3d36;
+  border-radius: 999px;
   color: #969892;
+  flex: none;
+  font-size: 12px;
+  padding: 2px 10px;
+}
+
+.creation-script-card__badge--confirmed {
+  border-color: var(--accent-strong, #c6a45f);
+  color: var(--accent-strong, #c6a45f);
+}
+
+.creation-extraction-card__platform {
+  border: 1px solid #3a3d36;
+  border-radius: 6px;
+  color: #969892;
+  flex: none;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.creation-script-card__preview,
+.creation-extraction-card__preview {
+  color: #969892;
+  display: -webkit-box;
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.creation-script-card__meta,
+.creation-extraction-card__meta {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.creation-script-card__meta small,
+.creation-extraction-card__meta small {
+  color: #6f726b;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creation-script-card__meta-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.creation-script-card__meta-actions button {
+  background: none;
+  border: 0;
+  color: #6f726b;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+
+.creation-script-card__meta-actions button:hover {
+  color: #e8e8e4;
+}
+
+.creation-script-card__meta-actions .creation-script-card__delete:hover {
+  color: #e5695f;
+}
+
+/* 提取记录 meta 行的「查看 / 复用到工坊」：成对的紧凑描边按钮（用户要求
+   重新设计，原先文字按钮被挤成竖排折行）。查看弱化、复用保持描边主次。 */
+.creation-extraction-card__meta .creation-script-card__meta-actions button {
+  border: 1px solid #3d3e39;
+  border-radius: 8px;
+  color: #969892;
+  font-size: 13px;
+  min-height: 30px;
+  padding: 4px 12px;
+}
+
+.creation-extraction-card__meta
+  .creation-script-card__meta-actions
+  button:hover:not(:disabled) {
+  border-color: #57594f;
+  color: #e8e8e4;
+}
+
+.creation-extraction-card__meta
+  .creation-script-card__meta-actions
+  .studio-button--outline:hover:not(:disabled) {
+  border-color: #57594f;
+  background: #171610;
+}
+
+/* 「打开查看」全文弹层：我的文案与提取记录共用（用户要求两列表可查看，
+   列表只露预览，全文进弹层）。 */
+.creation-copy-viewer {
+  display: grid;
+  gap: 10px;
+  min-width: min(560px, 80vw);
+}
+
+.creation-copy-viewer__meta {
+  color: #969892;
+  font-size: 12px;
+  margin: 0;
+}
+
+.creation-copy-viewer__headline {
+  color: #e8e8e4;
+  font-weight: 600;
+  margin: 0;
+}
+
+.creation-copy-viewer__text {
+  background: #0e100f;
+  border: 1px solid #242622;
+  border-radius: 10px;
+  font: inherit;
+  line-height: 1.8;
+  margin: 0;
+  max-height: 46vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 14px 16px;
+  white-space: pre-wrap;
+}
+
+.creation-copy-viewer__actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.creation-script-card__delete {
+  background: none;
+  border: 0;
+  color: #6f726b;
+  cursor: pointer;
+  flex: none;
+  font-size: 12px;
+  padding: 2px 4px;
 }
 
 .creation-empty-workspace {
@@ -461,6 +652,42 @@
     minmax(0, 1.2fr) minmax(248px, 0.72fr)
     minmax(280px, 1fr);
   margin-top: 16px;
+}
+
+/* AI 视频页签行：左侧文/图与参考生视频切换，右侧提示词教程外链入口
+   （仅参考生视频页签显示，飞书文档新窗口打开）。 */
+.creation-reference-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.creation-reference-toolbar .studio-tabs {
+  flex: none;
+}
+
+.creation-prompt-tutorial {
+  align-items: center;
+  background: transparent;
+  border: 1px solid #3d3e39;
+  border-radius: 8px;
+  color: var(--accent-strong, #c6a45f);
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  font-size: 13px;
+  gap: 6px;
+  padding: 6px 12px;
+}
+
+.creation-prompt-tutorial:hover {
+  border-color: var(--accent-strong, #c6a45f);
+}
+
+.creation-prompt-tutorial:focus-visible {
+  outline: 2px solid var(--accent-strong, #c6a45f);
+  outline-offset: 1px;
 }
 
 .creation-video-grid.reference {

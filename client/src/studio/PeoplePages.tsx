@@ -15,6 +15,7 @@ import {
   deleteOralAvatar,
   deleteOralVoice,
   deleteSimpleCharacterIdentity,
+  deleteSimpleSceneLook,
   listOralAvatars,
   listOralVoices,
   type OralVoiceLanguage,
@@ -47,6 +48,7 @@ import {
   validateOralAudioFile,
 } from "./live";
 import type {
+  StudioAsset,
   StudioAvatar,
   StudioPage,
   StudioPerson,
@@ -348,8 +350,9 @@ function PersonCard({
   };
   return (
     <article className="person-card">
-      {/* 固定 4:5 封面容器：Media 不带 fitContainer 时会按图片自然比例写内联
-          样式，是人物卡片高度参差的根源；交给固定比例容器统一约束。 */}
+      {/* 固定 3:4 封面容器：Media 不带 fitContainer 时会按图片自然比例写内联
+          样式，是人物卡片高度参差的根源；交给固定比例容器统一约束（cover
+          裁切保头见 people.css）。 */}
       <div className="person-card__portrait">
         <Media
           asset={
@@ -397,15 +400,15 @@ function PersonCard({
             用于创作
           </Button>
           <Button
-            variant="quiet"
+            className="person-card__actions__delete"
             disabled={deleting}
+            variant="outline"
             onClick={() => {
               setDeleteMode("purge");
               setRemoveProjectRefs(false);
               setConfirmingDelete(true);
             }}
           >
-            <Icon name="close" size={16} />
             删除
           </Button>
         </div>
@@ -768,6 +771,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
   } = useStudio();
   const readOnly = user.role === "auditor";
   const [loadingMore, setLoadingMore] = useState(false);
+  const [deletingSceneId, setDeletingSceneId] = useState("");
   const assets = data.assets.filter(
     (asset) => asset.personId === person.id && asset.kind === "image",
   );
@@ -871,6 +875,23 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
       notify(customerVisibleErrorMessage(cause, "加载更多场景失败，请重试。"));
     } finally {
       setLoadingMore(false);
+    }
+  };
+  const removeScene = async (asset: StudioAsset) => {
+    if (review || readOnly || deletingSceneId) return;
+    // 删除不可逆；场景被项目选用/存在进行中任务时后端会 409 并给出中文原因。
+    if (!window.confirm(`删除场景造型「${asset.name}」？删除后不可恢复。`)) return;
+    setDeletingSceneId(asset.id);
+    try {
+      await deleteSimpleSceneLook(person.id, asset.contactSheetId ?? asset.id);
+      notify("场景造型已删除。");
+      await refreshScenes();
+    } catch (cause) {
+      notify(
+        customerVisibleErrorMessage(cause, "删除场景造型失败，请稍后重试。"),
+      );
+    } finally {
+      setDeletingSceneId("");
     }
   };
   return (
@@ -1005,7 +1026,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
               {asset.contactSheetId ? (
                 <p className="scene-set-label">1 套 · 五视图合成图</p>
               ) : null}
-              <div>
+              <div className="scene-card__actions">
                 <Button
                   disabled={
                     readOnly ||
@@ -1022,6 +1043,14 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                   }}
                 >
                   用于人物置换
+                </Button>
+                <Button
+                  className="scene-card__delete"
+                  disabled={readOnly || deletingSceneId === asset.id}
+                  variant="outline"
+                  onClick={() => void removeScene(asset)}
+                >
+                  {deletingSceneId === asset.id ? "删除中…" : "删除"}
                 </Button>
               </div>
             </Panel>
@@ -1418,13 +1447,15 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           {ready.map((avatar) => (
             <article className="oral-library-card" key={avatar.id}>
               <div className="oral-library-preview">
+                {/* 不带 fitContainer：Media 会按素材自然宽高比写内联样式，
+                    预览框随视频真实比例自适应（2026-11-15 用户要求），
+                    竖屏分身不再被横向 cover 裁掉头脚。 */}
                 <Media
                   asset={data.assets.find(
                     (asset) => asset.id === avatar.imageId,
                   )}
                   alt={avatar.name}
                   presentation="video"
-                  fitContainer
                 />
                 {review ? <span className="oral-demo-badge">示例</span> : null}
                 <span className="oral-video-badge">
@@ -1525,13 +1556,6 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             {error}
           </p>
         ) : null}
-        <footer className="oral-library-footer">
-          <Icon name="video" size={20} />
-          <div>
-            <p>视频分身 + 克隆声音 + 文案 → 数字人口播</p>
-            <span>一次创建，可在后续口播中重复使用。</span>
-          </div>
-        </footer>
       </div>
       <aside className="oral-library-guide">
         <div className="oral-library-actions">
@@ -1545,44 +1569,11 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           </Button>
         </div>
         <h3>创建分身，只需一段视频</h3>
-        <p>按照以下建议拍摄，帮助生成更自然的数字人口播效果。</p>
-        <ul className="oral-shooting-guide">
-          {[
-            ["person", "单人正面出镜", "请保持本人出镜，面部清晰可见。"],
-            ["audio", "嘴部清晰无遮挡", "说话时避免手部或其他物体遮挡嘴部。"],
-            [
-              "video",
-              "画面稳定、光线均匀",
-              "建议在光线充足、稳定的环境下拍摄。",
-            ],
-          ].map(([icon, title, description]) => (
-            <li key={title}>
-              <span>
-                <Icon name={icon} size={24} />
-              </span>
-              <div>
-                <h4>{title}</h4>
-                <p>{description}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
-        <h3>创建流程</h3>
-        <ol className="oral-create-steps">
-          {[
-            ["upload", "上传视频", "上传一段真人出镜的视频"],
-            ["pen", "命名并确认授权", "为分身命名并确认使用授权"],
-            ["check", "等待分身完成", "系统处理中，完成即可使用"],
-          ].map(([icon, title, description]) => (
-            <li key={title}>
-              <span>
-                <Icon name={icon} size={22} />
-              </span>
-              <strong>{title}</strong>
-              <small>{description}</small>
-            </li>
-          ))}
-        </ol>
+        {/* 拍摄建议压缩成单行要点：分步教程式长文对熟手是噪音（界面精简
+            2026-11-15），创建弹窗里保留逐步引导。 */}
+        <p className="oral-guide-compact">
+          拍摄建议：单人正面出镜 · 嘴部清晰无遮挡 · 画面稳定光线均匀。
+        </p>
         <section className="oral-library-voice">
           <h3>我的声音</h3>
           <div>

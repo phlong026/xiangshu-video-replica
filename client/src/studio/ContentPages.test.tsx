@@ -151,8 +151,8 @@ const {
         id: "tm-2",
         title: "结算规则讲义",
         description: "",
-        kind: "training",
-        kind_label: "培训文档",
+        kind: "doc",
+        kind_label: "文档",
         content_type: "application/pdf",
         file_suffix: ".pdf",
         size_bytes: 300 * 1024,
@@ -846,8 +846,8 @@ describe("V1.4 内容与运营页面", () => {
           id: "tm-2",
           title: "结算规则讲义",
           description: "",
-          kind: "training",
-          kind_label: "培训文档",
+          kind: "doc",
+          kind_label: "文档",
           content_type: "application/pdf",
           file_suffix: ".pdf",
           size_bytes: 300 * 1024,
@@ -4454,14 +4454,26 @@ describe("全自动复刻入口（M8 v1）", () => {
       });
     try {
       const view = render(<MaterialsPage />);
-      fireEvent.click(await screen.findByRole("button", { name: "播放" }));
+      // 播放进弹层（MATERIAL-UX P0）：卡内不再嵌原生播放器；两张卡各有
+      // 一个「预览」，点第一张（视频卡）。
+      const previewButtons = await screen.findAllByRole("button", {
+        name: "预览",
+      });
+      fireEvent.click(previewButtons[0]);
+      const dialog = await screen.findByRole("dialog", {
+        name: "素材预览",
+      });
       await waitFor(() =>
-        expect(view.container.querySelector("video")).toHaveAttribute(
+        expect(dialog.querySelector("video")).toHaveAttribute(
           "src",
           "https://signed/old",
         ),
       );
-      fireEvent.click(screen.getAllByRole("button", { name: "下载" })[0]);
+      fireEvent.click(
+        view.container.querySelector(
+          ".content-material-card__actions button:nth-child(2)",
+        ) as HTMLButtonElement,
+      );
       await waitFor(() =>
         expect(links).toEqual([
           {
@@ -4483,21 +4495,98 @@ describe("全自动复刻入口（M8 v1）", () => {
       .mockResolvedValueOnce("https://signed/old")
       .mockResolvedValueOnce("https://signed/new");
     const view = render(<MaterialsPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "播放" }));
+    const previewButtons = await screen.findAllByRole("button", {
+      name: "预览",
+    });
+    fireEvent.click(previewButtons[0]);
+    const dialog = await screen.findByRole("dialog", { name: "素材预览" });
     await waitFor(() =>
-      expect(view.container.querySelector("video")).toHaveAttribute(
+      expect(dialog.querySelector("video")).toHaveAttribute(
         "src",
         "https://signed/old",
       ),
     );
-    fireEvent.error(view.container.querySelector("video") as HTMLVideoElement);
+    fireEvent.error(dialog.querySelector("video") as HTMLVideoElement);
     await waitFor(() =>
-      expect(view.container.querySelector("video")).toHaveAttribute(
+      expect(dialog.querySelector("video")).toHaveAttribute(
         "src",
         "https://signed/new",
       ),
     );
-    fireEvent.error(view.container.querySelector("video") as HTMLVideoElement);
+    fireEvent.error(dialog.querySelector("video") as HTMLVideoElement);
     expect(trainingMaterialDownloadUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it("素材卡标题与元信息随封面常显，类型页签带计数", async () => {
+    useStudio.mockReturnValue(studio());
+    render(<MaterialsPage />);
+
+    // 媒体卡（视频）不再只露黑块：标题/描述/大小常显（MATERIAL-UX P0）。
+    expect(await screen.findByText("三步完成爆款复刻")).toBeInTheDocument();
+    expect(screen.getByText("新手必看的完整流程演示")).toBeInTheDocument();
+    expect(screen.getByText(/12\.0 MB/)).toBeInTheDocument();
+    // 类型计数徽标（库内全量）+ 结果总数；页签可访问名为「标签+数字」连写。
+    expect(screen.getByRole("tab", { name: "全部2" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "视频1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "文档1" })).toBeInTheDocument();
+    expect(screen.getByText("共 2 个素材")).toBeInTheDocument();
+
+    // 类型页签真实过滤列表（回归：曾出现只改高亮不过滤的缺陷）。
+    fireEvent.click(screen.getByRole("tab", { name: "文档1" }));
+    expect(await screen.findByText("结算规则讲义")).toBeInTheDocument();
+    expect(screen.queryByText("三步完成爆款复刻")).not.toBeInTheDocument();
+    expect(screen.getByText("共 1 个素材")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "全部2" }));
+    expect(await screen.findByText("三步完成爆款复刻")).toBeInTheDocument();
+    expect(screen.getByText("共 2 个素材")).toBeInTheDocument();
+  });
+
+  it("站内搜索按标题与标签过滤并更新总数", async () => {
+    useStudio.mockReturnValue(studio());
+    render(<MaterialsPage />);
+
+    const searchBox = await screen.findByRole("searchbox", {
+      name: "搜索素材",
+    });
+    fireEvent.change(searchBox, { target: { value: "讲义" } });
+    expect(await screen.findByText("结算规则讲义")).toBeInTheDocument();
+    expect(screen.queryByText("三步完成爆款复刻")).not.toBeInTheDocument();
+    expect(screen.getByText("共 1 个素材")).toBeInTheDocument();
+
+    fireEvent.change(searchBox, { target: { value: "#入门教程" } });
+    expect(await screen.findByText("三步完成爆款复刻")).toBeInTheDocument();
+    expect(screen.queryByText("结算规则讲义")).not.toBeInTheDocument();
+    expect(screen.getByText("共 1 个素材")).toBeInTheDocument();
+  });
+
+  it("自动重签失败后仅在失败卡上提供重试入口", async () => {
+    useStudio.mockReturnValue(studio());
+    trainingMaterialDownloadUrl
+      .mockReset()
+      .mockResolvedValueOnce("https://signed/old")
+      .mockRejectedValueOnce(new Error("签名服务暂不可用"));
+    render(<MaterialsPage />);
+    const previewButtons = await screen.findAllByRole("button", {
+      name: "预览",
+    });
+    fireEvent.click(previewButtons[0]);
+    const dialog = await screen.findByRole("dialog", { name: "素材预览" });
+    await waitFor(() =>
+      expect(dialog.querySelector("video")).toHaveAttribute(
+        "src",
+        "https://signed/old",
+      ),
+    );
+    fireEvent.error(dialog.querySelector("video") as HTMLVideoElement);
+    // 重签失败：弹层提示行与失败卡动作区各有一个「重试」入口（双入口），
+    // 正常卡不暴露该按钮。
+    const retries = await screen.findAllByRole("button", { name: "重试" });
+    expect(retries).toHaveLength(2);
+    expect(
+      retries.some((button) =>
+        button.closest(".content-material-card__actions"),
+      ),
+    ).toBe(true);
   });
 });
