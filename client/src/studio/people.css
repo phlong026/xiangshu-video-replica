@@ -118,7 +118,8 @@
 .scene-card__actions .studio-button--outline.scene-card__delete {
   color: #969892;
 }
-.scene-card__actions .studio-button--outline.scene-card__delete:hover:not(:disabled) {
+.scene-card__actions
+  .studio-button--outline.scene-card__delete:hover:not(:disabled) {
   border-color: #8a4038;
   color: #e5695f;
 }

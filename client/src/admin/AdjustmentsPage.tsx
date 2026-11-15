@@ -52,7 +52,7 @@ const emptyFilters: Filters = {
 
 export function AdjustmentsPage({
   userId,
-  readOnly = false,
+  readOnly: _readOnly = false,
   onCustomer,
 }: {
   userId?: string;

@@ -27,7 +27,7 @@ const PAGE_SIZE = 20;
  * 补上此前被忽略的分页——服务端一直返回 total 并支持 limit/offset。
  */
 export function AccountsPage({
-  readOnly = false,
+  readOnly: _readOnly = false,
   userId = "",
 }: {
   readOnly?: boolean;
