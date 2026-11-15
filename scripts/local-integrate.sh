@@ -2,7 +2,9 @@
 # 本地集成：门禁全绿才允许把 feature 分支合入 main（merge-queue 语义）。
 #
 # 用法：
-#   scripts/local-integrate.sh <feature-branch> [--push]
+#   scripts/local-integrate.sh <feature-branch> [--push] [--incremental-gate <script>]
+#   --incremental-gate 仅用于用户明确要求复用已通过全量的批次；脚本须验证
+#   基线证据与未变范围，并执行本次受影响回归。默认始终运行 check:full。
 #
 # 流程：
 #   0. 防呆：工作区必须干净（无已跟踪改动）；feature 分支必须存在、
@@ -27,14 +29,31 @@ cd "${REPO_ROOT}"
 
 FEATURE="${1:-}"
 PUSH=0
-[ "${2:-}" = "--push" ] && PUSH=1
+INCREMENTAL_GATE=""
 
 abort() {
   printf '[integrate] 中止：%s\n' "$1" >&2
   exit 1
 }
 
-[ -n "${FEATURE}" ] || abort "用法：scripts/local-integrate.sh <feature-branch> [--push]"
+[ -n "${FEATURE}" ] || abort "用法：scripts/local-integrate.sh <feature-branch> [--push] [--incremental-gate <script>]"
+shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --push) PUSH=1; shift ;;
+    --incremental-gate)
+      [ -n "${2:-}" ] || abort "--incremental-gate 缺少门禁脚本"
+      [ -z "${INCREMENTAL_GATE}" ] || abort "不能重复指定增量门禁"
+      INCREMENTAL_GATE="$2"
+      shift 2
+      ;;
+    *) abort "未知参数：$1" ;;
+  esac
+done
+if [ -n "${INCREMENTAL_GATE}" ]; then
+  [ -f "${INCREMENTAL_GATE}" ] || abort "增量门禁脚本不存在：${INCREMENTAL_GATE}"
+  INCREMENTAL_GATE="$(cd "$(dirname "${INCREMENTAL_GATE}")" && pwd)/$(basename "${INCREMENTAL_GATE}")"
+fi
 [ "${FEATURE}" != "main" ] || abort "feature 分支不能是 main"
 git show-ref --verify --quiet "refs/heads/${FEATURE}" || abort "分支不存在：${FEATURE}"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || abort "工作区有未提交改动，先提交或清理后再集成"
@@ -64,23 +83,38 @@ if ! git merge --no-commit --no-ff "${FEATURE}"; then
   abort "合并冲突：先在 ${FEATURE} 上解决与 main 的冲突"
 fi
 
-printf '\n[integrate] 合并结果已就绪，开始 check:full（预计几十分钟，期间工作区归集成者独占）\n'
+GATE_NAME="check:full"
+if [ -n "${INCREMENTAL_GATE}" ]; then
+  GATE_NAME="incremental (full-suite baseline reused; NOT rerun)"
+fi
+printf '\n[integrate] 合并结果已就绪，开始 %s（期间工作区归集成者独占）\n' "${GATE_NAME}"
 GATE_STARTED=$SECONDS
-if npm run check:full; then
+run_gate() {
+  if [ -n "${INCREMENTAL_GATE}" ]; then
+    bash "${INCREMENTAL_GATE}"
+  else
+    npm run check:full
+  fi
+}
+if run_gate; then
   GATE_PASSED=1
 else
   restore
-  abort "check:full 未通过，main 已还原到合并前状态（证据日志见 .shard-logs/）"
+  abort "${GATE_NAME} 未通过，main 已还原到合并前状态"
 fi
 GATE_SECONDS=$((SECONDS - GATE_STARTED))
 
-GATE_LOG="$(ls -t .shard-logs/full-gate-*.log 2>/dev/null | head -1 || true)"
+if [ -n "${INCREMENTAL_GATE}" ]; then
+  GATE_LOG="${INCREMENTAL_GATE}"
+else
+  GATE_LOG="$(ls -t .shard-logs/full-gate-*.log 2>/dev/null | head -1 || true)"
+fi
 # git-dir 而非字面 .git/：linked worktree 里 .git 是文件，真实 gitdir 在主仓
 # .git/worktrees/<name>/ 下（2026-11-11 集成实战踩坑：六段门禁全绿后栽在这里）。
 GIT_MSG="$(git rev-parse --git-dir)/INTEGRATE_MSG"
 {
   printf "Merge branch '%s'\n" "${FEATURE}"
-  printf '\nLocal gate: check:full PASS（%s，耗时 %ds）\n' "$(date '+%F %T %z')" "${GATE_SECONDS}"
+  printf '\nLocal gate: %s PASS（%s，耗时 %ds）\n' "${GATE_NAME}" "$(date '+%F %T %z')" "${GATE_SECONDS}"
   [ -n "${GATE_LOG}" ] && printf 'Evidence: %s\n' "${GATE_LOG}"
   printf 'Integrator: scripts/local-integrate.sh\n'
 } > "${GIT_MSG}"

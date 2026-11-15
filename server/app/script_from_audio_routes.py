@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, status
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.permissions import require_project_access
 from app.script_from_audio import (
@@ -48,8 +48,8 @@ def extract_script_from_audio(
 )
 def read_script_from_audio_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ScriptFromAudioTaskResponse:
     row = load_script_from_audio_task(conn, task_id)
     require_project_access(
@@ -67,8 +67,8 @@ def read_script_from_audio_task(
 )
 def read_latest_script_from_audio_task(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ScriptFromAudioTaskResponse | None:
     require_project_access(
         conn,

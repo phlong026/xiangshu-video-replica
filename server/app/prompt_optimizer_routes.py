@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from app.analysis import ApilioGemini
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.prompt_optimizer import PromptOptimizeRequest, enqueue, task_result
@@ -46,7 +46,7 @@ def create_prompt_optimization(request: PromptOptimizeRequest, db: BusinessDbDep
 
 @router.get("/{task_id}")
 def read_prompt_optimization(
-    task_id: str, conn: Database, actor: AuthenticatedUser
+    task_id: str, conn: ReadDatabase, actor: ShortAuthUser
 ) -> dict[str, Any]:
     row = conn.execute(
         "SELECT * FROM prompt_optimization_receipts WHERE id=%s AND owner_user_id=%s",

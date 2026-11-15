@@ -17,7 +17,7 @@ from __future__ import annotations
 from cryptography.fernet import Fernet
 from fastapi import APIRouter
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.publish import (
     PublishAccountCreateRequest,
@@ -41,8 +41,8 @@ def _fernet() -> Fernet:
 
 @router.get("/accounts", response_model=PublishAccountListResponse)
 def read_publish_accounts(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> PublishAccountListResponse:
     return list_accounts(conn, actor_id=actor.id)
 

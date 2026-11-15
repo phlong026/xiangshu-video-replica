@@ -27,7 +27,7 @@ from app.admin_auth_routes import AdminReader, CustomerWriter
 from app.admin_customer_routes import _write_with_idempotency
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.sql_pagination import page_bounds
 
@@ -112,7 +112,7 @@ def _announcement_row(row: tuple[object, ...]) -> dict[str, object]:
 
 
 @router.get("/announcements")
-def list_live_announcements(conn: Database, actor: AuthenticatedUser) -> dict[str, object]:
+def list_live_announcements(conn: ReadDatabase, actor: ShortAuthUser) -> dict[str, object]:
     """当前生效公告（置顶优先，最新次之，≤10 条），附带当前用户已读标记。"""
     try:
         with pg_transaction() as pg:

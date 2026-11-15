@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database, ShortAuthUser
+from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
@@ -58,8 +58,8 @@ class MaterialResolveRequest(BaseModel):
 
 @router.get("", response_model=MaterialPage)
 def read_materials(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     media_type: MaterialMediaType | None = None,
     source: MaterialSource | None = None,
     q: Annotated[str | None, Query(max_length=120)] = None,
@@ -93,8 +93,8 @@ def read_materials(
 
 @router.get("/groups", response_model=MaterialGroupsResponse)
 def read_material_groups(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> MaterialGroupsResponse:
     return list_material_groups(conn, actor=actor)
 
@@ -102,8 +102,8 @@ def read_material_groups(
 @router.get("/{material_id}/usages", response_model=MaterialUsagesResponse)
 def read_material_usages(
     material_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> MaterialUsagesResponse:
     """MATERIAL-UX-10：单素材按需使用记录（owner 围栏；直出成片恒为空）。"""
     return list_material_usages(conn, actor=actor, material_id=material_id)
@@ -111,8 +111,8 @@ def read_material_usages(
 
 @router.get("/tags", response_model=list[MaterialTagItem])
 def read_material_tags(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[MaterialTagItem]:
     """MATERIAL-UX-05：当前用户可见素材的标签聚合计数（count DESC, tag ASC）。"""
     return list_material_tags(conn, actor=actor)

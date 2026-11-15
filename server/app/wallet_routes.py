@@ -6,7 +6,7 @@ from typing import Literal, cast
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.settings import DEFAULT_BILLING_SETTINGS
 from app.sql_pagination import PAGE_CLAUSE
 
@@ -237,7 +237,7 @@ def pricing_breakdown(snapshot: object) -> WalletTransactionPricing | None:
 
 
 @router.get("", response_model=WalletResponse, response_model_exclude_none=True)
-def read_wallet(conn: Database, actor: AuthenticatedUser) -> WalletResponse:
+def read_wallet(conn: ReadDatabase, actor: ShortAuthUser) -> WalletResponse:
     row = conn.execute(
         """
         SELECT available_credits, reserved_credits
@@ -281,8 +281,8 @@ def read_wallet(conn: Database, actor: AuthenticatedUser) -> WalletResponse:
 
 @router.get("/transactions", response_model=WalletTransactionPage)
 def list_wallet_transactions(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> WalletTransactionPage:

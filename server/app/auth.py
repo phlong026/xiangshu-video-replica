@@ -95,23 +95,23 @@ def get_current_user_short_tx(
 ) -> CurrentUser:
     """认证自开短事务：验证完成立即提交归还连接.
 
-    供「请求体接收/存储 I/O 以分钟计」的上传路由专用（put_local_object、
-    put_local_material）。若经由 get_current_user 隐式吃下请求级事务，整个
-    上传期间连接停在 idle-in-transaction，被 60s 护栏击杀（2026-11-02 生产
-    池饿死事故的 S2-9 路径）。认证语义与 get_current_user 完全一致，仅事务
-    边界更短；后续业务读写各自开短事务。
+    用于长上传和普通读取。认证后立即释放会话行锁，避免一个慢查询串住同一
+    账号的列表、钱包或登出请求。认证语义与 get_current_user 一致，仅事务
+    边界更短；读取经 ReadDatabase 借用业务连接，写入仍须经过会话栅栏。
     """
     from app.api_key_service import touch_last_used
     from app.customer_fence import _verify_api_key_in_transaction, resolve_api_key_user
 
+    # 程序凭据解析本身会借用连接，必须先完成，不能占着认证连接再等第二条。
+    principal = resolve_api_key_user(request)
     with pg_transaction() as pg_conn:
         conn = BusinessConnection.postgres(pg_conn)
-        principal = resolve_api_key_user(request)
         if principal is not None:
             _verify_api_key_in_transaction(cast(Any, conn.raw), principal)
             touch_last_used(cast(Any, conn.raw), key_id=principal.key_id)
             conn.api_key_id = principal.key_id
             conn.auth_source = "api_key"
+            request.state.short_auth_api_key = principal
             return authenticate_user(conn, principal.user_id)
         return authenticate_request(
             conn,
@@ -121,6 +121,31 @@ def get_current_user_short_tx(
 
 
 ShortAuthUser = Annotated[CurrentUser, Depends(get_current_user_short_tx)]
+
+
+def get_read_database(
+    request: Request,
+    _actor: ShortAuthUser,
+    conn: Database,
+) -> BusinessConnection:
+    """先提交会话校验，再借用业务查询连接，避免读请求长时间占用会话行锁。
+
+    参数顺序也是依赖顺序：短事务必须先结束，再进入 get_database。否则
+    并发请求会先借满连接池，再各自等待第二条认证连接，形成连接池饥饿。
+    此依赖只用于读接口；写接口仍由原事务内的会话栅栏裁决。
+    """
+    from app.customer_fence import _verify_api_key_in_transaction
+
+    principal = getattr(request.state, "short_auth_api_key", None)
+    if principal is not None:
+        # 程序凭据继续在业务事务内复核并保留归属信息，不改变其吊销边界。
+        _verify_api_key_in_transaction(cast(Any, conn.raw), principal)
+        conn.api_key_id = principal.key_id
+        conn.auth_source = "api_key"
+    return conn
+
+
+ReadDatabase = Annotated[BusinessConnection, Depends(get_read_database)]
 
 
 def authenticate_request(

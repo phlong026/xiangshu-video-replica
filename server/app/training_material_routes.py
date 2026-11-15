@@ -62,7 +62,7 @@ from app.admin_customer_routes import _write_with_idempotency
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
 from app.admin_write_contract import require_write_contract
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.db_portable import BusinessConnection
 from app.pan123_client import (
@@ -221,8 +221,8 @@ def _visible_filters(kind: str, tag: str) -> tuple[str, tuple[object, ...]]:
 
 @router.get("/training-materials")
 def list_training_materials(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     kind: str = "",
     tag: str = "",
     page: Annotated[int, Query(ge=1)] = 1,

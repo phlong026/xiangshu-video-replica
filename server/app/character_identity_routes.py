@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.analysis import APILIO_DEFAULT_BASE_URL, APILIO_GEMINI_MODEL
-from app.auth import AuthenticatedUser, CurrentUser, Database
+from app.auth import AuthenticatedUser, CurrentUser, Database, ReadDatabase, ShortAuthUser
 from app.character_contracts import CharacterPersona, CharacterVersion, PersonIdentity
 from app.character_identity import (
     ApilioSourceImageInspector,
@@ -189,8 +189,8 @@ def local_upload_intent(
 
 @router.get("/person-identities", response_model=list[PersonIdentity])
 def read_person_identities(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[PersonIdentity]:
     return list_person_identities(conn, actor=actor)
 
@@ -218,8 +218,8 @@ def create_person_identity_route(
 @router.get("/person-identities/{identity_id}", response_model=PersonIdentity)
 def read_person_identity(
     identity_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> PersonIdentity:
     return get_person_identity(conn, actor=actor, identity_id=identity_id)
 
@@ -351,8 +351,8 @@ def complete_source_upload_route(
 )
 def read_character_personas(
     identity_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[CharacterPersona]:
     return list_character_personas(conn, actor=actor, identity_id=identity_id)
 
@@ -379,8 +379,8 @@ def create_character_persona_route(
 @router.get("/character-personas/{persona_id}", response_model=CharacterPersona)
 def read_character_persona(
     persona_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> CharacterPersona:
     return get_character_persona(conn, actor=actor, persona_id=persona_id)
 
@@ -419,8 +419,8 @@ def delete_character_persona_route(
 )
 def read_character_versions(
     persona_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[CharacterVersion]:
     return list_character_versions(conn, actor=actor, persona_id=persona_id)
 
@@ -449,8 +449,8 @@ def create_character_version_route(
 @router.get("/character-versions/{version_id}", response_model=CharacterVersion)
 def read_character_version(
     version_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> CharacterVersion:
     return get_character_version(conn, actor=actor, version_id=version_id)
 
