@@ -24,12 +24,14 @@ def upgrade() -> None:
         return
     # 滚动发布窗口：migrate 容器跑迁移时，旧镜像 worker 可能还在往队列写行。
     # DELETE 与 CREATE UNIQUE INDEX 之间若混入并发 INSERT（同键重复），建索引
-    # 会因唯一冲突整体回滚。先拿 SHARE ROW EXCLUSIVE（阻塞其他会话的
-    # INSERT/UPDATE/DELETE，放行 SELECT），锁随迁移事务持有到提交。
-    # 旧镜像代码在锁释放后的混跑期仍可能以旧冲突目标 INSERT 同键行并撞新索引
-    # 报唯一冲突——该轮对账事务会失败并由下一轮重试，属可接受的短窗口代价
-    # （worker 镜像在同一发布内随即滚动）。
-    op.execute("LOCK TABLE billing_reconciliation_items IN SHARE ROW EXCLUSIVE MODE")
+    # 会因唯一冲突整体回滚。用 EXCLUSIVE（阻塞其他会话的 INSERT/UPDATE/DELETE
+    # 以及 SELECT ... FOR UPDATE，放行普通 SELECT），锁随迁移事务持有到提交。
+    # 不用 SHARE ROW EXCLUSIVE：它与 ROW SHARE 兼容，并发的收口事务若先持有
+    # 行锁，迁移再拿 SRWE 后 DELETE 等行锁、收口 UPDATE 又等表锁，会形成死锁；
+    # EXCLUSIVE 在加锁点就排队，没有这个窗口。旧镜像代码在锁释放后的混跑期
+    # 仍可能以旧冲突目标 INSERT 同键行并撞新索引报唯一冲突——该轮对账事务会
+    # 失败并由下一轮重试，属可接受的短窗口代价（worker 镜像在同一发布内随即滚动）。
+    op.execute("LOCK TABLE billing_reconciliation_items IN EXCLUSIVE MODE")
     # 折叠存量重复：同一 (service, source_id, billing_round) 的活跃记录里保留
     # check_count 最高的一条（并列取最早创建、最小 id，保证确定性）。
     # RESOLVED 行不参与键约束，原样保留供明细审计。

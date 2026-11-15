@@ -66,17 +66,27 @@ export function BillingReconciliationQueue({
   const [total, setTotal] = useState<number | null>(null);
   const [stateFilter, setStateFilter] = useState<StateFilter>("ALL");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  // 忙碌用计数器而不是布尔：扫描/收口是"写"，写完还要触发一次读。若用布尔，
+  // 慢写操作的 finally 会把并行中读请求的忙碌态提前清掉，按钮提前解禁。
+  const [busyCount, setBusyCount] = useState(0);
+  const busy = busyCount > 0;
   // 收口交互：正在填写收口备注的条目 id 与备注文本。
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [resolveNote, setResolveNote] = useState("");
   // 请求序号：筛选切换后早发请求可能晚到，过期响应一律丢弃，
   // 不让旧数据覆盖新筛选下的列表。
   const loadSeq = useRef(0);
+  // 筛选的最新值放 ref：扫描/收口完成后的刷新必须取"当下"的筛选，不能用
+  // 事件闭包里的旧值（旧值会借最新序号把新筛选下的列表覆盖掉）。
+  const stateFilterRef = useRef<StateFilter>(stateFilter);
+  useEffect(() => {
+    stateFilterRef.current = stateFilter;
+  }, [stateFilter]);
 
-  const load = useCallback(async (state: StateFilter) => {
+  const load = useCallback(async () => {
+    const state = stateFilterRef.current;
     const seq = ++loadSeq.current;
-    setBusy(true);
+    setBusyCount((count) => count + 1);
     setError("");
     try {
       const query = state === "ALL" ? "" : `&state=${state}`;
@@ -94,17 +104,17 @@ export function BillingReconciliationQueue({
       if (seq !== loadSeq.current) return;
       setError(cause instanceof Error ? cause.message : "核对队列读取失败");
     } finally {
-      if (seq === loadSeq.current) setBusy(false);
+      setBusyCount((count) => Math.max(0, count - 1));
     }
   }, []);
 
   useEffect(() => {
-    void load(stateFilter);
+    void load();
   }, [load, stateFilter]);
 
   async function rescan() {
     if (readOnly || busy) return;
-    setBusy(true);
+    setBusyCount((count) => count + 1);
     try {
       await adminWrite(
         "/api/control/billing-reconciliation/scan",
@@ -112,17 +122,17 @@ export function BillingReconciliationQueue({
         "管理端手动触发卡单扫描",
         "核对队列扫描暂不可用，请稍后重试。",
       );
-      await load(stateFilter);
+      await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "扫描失败");
     } finally {
-      setBusy(false);
+      setBusyCount((count) => Math.max(0, count - 1));
     }
   }
 
   async function submitResolve(item: ReconciliationItem) {
     if (readOnly || busy) return;
-    setBusy(true);
+    setBusyCount((count) => count + 1);
     setError("");
     try {
       await adminWrite(
@@ -133,12 +143,12 @@ export function BillingReconciliationQueue({
       );
       setResolvingId(null);
       setResolveNote("");
-      await load(stateFilter);
+      await load();
     } catch (cause) {
       // 409（计费仍未终态）等信息会带后端原文展示，不吞。
       setError(cause instanceof Error ? cause.message : "收口失败");
     } finally {
-      setBusy(false);
+      setBusyCount((count) => Math.max(0, count - 1));
     }
   }
 
