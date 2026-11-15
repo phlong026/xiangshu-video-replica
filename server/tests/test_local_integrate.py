@@ -15,13 +15,18 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "local-integrate.sh"
 @pytest.mark.parametrize("gate", ["full", "incremental", "failed"])
 def test_local_integrate_gates_and_rollback(tmp_path: Path, gate: str) -> None:
     bash = shutil.which("bash")
-    if os.name == "nt" and (git_binary := shutil.which("git")):
+    if os.name == "nt":
         # Windows 的 PATH 可能先命中 WSL 启动器；本机 Git 仓库须用 Git Bash。
-        git_path = Path(git_binary).resolve()
-        for candidate in (git_path.parent / "bash.exe", git_path.parents[1] / "bin" / "bash.exe"):
-            if candidate.is_file():
-                bash = str(candidate)
-                break
+        bash = None
+        if git_binary := shutil.which("git"):
+            git_path = Path(git_binary).resolve()
+            for candidate in (
+                git_path.parent / "bash.exe",
+                git_path.parents[1] / "bin" / "bash.exe",
+            ):
+                if candidate.is_file():
+                    bash = str(candidate)
+                    break
     assert bash is not None, "仓库集成流程要求 Bash"
     env = {
         **os.environ,
@@ -45,6 +50,14 @@ def test_local_integrate_gates_and_rollback(tmp_path: Path, gate: str) -> None:
         ).strip()
 
     git("init", "-b", "main")
+    # 模拟开发机全局强制签名且签名程序不可用；只在临时仓库关闭签名。
+    global_config = tmp_path / ".git" / "test-global.cfg"
+    global_config.write_text(
+        "[commit]\n    gpgsign = true\n[gpg]\n    program = missing-integration-test-gpg\n",
+        encoding="utf-8",
+    )
+    env["GIT_CONFIG_GLOBAL"] = str(global_config)
+    git("config", "commit.gpgsign", "false")
     git("config", "core.autocrlf", "false")
     git("config", "core.hooksPath", "disabled-hooks")
     scripts = tmp_path / "scripts"
