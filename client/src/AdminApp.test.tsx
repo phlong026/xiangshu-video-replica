@@ -1236,9 +1236,7 @@ describe("AdminApp", () => {
     const fetchMock = installFetch();
     render(<AdminApp />);
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "首次设置或找回密码" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "找回密码" }));
     fireEvent.change(screen.getByLabelText("一次性恢复凭据"), {
       target: { value: "ASX1.body.signature" },
     });
@@ -1286,6 +1284,75 @@ describe("AdminApp", () => {
       "aria-pressed",
       "false",
     );
+  });
+
+  it("记住账号：勾选即时落盘、取消立即清除、登录成功后仍保留", async () => {
+    // 「记住账号」只存用户名不存密码：管理后台密码交给浏览器密码管理器，
+    // localStorage 存明文密码在共用电脑/扩展场景就是裸奔。
+    const fetchMock = vi.fn((url: string, requestInit?: RequestInit) => {
+      if (
+        url.endsWith("/api/control/admin/session") &&
+        (!requestInit?.method || requestInit.method === "GET")
+      ) {
+        return jsonResponse(
+          {
+            detail: {
+              code: "ADMIN_SESSION_INVALID",
+              message: "Admin session is missing, revoked or invalid.",
+            },
+          },
+          401,
+        );
+      }
+      if (url.endsWith("/api/control/admin/session/password")) {
+        return jsonResponse(adminSession, 201);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.localStorage.removeItem("admin.login.rememberedUsername");
+
+    render(<AdminApp />);
+
+    fireEvent.change(await screen.findByLabelText("管理员账号"), {
+      target: { value: "admin" },
+    });
+    fireEvent.click(screen.getByLabelText("记住账号"));
+    expect(window.localStorage.getItem("admin.login.rememberedUsername")).toBe(
+      "admin",
+    );
+
+    fireEvent.click(screen.getByLabelText("记住账号"));
+    expect(
+      window.localStorage.getItem("admin.login.rememberedUsername"),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("记住账号"));
+    fireEvent.change(screen.getByLabelText("管理员密码"), {
+      target: { value: "Admin Login Passphrase 2026!" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录后台" }));
+    expect(
+      await screen.findByRole("navigation", { name: "管理端导航" }),
+    ).toBeInTheDocument();
+    expect(window.localStorage.getItem("admin.login.rememberedUsername")).toBe(
+      "admin",
+    );
+
+    window.localStorage.removeItem("admin.login.rememberedUsername");
+  });
+
+  it("记住账号：再次打开登录门自动回填账号并勾选", async () => {
+    const fetchMock = installFetch();
+    window.localStorage.setItem("admin.login.rememberedUsername", "ops-admin");
+
+    render(<AdminApp />);
+
+    expect(await screen.findByLabelText("管理员账号")).toHaveValue("ops-admin");
+    expect(screen.getByLabelText("记住账号")).toBeChecked();
+    expect(fetchMock).toHaveBeenCalled();
+
+    window.localStorage.removeItem("admin.login.rememberedUsername");
   });
 
   it("登录提交期间禁用按钮并阻止重复提交以保护登录限流预算", async () => {
@@ -1453,9 +1520,7 @@ describe("AdminApp", () => {
 
     render(<AdminApp />);
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "首次设置或找回密码" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "找回密码" }));
 
     expect(screen.getByText("凭据以 ASX1. 开头。")).toBeInTheDocument();
 
