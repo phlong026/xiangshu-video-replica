@@ -1948,6 +1948,7 @@ html:has(.studio-shell) {
   .studio-home-metrics svg {
     width: 17px;
   }
+  /* biome-ignore lint/style/noDescendingSpecificity: 与 hero 标题样式分层，重构另行任务 */
   .studio-home-metrics strong {
     font-size: var(--font-metric);
   }

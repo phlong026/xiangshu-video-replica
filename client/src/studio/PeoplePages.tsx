@@ -880,7 +880,8 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
   const removeScene = async (asset: StudioAsset) => {
     if (review || readOnly || deletingSceneId) return;
     // 删除不可逆；场景被项目选用/存在进行中任务时后端会 409 并给出中文原因。
-    if (!window.confirm(`删除场景造型「${asset.name}」？删除后不可恢复。`)) return;
+    if (!window.confirm(`删除场景造型「${asset.name}」？删除后不可恢复。`))
+      return;
     setDeletingSceneId(asset.id);
     try {
       await deleteSimpleSceneLook(person.id, asset.contactSheetId ?? asset.id);
