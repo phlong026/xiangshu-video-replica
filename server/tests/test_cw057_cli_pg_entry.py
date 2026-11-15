@@ -222,6 +222,17 @@ HISTORICAL_CLI_ROWS: tuple[CommandRow, ...] = tuple(
             "per-row FOR UPDATE lock + fresh-snapshot evidence recheck; "
             "idempotent; 2026-11 爆款链路改造 WP4",
         ),
+        (
+            "python -m scripts.backfill_operation_costs",
+            "scripts/backfill_operation_costs.py",
+            "current-pg",
+            "PostgreSQL (business)",
+            "backfill (one-shot)",
+            "dry-run by default; writes billing_evidence only with --apply "
+            "(cost = usage × configured tariff unit_cost_fen, same evidence/"
+            "audit rows as the manual cost review form); batch-committed with "
+            "per-batch audit; idempotent; 2026-11-15 管理端审计修复 M2",
+        ),
     )
 )
 
