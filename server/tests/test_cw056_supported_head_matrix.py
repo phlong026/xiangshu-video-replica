@@ -439,16 +439,20 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # unique_constraints 各 +1、columns +6、check_constraints +1、
 # timestamptz_columns +1（created_at）；digest 在空库→新 head 的 PG16 探针
 # 库（m6b_schema_probe）重算。
+# 2026-11-15 展示配置 KV：display_settings（key 主键 + value/updated_by_user_id/
+# updated_at 四列，时间戳走 sa.TIMESTAMP() 即 timestamptz 计数不变），故
+# tables/primary_keys 各 +1、columns +4；digest 由 --print-schema 在空库→新
+# head 的 PG16 探针库（cw056_probe）重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "check_constraints": 409,
-    "columns": 1581,
+    "columns": 1585,
     "foreign_keys": 221,
     "identity_columns": 0,
     "jsonb_columns": 16,
     "partial_indexes": 48,
-    "primary_keys": 139,
+    "primary_keys": 140,
     "sequences": 8,
-    "tables": 139,
+    "tables": 140,
     "timestamptz_columns": 131,
     "triggers": 61,
     "unique_constraints": 45,
@@ -530,6 +534,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "customer_unit_prices",
     "daily_external_prices",
     "device_pairing_requests",
+    "display_settings",
     "external_call_logs",
     "external_call_observations",
     "external_call_response_pending",
@@ -715,7 +720,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
 # 2026-11-13 M6b 发送意图表追加后，在空库→新 head 的 PG16 探针库再重算。
-HEAD_SCHEMA_DIGEST = "621c790357b434a1e94a7dee59e4c6dc394fd9ebf705788284023a693d4baa16"
+HEAD_SCHEMA_DIGEST = "21dd86c547f68f40bc61952f767f57dca639bf2b6e8e882170a0b61e5eaa810c"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
