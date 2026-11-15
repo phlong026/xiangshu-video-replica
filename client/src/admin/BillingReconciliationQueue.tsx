@@ -108,8 +108,7 @@ export function BillingReconciliationQueue({
     }
   }, []);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies：load 内部经 ref 读当前
-  // 筛选（避免闭包旧值），但筛选切换必须重触发本 effect——这是有意的额外依赖。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: load 经 ref 读当前筛选（防闭包旧值），但筛选切换必须重触发本 effect——有意的额外依赖
   useEffect(() => {
     void load();
   }, [load, stateFilter]);
