@@ -804,6 +804,61 @@ def test_whitelist_recharge_status_is_404_for_a_missing_order(
     assert resp.json()["detail"]["code"] == "RECHARGE_ORDER_NOT_FOUND"
 
 
+@pytest.mark.parametrize("change", ["none", "revoke", "disable-owner", "scope"])
+def test_short_read_auth_rechecks_api_key_before_business_query(
+    client: TestClient, pg_dsn: str, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """单连接池不嵌套借用；认证后吊销或缩权仍须在业务事务内拒绝。"""
+    from app.auth import get_current_user_short_tx
+    from app.generation_routes import router as generation_router
+
+    client.app.include_router(generation_router)
+    user_id = _new_user("read-boundary")
+    _seed_customer(pg_dsn, user_id)
+    plaintext, record = _seed_key(pg_dsn, user_id)
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MIN", "0")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MAX", "1")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_TIMEOUT", "1")
+    close_pg_pool()
+    authenticated: list[str] = []
+
+    def after_auth(request: Request):
+        actor = get_current_user_short_tx(
+            request, authorization=request.headers.get("authorization"), dev_user_id=None
+        )
+        authenticated.append(actor.id)
+        with pg_transaction() as conn:
+            if change == "revoke":
+                conn.execute(
+                    "UPDATE customer_api_keys SET revoked_at=now() WHERE id=%s", (record.id,)
+                )
+            elif change == "disable-owner":
+                conn.execute("UPDATE users SET is_active=0 WHERE id=%s", (user_id,))
+            elif change == "scope":
+                conn.execute("UPDATE customer_api_keys SET scopes='[]' WHERE id=%s", (record.id,))
+        return actor
+
+    client.app.dependency_overrides[get_current_user_short_tx] = after_auth
+    try:
+        response = client.get("/api/generation-batches", headers=_bearer(plaintext))
+        assert authenticated == [user_id]
+        assert response.status_code == {"none": 200, "scope": 403}.get(change, 401), response.text
+        if change != "none":
+            assert response.json()["detail"]["code"] == (
+                "API_KEY_SCOPE_DENIED" if change == "scope" else "API_KEY_INVALID"
+            )
+        else:
+            with psycopg.connect(pg_dsn) as conn:
+                used = conn.execute(
+                    "SELECT last_used_at IS NOT NULL FROM customer_api_keys WHERE id=%s",
+                    (record.id,),
+                ).fetchone()
+            assert used == (True,)
+    finally:
+        client.app.dependency_overrides.clear()
+        close_pg_pool()
+
+
 def test_api_key_lane_fenced_when_master_deactivated(client: TestClient, pg_dsn: str) -> None:
     """封禁母账号后，子账号名下的存量 API key 必须随之失效（上线评审 H-2）。
 

@@ -53,7 +53,7 @@ from pg_test_kit import (
     upgrade_test_database_to_head,
 )
 
-from app.auth import CurrentUser, get_current_user
+from app.auth import CurrentUser, get_current_user, get_current_user_short_tx
 from app.customer_fence import get_business_db
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
@@ -327,7 +327,9 @@ def holder() -> _PgBusinessDb:
     """
     db = _PgBusinessDb(actor("employee_1"))
     app.dependency_overrides[get_business_db] = lambda: db
-    app.dependency_overrides[get_current_user] = lambda: db.current_actor
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: db.current_actor
     return db
 
 

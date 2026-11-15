@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import Database, ReadDatabase, ShortAuthUser
 from app.billing_catalog import SERVICES
 from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
@@ -327,8 +327,8 @@ class ViralDiscoveriesResponse(BaseModel):
 
 @router.get("/search/discoveries", response_model=ViralDiscoveriesResponse)
 def list_viral_search_discoveries(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     search_date: Annotated[str | None, Query(alias="date", max_length=10)] = None,
 ) -> ViralDiscoveriesResponse:
     """客户'我的发现'（按天，默认今天·上海时区）：发现记录左联内容池."""

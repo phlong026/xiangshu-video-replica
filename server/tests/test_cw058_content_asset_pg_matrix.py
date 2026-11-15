@@ -45,7 +45,7 @@ from pg_test_kit import (
     upgrade_test_database_to_head,
 )
 
-from app.auth import CurrentUser
+from app.auth import CurrentUser, get_current_user_short_tx
 from app.character_asset_review import (
     list_character_asset_reviews,
     publish_character_version,
@@ -598,13 +598,17 @@ def test_prelaunch_saved_script_detail_can_open_beyond_latest_fifty(
     assert "old-0" not in {
         item.script_id for item in list_saved_scripts(bus, actor_id="employee_1").items
     }
-    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor("employee_1", "employee")
     try:
         client = TestClient(app)
         response = client.get("/api/studio/saved-scripts/old-0")
         assert response.status_code == 200
         assert response.json()["text"] == "仍可打开的历史文案"
-        app.dependency_overrides[get_current_user] = lambda: actor("employee_2", "employee")
+        app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+            get_current_user
+        ] = lambda: actor("employee_2", "employee")
         assert client.get("/api/studio/saved-scripts/old-0").status_code == 404
     finally:
         app.dependency_overrides.clear()
@@ -626,7 +630,9 @@ def test_prelaunch_notifications_hide_other_users_and_preserve_read_cutoff(
                 yield BusinessConnection.postgres(raw), actor("employee_1", "employee")
 
     _seed_stats_scene(pg)
-    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor("employee_1", "employee")
     try:
         client = TestClient(app)
         response = client.get("/api/studio/notifications")
@@ -811,7 +817,9 @@ def test_optional_project_state_routes_conceal_foreign_projects_on_real_pg(
     # 客户 PG 通道按设计拒绝开发身份头（CW-031 已锁定该安全性质）：路由级
     # 测试覆写鉴权依赖、保留真实 get_database PG 通道——被测不变量是属主
     # 掩蔽而非鉴权本身。
-    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor("employee_1", "employee")
     try:
         client = TestClient(app)
         headers = {"X-Dev-User-Id": "employee_1"}
@@ -1201,7 +1209,9 @@ def test_notification_preferences_upsert_keeps_single_row_on_pg(
     from app.auth import get_current_user
     from app.main import app
 
-    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor("employee_1", "employee")
     try:
         client = TestClient(app)
         headers = {"X-Dev-User-Id": "employee_1"}
@@ -3225,7 +3235,9 @@ def test_project_list_exposes_audio_only_script_source(
         "'audio/mp4','employee_1','{}')"
     )
     pg.commit()
-    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor("employee_1", "employee")
     try:
         projects = TestClient(app).get("/api/projects").json()
     finally:
@@ -3250,7 +3262,9 @@ def test_project_list_optional_pagination(lane_env: str, pg: psycopg.Connection)
         )
     seed_project(pg, "page-project-foreign", "employee_2")
     pg.commit()
-    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor("employee_1", "employee")
     try:
         client = TestClient(app)
         everything = [item["id"] for item in client.get("/api/projects").json()]
@@ -4444,7 +4458,9 @@ def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
     from app.viral_routes import get_viral_source_client as _client_dependency
 
     app.dependency_overrides[_client_dependency] = lambda: stub
-    app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor("employee_1", "employee")
     try:
         client = TestClient(app)
         response = client.get(

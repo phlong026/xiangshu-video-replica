@@ -1474,25 +1474,23 @@ def resolve_viral_link_for_admin(
     if not raw_url:
         raise http_error(422, "VIRAL_LINK_INVALID", "请粘贴视频分享链接。")
     try:
+        normalized_url = normalize_supported_link(raw_url)
+        platform = supported_link_platform(normalized_url)
+        if platform not in ("douyin", "xiaohongshu", "wechat_channels"):
+            raise http_error(
+                422,
+                "VIRAL_PLATFORM_INVALID",
+                "暂时只支持抖音、小红书、视频号采集。",
+            )
         with pg_transaction() as pg:
             conn = BusinessConnection.postgres(pg)
-            normalized_url = normalize_supported_link(raw_url)
-            platform = supported_link_platform(normalized_url)
-            if platform not in ("douyin", "xiaohongshu", "wechat_channels"):
-                raise http_error(
-                    422,
-                    "VIRAL_PLATFORM_INVALID",
-                    "暂时只支持抖音、小红书、视频号采集。",
-                )
             resolver: DouyidouLinkClient | WechatLinkClient
             if platform == "wechat_channels":
                 resolver = wechat_link_client_from_settings(conn)
             else:
                 resolver = douyidou_link_client_from_settings(conn)
-            try:
-                resolved = resolver.resolve(normalized_url, purpose="replica")
-            except ViralLinkError as exc:
-                raise http_error(exc.status_code, exc.code, exc.message) from exc
+        # 客户端已持有配置快照；外部解析不能占着连接，避免慢请求耗尽管理端池。
+        resolved = resolver.resolve(normalized_url, purpose="replica")
     except ViralLinkError as exc:
         raise http_error(exc.status_code, exc.code, exc.message) from exc
     meta = resolved.metadata

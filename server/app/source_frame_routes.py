@@ -8,7 +8,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessRow
 from app.media_routes import get_media_storage
@@ -134,8 +134,8 @@ def extract_project_source_frames(
 )
 def read_source_frame_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> SourceFrameTaskResponse:
     row = load_source_frame_task(conn, task_id)
     try:
@@ -176,8 +176,8 @@ def cancel_project_source_frame_task(
 def read_latest_source_frame_task(
     project_id: str,
     asset_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> SourceFrameTaskResponse | None:
     require_project_access(
         conn,
@@ -196,8 +196,8 @@ def read_latest_source_frame_task(
 @router.get("/projects/{project_id}/source-frames/latest", response_model=VersionResponse | None)
 def read_latest_source_frames(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="source_frame.read")
     row = latest_version(conn, project_id, SOURCE_FRAME_CANDIDATES_KIND)
@@ -233,8 +233,8 @@ def confirm_project_source_frame(
 )
 def read_latest_source_frame_selection(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="source_frame.read")
     row = latest_version(conn, project_id, SOURCE_FRAME_SELECTION_KIND)

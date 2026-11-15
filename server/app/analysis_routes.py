@@ -40,7 +40,7 @@ from app.analysis import (
     validate_shot_cards,
 )
 from app.async_compat import reject_legacy_sync_operation
-from app.auth import AuthenticatedUser, CurrentUser, Database, Role
+from app.auth import CurrentUser, Database, ReadDatabase, Role, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_pg import is_customer_production
 from app.db_portable import BusinessConnection, BusinessRow
@@ -514,8 +514,8 @@ def create_project_analysis_task(
 @router.get("/analysis-tasks/{task_id}", response_model=AnalysisTaskResponse)
 def read_analysis_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> AnalysisTaskResponse:
     row = load_analysis_task(conn, task_id)
     try:
@@ -549,8 +549,8 @@ def cancel_project_analysis_task(
 @router.get("/analysis/{analysis_id}", response_model=VersionResponse)
 def read_analysis(
     analysis_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionResponse:
     row = load_analysis_version(conn, analysis_id)
     try:
@@ -577,8 +577,8 @@ def read_analysis(
 @router.get("/projects/{project_id}/analysis/latest", response_model=VersionResponse)
 def read_latest_project_analysis(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionResponse:
     require_project_access(conn, actor=actor, project_id=project_id, action="analysis.read")
     row = conn.execute(
@@ -603,8 +603,8 @@ def read_latest_project_analysis(
 @router.get("/projects/{project_id}/shot-cards/latest", response_model=VersionResponse | None)
 def read_latest_project_shot_card(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="shot_card.read")
     row = conn.execute(

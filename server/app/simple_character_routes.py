@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app import content_store
 from app.async_compat import reject_legacy_sync_operation
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
 from app.character_asset_review import cleanup_publication_objects
 from app.character_contracts import PersonIdentity, RequiredCharacterViewType
 from app.character_identity import character_error, read_identity_row, required_text
@@ -395,8 +395,8 @@ async def enqueue_project_simple_character(
 
 @router.get("/library", response_model=SimpleLibraryPageResponse)
 def read_simple_library(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 12,
     cursor: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
     query: Annotated[str, Query(max_length=100)] = "",
@@ -451,8 +451,8 @@ def read_simple_library(
 )
 def read_scene_looks(
     identity_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 12,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> SimpleSceneLookPageResponse:
@@ -573,8 +573,8 @@ def enqueue_scene_look(
 )
 def read_latest_scene_look_task(
     identity_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> CharacterSheetTaskResponse | None:
     identity = read_identity_row(conn, identity_id)
     if actor.role != "admin" and str(identity["owner_user_id"]) != actor.id:
@@ -767,8 +767,8 @@ def enqueue_regenerate_contact_sheet(
 @router.get("/task-status/{task_id}", response_model=CharacterSheetTaskResponse)
 def read_character_sheet_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> CharacterSheetTaskResponse:
     row = load_image_task(conn, table="character_sheet_tasks", task_id=task_id)
     require_character_sheet_task_access(actor=actor, row=row)
@@ -777,8 +777,8 @@ def read_character_sheet_task(
 
 @router.get("/tasks/active-or-latest", response_model=CharacterSheetTaskResponse | None)
 def read_latest_character_sheet_task(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> CharacterSheetTaskResponse | None:
     row = latest_base_character_sheet_task(conn, owner_id=actor.id)
     return None if row is None else character_sheet_task_response(row)

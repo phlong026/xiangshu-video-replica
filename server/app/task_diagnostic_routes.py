@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 
 router = APIRouter(prefix="/api/task-references", tags=["task-references"])
 TaskType = Literal[
@@ -42,7 +42,7 @@ class CustomerTaskReference(BaseModel):
 
 @router.get("/{task_type}/{task_id}", response_model=CustomerTaskReference)
 def customer_task_reference(
-    conn: Database, actor: AuthenticatedUser, response: Response, task_type: TaskType, task_id: str
+    conn: ReadDatabase, actor: ShortAuthUser, response: Response, task_type: TaskType, task_id: str
 ) -> CustomerTaskReference:
     response.headers["Cache-Control"] = "no-store"
     source, owner = SOURCES[task_type]
