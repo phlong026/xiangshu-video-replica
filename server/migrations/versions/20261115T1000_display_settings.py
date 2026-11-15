@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20261115T1000_display_settings"
-down_revision = "20261113T1000_replica_pipeline_submit_intents"
+down_revision = "20261115T1900_billing_reconciliation_active_dedupe"
 branch_labels = None
 depends_on = None
 
