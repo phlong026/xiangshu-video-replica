@@ -720,7 +720,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
 # 2026-11-13 M6b 发送意图表追加后，在空库→新 head 的 PG16 探针库再重算。
-HEAD_SCHEMA_DIGEST = "21dd86c547f68f40bc61952f767f57dca639bf2b6e8e882170a0b61e5eaa810c"
+HEAD_SCHEMA_DIGEST = "af07d1611cd50529eba6841f3fdcaa179ffab0aa7f3eb3e1b82a787d9cacf4be"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
