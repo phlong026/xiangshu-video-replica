@@ -27,7 +27,13 @@ from app.viral_collection_failures import classify_collection_failure
 from app.viral_collection_schedule import advance_collection_time
 from app.viral_content_observations import record_content_source, record_content_stage
 from app.viral_keywords import ViralKeywordConfig
-from app.viral_media import CoverEnricher, UrlFetcher, ViralMediaPipeline
+from app.viral_media import (
+    CoverEnricher,
+    UrlFetcher,
+    ViralMediaDNSUnavailable,
+    ViralMediaError,
+    ViralMediaPipeline,
+)
 from app.viral_refresh import ViralRefreshLease, _require_lease
 from app.viral_store import (
     get_viral_video,
@@ -37,7 +43,13 @@ from app.viral_store import (
     viral_runtime_controls,
     viral_video_availability,
 )
-from app.viral_tikhub import ViralSourceError, ViralVideo, viral_source_client_from_settings
+from app.viral_tikhub import (
+    PLATFORM_DOUYIN,
+    ViralSourceClient,
+    ViralSourceError,
+    ViralVideo,
+    viral_source_client_from_settings,
+)
 from app.viral_wechat_link import wechat_link_client_from_settings_or_none
 
 
@@ -285,6 +297,35 @@ def _checkpoint(
     )
 
 
+def _refresh_douyin_play_url(
+    conn: BusinessConnection, client: ViralSourceClient | None, video: ViralVideo
+) -> ViralVideo | None:
+    """按视频 ID 重外呼刷新抖音播放地址，取到新直链就回库并返回该条目.
+
+    库里存的 ``play_url`` 是采集/导入当时的限时 CDN 签名直链，延后转存必然
+    403（生产 2026-11-15 实锤：同条目 play_url 403、audio_url 200）。数据源
+    没有单条详情接口，复用「视频 ID 当关键词」的综合搜索刷新通道；只认精确
+    命中本视频且带新 ``play_url`` 的结果，任何无关视频都不得入库。视频号链
+    接条目已有解析通道重取，不走这里。拿不到有效新地址返回 None（调用方保
+    持原失败），调用方只在普通 ``ViralMediaError`` 时进入本路径——Busy（他
+    人在准备）与 DNS 不可达（重取无济于事）不消耗这次外呼。
+    """
+    if client is None or video.platform != PLATFORM_DOUYIN:
+        return None
+    try:
+        candidates = client.douyin_refresh(platform=video.platform, video_id=video.video_id)
+    except ViralSourceError:
+        return None
+    refreshed = next(
+        (item for item in candidates if item.video_id == video.video_id and item.play_url),
+        None,
+    )
+    if refreshed is None:
+        return None
+    upsert_viral_videos(conn, [refreshed])
+    return refreshed
+
+
 def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video_id: str) -> None:
     """Prepare an existing item only; never search, bill customers or replace a list."""
     with _keep_lease(lease) as check, video_billing_context(lease.platform, video_id):
@@ -309,7 +350,19 @@ def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video
             cancellation_check=check,
             wechat_link_client=wechat_link_client,
         )
-        pipeline.fetch(video, prefer="video")
+        try:
+            pipeline.fetch(video, prefer="video")
+        except ViralMediaDNSUnavailable:
+            raise
+        except ViralMediaError:
+            # 播放地址是限时签名直链：入库后未及时转存就会过期（403）。重取一条
+            # 新直链回库再试一次；再失败按原样抛出，任务进既有失败/重试通道。
+            with _connection() as conn:
+                fresh = _refresh_douyin_play_url(conn, client, video)
+            if fresh is None:
+                raise
+            pipeline.fetch(fresh, prefer="video")
+            video = fresh
         # 首次下载取得的详情（视频号解密详情等）要跨过下面的音频回访保留：
         # pipeline.fetch 每次都会把 detail 清空，音频回访即使等价命中缓存也会
         # 抹掉它，统计回写就会丢失（Codex 收尾评审 P2）。
