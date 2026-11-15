@@ -288,6 +288,10 @@
   gap: 10px;
   margin-bottom: 12px;
 }
+/* 「刷新 / 刷新中…」文案等宽，避免自动刷新期间按钮宽度抖动。 */
+.dashboard-toolbar > button {
+  min-width: 96px;
+}
 .dashboard-toolbar [role="status"] {
   margin-right: auto;
   color: var(--admin-muted, #a49e95);
@@ -336,6 +340,9 @@
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
   gap: 18px;
+  /* 两列内容高度天然不同（右列待办列表长），禁止互相拉伸——
+     否则图表面板被拉高后在绘图区下方留出大片空白（2026-11-15 审计）。 */
+  align-items: start;
 }
 .dashboard-main-grid > .admin-panel {
   min-height: 382px;
@@ -380,6 +387,17 @@
 .dashboard-combo .dashboard-trend__bars {
   height: 100%;
   min-height: 0;
+}
+/* 目录没配单价时全天成本都是「待核对」：占位文字要可见（此前暗色主题下
+   几乎隐形，整个绘图区看起来像一块空白）。 */
+.dashboard-combo .dashboard-trend__bars > span {
+  align-self: center;
+  justify-self: center;
+  color: #8f8981;
+  font-size: var(--font-caption);
+  border: 1px dashed #4a443b;
+  border-radius: 8px;
+  padding: 3px 10px;
 }
 .dashboard-combo .dashboard-trend__bar.dashboard-trend__bar--cost {
   background: linear-gradient(180deg, #e0c17c, #8d7138);
@@ -628,6 +646,11 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+}
+/* 全局 input{width:100%} 会把月份选择器拉满整行；这里收回正常宽度。 */
+.funds-month-filter input {
+  width: auto;
+  flex: 0 1 220px;
 }
 @media (min-width: 960px) and (max-width: 1200px) {
   .admin-shell--control .admin-workspace .business-dashboard .business-kpis {

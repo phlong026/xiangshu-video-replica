@@ -573,6 +573,9 @@ export function AdminApp() {
         new URLSearchParams(window.location.hash.split("?")[1] ?? ""),
       );
     };
+    // 深链/页签切换后把内容区滚回顶部：否则上一页的滚动位置会让新页的
+    // 页签行被 sticky header 压住（2026-11-15 审计·成本核对页）。
+    document.querySelector(".admin-workspace")?.scrollTo({ top: 0 });
     window.addEventListener("hashchange", restore);
     window.addEventListener("popstate", restore);
     return () => {

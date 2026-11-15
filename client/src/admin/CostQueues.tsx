@@ -68,7 +68,7 @@ export function CostQueues({
             <strong>{counts[q.key] ?? "…"}</strong>
             <small>
               {q.key === "legacy" ? "2019-01-01" : range.get("start")} 至{" "}
-              {range.get("end")} · 当前客户与业务筛选
+              {range.get("end")} · 按当前筛选
             </small>
           </button>
         </article>

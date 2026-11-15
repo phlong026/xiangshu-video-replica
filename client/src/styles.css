@@ -6985,3 +6985,21 @@ button.admin-viral-tile dd {
 .admin-generation-records td > small {
   display: block;
 }
+
+/* 报表中心（2026-11-15 审计）：导出卡复用 viral-tile 结构，但 dd 里
+   「导出 CSV」按钮与描述文字此前按内联流排布，文字从按钮右侧起步再绕到
+   下方，排版断裂；这里统一为纵向堆叠。 */
+.admin-reports-page .admin-viral-tile dd {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 0;
+  font-weight: 400;
+}
+
+.admin-reports-page .admin-viral-tile dd small {
+  margin-left: 0;
+  color: var(--admin-muted);
+  line-height: 1.6;
+}
