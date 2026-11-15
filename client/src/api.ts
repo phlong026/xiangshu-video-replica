@@ -3630,7 +3630,6 @@ export async function fetchAnalysisVersions(projectId: string): Promise<{
 
 /** 按版本号载入任一拆解版本（复刻页「拆解历史」→ 载入此版本）。 */
 export async function fetchAnalysisVersionById(
-  projectId: string,
   analysisId: string,
 ): Promise<AnalysisVersion> {
   return requestApiJson<AnalysisVersion>(

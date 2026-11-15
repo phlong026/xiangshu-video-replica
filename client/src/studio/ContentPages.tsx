@@ -3774,10 +3774,7 @@ export function PublishPage() {
               ) : (
                 <Empty
                   action={
-                    <Button
-                      variant="primary"
-                      onClick={() => openLive("tasks")}
-                    >
+                    <Button variant="primary" onClick={() => openLive("tasks")}>
                       去任务中心选择成片
                     </Button>
                   }

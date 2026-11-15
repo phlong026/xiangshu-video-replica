@@ -113,17 +113,20 @@
   padding: 3px 12px;
 }
 
-.admin-training-card__cover[data-kind="video"] .admin-training-card__cover-mark {
+.admin-training-card__cover[data-kind="video"]
+  .admin-training-card__cover-mark {
   border-color: #e07b6a66;
   color: #e07b6a;
 }
 
-.admin-training-card__cover[data-kind="audio"] .admin-training-card__cover-mark {
+.admin-training-card__cover[data-kind="audio"]
+  .admin-training-card__cover-mark {
   border-color: #d9b44a66;
   color: #d9b44a;
 }
 
-.admin-training-card__cover[data-kind="image"] .admin-training-card__cover-mark {
+.admin-training-card__cover[data-kind="image"]
+  .admin-training-card__cover-mark {
   border-color: #7fc98d66;
   color: #7fc98d;
 }

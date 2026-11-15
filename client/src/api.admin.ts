@@ -1716,7 +1716,10 @@ export async function listTrainingMaterials(
 export async function getDisplaySetting(
   key: string,
 ): Promise<{ key: string; value: string }> {
-  return adminRead(`/api/admin/settings/display/${encodeURIComponent(key)}`, "读取展示配置失败");
+  return adminRead(
+    `/api/admin/settings/display/${encodeURIComponent(key)}`,
+    "读取展示配置失败",
+  );
 }
 
 export async function updateDisplaySetting(input: {

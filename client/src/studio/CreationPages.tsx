@@ -15,6 +15,9 @@ import {
   customerVisibleErrorMessage,
   DIRECT_RESULT_RETENTION_HINT,
   deleteStudioSavedScript,
+  fetchAnalysisVersionById,
+  fetchAnalysisVersions,
+  fetchDisplaySetting,
   fetchViralCopyExtractions,
   type GenerationRatio,
   type GenerationVersionState,
@@ -44,9 +47,6 @@ import {
   saveGenerationPrompt,
   saveShotCards,
   selectCharacterReferences,
-  fetchDisplaySetting,
-  fetchAnalysisVersions,
-  fetchAnalysisVersionById,
   startVideoAnalysis,
   type ViralCopyExtractionRecord,
   waitForAnalysisTask,
@@ -163,14 +163,14 @@ async function getProjectAnalysisOrNull(
 }
 
 async function getAnalysisVersionOrNull(
-  projectId: string,
   analysisId: string,
 ): Promise<AnalysisVersion | null> {
   try {
-    return await fetchAnalysisVersionById(projectId, analysisId);
+    return await fetchAnalysisVersionById(analysisId);
   } catch (cause: unknown) {
     const error = cause as { code?: string; status?: number };
-    if (error.status === 404 && error.code === "ANALYSIS_NOT_FOUND") return null;
+    if (error.status === 404 && error.code === "ANALYSIS_NOT_FOUND")
+      return null;
     throw cause;
   }
 }
@@ -2060,7 +2060,7 @@ export function ReplicaPage() {
           await Promise.allSettled([
             getLatestProjectShotCards(target.id),
             analysisId
-              ? getAnalysisVersionOrNull(target.id, analysisId)
+              ? getAnalysisVersionOrNull(analysisId)
               : getProjectAnalysisOrNull(target.id),
             getLatestGenerationPrompt(target.id),
             getLatestScriptVersion(target.id),
@@ -3074,9 +3074,7 @@ export function ReplicaPage() {
                         <p className="oral-dialog-intro">{historyError}</p>
                       ) : null}
                       {historyLoading ? (
-                        <p className="oral-dialog-intro">
-                          正在读取拆解历史…
-                        </p>
+                        <p className="oral-dialog-intro">正在读取拆解历史…</p>
                       ) : historyItems.length === 0 ? (
                         <p className="oral-dialog-intro">
                           本项目还没有拆解记录；点「启动 AI 拆解」生成第一次。
@@ -5884,10 +5882,7 @@ function PromptTutorialButton() {
             教程整理中，敬请期待。正式教程上线后，这里会直接打开教程文档。
           </p>
           <footer className="oral-dialog-actions">
-            <Button
-              variant="primary"
-              onClick={() => setPlaceholderOpen(false)}
-            >
+            <Button variant="primary" onClick={() => setPlaceholderOpen(false)}>
               知道了
             </Button>
           </footer>
@@ -5966,11 +5961,7 @@ export function OralPage() {
   const journeyDone: [boolean, boolean, boolean] = audioMode
     ? [avatarReady, true, audioReady]
     : [avatarReady, voiceReady, scriptReady];
-  const journeyStep: 1 | 2 | 3 = journeyDone[0]
-    ? journeyDone[1]
-      ? 3
-      : 2
-    : 1;
+  const journeyStep: 1 | 2 | 3 = journeyDone[0] ? (journeyDone[1] ? 3 : 2) : 1;
   const missing = audioMode
     ? [avatarReady ? "" : "视频分身", audioReady ? "" : "完整口播音频"]
         .filter(Boolean)
@@ -6081,10 +6072,10 @@ export function OralPage() {
           {!audioMode && (
             <div className="oral-voice-choice">
               <div
-              className={`creation-panel-title-row ${
-                voiceReady ? "is-done" : "is-pending"
-              }`}
-            >
+                className={`creation-panel-title-row ${
+                  voiceReady ? "is-done" : "is-pending"
+                }`}
+              >
                 <span>{voiceReady ? "✓" : "○"} 克隆声音</span>
                 <Button
                   variant="outline"
