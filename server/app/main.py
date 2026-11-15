@@ -63,6 +63,7 @@ from app.customer_security_routes import router as customer_security_router
 from app.customer_session_routes import router as customer_session_router
 from app.customer_sub_account_routes import router as customer_sub_account_router
 from app.db_pg import DATABASE_URL_ENV, SQLITE_URL_SCHEMES, close_pg_pool, is_customer_production
+from app.display_settings import router as display_settings_router
 from app.export_controller import router as export_router
 from app.failure_rate_alerts import router as admin_alerts_router
 from app.first_frame_routes import router as first_frame_router
@@ -417,6 +418,7 @@ app.include_router(admin_customer_annotation_router)
 app.include_router(admin_refund_router)
 app.include_router(announcement_router)
 app.include_router(training_material_router)
+app.include_router(display_settings_router)
 app.include_router(worker_observation_router)
 app.include_router(publish_stats_router)
 app.include_router(admin_publish_reconcile_router)

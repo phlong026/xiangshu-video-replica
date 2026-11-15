@@ -29,6 +29,7 @@ import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralAcquirePage } from "./admin/ViralAcquirePage";
 import { WorkerObservationsPage } from "./admin/WorkerObservationsPage";
 import "./admin/admin-login.css";
+import "./admin/admin-training-materials.css";
 import { PageBanner } from "./admin/ui/PageBanner";
 import { AdminPermissionsProvider, canFromActor } from "./admin/ui/permissions";
 import { roleLabel } from "./admin/ui/vocabulary";

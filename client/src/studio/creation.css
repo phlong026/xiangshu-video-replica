@@ -2757,3 +2757,30 @@
   align-items: stretch;
   gap: 0;
 }
+
+/* 拆解历史弹窗（用户拍板 2026-11-15）：对话框形态不占常驻空间。 */
+.analysis-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.analysis-history-list li {
+  align-items: center;
+  border: 1px solid #292a27;
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.analysis-history-meta {
+  color: #b9bab2;
+  font-size: 13px;
+}

@@ -21,6 +21,7 @@ import { RechargePackageManager } from "./RechargePackageManager";
 import { RegistrationBonusSection } from "./RegistrationBonusSection";
 import { TabBar } from "./ui/TabBar";
 import { useHashParam } from "./ui/useHashParam";
+import { TutorialLinkSection } from "./TutorialLinkSection";
 
 // 方案 P1「价格与套餐一页化」：兑换比例 / 业务单价 / 充值套餐 / 试算器收拢
 // 到一个页签，讲清任一客户的扣费规则；收款设置单独一页（商户配置是另一类
@@ -183,7 +184,12 @@ export function SystemSettingsPage({
           )}
         </div>
       ) : null}
-      {tab === "ops" ? <CustomerOpsParamsSection readOnly={readOnly} /> : null}
+      {tab === "ops" ? (
+        <>
+          <CustomerOpsParamsSection readOnly={readOnly} />
+          <TutorialLinkSection readOnly={readOnly} />
+        </>
+      ) : null}
       {tab === "features" ? (
         <FeatureSwitchesSection
           readOnly={readOnly}

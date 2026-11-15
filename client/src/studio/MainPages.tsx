@@ -1507,12 +1507,9 @@ export function TasksPage() {
   };
   return (
     <section className="studio-tasks-page">
-      {/* 独立任务列表与数据看板页签共用表格，标题由各自页面入口提供。 */}
-      <div className="studio-page-actions">
-        {!review && (
-          <Button onClick={() => openLive("tasks")}>历史任务与下载</Button>
-        )}
-      </div>
+      {/* 独立任务列表与数据看板页签共用表格，标题由各自页面入口提供。
+          工具并轨一行（用户拍板 2026-11-15）：页签左、类型筛选与历史任务
+          入口右，不再上下错位悬浮。 */}
       <div className="studio-filter-bar">
         <Tabs
           value={status}
@@ -1524,12 +1521,17 @@ export function TasksPage() {
             { id: "completed", label: "已完成" },
           ]}
         />
-        <FilterSelect
-          label="类型"
-          items={kindItems}
-          value={kind}
-          onChange={setKind}
-        />
+        <div className="studio-task-toolbar-right">
+          <FilterSelect
+            label="类型"
+            items={kindItems}
+            value={kind}
+            onChange={setKind}
+          />
+          {!review && (
+            <Button onClick={() => openLive("tasks")}>历史任务与下载</Button>
+          )}
+        </div>
       </div>
       <p className="studio-result-count" role="status">
         共 {tasks.length} 条任务
@@ -1551,9 +1553,17 @@ export function TasksPage() {
                 <td>
                   <div className="studio-task-name">
                     {task.poster ? (
-                      <VideoPreview poster={task.poster} />
+                      <VideoPreview
+                        className="studio-task-thumb"
+                        poster={task.poster}
+                      />
                     ) : (
-                      <Icon name="video" size={30} />
+                      <span
+                        aria-hidden="true"
+                        className="studio-task-thumb is-empty"
+                      >
+                        <Icon name="video" size={16} />
+                      </span>
                     )}
                     {renamingId === task.id ? (
                       <input

@@ -44,6 +44,9 @@ import {
   saveGenerationPrompt,
   saveShotCards,
   selectCharacterReferences,
+  fetchDisplaySetting,
+  fetchAnalysisVersions,
+  fetchAnalysisVersionById,
   startVideoAnalysis,
   type ViralCopyExtractionRecord,
   waitForAnalysisTask,
@@ -159,6 +162,19 @@ async function getProjectAnalysisOrNull(
   }
 }
 
+async function getAnalysisVersionOrNull(
+  projectId: string,
+  analysisId: string,
+): Promise<AnalysisVersion | null> {
+  try {
+    return await fetchAnalysisVersionById(projectId, analysisId);
+  } catch (cause: unknown) {
+    const error = cause as { code?: string; status?: number };
+    if (error.status === 404 && error.code === "ANALYSIS_NOT_FOUND") return null;
+    throw cause;
+  }
+}
+
 // S14（恢复容错）：历史接口局部失败时的降级空态，语义等同「该项目尚无该版本」。
 const EMPTY_GENERATION_VERSION_STATE: GenerationVersionState = {
   stale: false,
@@ -179,13 +195,6 @@ const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
 // 提取无时长上限、改写限 20000 字符——原文面板必须把上限显式标出来，
 // 否则超长转写稿只会在生成按钮旁看到一个没有上下文的「不能超过 20000 字符」。
 const COPY_SOURCE_TEXT_LIMIT = 20000;
-
-// 参考生视频提示词教程（用户拍板 2026-11-15：先飞书文档外链，运营改内容
-// 不发版；内容稳定后再考虑站内页）。TODO(上线前): 把下面的占位地址换成
-// 正式飞书分享链接，并把分享权限设为「互联网上获得链接的人可阅读」，
-// 否则客户打开会是飞书登录墙。
-const PROMPT_TUTORIAL_URL =
-  "https://feishu.cn/docx/TODO-replace-with-official-tutorial-link";
 
 // 清空页面与云端取消是两件事；只有服务端明确返回取消终态才可告知已取消。
 async function cancelPreviousAnalysisTask(taskId: string): Promise<string> {
@@ -1834,6 +1843,20 @@ export function ReplicaPage() {
   const [savingPrompt, setSavingPrompt] = useState(false);
 
   const [restoreBusy, setRestoreBusy] = useState(false);
+  // 拆解历史弹窗（用户拍板 2026-11-15）：对话框形态不占常驻空间；载入任一
+  // 历史版本走既有恢复链路（restoreSavedProject 指定分析版本）。
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyItems, setHistoryItems] = useState<
+    Array<{
+      id: string;
+      version_number: number;
+      asset_id: string;
+      created_at: string;
+    }>
+  >([]);
+  const [historyError, setHistoryError] = useState("");
+  const [loadingVersionId, setLoadingVersionId] = useState("");
   const [restoreError, setRestoreError] = useState("");
   const [cancellationNotices, setCancellationNotices] = useState<
     Record<string, string>
@@ -2021,7 +2044,7 @@ export function ReplicaPage() {
   };
 
   const restoreSavedProject = useCallback(
-    async (target: Project, force = false) => {
+    async (target: Project, force = false, analysisId?: string) => {
       if (restoreSuppressedRef.current) return;
       if (!force && restoredProjectIdRef.current === target.id) return;
       const operation = ++restoreOperationRef.current;
@@ -2036,7 +2059,9 @@ export function ReplicaPage() {
         const [shotResult, analysisResult, promptResult, scriptResult] =
           await Promise.allSettled([
             getLatestProjectShotCards(target.id),
-            getProjectAnalysisOrNull(target.id),
+            analysisId
+              ? getAnalysisVersionOrNull(target.id, analysisId)
+              : getProjectAnalysisOrNull(target.id),
             getLatestGenerationPrompt(target.id),
             getLatestScriptVersion(target.id),
           ]);
@@ -2179,6 +2204,37 @@ export function ReplicaPage() {
     state.draft.prompt,
     state.draft.promptEdited,
   ]);
+
+  const openAnalysisHistory = async () => {
+    if (!project) return;
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const response = await fetchAnalysisVersions(project.id);
+      setHistoryItems(response.items);
+    } catch (cause) {
+      setHistoryError(
+        cause instanceof Error ? cause.message : "读取拆解历史失败",
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const loadAnalysisVersion = async (analysisId: string) => {
+    if (!project) return;
+    setLoadingVersionId(analysisId);
+    try {
+      await restoreSavedProject(project, true, analysisId);
+      setHistoryOpen(false);
+      notify("已载入所选拆解版本。");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "载入拆解版本失败");
+    } finally {
+      setLoadingVersionId("");
+    }
+  };
 
   useEffect(() => {
     if (review || !project) return;
@@ -2946,6 +3002,15 @@ export function ReplicaPage() {
                         <small>已拆解 {displayShots.length} 个镜头</small>
                       )}
                     </span>
+                    {project ? (
+                      <Button
+                        variant="quiet"
+                        disabled={readOnly}
+                        onClick={() => void openAnalysisHistory()}
+                      >
+                        拆解历史
+                      </Button>
+                    ) : null}
                   </div>
                   <div className="creation-replica-stats">
                     <div className="creation-replica-stat is-gold">
@@ -3000,6 +3065,49 @@ export function ReplicaPage() {
                       开始新的复刻
                     </Button>
                   </div>
+                  {historyOpen ? (
+                    <StudioDialog
+                      title="拆解历史"
+                      onClose={() => setHistoryOpen(false)}
+                    >
+                      {historyError ? (
+                        <p className="oral-dialog-intro">{historyError}</p>
+                      ) : null}
+                      {historyLoading ? (
+                        <p className="oral-dialog-intro">
+                          正在读取拆解历史…
+                        </p>
+                      ) : historyItems.length === 0 ? (
+                        <p className="oral-dialog-intro">
+                          本项目还没有拆解记录；点「启动 AI 拆解」生成第一次。
+                        </p>
+                      ) : (
+                        <ul className="analysis-history-list">
+                          {historyItems.map((item) => (
+                            <li key={item.id}>
+                              <span className="analysis-history-meta">
+                                第 {item.version_number} 版 ·{" "}
+                                {new Date(item.created_at).toLocaleString(
+                                  "zh-CN",
+                                )}
+                              </span>
+                              <Button
+                                variant="outline"
+                                disabled={loadingVersionId === item.id}
+                                onClick={() =>
+                                  void loadAnalysisVersion(item.id)
+                                }
+                              >
+                                {loadingVersionId === item.id
+                                  ? "载入中…"
+                                  : "载入此版本"}
+                              </Button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </StudioDialog>
+                  ) : null}
                   {restoreBusy && (
                     <Hint>正在读取已保存的分镜、文案和 Prompt…</Hint>
                   )}
@@ -5058,20 +5166,7 @@ export function VideoPage() {
             navigate(value === "reference" ? "reference" : "video")
           }
         />
-        {referenceMode ? (
-          // 教程是参考生视频六段式提示词的玩法说明，只在参考生视频页签展示；
-          // 外链新窗口打开，运营在飞书侧更新内容无需发版。
-          <button
-            className="creation-prompt-tutorial"
-            type="button"
-            onClick={() =>
-              window.open(PROMPT_TUTORIAL_URL, "_blank", "noopener,noreferrer")
-            }
-          >
-            <Icon aria-hidden="true" name="info" size={14} />
-            提示词教程
-          </button>
-        ) : null}
+        {referenceMode ? <PromptTutorialButton /> : null}
       </div>
       <div
         className={`creation-video-grid ${referenceMode ? "reference" : ""}`}
@@ -5750,6 +5845,58 @@ export function VideoPage() {
   );
 }
 
+function PromptTutorialButton() {
+  // 教程链接走管理端展示配置（prompt_tutorial_url）；未配置/读取失败弹
+  // 「敬请期待」占位弹窗（用户拍板 2026-11-15：正式链接就绪前不上外链）。
+  const [pending, setPending] = useState(false);
+  const [placeholderOpen, setPlaceholderOpen] = useState(false);
+  return (
+    <>
+      <button
+        className="creation-prompt-tutorial"
+        disabled={pending}
+        type="button"
+        onClick={() => {
+          setPending(true);
+          void (async () => {
+            try {
+              const url = await fetchDisplaySetting("prompt_tutorial_url");
+              if (url) {
+                window.open(url, "_blank", "noopener,noreferrer");
+              } else {
+                setPlaceholderOpen(true);
+              }
+            } finally {
+              setPending(false);
+            }
+          })();
+        }}
+      >
+        <Icon aria-hidden="true" name="info" size={14} />
+        提示词教程
+      </button>
+      {placeholderOpen ? (
+        <StudioDialog
+          title="提示词教程"
+          onClose={() => setPlaceholderOpen(false)}
+        >
+          <p className="oral-dialog-intro">
+            教程整理中，敬请期待。正式教程上线后，这里会直接打开教程文档。
+          </p>
+          <footer className="oral-dialog-actions">
+            <Button
+              variant="primary"
+              onClick={() => setPlaceholderOpen(false)}
+            >
+              知道了
+            </Button>
+          </footer>
+        </StudioDialog>
+      ) : null}
+    </>
+  );
+}
+
 function PersonIdentity({ person }: { person?: StudioPerson }) {
   const { openPicker, user } = useStudio();
   const readOnly = user.role === "auditor";
@@ -5810,6 +5957,31 @@ export function OralPage() {
   const ready = Boolean(
     person && avatar && (audioMode ? audio : voice && scriptReady),
   );
+  // 平铺式简化（用户拍板 2026-11-15）：流程条按真实状态驱动——完成的打 ✓、
+  // 当前第一未完成项高亮，不再恒显「第 3 步」；分区标题同步标记，右栏重复
+  // 的就绪清单取消，未就绪原因收敛到生成按钮旁一行。
+  const avatarReady = Boolean(avatar);
+  const voiceReady = Boolean(voice);
+  const audioReady = Boolean(audio);
+  const journeyDone: [boolean, boolean, boolean] = audioMode
+    ? [avatarReady, true, audioReady]
+    : [avatarReady, voiceReady, scriptReady];
+  const journeyStep: 1 | 2 | 3 = journeyDone[0]
+    ? journeyDone[1]
+      ? 3
+      : 2
+    : 1;
+  const missing = audioMode
+    ? [avatarReady ? "" : "视频分身", audioReady ? "" : "完整口播音频"]
+        .filter(Boolean)
+        .join("、")
+    : [
+        avatarReady ? "" : "视频分身",
+        voiceReady ? "" : "克隆声音",
+        scriptReady ? "" : "文案终稿",
+      ]
+        .filter(Boolean)
+        .join("、");
   const manage = (page: "person-avatars" | "person-voices") =>
     navigate(page, { returnTo: "oral", selectedPersonId: state.draft.ipId });
   return (
@@ -5853,12 +6025,16 @@ export function OralPage() {
           已有音频
         </Button>
       </div>
-      {!audioMode && <OralJourney step={3} />}
+      {!audioMode && <OralJourney step={journeyStep} done={journeyDone} />}
       <div className="oral-composer-grid">
         <Panel className="oral-source-panel">
           <PersonIdentity person={person} />
-          <div className="creation-panel-title-row">
-            <span>视频分身</span>
+          <div
+            className={`creation-panel-title-row ${
+              avatarReady ? "is-done" : "is-pending"
+            }`}
+          >
+            <span>{avatarReady ? "✓" : "○"} 视频分身</span>
             <Button
               variant="outline"
               disabled={readOnly}
@@ -5904,8 +6080,12 @@ export function OralPage() {
           )}
           {!audioMode && (
             <div className="oral-voice-choice">
-              <div className="creation-panel-title-row">
-                <span>克隆声音</span>
+              <div
+              className={`creation-panel-title-row ${
+                voiceReady ? "is-done" : "is-pending"
+              }`}
+            >
+                <span>{voiceReady ? "✓" : "○"} 克隆声音</span>
                 <Button
                   variant="outline"
                   disabled={readOnly}
@@ -6010,23 +6190,11 @@ export function OralPage() {
               </div>
             </>
           )}
-          <div className="oral-readiness">
-            {[
-              ["视频分身", Boolean(avatar)],
-              ...(audioMode
-                ? [["完整音频", Boolean(audio)]]
-                : [
-                    ["克隆声音", Boolean(voice)],
-                    ["文案终稿", scriptReady],
-                  ]),
-            ].map(([label, complete]) => (
-              <span key={String(label)} className={complete ? "is-ready" : ""}>
-                <Icon name={complete ? "check" : "clock"} size={14} />
-                {label}
-                {complete ? "已就绪" : "待准备"}
-              </span>
-            ))}
-          </div>
+          {missing ? (
+            <p className="oral-missing" role="status">
+              还差：{missing}——按上方标记逐项准备即可。
+            </p>
+          ) : null}
           <footer className="creation-action-bar">
             <Button variant="outline" disabled={readOnly} onClick={saveDraft}>
               保存草稿

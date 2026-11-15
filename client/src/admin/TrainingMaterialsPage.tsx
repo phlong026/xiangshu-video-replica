@@ -9,7 +9,6 @@ import {
   uploadTrainingMaterial,
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { DataTable } from "./ui/DataTable";
 import { ListPage } from "./ui/ListPage";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -148,6 +147,7 @@ export function TrainingMaterialsPage({
   const [offset, setOffset] = useState(0);
   const [kindTab, setKindTab] = useState<"" | TrainingMaterialKind>("");
   const [tagFilter, setTagFilter] = useState("");
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -171,6 +171,7 @@ export function TrainingMaterialsPage({
         offset,
         kind: kindTab || undefined,
         tag: tagFilter || undefined,
+        search: search || undefined,
       });
       setItems(response.items);
       setTagFacet(response.tag_facet ?? []);
@@ -180,7 +181,7 @@ export function TrainingMaterialsPage({
     } finally {
       setLoading(false);
     }
-  }, [offset, kindTab, tagFilter]);
+  }, [offset, kindTab, tagFilter, search]);
 
   useEffect(() => {
     void load();
@@ -352,34 +353,66 @@ export function TrainingMaterialsPage({
         loading={loading}
         hasItems={items.length > 0}
         loadingText="正在读取培训素材…"
-        emptyText="还没有培训素材；点「上传素材」发布第一条。"
+        emptyText={
+          search || tagFilter || kindTab
+            ? "没有匹配的素材；换个关键词或清除筛选再试。"
+            : "还没有培训素材；点「上传素材」发布第一条。"
+        }
         actions={
           <>
-            <header>
+            <header className="admin-training-toolbar">
               <p className="admin-hint">
                 工作台「素材库」页面展示本库内容：这里统一上传培训视频、音频、
                 图片与文档，客户只能浏览与下载。数字越大排在越前（同序按新→旧）；
                 标签必填，客户按标签筛选内容。
               </p>
-              <div role="tablist" aria-label="格式分组">
-                {KIND_TABS.map((entry) => (
+              <div className="admin-training-toolbar__row">
+                <div
+                  role="tablist"
+                  aria-label="格式分组"
+                  className="admin-training-tabs"
+                >
+                  {KIND_TABS.map((entry) => (
+                    <button
+                      key={entry.id || "all"}
+                      type="button"
+                      role="tab"
+                      aria-selected={kindTab === entry.id}
+                      className={kindTab === entry.id ? "is-active" : undefined}
+                      onClick={() => {
+                        setKindTab(entry.id);
+                        setOffset(0);
+                      }}
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  aria-label="搜索素材"
+                  className="admin-training-search"
+                  onChange={(event) => {
+                    setSearch(event.target.value);
+                    setOffset(0);
+                  }}
+                  placeholder="搜索标题、说明"
+                  type="search"
+                  value={search}
+                />
+                {!readOnly && !uploadOpen && editing === null ? (
                   <button
-                    key={entry.id || "all"}
+                    className="admin-training-upload"
                     type="button"
-                    role="tab"
-                    aria-selected={kindTab === entry.id}
-                    onClick={() => {
-                      setKindTab(entry.id);
-                      setOffset(0);
-                    }}
+                    onClick={openUpload}
                   >
-                    {entry.label}
+                    上传素材
                   </button>
-                ))}
+                ) : null}
               </div>
               {tagFacet.length > 0 ? (
                 <fieldset
                   aria-label="按标签筛选"
+                  className="admin-training-tags"
                   style={{ border: 0, padding: 0, margin: 0 }}
                 >
                   {tagFacet.map((tag) => (
@@ -387,6 +420,7 @@ export function TrainingMaterialsPage({
                       key={tag}
                       type="button"
                       aria-pressed={tagFilter === tag}
+                      className={tagFilter === tag ? "is-active" : undefined}
                       onClick={() => {
                         setTagFilter(tagFilter === tag ? "" : tag);
                         setOffset(0);
@@ -398,11 +432,6 @@ export function TrainingMaterialsPage({
                 </fieldset>
               ) : null}
             </header>
-            {!readOnly && !uploadOpen && editing === null ? (
-              <button type="button" onClick={openUpload}>
-                上传素材
-              </button>
-            ) : null}
           </>
         }
         pagination={
@@ -415,88 +444,90 @@ export function TrainingMaterialsPage({
           />
         }
       >
-        <DataTable
-          ariaLabel="培训素材清单"
-          headers={
-            <>
-              <th>标题 / 说明</th>
-              <th>类型</th>
-              <th>大小</th>
-              <th>标签</th>
-              <th>排序 / 状态</th>
-              <th>下载次数</th>
-              <th>上传时间 / 人</th>
-              <th>操作</th>
-            </>
-          }
+        <div
+          aria-label="培训素材清单"
+          className="admin-training-grid"
+          role="list"
         >
           {items.map((item) => (
-            <tr key={item.id}>
-              <td>
+            <article
+              className="admin-training-card"
+              data-kind={item.kind}
+              key={item.id}
+            >
+              <div className="admin-training-card__cover" data-kind={item.kind}>
+                <span
+                  aria-hidden="true"
+                  className="admin-training-card__cover-mark"
+                >
+                  {item.kind_label}
+                </span>
+              </div>
+              <div className="admin-training-card__body">
                 <strong>{item.title}</strong>
-                {item.description ? (
-                  <p className="admin-hint">{item.description.slice(0, 80)}</p>
+                {item.description ? <p>{item.description}</p> : null}
+                <span className="admin-training-card__meta">
+                  <em data-kind={item.kind}>{item.kind_label}</em>
+                  {formatSizeMb(item.size_bytes)} ·{" "}
+                  {formatDateTime(item.created_at)}
+                  {item.created_by ? ` · ${item.created_by}` : ""}
+                </span>
+                {item.tags.length > 0 ? (
+                  <span className="admin-training-card__tags">
+                    {item.tags.map((tag) => (
+                      <i key={tag}>#{tag}</i>
+                    ))}
+                  </span>
                 ) : null}
-              </td>
-              <td>
-                {item.kind_label}
-                <small>{item.file_suffix}</small>
-              </td>
-              <td>{formatSizeMb(item.size_bytes)}</td>
-              <td>{item.tags.map((tag) => `#${tag}`).join(" ")}</td>
-              <td>
-                <strong>{item.sort_order}</strong>
-                <br />
-                <StatusBadge tone={item.visible ? "good" : "neutral"}>
-                  {item.visible ? "上架" : "已下架"}
-                </StatusBadge>
-              </td>
-              <td>{item.download_count}</td>
-              <td>
-                {formatDateTime(item.created_at)} · {item.created_by}
-              </td>
-              <td>
-                {readOnly ? null : (
-                  <>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      onClick={() => void copyDirectLink(item)}
-                    >
-                      复制直链
-                    </button>{" "}
-                    <button
-                      type="button"
-                      disabled={saving}
-                      onClick={() => openEdit(item)}
-                    >
-                      编辑
-                    </button>{" "}
-                    <button
-                      type="button"
-                      disabled={saving}
-                      onClick={() =>
-                        void toggleVisible(
-                          item,
-                          item.visible ? "临时下架" : "重新上架",
-                        )
-                      }
-                    >
-                      {item.visible ? "下架" : "上架"}
-                    </button>{" "}
-                    <button
-                      type="button"
-                      disabled={saving}
-                      onClick={() => setPendingDelete(item)}
-                    >
-                      删除
-                    </button>
-                  </>
-                )}
-              </td>
-            </tr>
+                <span className="admin-training-card__ops">
+                  <strong>排序 {item.sort_order}</strong>
+                  <StatusBadge tone={item.visible ? "good" : "neutral"}>
+                    {item.visible ? "上架" : "已下架"}
+                  </StatusBadge>
+                  <small>{item.download_count} 次下载</small>
+                </span>
+              </div>
+              {readOnly ? null : (
+                <footer className="admin-training-card__actions">
+                  <button
+                    disabled={saving}
+                    type="button"
+                    onClick={() => void copyDirectLink(item)}
+                  >
+                    复制直链
+                  </button>
+                  <button
+                    disabled={saving}
+                    type="button"
+                    onClick={() => openEdit(item)}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    disabled={saving}
+                    type="button"
+                    onClick={() =>
+                      void toggleVisible(
+                        item,
+                        item.visible ? "临时下架" : "重新上架",
+                      )
+                    }
+                  >
+                    {item.visible ? "下架" : "上架"}
+                  </button>
+                  <button
+                    className="is-danger"
+                    disabled={saving}
+                    type="button"
+                    onClick={() => setPendingDelete(item)}
+                  >
+                    删除
+                  </button>
+                </footer>
+              )}
+            </article>
           ))}
-        </DataTable>
+        </div>
       </ListPage>
       <ConfirmDialog
         open={uploadOpen}
