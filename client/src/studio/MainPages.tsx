@@ -932,10 +932,7 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          支持抖音、小红书、视频号的分享链接；其他平台请上传 MP4/MOV
-          文件；视频复刻支持 4-30 秒、200 MB
-          以内的视频，更长的视频会自动提取音轨用于提取文案
-          （桌面端，原视频不上传）。
+          支持抖音、小红书的分享链接，其他平台请上传 MP4文件；
         </p>
         {linkState.status === "loading" && (
           <p className="studio-upload-status" role="status">
