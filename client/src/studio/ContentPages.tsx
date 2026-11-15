@@ -3800,7 +3800,9 @@ export function PublishPage() {
             </section>
             <section className="content-publish-cover">
               <h3>封面选择</h3>
-              <Hint>从你的成片中抽取的候选帧；也可以上传自定义图片或用飞影模板生成。</Hint>
+              <Hint>
+                从你的成片中抽取的候选帧；也可以上传自定义图片或用飞影模板生成。
+              </Hint>
               <div
                 aria-label="封面来源"
                 className="content-cover-source"
@@ -3862,11 +3864,7 @@ export function PublishPage() {
                         onClick={() => setSelectedTemplate(style.id)}
                         type="button"
                       >
-                        <img
-                          alt={style.title}
-                          loading="lazy"
-                          src={style.url}
-                        />
+                        <img alt={style.title} loading="lazy" src={style.url} />
                         <small>{style.title}</small>
                       </button>
                     ))}
@@ -3895,11 +3893,13 @@ export function PublishPage() {
                           setGeneratingCover(true);
                           void (async () => {
                             try {
-                              const generated = await generateCoverFromTemplate({
-                                canvasPreset: "9:16",
-                                content,
-                                template: selectedTemplate,
-                              });
+                              const generated = await generateCoverFromTemplate(
+                                {
+                                  canvasPreset: "9:16",
+                                  content,
+                                  template: selectedTemplate,
+                                },
+                              );
                               const response = await fetch(
                                 `data:image/${
                                   generated.coverId ? "jpeg" : "jpeg"
