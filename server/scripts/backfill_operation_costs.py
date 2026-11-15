@@ -43,20 +43,24 @@ _BATCH_SIZE = 500
 
 
 def _candidates(conn: BusinessConnection, *, service: str, limit: int) -> dict[str, int]:
-    """统计口径与成本核对页一致：成本未知的已完成调用。"""
+    """统计口径与成本核对页一致：成本未知的已完成调用。
+
+    各桶条件写在 FILTER 里而不是外层 WHERE——外层过滤会让 pending 桶恒为 0，
+    运营看不到"还有多少在途请求将来才需要补"。
+    """
     row = conn.execute(
         """
         SELECT
-          count(*) FILTER (WHERE a.cost_fen IS NULL AND e.attempt_id IS NULL
-                             AND a.usage IS NOT NULL) AS backfillable,
-          count(*) FILTER (WHERE a.cost_fen IS NULL AND e.attempt_id IS NULL
-                             AND a.usage IS NULL) AS unmetered,
+          count(*) FILTER (WHERE o.state <> 'PENDING' AND a.cost_fen IS NULL
+                             AND e.attempt_id IS NULL AND a.usage IS NOT NULL) AS backfillable,
+          count(*) FILTER (WHERE o.state <> 'PENDING' AND a.cost_fen IS NULL
+                             AND e.attempt_id IS NULL AND a.usage IS NULL) AS unmetered,
           count(*) FILTER (WHERE o.state = 'PENDING') AS pending,
           count(*) AS total
         FROM billing_attempts a
         JOIN billing_operations o ON o.id = a.operation_id
         LEFT JOIN billing_evidence e ON e.attempt_id = a.id
-        WHERE a.service = %s AND o.state <> 'PENDING'
+        WHERE a.service = %s
         """,
         (service,),
     ).fetchone()
@@ -193,10 +197,14 @@ def main(argv: list[str] | None = None) -> int:
                 for row in rows:
                     cost = Decimal(str(row["usage"])) * unit_cost
                     evidence_id = str(uuid4())
-                    conn.execute(
+                    # ON CONFLICT DO NOTHING：候选快照建立后、拿锁前，人工补录
+                    # 或另一实例可能已为同一 attempt 提交 evidence（attempt_id
+                    # 唯一约束兜底）。撞行时只跳过该行，绝不回滚整批。
+                    inserted = conn.execute(
                         "INSERT INTO billing_evidence(id,operation_id,attempt_id,"
                         "units,cost_fen,reference,reason,actor_user_id) "
-                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s) "
+                        "ON CONFLICT (attempt_id) DO NOTHING RETURNING id",
                         (
                             evidence_id,
                             str(row["operation_id"]),
@@ -207,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
                             args.reason,
                             str(actor["id"]),
                         ),
-                    )
+                    ).fetchone()
+                    if inserted is None:
+                        continue
                     conn.execute(
                         "INSERT INTO audit_logs(id,actor_user_id,action,entity_type,"
                         "entity_id,metadata_json) VALUES(%s,%s,%s,%s,%s,%s)",

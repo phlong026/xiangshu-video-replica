@@ -2301,7 +2301,7 @@ def test_reconcile_releases_stale_search_operations(client, route_state):
         ) == (8, 2)
 
 
-def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, route_state):
+def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, route_state, capsys):
     """M2（2026-11-15 审计修复）：目录配好单价后，历史 UNKNOWN 调用可批量补录。
 
     - dry-run（默认）只报规模，不写任何行；
@@ -2350,6 +2350,17 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
             service="quality_inspection",
         )
         finish_operation(conn, operation_id=op2, units=1, succeeded=True)
+        # 在途请求：质检 attempt 挂在未完成的 operation 上，统计应单独计数。
+        op3 = accept_operation(
+            conn, user_id=uid, service="first_frame", source_id="bfill-3", units=1
+        )
+        record_attempt(
+            conn,
+            operation_id=op3,
+            attempt_key="insp-pending",
+            usage=1,
+            service="quality_inspection",
+        )
 
     base_args = [
         "--service",
@@ -2362,8 +2373,12 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
         route_state,
     ]
 
-    # dry-run（默认）：零写入。
+    # dry-run（默认）：零写入；统计里在途请求单独计数，不混进可补桶。
     assert backfill_main(base_args) == 0
+    captured = capsys.readouterr()
+    assert "backfillable=1" in captured.out
+    assert "unmetered=1" in captured.out
+    assert "pending=1" in captured.out
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0
 
