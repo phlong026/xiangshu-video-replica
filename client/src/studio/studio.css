@@ -181,17 +181,6 @@ html:has(.studio-shell) {
 .studio-nav-group button:hover {
   background: #151612;
 }
-.studio-nav-group button small {
-  margin-left: auto;
-  border-radius: 50%;
-  min-width: 26px;
-  height: 26px;
-  background: #252624;
-  display: grid;
-  place-content: center;
-  color: #f0efe8;
-  font-size: var(--font-body);
-}
 .studio-account-entry {
   width: 100%;
   display: flex;
@@ -1675,8 +1664,7 @@ html:has(.studio-shell) {
   object-fit: cover;
   border-radius: 7px;
 }
-.studio-picker-grid--reference strong,
-.studio-picker-grid--reference small {
+.studio-picker-grid--reference :where(strong, small) {
   grid-column: 2;
   margin-top: 0;
   overflow: hidden;
@@ -2166,4 +2154,18 @@ html:has(.studio-shell) {
 .studio-tasks-page .studio-task-thumb > .video-preview {
   height: 100%;
   width: 100%;
+}
+
+/* 侧边导航徽标：置于文件末尾保证 `small` 结尾选择器按特异性升序排列
+   （biome noDescendingSpecificity；元素与上方 X small 规则无交集，无级联影响） */
+.studio-nav-group button small {
+  margin-left: auto;
+  border-radius: 50%;
+  min-width: 26px;
+  height: 26px;
+  background: #252624;
+  display: grid;
+  place-content: center;
+  color: #f0efe8;
+  font-size: var(--font-body);
 }

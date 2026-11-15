@@ -2635,3 +2635,73 @@ span.viral-card-cover-empty.content-player-viral-poster {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 发布页封面来源页签（用户拍板 2026-11-15）：成片帧 / 模板封面（飞影）。 */
+.content-cover-source {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.content-cover-source button {
+  background: #171817;
+  border: 1px solid #2c2d2a;
+  border-radius: 8px;
+  color: #9a9b95;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 12px;
+}
+
+.content-cover-source button[aria-selected="true"] {
+  border-color: #e5aa3666;
+  color: #e5aa36;
+}
+
+.content-cover-templates {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.content-cover-templates .content-cover-options button img {
+  aspect-ratio: 9 / 16;
+  object-fit: cover;
+  width: 100%;
+}
+
+.content-cover-templates .content-cover-options button small {
+  color: #999b95;
+  display: block;
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-cover-generate {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.content-cover-generate textarea {
+  background: #101111;
+  border: 1px solid #2c2d2a;
+  border-radius: 8px;
+  color: #d5d5cf;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.content-cover-generated {
+  border: 1px solid #292a27;
+  border-radius: 8px;
+  max-height: 220px;
+  object-fit: cover;
+  width: 100%;
+}
