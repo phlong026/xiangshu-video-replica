@@ -359,80 +359,78 @@ export function TrainingMaterialsPage({
             : "还没有培训素材；点「上传素材」发布第一条。"
         }
         actions={
-          <>
-            <header className="admin-training-toolbar">
-              <p className="admin-hint">
-                工作台「素材库」页面展示本库内容：这里统一上传培训视频、音频、
-                图片与文档，客户只能浏览与下载。数字越大排在越前（同序按新→旧）；
-                标签必填，客户按标签筛选内容。
-              </p>
-              <div className="admin-training-toolbar__row">
-                <div
-                  role="tablist"
-                  aria-label="格式分组"
-                  className="admin-training-tabs"
-                >
-                  {KIND_TABS.map((entry) => (
-                    <button
-                      key={entry.id || "all"}
-                      type="button"
-                      role="tab"
-                      aria-selected={kindTab === entry.id}
-                      className={kindTab === entry.id ? "is-active" : undefined}
-                      onClick={() => {
-                        setKindTab(entry.id);
-                        setOffset(0);
-                      }}
-                    >
-                      {entry.label}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  aria-label="搜索素材"
-                  className="admin-training-search"
-                  onChange={(event) => {
-                    setSearch(event.target.value);
-                    setOffset(0);
-                  }}
-                  placeholder="搜索标题、说明"
-                  type="search"
-                  value={search}
-                />
-                {!readOnly && !uploadOpen && editing === null ? (
+          <header className="admin-training-toolbar">
+            <p className="admin-hint">
+              工作台「素材库」页面展示本库内容：这里统一上传培训视频、音频、
+              图片与文档，客户只能浏览与下载。数字越大排在越前（同序按新→旧）；
+              标签必填，客户按标签筛选内容。
+            </p>
+            <div className="admin-training-toolbar__row">
+              <div
+                role="tablist"
+                aria-label="格式分组"
+                className="admin-training-tabs"
+              >
+                {KIND_TABS.map((entry) => (
                   <button
-                    className="admin-training-upload"
+                    key={entry.id || "all"}
                     type="button"
-                    onClick={openUpload}
+                    role="tab"
+                    aria-selected={kindTab === entry.id}
+                    className={kindTab === entry.id ? "is-active" : undefined}
+                    onClick={() => {
+                      setKindTab(entry.id);
+                      setOffset(0);
+                    }}
                   >
-                    上传素材
+                    {entry.label}
                   </button>
-                ) : null}
+                ))}
               </div>
-              {tagFacet.length > 0 ? (
-                <fieldset
-                  aria-label="按标签筛选"
-                  className="admin-training-tags"
-                  style={{ border: 0, padding: 0, margin: 0 }}
+              <input
+                aria-label="搜索素材"
+                className="admin-training-search"
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setOffset(0);
+                }}
+                placeholder="搜索标题、说明"
+                type="search"
+                value={search}
+              />
+              {!readOnly && !uploadOpen && editing === null ? (
+                <button
+                  className="admin-training-upload"
+                  type="button"
+                  onClick={openUpload}
                 >
-                  {tagFacet.map((tag) => (
-                    <button
-                      key={tag}
-                      type="button"
-                      aria-pressed={tagFilter === tag}
-                      className={tagFilter === tag ? "is-active" : undefined}
-                      onClick={() => {
-                        setTagFilter(tagFilter === tag ? "" : tag);
-                        setOffset(0);
-                      }}
-                    >
-                      #{tag}
-                    </button>
-                  ))}
-                </fieldset>
+                  上传素材
+                </button>
               ) : null}
-            </header>
-          </>
+            </div>
+            {tagFacet.length > 0 ? (
+              <fieldset
+                aria-label="按标签筛选"
+                className="admin-training-tags"
+                style={{ border: 0, padding: 0, margin: 0 }}
+              >
+                {tagFacet.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    aria-pressed={tagFilter === tag}
+                    className={tagFilter === tag ? "is-active" : undefined}
+                    onClick={() => {
+                      setTagFilter(tagFilter === tag ? "" : tag);
+                      setOffset(0);
+                    }}
+                  >
+                    #{tag}
+                  </button>
+                ))}
+              </fieldset>
+            ) : null}
+          </header>
         }
         pagination={
           <Pagination
@@ -444,11 +442,7 @@ export function TrainingMaterialsPage({
           />
         }
       >
-        <div
-          aria-label="培训素材清单"
-          className="admin-training-grid"
-          role="list"
-        >
+        <ul aria-label="培训素材清单" className="admin-training-grid">
           {items.map((item) => (
             <article
               className="admin-training-card"
@@ -527,7 +521,7 @@ export function TrainingMaterialsPage({
               )}
             </article>
           ))}
-        </div>
+        </ul>
       </ListPage>
       <ConfirmDialog
         open={uploadOpen}

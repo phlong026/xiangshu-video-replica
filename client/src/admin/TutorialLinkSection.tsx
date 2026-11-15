@@ -8,7 +8,11 @@ import { getDisplaySetting, updateDisplaySetting } from "../api.admin";
  * 版；搬进数据库后运营在这里改，客户端即时生效。留空 = 客户端按钮点击弹
  * 「敬请期待」占位弹窗（正式链接就绪前的默认行为，用户拍板 2026-11-15）。
  */
-export function TutorialLinkSection({ readOnly = false }: { readOnly?: boolean }) {
+export function TutorialLinkSection({
+  readOnly = false,
+}: {
+  readOnly?: boolean;
+}) {
   const [value, setValue] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -48,7 +52,11 @@ export function TutorialLinkSection({ readOnly = false }: { readOnly?: boolean }
         reason: "更新提示词教程链接",
       });
       setValue(response.value);
-      setNotice(response.value ? "教程链接已保存，客户端即时生效。" : "已清空：客户端按钮将显示占位弹窗。");
+      setNotice(
+        response.value
+          ? "教程链接已保存，客户端即时生效。"
+          : "已清空：客户端按钮将显示占位弹窗。",
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存教程链接失败");
     } finally {
