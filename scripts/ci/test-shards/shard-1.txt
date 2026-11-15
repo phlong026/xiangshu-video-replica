@@ -46,6 +46,7 @@ server/tests/test_sql_pagination.py
 server/tests/test_sub_account_schema.py
 server/tests/test_viral_copy_simplify_pg.py
 server/tests/test_viral_search_pg.py
+server/tests/test_viral_single_archive_refresh_pg.py
 server/tests/test_wallet_pricing_breakdown.py
 server/tests/test_wallet_pricing_breakdown_pg.py
 server/tests/test_worker_concurrency_config.py
