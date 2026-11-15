@@ -1225,3 +1225,41 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 平铺式简化（用户拍板 2026-11-15）：流程条与分区标题按真实状态驱动。 */
+.oral-journey li.is-done {
+  color: #7fc98d;
+}
+
+.oral-journey li.is-done span {
+  background: #1d2b1f;
+  color: #7fc98d;
+}
+
+.oral-journey li.is-current {
+  background: #241d0e;
+  border-color: #e5aa3655;
+}
+
+.oral-journey li.is-current strong,
+.oral-journey li.is-current span {
+  color: #e5aa36;
+}
+
+.oral-journey li.is-current small {
+  color: #d9b44a;
+}
+
+.creation-panel-title-row.is-done > span {
+  color: #7fc98d;
+}
+
+.creation-panel-title-row.is-pending > span {
+  color: #e5aa36;
+}
+
+.oral-missing {
+  color: #d9b44a;
+  font-size: var(--font-caption);
+  margin: 8px 0 0;
+}

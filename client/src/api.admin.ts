@@ -1691,6 +1691,8 @@ export async function listTrainingMaterials(
     includeHidden?: boolean;
     kind?: string;
     tag?: string;
+    /** 标题/说明模糊搜索（服务端 ILIKE）。 */
+    search?: string;
     limit?: number;
     offset?: number;
   } = {},
@@ -1699,6 +1701,7 @@ export async function listTrainingMaterials(
   if (options.includeHidden === false) params.set("include_hidden", "false");
   if (options.kind) params.set("kind", options.kind);
   if (options.tag) params.set("tag", options.tag);
+  if (options.search?.trim()) params.set("search", options.search.trim());
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));
@@ -1706,6 +1709,31 @@ export async function listTrainingMaterials(
   return adminRead(
     `/api/control/training-materials${query ? `?${query}` : ""}`,
     "读取培训素材失败",
+  );
+}
+
+/** 展示配置（KV）：管理端读写，客户端只读白名单键。 */
+export async function getDisplaySetting(
+  key: string,
+): Promise<{ key: string; value: string }> {
+  return adminRead(
+    `/api/admin/settings/display/${encodeURIComponent(key)}`,
+    "读取展示配置失败",
+  );
+}
+
+export async function updateDisplaySetting(input: {
+  key: string;
+  value: string;
+  reason: string;
+}): Promise<{ key: string; value: string }> {
+  return adminWrite(
+    `/api/admin/settings/display/${encodeURIComponent(input.key)}`,
+    { value: input.value },
+    input.reason,
+    "更新展示配置失败",
+    undefined,
+    "PUT",
   );
 }
 

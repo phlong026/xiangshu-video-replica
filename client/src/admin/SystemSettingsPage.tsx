@@ -19,6 +19,7 @@ import { PaymentSettingsSection } from "./PaymentSettingsSection";
 import { QueueModeSection } from "./QueueModeSection";
 import { RechargePackageManager } from "./RechargePackageManager";
 import { RegistrationBonusSection } from "./RegistrationBonusSection";
+import { TutorialLinkSection } from "./TutorialLinkSection";
 import { TabBar } from "./ui/TabBar";
 import { useHashParam } from "./ui/useHashParam";
 
@@ -183,7 +184,12 @@ export function SystemSettingsPage({
           )}
         </div>
       ) : null}
-      {tab === "ops" ? <CustomerOpsParamsSection readOnly={readOnly} /> : null}
+      {tab === "ops" ? (
+        <>
+          <CustomerOpsParamsSection readOnly={readOnly} />
+          <TutorialLinkSection readOnly={readOnly} />
+        </>
+      ) : null}
       {tab === "features" ? (
         <FeatureSwitchesSection
           readOnly={readOnly}

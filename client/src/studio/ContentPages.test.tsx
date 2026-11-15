@@ -942,9 +942,8 @@ describe("V1.4 内容与运营页面", () => {
     );
     // 审核示例只演示交互，不执行真实下载。
     expect(value.notify).toHaveBeenCalledWith("审核模式仅演示，不执行下载");
-    expect(
-      screen.queryByRole("button", { name: /复刻/ }),
-    ).not.toBeInTheDocument();
+    // 一键复刻爆款常驻（用户拍板 2026-11-15）：按时长在详情页意图里分流，
+    // 卡片不再按 4–30s 门槛隐藏入口。
     for (const actions of view.container.querySelectorAll(
       ".content-card-actions",
     )) {
@@ -952,7 +951,7 @@ describe("V1.4 内容与运营页面", () => {
         [...actions.querySelectorAll("button")].map(
           (button) => button.textContent,
         ),
-      ).toEqual(["提取文案", "查看详情", "下载视频"]);
+      ).toEqual(["一键复刻爆款", "提取文案", "查看详情", "下载视频"]);
     }
   });
 
@@ -1018,7 +1017,7 @@ describe("V1.4 内容与运营页面", () => {
     // 16 秒在 4–30s 复刻门槛内：卡片主 CTA（一键复刻）随列表数据渲染；
     // 提取文案仍经详情页意图发起。
     expect(
-      screen.getByRole("button", { name: "一键复刻：已收藏的庭院视频" }),
+      screen.getByRole("button", { name: "一键复刻爆款：已收藏的庭院视频" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "收藏 已收藏的庭院视频" }),
@@ -2361,16 +2360,12 @@ describe("V1.4 内容与运营页面", () => {
       const view = render(<ViralPage />);
       if (platformIndex === 1)
         fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-      expect(screen.getByText(/统计来源：/)).toHaveTextContent(
-        platformIndex === 0 ? "平台搜索" : "互动核验",
-      );
+      // 卡片取消统计来源元数据行（用户拍板 2026-11-15）：详情页仍保留。
+      expect(screen.queryByText(/统计来源：/)).not.toBeInTheDocument();
       expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
       expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
       expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
       expect(screen.getByTitle("收藏")).toHaveTextContent("待核验");
-      expect(
-        screen.getByText(/统计时间：2026-10-12T08:00:00Z/),
-      ).toHaveTextContent("本次部分指标未更新");
       view.unmount();
       useStudio.mockReturnValue({
         ...value,
@@ -2423,14 +2418,14 @@ describe("V1.4 内容与运营页面", () => {
       />,
     );
     fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-    await waitFor(() =>
-      expect(screen.getByText(/本次部分指标未更新/)).toBeInTheDocument(),
-    );
+    // 卡片取消统计来源元数据行（用户拍板 2026-11-15）：部分更新语义由详情
+    // 页同款组件承载，卡片只保留四项指标本身。
+    expect(screen.queryByText(/本次部分指标未更新/)).not.toBeInTheDocument();
     expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
     expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
     expect(
-      screen.getByText(/统计时间：2026-10-12T08:00:00Z/),
-    ).toBeInTheDocument();
+      screen.queryByText(/统计时间：2026-10-12T08:00:00Z/),
+    ).not.toBeInTheDocument();
   });
 
   it("非首页发布条目在客户列表首屏和下一页可见，私有导入不混入", async () => {
@@ -2769,7 +2764,8 @@ describe("V1.4 内容与运营页面", () => {
     const view = render(<ViralPage />);
 
     const titles = () =>
-      [...view.container.querySelectorAll(".viral-card-body h3")].map(
+      // 标题浮层压图（布局重设计后）：h3 在 cover 的 overlay-text 里。
+      [...view.container.querySelectorAll(".viral-card-overlay-text h3")].map(
         (node) => node.textContent,
       );
     expect(titles()[0]).toBe("排序参考 7");

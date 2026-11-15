@@ -1948,6 +1948,7 @@ html:has(.studio-shell) {
   .studio-home-metrics svg {
     width: 17px;
   }
+  /* biome-ignore lint/style/noDescendingSpecificity: 与 hero 标题样式分层，重构另行任务 */
   .studio-home-metrics strong {
     font-size: var(--font-metric);
   }
@@ -2115,4 +2116,54 @@ html:has(.studio-shell) {
   .studio-shell--creation .studio-topbar {
     padding: 10px 16px;
   }
+}
+
+/* 任务列表页工具并轨（用户拍板 2026-11-15）：页签左、筛选与历史任务右。 */
+.studio-tasks-page .studio-filter-bar {
+  margin: 16px 0 8px;
+}
+
+.studio-task-toolbar-right {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+/* 行密度收紧 + 缩略图统一 64×36：缺封面用占位框，行高不再被空图标撑高。 */
+.studio-tasks-page .studio-table tr {
+  height: auto;
+}
+
+.studio-tasks-page .studio-table th {
+  padding: 14px 20px;
+}
+
+.studio-tasks-page .studio-table td {
+  padding: 10px 20px;
+}
+
+.studio-tasks-page .studio-task-name {
+  gap: 12px;
+}
+
+.studio-tasks-page .studio-task-thumb {
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  flex: 0 0 64px;
+  height: 36px;
+  overflow: hidden;
+  width: 64px;
+}
+
+.studio-tasks-page .studio-task-thumb.is-empty {
+  align-items: center;
+  background: #171817;
+  color: #55564f;
+  display: flex;
+  justify-content: center;
+}
+
+.studio-tasks-page .studio-task-thumb > .video-preview {
+  height: 100%;
+  width: 100%;
 }

@@ -1,0 +1,247 @@
+/* 培训素材库管理面（2026-11-15 界面对齐客户端素材库卡片）：
+   表格改卡片网格，工具行（类型页签 + 搜索 + 上传）并轨一行。 */
+
+.admin-training-toolbar__row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 10px 0 8px;
+}
+
+.admin-training-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.admin-training-tabs button {
+  background: #171817;
+  border: 1px solid #2c2d2a;
+  border-radius: 8px;
+  color: #9a9b95;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 5px 12px;
+}
+
+.admin-training-tabs button.is-active {
+  background: #242622;
+  border-color: #e5aa3666;
+  color: #e5aa36;
+}
+
+.admin-training-search {
+  background: #101111;
+  border: 1px solid #2c2d2a;
+  border-radius: 8px;
+  color: #d5d5cf;
+  flex: 1;
+  font-size: 13px;
+  min-width: 180px;
+  padding: 6px 10px;
+}
+
+.admin-training-search:focus {
+  border-color: #e5aa3666;
+  outline: none;
+}
+
+.admin-training-upload {
+  background: #e5aa36;
+  border: 0;
+  border-radius: 8px;
+  color: #17130a;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+}
+
+.admin-training-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.admin-training-tags button {
+  background: #171817;
+  border: 1px solid #2c2d2a;
+  border-radius: 999px;
+  color: #9a9b95;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+.admin-training-tags button.is-active {
+  border-color: #e5aa3666;
+  color: #e5aa36;
+}
+
+.admin-training-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  margin-top: 12px;
+}
+
+.admin-training-card {
+  background: #101111;
+  border: 1px solid #292a27;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.admin-training-card__cover {
+  align-items: center;
+  aspect-ratio: 16 / 9;
+  background: #171817;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: center;
+}
+
+.admin-training-card__cover-mark {
+  border: 1px solid #33342f;
+  border-radius: 999px;
+  color: #8f9089;
+  font-size: 12px;
+  padding: 3px 12px;
+}
+
+.admin-training-card__cover[data-kind="video"]
+  .admin-training-card__cover-mark {
+  border-color: #e07b6a66;
+  color: #e07b6a;
+}
+
+.admin-training-card__cover[data-kind="audio"]
+  .admin-training-card__cover-mark {
+  border-color: #d9b44a66;
+  color: #d9b44a;
+}
+
+.admin-training-card__cover[data-kind="image"]
+  .admin-training-card__cover-mark {
+  border-color: #7fc98d66;
+  color: #7fc98d;
+}
+
+.admin-training-card__cover[data-kind="doc"] .admin-training-card__cover-mark {
+  border-color: #6aa9e066;
+  color: #6aa9e0;
+}
+
+.admin-training-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px 8px;
+}
+
+.admin-training-card__body strong {
+  color: #e8e8e2;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-training-card__body p {
+  -webkit-box-orient: vertical;
+  color: #9a9b95;
+  display: -webkit-box;
+  font-size: 12px;
+  -webkit-line-clamp: 1;
+  margin: 0;
+  overflow: hidden;
+}
+
+.admin-training-card__meta {
+  color: #77796f;
+  font-size: 12px;
+}
+
+.admin-training-card__meta em {
+  font-style: normal;
+  margin-right: 6px;
+}
+
+.admin-training-card__meta em[data-kind="video"] {
+  color: #e07b6a;
+}
+
+.admin-training-card__meta em[data-kind="audio"] {
+  color: #d9b44a;
+}
+
+.admin-training-card__meta em[data-kind="image"] {
+  color: #7fc98d;
+}
+
+.admin-training-card__meta em[data-kind="doc"] {
+  color: #6aa9e0;
+}
+
+.admin-training-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.admin-training-card__tags i {
+  border: 1px solid #292a27;
+  border-radius: 999px;
+  color: #999b95;
+  font-size: 11px;
+  font-style: normal;
+  padding: 1px 8px;
+}
+
+.admin-training-card__ops {
+  align-items: center;
+  color: #77796f;
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.admin-training-card__ops strong {
+  color: #b9bab2;
+}
+
+.admin-training-card__actions {
+  border-top: 1px solid #1f201e;
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px;
+}
+
+.admin-training-card__actions button {
+  background: #171817;
+  border: 1px solid #33342f;
+  border-radius: 7px;
+  color: #b9bab2;
+  cursor: pointer;
+  flex: 1;
+  font-size: 12px;
+  padding: 5px 0;
+}
+
+.admin-training-card__actions button:hover:not(:disabled) {
+  border-color: #e5aa3666;
+  color: #e5aa36;
+}
+
+.admin-training-card__actions button.is-danger:hover:not(:disabled) {
+  border-color: #e07b6a66;
+  color: #e07b6a;
+}
+
+.admin-training-card__actions button:disabled {
+  opacity: 0.5;
+}

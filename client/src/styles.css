@@ -6735,6 +6735,7 @@ button.admin-viral-tile dd {
   .admin-viral-titlelink {
   min-height: 44px;
 }
+/* biome-ignore lint/style/noDescendingSpecificity: 遗留表格选择列规则，重构另行任务 */
 .admin-shell--control
   .admin-workspace
   .admin-viral-library
@@ -6870,6 +6871,7 @@ button.admin-viral-tile dd {
   line-height: 1.8;
   overflow-wrap: anywhere;
 }
+/* biome-ignore lint/style/noDescendingSpecificity: 遗留抽屉 summary 规则，重构另行任务 */
 .admin-viral-advanced summary {
   cursor: pointer;
   padding: 12px 0;

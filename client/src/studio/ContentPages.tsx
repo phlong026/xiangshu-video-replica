@@ -531,6 +531,7 @@ function ViralCover({
   playerRef,
   error,
   cacheProgress,
+  onOpenDetail,
 }: {
   video: StudioVideo;
   playing: boolean;
@@ -543,6 +544,7 @@ function ViralCover({
   playerRef: RefObject<HTMLVideoElement | null>;
   error?: string;
   cacheProgress?: ViralCacheProgress;
+  onOpenDetail: () => void;
 }) {
   const publish = viralPublishLabel(video);
   return (
@@ -590,6 +592,26 @@ function ViralCover({
       {cacheProgress && <ViralCacheBadge progress={cacheProgress} />}
       {!playing && (
         <div className="viral-card-overlay">
+          <div className="viral-card-overlay-text">
+            <h3>
+              <button
+                type="button"
+                className="viral-card-title"
+                onClick={onOpenDetail}
+              >
+                {video.title}
+              </button>
+            </h3>
+            {video.tags?.length ? (
+              <div className="viral-card-tags">
+                {video.tags.slice(0, 3).map((tag) => (
+                  <span key={tag} title={`#${tag}`}>
+                    #{tag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <ViralStatsRow video={video} />
           <div className="viral-card-overlay-author">
             {video.authorAvatar ? (
@@ -1126,12 +1148,8 @@ function ViralCard({
   const { review, navigate, notify, openLive } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
   const [downloadBusy, setDownloadBusy] = useState(false);
-  // ADM-17 卡片级直达：与详情页同一条 4–30s 门槛；未知/超限不渲染复刻入口，
-  // 只保留提取文案方向。
-  const canReplicateFromCard =
-    typeof video.durationMs === "number" &&
-    video.durationMs >= 4_000 &&
-    video.durationMs <= 30_000;
+  // 一键复刻爆款按钮常驻（用户拍板 2026-11-15）：按时长在详情页意图里分流
+  // ——≤30s 走 AI 视频复刻，>30s 走数字人口播路线，不再按门槛隐藏入口。
   const { playback, play, retry, markFailed, activate } = useViralPlayback(
     video,
     active,
@@ -1232,6 +1250,7 @@ function ViralCard({
         playerRef={playerRef}
         error={playback.status === "error" ? playback.message : undefined}
         cacheProgress={cacheProgress}
+        onOpenDetail={openDetail}
       />
       <ViralFavoriteButton
         compact
@@ -1240,44 +1259,27 @@ function ViralCard({
         onSavedChange={onFavoriteChange}
       />
       <div className="viral-card-body">
-        {/* 标题即入口：与「查看详情」同一动作，用户按直觉点标题就能进详情。 */}
-        <h3>
-          <button
-            type="button"
-            className="viral-card-title"
-            onClick={openDetail}
-          >
-            {video.title}
-          </button>
-        </h3>
-        <ViralStatisticsNote video={video} />
-        <div className="viral-card-tags">
-          {video.tags?.slice(0, 6).map((tag) => (
-            <span key={tag} title={`#${tag}`}>
-              #{tag}
-            </span>
-          ))}
-        </div>
+        {/* 布局重设计（用户拍板 2026-11-15）：标题/统计/标签全部浮层压在封面
+            上（见 ViralCover 的 overlay-text），卡片高度由封面 9:16 统一决定，
+            不再被下方文字撑出参差；统计来源元数据行整体取消。body 只留按钮
+            区，等宽两列。 */}
         <div className="content-card-actions">
-          {/* 2026-10-31：一键复刻升级为卡片主 CTA——复刻是这个页面的核心转化
-              动作，放首位并用 primary 样式；时长门槛与详情页共用 4–30s。
-              提取文案是第二方向（文案二创/口播线），同为意图式跳详情执行。 */}
-          {canReplicateFromCard ? (
-            <Button
-              variant="primary"
-              aria-label={`一键复刻：${video.title}`}
-              onClick={() => {
-                navigate("viral-detail", {
-                  selectedVideoId: video.id,
-                  returnTo: "viral",
-                  viralReplicateIntent: true,
-                });
-                persistViralDetailUrl(video);
-              }}
-            >
-              一键复刻
-            </Button>
-          ) : null}
+          {/* 一键复刻爆款=卡片主 CTA，常驻按时长分流：≤30s 直接 AI 视频复刻，
+              >30s 直接数字人口播路线（详见详情页意图消费）。 */}
+          <Button
+            variant="primary"
+            aria-label={`一键复刻爆款：${video.title}`}
+            onClick={() => {
+              navigate("viral-detail", {
+                selectedVideoId: video.id,
+                returnTo: "viral",
+                viralReplicateIntent: true,
+              });
+              persistViralDetailUrl(video);
+            }}
+          >
+            一键复刻爆款
+          </Button>
           {video.platformKey && video.nativeId ? (
             <Button
               variant="outline"
@@ -2332,9 +2334,13 @@ export function ViralDetailPage() {
       return;
     }
     if (video.durationMs > 30_000) {
-      notify(
-        "该视频超过 30 秒，暂不支持自动复刻；可用「提取文案」获取文案后由口播数字人翻拍。",
-      );
+      // 一键复刻爆款按时长分流（用户拍板 2026-11-15）：>30s 直接走数字人口
+      // 播路线——导入转写后落文案页确认，确认终稿即可口播；不再弹「暂不支持」。
+      if (!video.platformKey || !video.nativeId) {
+        notify("该视频缺少平台标识，无法复刻");
+        return;
+      }
+      requestExtractRef.current();
       return;
     }
     if (video.durationMs < 4_000) {
@@ -3265,6 +3271,7 @@ export function PublishPage() {
     data,
     navigate,
     notify,
+    openLive,
     patchState,
     review,
     state,
@@ -3766,13 +3773,19 @@ export function PublishPage() {
                 />
               ) : (
                 <Empty
+                  action={
+                    <Button variant="primary" onClick={() => openLive("tasks")}>
+                      去任务中心选择成片
+                    </Button>
+                  }
                   title="暂无可发布成片"
-                  description="请从任务中心选择一条已完成的视频。"
+                  description="选择一条已完成的视频即可开始编辑发布。"
                 />
               )}
             </section>
             <section className="content-publish-cover">
               <h3>封面选择</h3>
+              <Hint>从你的成片中抽取的候选帧；也可以上传自定义图片。</Hint>
               {coverCandidates.length ? (
                 <div className="content-cover-options">
                   {coverCandidates.map((asset, index) => (
