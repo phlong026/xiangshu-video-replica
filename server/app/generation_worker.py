@@ -1392,6 +1392,10 @@ def _run_recharge_order_sweep_once() -> None:
                     zpay_allowed_channels=tuple(zpay_allowed_channels)
                     if zpay_allowed_channels
                     else None,
+                    # 轮转游标按节流周期分桶：每轮换一页候选，查单失败的
+                    # 单不会饿死后面的掉单。
+                    rotation_index=int(time.time())
+                    // max(int(_recharge_sweep_interval_seconds()), 1),
                 )
             finally:
                 raw.execute(

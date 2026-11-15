@@ -27,8 +27,10 @@ PAID 短路，永远不会双入账。供应商闭包传 None 表示该通道未
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from app.db_portable import BusinessConnection
 from app.wechat_native_client import (
@@ -36,21 +38,52 @@ from app.wechat_native_client import (
     NATIVE_RECONCILIATION_GRACE_SECONDS,
     WeChatOrderQueryResult,
 )
-from app.zpay import ZPayOrderQueryResult
 from app.zpay_payments import (
     ZPAY_ORDER_VALIDITY_SECONDS,
     NativeReconciliationOutcome,
     close_lapsed_orders_by_no,
+    count_stale_pending_native_orders,
+    count_stale_pending_zpay_orders,
     reconcile_stale_pending_native_orders,
     reconcile_stale_pending_zpay_orders,
 )
 
 logger = logging.getLogger(__name__)
 
+
+class _OrderQueryAnswer(Protocol):
+    """两个 provider 查单应答的结构交集（字段名完全一致）。
+
+    WeChat/ ZPay 专有应答类与 provider 抽象的通用 OrderQueryResult 都满足
+    这个形状；闭包契约按结构匹配，调用方不必做类型转换。
+    """
+
+    @property
+    def paid(self) -> bool: ...
+
+    @property
+    def merchant_order_no(self) -> str: ...
+
+    @property
+    def provider_trade_no(self) -> str | None: ...
+
+    @property
+    def transaction_id(self) -> str | None: ...
+
+    @property
+    def amount_fen(self) -> int | None: ...
+
+    @property
+    def channel(self) -> str | None: ...
+
+    @property
+    def response_digest(self) -> str: ...
+
+
 # 经此模块对外提供的查询闭包签名：给单号，回供应商应答（或抛错——单笔失败
 # 只跳过本单，由 reconcile 实现各自计数）。
 WeChatQuery = Callable[[str], WeChatOrderQueryResult]
-ZpayQuery = Callable[[str], ZPayOrderQueryResult]
+ZpayQuery = Callable[[str], _OrderQueryAnswer]
 
 
 @dataclass(frozen=True)
@@ -76,25 +109,42 @@ def sweep_pending_recharge_orders(
     zpay_validity_seconds: int = ZPAY_ORDER_VALIDITY_SECONDS,
     zpay_allowed_channels: tuple[str, ...] | None = None,
     limit: int = 200,
+    rotation_index: int = 0,
 ) -> RechargeSweepOutcome:
-    """跑一遍完整的待支付订单兜底，返回聚合计数（只打印用，无敏感字段）。"""
+    """跑一遍完整的待支付订单兜底，返回聚合计数（只打印用，无敏感字段）。
+
+    ``rotation_index`` 是轮转游标（调用方用时间/轮次生成即可，无需持久化）：
+    候选按 created_at 分页，每轮取第 rotation_index % pages 页。固定取最老
+    一批会让持续查单失败的单饿死后面的掉单（评审 P1），轮转保证每个单都会
+    被周期性问到。
+    """
     noop = NativeReconciliationOutcome(queried=0, settled=0, unpaid=0, skipped=0)
     if wechat_query_order is not None:
+        native_total = count_stale_pending_native_orders(
+            conn, grace_seconds=reconcile_grace_seconds
+        )
+        native_pages = max(1, math.ceil(native_total / limit))
+        native_offset = (max(0, rotation_index) % native_pages) * limit
         native = reconcile_stale_pending_native_orders(
             conn,
             query_order=wechat_query_order,
             grace_seconds=reconcile_grace_seconds,
             limit=limit,
+            offset=native_offset,
         )
     else:
         native = noop
     if zpay_query_order is not None:
+        zpay_total = count_stale_pending_zpay_orders(conn, grace_seconds=reconcile_grace_seconds)
+        zpay_pages = max(1, math.ceil(zpay_total / limit))
+        zpay_offset = (max(0, rotation_index) % zpay_pages) * limit
         zpay = reconcile_stale_pending_zpay_orders(
             conn,
             query_order=zpay_query_order,
             grace_seconds=reconcile_grace_seconds,
             limit=limit,
             allowed_channels=zpay_allowed_channels,
+            offset=zpay_offset,
         )
     else:
         zpay = noop

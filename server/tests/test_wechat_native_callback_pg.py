@@ -1210,3 +1210,54 @@ def test_zpay_reconciliation_settles_cross_channel_within_merchant_whitelist(
 def _autocommit(dsn: str):
     """sweep 契约要求 autocommit 连接（外呼期间不持事务），测试同生产同构。"""
     return psycopg.connect(dsn, autocommit=True)
+
+
+def test_sweep_rotation_reaches_orders_behind_failing_queries(wechat_db: str) -> None:
+    """评审 P1 回归：最老一批持续查单失败时，轮转游标必须让后面的掉单被问到。
+
+    旧实现固定取最老 limit 条——最老的单查单失败就永远占着坑，新掉进来的
+    已付款单永远轮不到补账。
+    """
+    _seed_order(
+        wechat_db,
+        order_id="rot_fail",
+        merchant_order_no="rot_fail_no",
+        wechat=False,
+        created_at="2026-01-01 00:00:00+00",
+    )
+    _seed_order(
+        wechat_db,
+        order_id="rot_paid",
+        merchant_order_no="rot_paid_no",
+        wechat=False,
+        created_at="2026-01-01 01:00:00+00",
+    )
+
+    def flaky_query(order_no: str) -> ZPayOrderQueryResult:
+        if order_no == "rot_fail_no":
+            raise RuntimeError("gateway keeps timing out")
+        return _zpay_paid_query(order_no)
+
+    # 第 0 页：最老的 rot_fail 被问到（失败跳过），rot_paid 还轮不到。
+    outcome_a = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=None,
+        zpay_query_order=flaky_query,
+        limit=1,
+        rotation_index=0,
+    )
+    # 查单失败计 skipped（不算 queried），轮转到下一页前 rot_paid 保持 PENDING。
+    assert outcome_a.zpay.skipped == 1
+    assert outcome_a.settled == 0
+    assert _status(wechat_db, "rot_paid") == "PENDING"
+
+    # 第 1 页：轮转让出位置，rot_paid 被问到并补账。
+    outcome_b = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=None,
+        zpay_query_order=flaky_query,
+        limit=1,
+        rotation_index=1,
+    )
+    assert outcome_b.settled == 1
+    assert _status(wechat_db, "rot_paid") == "PAID"

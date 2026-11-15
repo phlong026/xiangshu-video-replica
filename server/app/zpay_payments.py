@@ -263,24 +263,35 @@ def count_blocking_native_orders(
 
 
 def list_stale_pending_native_orders(
-    conn: BusinessConnection, *, grace_seconds: int, limit: int
+    conn: BusinessConnection, *, grace_seconds: int, limit: int, offset: int = 0
 ) -> list[str]:
     """Order numbers of the oldest Native orders still PENDING past the grace.
 
     Read-only and lock-free on purpose: the caller must have no transaction open
     that would span the external query-order calls, so a concurrently arriving
-    callback never waits on the sweep's snapshot.
+    callback never waits on the sweep's snapshot. ``offset`` 供 sweep 轮转游标
+    使用：固定取最老一批会让持续查单失败的单饿死后面的掉单。
     """
     rows = conn.execute(
         f"""
         SELECT merchant_order_no FROM recharge_orders
         WHERE {_PENDING_NATIVE_OLDER_THAN}
         ORDER BY created_at
-        LIMIT %s
+        LIMIT %s OFFSET %s
         """,  # noqa: S608
-        (float(grace_seconds), limit),
+        (float(grace_seconds), limit, max(0, offset)),
     ).fetchall()
     return [str(row[0]) for row in rows]
+
+
+def count_stale_pending_zpay_orders(conn: BusinessConnection, *, grace_seconds: int) -> int:
+    """Backlog size of the ZPay reconciliation sweep (rotation page count)."""
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_PENDING_ZPAY_OLDER_THAN}",
+        (float(grace_seconds),),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 @dataclass(frozen=True)
@@ -306,6 +317,7 @@ def reconcile_stale_pending_native_orders(
     query_order: Callable[[str], WeChatOrderQueryResult],
     grace_seconds: int = NATIVE_RECONCILIATION_GRACE_SECONDS,
     limit: int = 200,
+    offset: int = 0,
 ) -> NativeReconciliationOutcome:
     """Recover Native orders WeChat has paid but no callback ever confirmed.
 
@@ -326,7 +338,9 @@ def reconcile_stale_pending_native_orders(
     PENDING and its order number is reported via ``unpaid_order_nos``——过期
     关闭只允许针对这些"确认没付"的单（见 NativeReconciliationOutcome）。
     """
-    order_nos = list_stale_pending_native_orders(conn, grace_seconds=grace_seconds, limit=limit)
+    order_nos = list_stale_pending_native_orders(
+        conn, grace_seconds=grace_seconds, limit=limit, offset=offset
+    )
     queried = settled = unpaid = skipped = 0
     unpaid_order_nos: list[str] = []
     for order_no in order_nos:
@@ -399,21 +413,22 @@ _PENDING_ZPAY_OLDER_THAN = (
 
 
 def list_stale_pending_zpay_orders(
-    conn: BusinessConnection, *, grace_seconds: int, limit: int
+    conn: BusinessConnection, *, grace_seconds: int, limit: int, offset: int = 0
 ) -> list[str]:
     """Order numbers of the oldest ZPay orders still PENDING past the grace.
 
     Read-only and lock-free on purpose, same as the Native twin: the caller must
     have no transaction open that would span the external query-order call.
+    ``offset`` 同 Native 版——sweep 轮转游标防饿死。
     """
     rows = conn.execute(
         f"""
         SELECT merchant_order_no FROM recharge_orders
         WHERE {_PENDING_ZPAY_OLDER_THAN}
         ORDER BY created_at
-        LIMIT %s
+        LIMIT %s OFFSET %s
         """,  # noqa: S608
-        (float(grace_seconds), limit),
+        (float(grace_seconds), limit, max(0, offset)),
     ).fetchall()
     return [str(row[0]) for row in rows]
 
@@ -453,6 +468,7 @@ def reconcile_stale_pending_zpay_orders(
     grace_seconds: int,
     limit: int = 200,
     allowed_channels: Collection[str] | None = None,
+    offset: int = 0,
 ) -> NativeReconciliationOutcome:
     """Recover ZPay orders the gateway has marked paid but no callback confirmed.
 
@@ -461,7 +477,9 @@ def reconcile_stale_pending_zpay_orders(
     守卫拒绝分别计数跳过，绝不代答。连接契约也一致——调用方用 autocommit
     连接，结算各自成为短事务，外呼期间不持任何锁。
     """
-    order_nos = list_stale_pending_zpay_orders(conn, grace_seconds=grace_seconds, limit=limit)
+    order_nos = list_stale_pending_zpay_orders(
+        conn, grace_seconds=grace_seconds, limit=limit, offset=offset
+    )
     queried = settled = unpaid = skipped = 0
     unpaid_order_nos: list[str] = []
     for order_no in order_nos:
