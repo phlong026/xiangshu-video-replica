@@ -35,6 +35,7 @@ const api = vi.hoisted(() => ({
   renameOralAvatar: vi.fn(),
   renameOralVoice: vi.fn(),
   deleteSimpleCharacterIdentity: vi.fn(),
+  deleteSimpleSceneLook: vi.fn(),
   updateSimpleCharacterProfile: vi.fn(),
   uploadMaterial: vi.fn(),
   getLatestSceneLookTask: vi.fn(async () => null),
@@ -661,6 +662,46 @@ describe("PeoplePages", () => {
     render(<PersonPage />);
     expect(screen.queryByRole("button", { name: "制作口播分身" })).toBeNull();
     expect(screen.getByRole("button", { name: "用于人物置换" })).toBeEnabled();
+  });
+
+  it("场景造型卡提供删除：确认后调删除接口并刷新场景", async () => {
+    review = false;
+    currentPage = "person-photos";
+    api.deleteSimpleSceneLook.mockReset().mockResolvedValue(undefined);
+    live.loadPersonAssets.mockReset().mockResolvedValue({
+      assets: [],
+      errors: [],
+      loaded: 0,
+      total: 0,
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<PersonPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining("庭院讲解"),
+    );
+    await waitFor(() =>
+      expect(api.deleteSimpleSceneLook).toHaveBeenCalledWith("p1", "scene"),
+    );
+    await waitFor(() => expect(live.loadPersonAssets).toHaveBeenCalled());
+    expect(notify).toHaveBeenCalledWith("场景造型已删除。");
+    confirmSpy.mockRestore();
+  });
+
+  it("场景造型删除取消时不调删除接口", async () => {
+    review = false;
+    currentPage = "person-photos";
+    api.deleteSimpleSceneLook.mockReset();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(<PersonPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(api.deleteSimpleSceneLook).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 
   it("视频分身创建不读取草稿中的照片", () => {
