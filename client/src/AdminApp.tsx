@@ -468,6 +468,19 @@ export function AdminApp() {
   const newPasswordRef = useRef<HTMLInputElement>(null);
   const initialRoute = adminRouteFromHash(window.location.hash);
   const [activeTab, setActiveTab] = useState<AdminTab>(initialRoute.tab);
+  // 路由切换后把滚动复位到顶部：上一页的滚动位置会让新页的页签行被
+  // sticky header 压住（2026-11-15 审计·成本核对页）。宽屏内容区自滚、
+  // 窄屏（<1024px，overflow:visible）由文档滚动，两个容器都复位。
+  useEffect(() => {
+    // jsdom（单测环境）不实现 scrollTo，一律做能力探测。
+    const workspace = document.querySelector(".admin-workspace");
+    if (workspace && typeof workspace.scrollTo === "function") {
+      workspace.scrollTo({ top: 0 });
+    }
+    if (typeof window.scrollTo === "function") {
+      window.scrollTo({ top: 0 });
+    }
+  }, [activeTab]);
   const [navigationIntent, setNavigationIntent] = useState(initialRoute.intent);
   const [businessTarget, setBusinessTarget] = useState(
     () => new URLSearchParams(window.location.hash.split("?")[1] ?? ""),
@@ -573,9 +586,6 @@ export function AdminApp() {
         new URLSearchParams(window.location.hash.split("?")[1] ?? ""),
       );
     };
-    // 深链/页签切换后把内容区滚回顶部：否则上一页的滚动位置会让新页的
-    // 页签行被 sticky header 压住（2026-11-15 审计·成本核对页）。
-    document.querySelector(".admin-workspace")?.scrollTo({ top: 0 });
     window.addEventListener("hashchange", restore);
     window.addEventListener("popstate", restore);
     return () => {

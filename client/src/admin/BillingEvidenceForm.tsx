@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { adminWrite } from "../api.admin";
 import { PageBanner } from "./ui/PageBanner";
 
@@ -11,6 +11,7 @@ export function BillingEvidenceForm({
   attemptId?: string;
   onSaved: () => void;
 }) {
+  const formId = useId();
   const [value, setValue] = useState("");
   const [reference, setReference] = useState("");
   const [reason, setReason] = useState("");
@@ -66,7 +67,7 @@ export function BillingEvidenceForm({
       <label>
         {attemptId ? "本次调用总成本（分）" : "实际成功时长（秒）"}
         <input
-          id="billing-evidence-value"
+          id={`${formId}-value`}
           name="billing_evidence_value"
           type="number"
           min={attemptId ? "0" : "0.000001"}
@@ -79,7 +80,7 @@ export function BillingEvidenceForm({
       <label>
         核对凭据
         <input
-          id="billing-evidence-reference"
+          id={`${formId}-reference`}
           name="billing_evidence_reference"
           value={reference}
           onChange={(e) => setReference(e.target.value)}
@@ -91,7 +92,7 @@ export function BillingEvidenceForm({
       <label>
         核对原因
         <input
-          id="billing-evidence-reason"
+          id={`${formId}-reason`}
           name="billing_evidence_reason"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
