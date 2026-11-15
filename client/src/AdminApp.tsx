@@ -363,10 +363,96 @@ export function adminRouteFromHash(hash: string): {
   };
 }
 
+// 「记住账号」只存用户名、绝不存密码：管理后台密码统一交给浏览器密码管理器，
+// localStorage 里的明文密码在共用电脑或被扩展/XSS 读取时就是裸奔。
+const ADMIN_REMEMBER_USERNAME_KEY = "admin.login.rememberedUsername";
+
+function readRememberedAdminUsername(): string {
+  try {
+    return window.localStorage.getItem(ADMIN_REMEMBER_USERNAME_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function persistRememberedAdminUsername(username: string) {
+  try {
+    if (username) {
+      window.localStorage.setItem(ADMIN_REMEMBER_USERNAME_KEY, username);
+    } else {
+      window.localStorage.removeItem(ADMIN_REMEMBER_USERNAME_KEY);
+    }
+  } catch {
+    // 隐私模式等场景 localStorage 不可用时静默放弃，不影响登录本身。
+  }
+}
+
+// 密码可见性切换按钮：内嵌在输入框右侧的眼睛图标（同行登录页通用做法）。
+// mousedown 阻止默认行为，点眼睛时输入框焦点不丢，可继续输入。
+function AdminEyeToggle({
+  label,
+  onToggle,
+  open,
+}: {
+  label: string;
+  onToggle: () => void;
+  open: boolean;
+}) {
+  return (
+    <button
+      aria-label={label}
+      aria-pressed={open}
+      className="admin-login__eye"
+      title={label}
+      type="button"
+      onMouseDown={(event) => {
+        event.preventDefault();
+      }}
+      onClick={onToggle}
+    >
+      <AdminEyeIcon open={open} />
+    </button>
+  );
+}
+
+// 密码可见性切换图标（同行登录页通用的内嵌眼睛，替代外挂「显示」按钮）。
+function AdminEyeIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="20"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 24 24"
+      width="20"
+    >
+      {open ? (
+        <>
+          <path d="M1 1l22 22" />
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+        </>
+      ) : (
+        <>
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z" />
+          <circle cx="12" cy="12" r="3" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 export function AdminApp() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [actor, setActor] = useState<AdminActorInfo | null>(null);
-  const [loginUsername, setLoginUsername] = useState("");
+  const [loginUsername, setLoginUsername] = useState(() =>
+    readRememberedAdminUsername(),
+  );
+  const [rememberUsername, setRememberUsername] = useState(
+    () => readRememberedAdminUsername() !== "",
+  );
   const [loginPassword, setLoginPassword] = useState("");
   const [recoveryCredential, setRecoveryCredential] = useState("");
   const [recoveryTrimmed, setRecoveryTrimmed] = useState(false);
@@ -374,6 +460,9 @@ export function AdminApp() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [authPending, setAuthPending] = useState<AuthPendingAction>("");
   const [showPassword, setShowPassword] = useState(false);
+  const [showRecoveryCredential, setShowRecoveryCredential] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const loginUsernameRef = useRef<HTMLInputElement>(null);
   const recoveryCredentialRef = useRef<HTMLInputElement>(null);
   const newPasswordRef = useRef<HTMLInputElement>(null);
@@ -617,6 +706,8 @@ export function AdminApp() {
       setActor(result.actor);
       setLoginPassword("");
       setShowPassword(false);
+      // 登录成功才落盘：此时 username 已通过校验，勾选状态即用户最终意图。
+      persistRememberedAdminUsername(rememberUsername ? username : "");
       setAuthPhase("ready");
       const route = adminRouteFromHash(window.location.hash);
       setActiveTab(route.tab);
@@ -649,6 +740,7 @@ export function AdminApp() {
       setLoginUsername(result.actor.username);
       setRecoveryCredential("");
       setRecoveryTrimmed(false);
+      setShowRecoveryCredential(false);
       setAuthPhase("password-setup");
     } catch (cause) {
       setError(
@@ -684,6 +776,8 @@ export function AdminApp() {
       setActor(null);
       setNewPassword("");
       setConfirmPassword("");
+      setShowNewPassword(false);
+      setShowConfirmPassword(false);
       setAuthPhase("anonymous");
       setNotice("密码已设置，请使用管理员账号和新密码登录。");
     } catch (cause) {
@@ -757,7 +851,7 @@ export function AdminApp() {
                 </div>
                 <div className="admin-login__control">
                   <label htmlFor="admin-login-password">管理员密码</label>
-                  <div className="admin-login__password-row">
+                  <div className="admin-login__password-box">
                     <input
                       id="admin-login-password"
                       autoComplete="current-password"
@@ -765,16 +859,40 @@ export function AdminApp() {
                       value={loginPassword}
                       onChange={(event) => setLoginPassword(event.target.value)}
                     />
-                    <button
-                      aria-label={showPassword ? "隐藏密码" : "显示密码"}
-                      aria-pressed={showPassword}
-                      className="admin-login__toggle"
-                      type="button"
-                      onClick={() => setShowPassword((current) => !current)}
-                    >
-                      {showPassword ? "隐藏" : "显示"}
-                    </button>
+                    <AdminEyeToggle
+                      label={showPassword ? "隐藏密码" : "显示密码"}
+                      onToggle={() => setShowPassword((current) => !current)}
+                      open={showPassword}
+                    />
                   </div>
+                </div>
+                <div className="admin-login__options">
+                  <label className="admin-login__remember">
+                    <input
+                      checked={rememberUsername}
+                      onChange={(event) => {
+                        const next = event.target.checked;
+                        setRememberUsername(next);
+                        // 勾选即时记住当前输入的账号；取消勾选立即清除。
+                        persistRememberedAdminUsername(
+                          next ? loginUsername.trim() : "",
+                        );
+                      }}
+                      type="checkbox"
+                    />
+                    <span>记住账号</span>
+                  </label>
+                  <button
+                    className="admin-login__link"
+                    type="button"
+                    onClick={() => {
+                      setError("");
+                      setNotice("");
+                      setAuthPhase("recovery");
+                    }}
+                  >
+                    找回密码
+                  </button>
                 </div>
                 <button
                   className="admin-login__submit"
@@ -782,17 +900,6 @@ export function AdminApp() {
                   type="submit"
                 >
                   {authPending === "login" ? "正在登录…" : "登录后台"}
-                </button>
-                <button
-                  className="admin-login__link"
-                  type="button"
-                  onClick={() => {
-                    setError("");
-                    setNotice("");
-                    setAuthPhase("recovery");
-                  }}
-                >
-                  首次设置或找回密码
                 </button>
               </form>
             ) : null}
@@ -809,20 +916,29 @@ export function AdminApp() {
                 </p>
                 <div className="admin-login__control">
                   <label htmlFor="admin-login-recovery">一次性恢复凭据</label>
-                  <input
-                    id="admin-login-recovery"
-                    autoComplete="off"
-                    placeholder="ASX1.…"
-                    ref={recoveryCredentialRef}
-                    type="password"
-                    value={recoveryCredential}
-                    onChange={(event) => {
-                      setRecoveryCredential(event.target.value);
-                      setRecoveryTrimmed(
-                        event.target.value !== event.target.value.trim(),
-                      );
-                    }}
-                  />
+                  <div className="admin-login__password-box">
+                    <input
+                      id="admin-login-recovery"
+                      autoComplete="off"
+                      placeholder="ASX1.…"
+                      ref={recoveryCredentialRef}
+                      type={showRecoveryCredential ? "text" : "password"}
+                      value={recoveryCredential}
+                      onChange={(event) => {
+                        setRecoveryCredential(event.target.value);
+                        setRecoveryTrimmed(
+                          event.target.value !== event.target.value.trim(),
+                        );
+                      }}
+                    />
+                    <AdminEyeToggle
+                      label={showRecoveryCredential ? "隐藏凭据" : "显示凭据"}
+                      onToggle={() =>
+                        setShowRecoveryCredential((current) => !current)
+                      }
+                      open={showRecoveryCredential}
+                    />
+                  </div>
                   <small className="admin-login__hint">
                     凭据以 ASX1. 开头。
                   </small>
@@ -861,26 +977,46 @@ export function AdminApp() {
                 </p>
                 <div className="admin-login__control">
                   <label htmlFor="admin-login-new-password">新管理员密码</label>
-                  <input
-                    id="admin-login-new-password"
-                    autoComplete="new-password"
-                    ref={newPasswordRef}
-                    type="password"
-                    value={newPassword}
-                    onChange={(event) => setNewPassword(event.target.value)}
-                  />
+                  <div className="admin-login__password-box">
+                    <input
+                      id="admin-login-new-password"
+                      autoComplete="new-password"
+                      ref={newPasswordRef}
+                      type={showNewPassword ? "text" : "password"}
+                      value={newPassword}
+                      onChange={(event) => setNewPassword(event.target.value)}
+                    />
+                    <AdminEyeToggle
+                      label={showNewPassword ? "隐藏新密码" : "显示新密码"}
+                      onToggle={() => setShowNewPassword((current) => !current)}
+                      open={showNewPassword}
+                    />
+                  </div>
                 </div>
                 <div className="admin-login__control">
                   <label htmlFor="admin-login-confirm-password">
                     确认新管理员密码
                   </label>
-                  <input
-                    id="admin-login-confirm-password"
-                    autoComplete="new-password"
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(event) => setConfirmPassword(event.target.value)}
-                  />
+                  <div className="admin-login__password-box">
+                    <input
+                      id="admin-login-confirm-password"
+                      autoComplete="new-password"
+                      type={showConfirmPassword ? "text" : "password"}
+                      value={confirmPassword}
+                      onChange={(event) =>
+                        setConfirmPassword(event.target.value)
+                      }
+                    />
+                    <AdminEyeToggle
+                      label={
+                        showConfirmPassword ? "隐藏确认密码" : "显示确认密码"
+                      }
+                      onToggle={() =>
+                        setShowConfirmPassword((current) => !current)
+                      }
+                      open={showConfirmPassword}
+                    />
+                  </div>
                 </div>
                 <button
                   className="admin-login__submit"

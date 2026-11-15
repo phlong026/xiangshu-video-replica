@@ -132,8 +132,13 @@
   border-radius: 10px;
   background: rgba(9, 12, 18, 0.55);
   color: var(--admin-copy);
+  caret-color: var(--admin-accent);
   min-height: 42px;
   padding: 0 12px;
+}
+
+.admin-login__control input:hover {
+  border-color: rgba(255, 255, 255, 0.3);
 }
 
 .admin-login__control input:focus-visible {
@@ -141,23 +146,80 @@
   outline-offset: 1px;
 }
 
-.admin-login__password-row {
+/* 深色输入框被浏览器自动填充刷成浅色底时，用内衬阴影盖回深色底。 */
+.admin-login__control input:-webkit-autofill,
+.admin-login__control input:-webkit-autofill:hover,
+.admin-login__control input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #090c12 inset;
+  -webkit-text-fill-color: var(--admin-copy);
+  caret-color: var(--admin-accent);
+}
+
+/* 密码/凭据框：输入框与账号框完全同宽，眼睛图标内嵌右侧（不占外部列），
+ * 参考 GitHub / 阿里云等登录页的通行做法。 */
+.admin-login__password-box {
+  position: relative;
+}
+
+.admin-login__password-box input {
+  width: 100%;
+  padding-right: 44px;
+}
+
+.admin-login__eye {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--admin-copy-faint);
+  cursor: pointer;
+}
+
+.admin-login__eye:hover {
+  color: var(--admin-copy);
+}
+
+.admin-login__eye:focus-visible {
+  outline: 2px solid var(--admin-accent);
+  outline-offset: 1px;
+}
+
+.admin-login__eye[aria-pressed="true"] {
+  color: var(--admin-accent);
+}
+
+/* 「记住账号 + 找回密码」经典行：勾选框靠左，链接靠右。
+ * 记住账号只落 localStorage 用户名，密码交给浏览器密码管理器。 */
+.admin-login__options {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-login__remember {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-}
-
-.admin-login__password-row input {
-  flex: 1;
-  min-width: 0;
-}
-
-.admin-login__toggle {
-  border: 1px solid var(--admin-line-strong);
-  background: rgba(255, 255, 255, 0.04);
   color: var(--admin-copy-soft);
   font-size: var(--font-label);
-  min-height: 42px;
-  padding: 0 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.admin-login__remember input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--admin-accent);
+  cursor: pointer;
 }
 
 .admin-login__submit {
@@ -172,13 +234,21 @@
   font-weight: 700;
 }
 
+.admin-login__submit:hover:not(:disabled) {
+  filter: brightness(1.07);
+}
+
+.admin-login__submit:focus-visible {
+  outline: 2px solid var(--admin-accent-strong);
+  outline-offset: 2px;
+}
+
 .admin-login__submit:disabled {
   cursor: progress;
   opacity: 0.6;
 }
 
 .admin-login__link {
-  justify-self: start;
   background: transparent;
   color: var(--admin-copy-faint);
   font-size: var(--font-label);
