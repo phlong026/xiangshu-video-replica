@@ -277,27 +277,133 @@
   display: block;
 }
 
-.creation-saved-list {
+/* 「我的文案」与「提取记录」列表：卡片化。此前提取记录行完全没有样式定义、
+ * 我的文案只有一行标题（未命名文案 × N），两处都按同行的素材库/云文档列表
+ * 惯例重排：标题 + 元信息 + 两行正文预览（line-clamp），卡片 hover 提亮。 */
+.creation-saved-list,
+.creation-extraction-list {
+  display: grid;
+  gap: 12px;
   margin-top: 16px;
 }
 
-.creation-script-row {
-  align-items: center;
-  background: none;
-  border: 0;
-  border-bottom: 1px solid #252723;
-  color: #e8e8e4;
-  cursor: pointer;
-  display: flex;
-  font: inherit;
-  justify-content: space-between;
-  padding: 16px 4px;
-  text-align: left;
-  width: 100%;
+.creation-script-card,
+.creation-extraction-card {
+  background: #0e100f;
+  border: 1px solid #242622;
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  transition: border-color 120ms ease;
 }
 
-.creation-script-row small {
+.creation-script-card:hover,
+.creation-extraction-card:hover {
+  border-color: #3a3d36;
+}
+
+.creation-script-card__main {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.creation-script-card__main:disabled {
+  cursor: default;
+}
+
+.creation-script-card__head,
+.creation-extraction-card__head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.creation-script-card__title,
+.creation-extraction-card__title {
+  flex: 1;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creation-script-card__badge {
+  border: 1px solid #3a3d36;
+  border-radius: 999px;
   color: #969892;
+  flex: none;
+  font-size: 12px;
+  padding: 2px 10px;
+}
+
+.creation-script-card__badge--confirmed {
+  border-color: var(--accent-strong, #c6a45f);
+  color: var(--accent-strong, #c6a45f);
+}
+
+.creation-extraction-card__platform {
+  border: 1px solid #3a3d36;
+  border-radius: 6px;
+  color: #969892;
+  flex: none;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.creation-script-card__preview,
+.creation-extraction-card__preview {
+  color: #969892;
+  display: -webkit-box;
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.creation-script-card__meta,
+.creation-extraction-card__meta {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.creation-script-card__meta small,
+.creation-extraction-card__meta small {
+  color: #6f726b;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creation-script-card__delete {
+  background: none;
+  border: 0;
+  color: #6f726b;
+  cursor: pointer;
+  flex: none;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.creation-script-card__delete:hover {
+  color: #e5695f;
 }
 
 .creation-empty-workspace {

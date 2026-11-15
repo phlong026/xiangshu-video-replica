@@ -254,6 +254,8 @@ export type StudioScript = {
   ipId?: string;
   sourceProjectId?: string;
   sourceKind?: "viral" | "project" | "link" | "upload";
+  /** 云端保存记录的最后更新时间（ISO）；仅「我的文案」列表回填，供列表页展示。 */
+  updatedAt?: string;
 };
 export type StudioDraft = {
   /** 音频口播与文字口播在草稿恢复时仍保持同一驱动方式。 */

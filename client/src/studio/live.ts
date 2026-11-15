@@ -1670,6 +1670,7 @@ export function savedScriptFromRecord(record: {
   ip_id?: string | null;
   source_project_id?: string | null;
   source_kind?: string | null;
+  updated_at?: string;
 }): StudioScript {
   return {
     resultKind: "manual",
@@ -1690,7 +1691,24 @@ export function savedScriptFromRecord(record: {
       record.source_kind === "upload"
         ? record.source_kind
         : undefined,
+    updatedAt: record.updated_at || undefined,
   };
+}
+
+/** 智能兜底标题：取正文第一行、压缩空白后截 28 字。标题留空的稿子若一律存成
+ * 「未命名文案」，列表里全是无意义的重复行，扫一眼认不出哪篇是哪篇；用首行
+ * 当标题，列表展示与保存落库共用同一个口径。 */
+export function fallbackCopyTitle(
+  text: string | null | undefined,
+  fallback = "未命名文案",
+): string {
+  const firstLine = (text ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) return fallback;
+  const compact = firstLine.replace(/\s+/g, " ");
+  return compact.length > 28 ? `${compact.slice(0, 28)}…` : compact;
 }
 
 export async function loadSavedScriptList(): Promise<StudioScript[]> {
@@ -1705,7 +1723,8 @@ export async function persistSavedScript(
 ): Promise<void> {
   const input: StudioSavedScriptInput = {
     script_id: script.id,
-    title: script.title || "未命名文案",
+    // 标题留空时按正文首行起一个可辨认的兜底标题，不再存「未命名文案」。
+    title: script.title || fallbackCopyTitle(script.text),
     text: script.text,
     original: script.original || null,
     version: script.version,

@@ -14,6 +14,7 @@ import {
   capturePromptSession,
   customerVisibleErrorMessage,
   DIRECT_RESULT_RETENTION_HINT,
+  deleteStudioSavedScript,
   fetchViralCopyExtractions,
   type GenerationRatio,
   type GenerationVersionState,
@@ -61,6 +62,7 @@ import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { useCopyExtractionProgress } from "./copyExtractionProgress";
 import {
+  fallbackCopyTitle,
   loadDraftMaterials,
   loadSavedScriptList,
   readAudioDuration,
@@ -226,6 +228,24 @@ function nearestSourceRatio(aspect: number): GenerationRatio {
     }
   }
   return best;
+}
+
+/** 提取记录元信息里展示的视频 ID：平台 ID 常是 19 位长数字，全量展示会把
+ * 元信息行顶爆，中间省略成 `770610…9675` 只保留可辨认的头尾。 */
+function shortVideoId(videoId: string): string {
+  return videoId.length > 14
+    ? `${videoId.slice(0, 6)}…${videoId.slice(-4)}`
+    : videoId;
+}
+
+/** 提取记录标题：平台视频标题为空（缓存未带标题）时退回正文首行，
+ * 再退回「平台 · 短 ID」——不再把裸长数字当标题展示。 */
+function extractionDisplayTitle(record: ViralCopyExtractionRecord): string {
+  if (record.title) return record.title;
+  return fallbackCopyTitle(
+    record.text,
+    `${record.platform} · ${shortVideoId(record.videoId)}`,
+  );
 }
 
 function findSource(
@@ -910,6 +930,22 @@ export function CopyPage() {
     });
     setTab("rewrite");
   };
+  const removeSavedScript = async (script: StudioScript) => {
+    if (readOnly) return;
+    // 删除不可逆且不进回收站，与内容发布页同一确认口径（window.confirm）。
+    const title =
+      script.title && script.title !== "未命名文案"
+        ? script.title
+        : fallbackCopyTitle(script.text);
+    if (!window.confirm(`删除「${title}」？删除后不可恢复。`)) return;
+    try {
+      await deleteStudioSavedScript(script.id);
+      notify("已删除该文案。");
+      void refreshSaved();
+    } catch (cause: unknown) {
+      notify(customerVisibleErrorMessage(cause, "删除失败，请重试。"));
+    }
+  };
   const source = findSource(
     data.assets,
     data.videos,
@@ -986,32 +1022,38 @@ export function CopyPage() {
           ) : extractions?.length ? (
             extractions.map((record) => (
               <div
-                className="creation-extraction-row"
+                className="creation-extraction-card"
                 key={`${record.platform}:${record.videoId}`}
               >
-                <div className="creation-extraction-row-head">
-                  <strong>
-                    {record.title || `${record.platform} · ${record.videoId}`}
+                <div className="creation-extraction-card__head">
+                  <span className="creation-extraction-card__platform">
+                    {record.platform}
+                  </span>
+                  <strong className="creation-extraction-card__title">
+                    {extractionDisplayTitle(record)}
                   </strong>
-                  <small>
-                    {record.lastExtractedAt.slice(0, 16).replace("T", " ")}
-                    {record.times > 1 ? ` · 提取 ${record.times} 次` : ""}
-                  </small>
                 </div>
-                <p>
+                <p className="creation-extraction-card__preview">
                   {record.text
-                    ? record.text.length > 120
-                      ? `${record.text.slice(0, 120)}…`
+                    ? record.text.length > 200
+                      ? `${record.text.slice(0, 200)}…`
                       : record.text
                     : "暂无正文，可重新提取。"}
                 </p>
-                <Button
-                  variant="outline"
-                  disabled={readOnly || !record.text}
-                  onClick={() => reuseExtraction(record)}
-                >
-                  复用到工坊
-                </Button>
+                <div className="creation-extraction-card__meta">
+                  <small>
+                    {record.lastExtractedAt.slice(0, 16).replace("T", " ")}
+                    {record.times > 1 ? ` · 提取 ${record.times} 次` : ""}
+                    {` · ${shortVideoId(record.videoId)}`}
+                  </small>
+                  <Button
+                    variant="outline"
+                    disabled={readOnly || !record.text}
+                    onClick={() => reuseExtraction(record)}
+                  >
+                    复用到工坊
+                  </Button>
+                </div>
               </div>
             ))
           ) : !extractionsLoading ? (
@@ -1043,18 +1085,62 @@ export function CopyPage() {
               }
             />
           ) : saved.length ? (
-            saved.map((script) => (
-              <button
-                className="creation-script-row"
-                disabled={readOnly}
-                key={script.id}
-                onClick={() => applySavedScript(script)}
-                type="button"
-              >
-                <span>{script.title}</span>
-                <small>{script.confirmed ? "已确认" : "草稿"}</small>
-              </button>
-            ))
+            saved.map((script) => {
+              // 老数据可能存了「未命名文案」或空标题：展示层用正文首行兜底，
+              // 不再让列表被无意义的重复标题填满。
+              const displayTitle =
+                script.title && script.title !== "未命名文案"
+                  ? script.title
+                  : fallbackCopyTitle(script.text);
+              const metaParts = [
+                script.updatedAt
+                  ? script.updatedAt.slice(0, 16).replace("T", " ")
+                  : "",
+                `${script.text.length} 字`,
+              ].filter(Boolean);
+              return (
+                <div className="creation-script-card" key={script.id}>
+                  <button
+                    className="creation-script-card__main"
+                    disabled={readOnly}
+                    onClick={() => applySavedScript(script)}
+                    type="button"
+                  >
+                    <span className="creation-script-card__head">
+                      <span className="creation-script-card__title">
+                        {displayTitle}
+                      </span>
+                      <span
+                        className={`creation-script-card__badge${
+                          script.confirmed
+                            ? " creation-script-card__badge--confirmed"
+                            : ""
+                        }`}
+                      >
+                        {script.confirmed ? "已确认" : "草稿"}
+                      </span>
+                    </span>
+                    {script.text ? (
+                      <span className="creation-script-card__preview">
+                        {script.text}
+                      </span>
+                    ) : null}
+                  </button>
+                  <div className="creation-script-card__meta">
+                    <small>{metaParts.join(" · ")}</small>
+                    <button
+                      aria-label={`删除${displayTitle}`}
+                      className="creation-script-card__delete"
+                      disabled={readOnly}
+                      type="button"
+                      onClick={() => void removeSavedScript(script)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              );
+            })
           ) : !savedLoading ? (
             <Empty
               title="还没有保存的文案"
