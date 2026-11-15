@@ -449,7 +449,7 @@ HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "foreign_keys": 221,
     "identity_columns": 0,
     "jsonb_columns": 16,
-    "partial_indexes": 48,
+    "partial_indexes": 49,
     "primary_keys": 140,
     "sequences": 8,
     "tables": 140,
