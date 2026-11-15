@@ -31,7 +31,7 @@ from pg_test_kit import (
     upgrade_test_database_to_head,
 )
 
-from app.auth import CurrentUser, get_current_user, get_database
+from app.auth import CurrentUser, get_current_user, get_current_user_short_tx, get_database
 from app.customer_fence import get_business_db
 from app.db_pg import close_pg_pool
 from app.db_portable import BusinessConnection
@@ -116,7 +116,9 @@ def client(pg: psycopg.Connection) -> TestClient:
     application = FastAPI()
     application.include_router(material_router)
     application.dependency_overrides[get_database] = lambda: bus
-    application.dependency_overrides[get_current_user] = lambda: current
+    application.dependency_overrides[get_current_user_short_tx] = application.dependency_overrides[
+        get_current_user
+    ] = lambda: current
     application.dependency_overrides[get_business_db] = lambda: _ScopedBusinessDb(bus, current)
     return TestClient(application)
 

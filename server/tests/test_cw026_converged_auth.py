@@ -26,15 +26,18 @@ Also covered here (the CW-026 acceptance delta):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import secrets
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 
 import psycopg
 import pytest
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.testclient import TestClient
 from pg_test_kit import require_pg_or_explicit_skip
 
@@ -469,6 +472,167 @@ def test_customer_session_reads_resolve_to_session_owner_only(
     stale = client.get("/api/wallet", headers=_bearer(str(first["session_token"])))
     assert stale.status_code == 401, stale.text
     assert stale.json()["detail"]["code"] == "SESSION_REPLACED"
+
+
+def _hold_customer_read_response(customer_app: FastAPI) -> tuple[Event, Event]:
+    ready, release = Event(), Event()
+
+    @customer_app.middleware("http")
+    async def slow_response(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        response = await call_next(request)
+        if request.headers.get("X-Test-Hold-Response") == "1":
+            ready.set()
+            if not await asyncio.to_thread(release.wait, 8):
+                raise RuntimeError("test did not release the slow response")
+        return response
+
+    return ready, release
+
+
+def test_slow_read_does_not_block_parallel_homepage_reads_or_download_grant(
+    customer_app: FastAPI, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """真库行锁回归：慢响应尚未结束时，首页查询与下载授权仍须独立完成。"""
+    from app import db_pg
+    from app.generation_routes import router as generation_router
+    from app.oral_routes import router as oral_router
+    from app.storage import STORAGE_ROOT_ENV
+    from app.studio_routes import router as studio_router
+    from app.viral_routes import router as viral_router
+
+    for router in (generation_router, oral_router, studio_router, viral_router):
+        customer_app.include_router(router)
+    monkeypatch.setenv(STORAGE_ROOT_ENV, str(tmp_path))
+    monkeypatch.setattr(db_pg, "PG_POOL_OPTIONS", db_pg.PG_POOL_OPTIONS + " -c lock_timeout=200ms")
+    ready, release = _hold_customer_read_response(customer_app)
+
+    with TestClient(customer_app, raise_server_exceptions=False) as test_client:
+        customer = _activate_customer(test_client, route_state, suffix="a")
+        headers = _bearer(str(customer["session_token"]))
+        project = test_client.post("/api/projects", json={"name": "并发预览"}, headers=headers)
+        assert project.status_code == 201, project.text
+        with psycopg.connect(route_state, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO wallets (user_id, available_credits, reserved_credits) "
+                "VALUES (%s, 111, 0) ON CONFLICT (user_id) DO NOTHING",
+                (customer["user_id"],),
+            )
+            conn.execute(
+                "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+                "content_type, created_by_user_id) VALUES "
+                "('concurrent-preview', %s, 'reference_video', 'local://regression/video.mp4', "
+                "'test-container-header', 32, 'video/mp4', %s)",
+                (project.json()["id"], customer["user_id"]),
+            )
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            slow = workers.submit(
+                test_client.get, "/api/wallet", headers={**headers, "X-Test-Hold-Response": "1"}
+            )
+            try:
+                assert ready.wait(5), "the authenticated slow response never started"
+                paths = (
+                    "/api/wallet",
+                    "/api/projects",
+                    "/api/generation-batches",
+                    "/api/studio/stats",
+                    "/api/oral/avatars?identity_id=no-avatars",
+                    "/api/viral/videos?platform=wechat_channels",
+                )
+                reads = [workers.submit(test_client.get, path, headers=headers) for path in paths]
+                grant = workers.submit(
+                    test_client.post, "/api/assets/concurrent-preview/download-url", headers=headers
+                )
+                results = [future.result(timeout=5) for future in reads]
+                granted = grant.result(timeout=5)
+                assert [result.status_code for result in results] == [200] * len(paths)
+                assert granted.status_code == 200, granted.text
+                assert "/api/assets/signed-objects/" in granted.json()["url"]
+            finally:
+                release.set()
+            assert slow.result(timeout=5).status_code == 200
+
+
+def test_concurrent_reads_work_with_a_single_connection_pool(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """认证与业务连接不能嵌套借用：池仅一条连接也应完成并发读请求。"""
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MIN", "1")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MAX", "1")
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_TIMEOUT", "2")
+    close_pg_pool()
+    customer = _activate_customer(client, route_state, suffix="a")
+    headers = _bearer(str(customer["session_token"]))
+    start = Barrier(8)
+
+    def read_projects(_: int) -> int:
+        start.wait(timeout=5)
+        return client.get("/api/projects", headers=headers).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        assert list(workers.map(read_projects, range(8))) == [200] * 8
+
+
+def test_logout_and_write_fencing_do_not_wait_for_a_slow_read(
+    customer_app: FastAPI, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """慢读不挡登出，登出后旧会话仍不能读取或新增项目。"""
+    from app import db_pg
+
+    monkeypatch.setattr(db_pg, "PG_POOL_OPTIONS", db_pg.PG_POOL_OPTIONS + " -c lock_timeout=200ms")
+    ready, release = _hold_customer_read_response(customer_app)
+    with TestClient(customer_app, raise_server_exceptions=False) as test_client:
+        customer = _activate_customer(test_client, route_state, suffix="a")
+        headers = _bearer(str(customer["session_token"]))
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            slow = workers.submit(
+                test_client.get, "/api/projects", headers={**headers, "X-Test-Hold-Response": "1"}
+            )
+            try:
+                assert ready.wait(5)
+                logged_out = test_client.post(
+                    "/api/customer/sessions/logout",
+                    headers={**headers, IDEMPOTENCY_KEY_HEADER: "read-lock-logout"},
+                )
+                assert logged_out.status_code == 204, logged_out.text
+                assert test_client.get("/api/projects", headers=headers).status_code == 401
+                rejected = test_client.post(
+                    "/api/projects", json={"name": "不能写入"}, headers=headers
+                )
+                assert rejected.status_code == 401, rejected.text
+            finally:
+                release.set()
+            assert slow.result(timeout=5).status_code == 200
+        with psycopg.connect(route_state) as conn:
+            assert (
+                conn.execute(
+                    "SELECT count(*) FROM projects WHERE owner_user_id=%s", (customer["user_id"],)
+                ).fetchone()[0]
+                == 0
+            )
+
+
+def test_short_read_auth_still_renews_expiry_and_activity(
+    client: TestClient, route_state: str
+) -> None:
+    """缩短事务不能丢掉有效会话的续期与在线活动时间。"""
+    customer = _activate_customer(client, route_state, suffix="a")
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state SET lease_until=clock_timestamp()+interval '1 hour', "
+            "last_seen_at=NULL WHERE user_id=%s",
+            (customer["user_id"],),
+        )
+    response = client.get("/api/projects", headers=_bearer(str(customer["session_token"])))
+    assert response.status_code == 200, response.text
+    with psycopg.connect(route_state) as conn:
+        renewed = conn.execute(
+            "SELECT lease_until::timestamptz>clock_timestamp()+interval '6 days', "
+            "last_seen_at IS NOT NULL FROM customer_session_state WHERE user_id=%s",
+            (customer["user_id"],),
+        ).fetchone()
+    assert renewed == (True, True)
 
 
 def test_project_write_is_scoped_to_the_fenced_session_owner(

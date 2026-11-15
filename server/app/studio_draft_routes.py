@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.studio_drafts import (
     DraftKind,
@@ -44,8 +44,8 @@ class SavedScriptDeleteResponse(BaseModel):
 @router.get("/drafts/{draft_kind}", response_model=StudioDraftResponse)
 def read_studio_draft(
     draft_kind: DraftKind,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> StudioDraftResponse:
     return load_studio_draft(conn, actor_id=actor.id, kind=draft_kind)
 
@@ -72,15 +72,15 @@ def remove_studio_draft(
 
 @router.get("/saved-scripts", response_model=SavedScriptListResponse)
 def read_saved_scripts(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> SavedScriptListResponse:
     return list_saved_scripts(conn, actor_id=actor.id)
 
 
 @router.get("/saved-scripts/{script_id}", response_model=SavedScriptResponse)
 def read_user_saved_script(
-    script_id: str, conn: Database, actor: AuthenticatedUser
+    script_id: str, conn: ReadDatabase, actor: ShortAuthUser
 ) -> SavedScriptResponse:
     return load_saved_script(conn, actor_id=actor.id, script_id=script_id)
 

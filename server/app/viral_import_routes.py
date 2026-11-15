@@ -16,7 +16,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.media import (
@@ -617,7 +617,7 @@ def create_viral_import_task(
 
 @router.get("/import-tasks/{task_id}", response_model=ViralImportTaskResponse)
 def read_viral_import_task(
-    task_id: str, conn: Database, actor: AuthenticatedUser
+    task_id: str, conn: ReadDatabase, actor: ShortAuthUser
 ) -> ViralImportTaskResponse:
     row = load_viral_import_task(conn, task_id)
     if str(row["owner_user_id"]) != actor.id:

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.async_compat import reject_legacy_sync_operation
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep, BusinessReadConn
 from app.db_pg import is_customer_production
 from app.db_portable import BusinessRow
@@ -330,8 +330,8 @@ def create_project_first_frame_task(
 @router.get("/first-frame-tasks/{task_id}", response_model=FirstFrameTaskResponse)
 def read_first_frame_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> FirstFrameTaskResponse:
     row = load_image_task(conn, table="first_frame_tasks", task_id=task_id)
     try:
@@ -353,8 +353,8 @@ def read_first_frame_task(
 )
 def read_latest_first_frame_task(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> FirstFrameTaskResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.task.read")
     row = latest_image_task(
@@ -369,8 +369,8 @@ def read_latest_first_frame_task(
 @router.get("/projects/{project_id}/first-frames/latest", response_model=VersionResponse | None)
 def read_latest_first_frames(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.read")
     try:
@@ -389,8 +389,8 @@ def read_latest_first_frames(
 @router.get("/projects/{project_id}/first-frames/history", response_model=list[VersionResponse])
 def read_first_frame_history(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[VersionResponse]:
     require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.read")
     rows = conn.execute(
@@ -432,8 +432,8 @@ def confirm_project_first_frame(
 )
 def read_latest_first_frame_selection(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.read")
     row = latest_version(conn, project_id, FIRST_FRAME_SELECTION_KIND)

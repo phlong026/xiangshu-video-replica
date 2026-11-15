@@ -53,6 +53,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from app.auth import get_current_user_short_tx
+
 # Set the audit HMAC key before importing app modules (audit writers require it).
 os.environ.setdefault(
     "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY",
@@ -1018,7 +1020,9 @@ def _read_actor_override(user_id: str = "employee_1", role: str = "employee") ->
     get_current_user dependency instead (auth itself is covered by
     test_cw026_converged_auth.py).
     """
-    app.dependency_overrides[get_current_user] = lambda: actor(user_id, role)
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: actor(user_id, role)
 
 
 def _make_business_db_override(
@@ -1428,7 +1432,9 @@ def test_consent_and_voice_confirmation_routes(scene: str) -> None:
     vendor, _ = make_vendor()
     db_override, _holder = _make_business_db_override(actor())
 
-    app.dependency_overrides[get_current_user] = actor
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = actor
     app.dependency_overrides[get_business_db] = db_override
     app.dependency_overrides[get_oral_vendor] = lambda: vendor
     try:
@@ -1581,7 +1587,9 @@ def test_delete_avatar_and_voice_routes(scene: str) -> None:
     avatar_id, voice_id = _seed_ready_assets()
     vendor, _ = make_vendor()
     db_override, _holder = _make_business_db_override(actor())
-    app.dependency_overrides[get_current_user] = actor
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = actor
     app.dependency_overrides[get_business_db] = db_override
     app.dependency_overrides[get_oral_vendor] = lambda: vendor
     try:
@@ -1616,7 +1624,9 @@ def test_delete_avatar_route_conflict_when_in_use(scene: str) -> None:
         )
     vendor, _ = make_vendor()
     db_override, _holder = _make_business_db_override(actor())
-    app.dependency_overrides[get_current_user] = actor
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = actor
     app.dependency_overrides[get_business_db] = db_override
     app.dependency_overrides[get_oral_vendor] = lambda: vendor
     try:
@@ -1656,7 +1666,9 @@ def test_hide_oral_task_route_hides_from_list_and_detail(scene: str) -> None:
     )
     vendor, _ = make_vendor()
     db_override, _holder = _make_business_db_override(actor())
-    app.dependency_overrides[get_current_user] = actor
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = actor
     app.dependency_overrides[get_business_db] = db_override
     app.dependency_overrides[get_oral_vendor] = lambda: vendor
     try:
@@ -1700,7 +1712,9 @@ def test_hide_oral_task_route_scoped_to_owner(scene: str) -> None:
     )
     vendor, _ = make_vendor()
     db_override, _holder = _make_business_db_override(actor())
-    app.dependency_overrides[get_current_user] = actor
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = actor
     app.dependency_overrides[get_business_db] = db_override
     app.dependency_overrides[get_oral_vendor] = lambda: vendor
     try:
@@ -4616,7 +4630,9 @@ def test_oral_task_serialization_reports_billing_status_and_available_actions(
         assert single.status_code == 200
         assert single.json()["billing_status"] == "RESERVED"
         assert single.json()["available_actions"] == []
-        app.dependency_overrides[get_current_user] = lambda: actor("employee_2")
+        app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+            get_current_user
+        ] = lambda: actor("employee_2")
         denied = client.get(f"/api/oral/tasks/{uncertain.task_id}")
         assert denied.status_code == 404
         assert denied.json()["detail"]["code"] == "ORAL_TASK_NOT_FOUND"
@@ -4739,7 +4755,9 @@ def _voice_settings(speech_rate: str, volume: str, pitch: str) -> VoiceSettings:
 @contextmanager
 def _voice_settings_client(current_actor: CurrentUser, vendor: HiflyClient) -> Iterator[TestClient]:
     db_override, _holder = _make_business_db_override(current_actor)
-    app.dependency_overrides[get_current_user] = lambda: current_actor
+    app.dependency_overrides[get_current_user_short_tx] = app.dependency_overrides[
+        get_current_user
+    ] = lambda: current_actor
     app.dependency_overrides[get_business_db] = db_override
     app.dependency_overrides[get_oral_vendor] = lambda: vendor
     try:

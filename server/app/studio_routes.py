@@ -18,7 +18,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict
 
-from app.auth import AuthenticatedUser, CurrentUser, Database
+from app.auth import AuthenticatedUser, CurrentUser, Database, ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.permissions import require_not_auditor
@@ -29,8 +29,8 @@ router = APIRouter(prefix="/api")
 
 @router.get("/studio/search", response_model=StudioSearchResponse)
 def read_studio_search(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     q: Annotated[str, Query(min_length=1, max_length=100)],
     kind: SearchKind = "video",
     page: Annotated[int, Query(ge=1, le=1_000_000)] = 1,
@@ -151,7 +151,7 @@ def studio_task_stats(
 
 
 @router.get("/studio/stats", response_model=StudioStatsResponse)
-def read_studio_stats(conn: Database, actor: AuthenticatedUser) -> StudioStatsResponse:
+def read_studio_stats(conn: ReadDatabase, actor: ShortAuthUser) -> StudioStatsResponse:
     return studio_task_stats(conn, actor=actor)
 
 
@@ -434,8 +434,8 @@ def studio_analytics(
 
 @router.get("/studio/analytics", response_model=StudioAnalyticsResponse)
 def read_studio_analytics(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     days: int = 7,
 ) -> StudioAnalyticsResponse:
     return studio_analytics(conn, actor=actor, days=days)
@@ -476,8 +476,8 @@ def _read_notification_preferences(
     response_model=StudioNotificationPreferences,
 )
 def read_studio_notification_preferences(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> StudioNotificationPreferences:
     return _read_notification_preferences(conn, actor.id)
 
@@ -598,7 +598,7 @@ def studio_notifications(
 
 @router.get("/studio/notifications", response_model=StudioNotificationsResponse)
 def read_studio_notifications(
-    conn: Database, actor: AuthenticatedUser
+    conn: ReadDatabase, actor: ShortAuthUser
 ) -> StudioNotificationsResponse:
     return studio_notifications(conn, actor=actor)
 
@@ -653,8 +653,8 @@ class SavedPromptListPage(BaseModel):
 
 @router.get("/studio/saved-prompts", response_model=SavedPromptListPage)
 def read_user_saved_prompts(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     limit: int = 50,
 ) -> SavedPromptListPage:
     """跨项目聚合作者本人的已保存提示词（versions kind='saved_prompt'）。

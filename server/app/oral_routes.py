@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.hifly import (
     HiflyClient,
@@ -183,7 +183,7 @@ def _serialize_tasks_for_owner(conn: Database, rows: list[dict[str, Any]]) -> li
 
 
 @router.get("/price")
-def read_oral_price(conn: Database, actor: AuthenticatedUser) -> dict[str, int | float]:
+def read_oral_price(conn: ReadDatabase, actor: ShortAuthUser) -> dict[str, int | float]:
     return oral_price_quote(conn, user_id=actor.id)
 
 
@@ -264,8 +264,8 @@ def create_clone_consent(
 @router.get("/consents")
 def read_clone_consents(
     identity_id: Annotated[str, Query(min_length=1, max_length=128)],
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[dict[str, Any]]:
     try:
         return list_oral_consents(conn, actor=actor, identity_id=identity_id)
@@ -281,8 +281,8 @@ def read_clone_consents(
 @router.get("/avatars")
 def list_oral_avatars(
     identity_id: Annotated[str, Query(min_length=1, max_length=128)],
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     q: Annotated[str | None, Query(max_length=MAX_CLONE_TITLE_CHARS)] = None,
 ) -> list[dict[str, Any]]:
     return [
@@ -430,8 +430,8 @@ def refresh_avatar(
 @router.get("/voices")
 def list_oral_voices(
     identity_id: Annotated[str, Query(min_length=1, max_length=128)],
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     q: Annotated[str | None, Query(max_length=MAX_CLONE_TITLE_CHARS)] = None,
 ) -> list[dict[str, Any]]:
     return [
@@ -663,8 +663,8 @@ def create_oral_generation_task(
 
 @router.get("/tasks", response_model=OralTaskPageResponse)
 def list_oral_generation_tasks(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, Any]:
@@ -689,8 +689,8 @@ def list_oral_generation_tasks(
 )
 def read_oral_generation_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> dict[str, Any]:
     try:
         row = read_oral_task(conn, task_id=task_id, actor=actor)

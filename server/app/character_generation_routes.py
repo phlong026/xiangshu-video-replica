@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import Database, ReadDatabase, ShortAuthUser
 from app.character_asset_review import (
     list_character_asset_reviews,
     publish_character_version,
@@ -83,8 +83,8 @@ def generate_character_assets(
 )
 def read_character_generation_tasks(
     version_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[CharacterGenerationTask]:
     return list_character_generation_tasks(
         conn,
@@ -99,8 +99,8 @@ def read_character_generation_tasks(
 )
 def read_character_assets(
     version_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[CharacterAsset]:
     return list_character_assets(
         conn,
@@ -136,8 +136,8 @@ def create_character_asset_review(
 )
 def read_character_asset_reviews(
     character_asset_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[CharacterAssetReview]:
     return list_character_asset_reviews(
         conn,

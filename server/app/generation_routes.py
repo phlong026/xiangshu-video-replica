@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection, BusinessRow
@@ -209,8 +209,8 @@ def rewrite_project_script(
 )
 def read_script_rewrite_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ScriptRewriteTaskResponse:
     row = load_script_rewrite_task(conn, task_id)
     require_project_access(
@@ -228,8 +228,8 @@ def read_script_rewrite_task(
 )
 def read_latest_script_rewrite_task(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     identity_scope: Literal["all", "identity", "none"] = Query(default="all"),
     identity_id: str | None = Query(default=None, min_length=1, max_length=128),
     source_asset_id: str | None = Query(default=None, min_length=1, max_length=128),
@@ -362,8 +362,8 @@ def _script_rewrite_profile_summary(
 @router.get("/projects/{project_id}/scripts/latest", response_model=VersionState)
 def read_latest_project_script(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionState:
     return version_state(
         conn,
@@ -434,8 +434,8 @@ def create_saved_prompt(
 @router.get("/projects/{project_id}/saved-prompts", response_model=list[VersionResult])
 def read_saved_prompts(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[VersionResult]:
     return [
         version_result(row) for row in list_saved_prompts(conn, project_id=project_id, actor=actor)
@@ -541,8 +541,8 @@ def apply_project_saved_prompt(
 @router.get("/projects/{project_id}/prompts/latest", response_model=VersionState)
 def read_latest_project_prompt(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> VersionState:
     return version_state(
         conn,
@@ -597,8 +597,8 @@ def create_project_generation_batch(
 
 @router.get("/generation-batches", response_model=GenerationBatchListPage)
 def list_generation_batch_records(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     project_id: str | None = Query(default=None, min_length=1, max_length=128),
     created_by_user_id: str | None = Query(default=None, min_length=1, max_length=128),
     status: BatchStatusFilter | None = Query(default=None),
@@ -621,8 +621,8 @@ def list_generation_batch_records(
 @router.get("/generation-batches/{batch_id}", response_model=BatchResult)
 def read_generation_batch(
     batch_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> BatchResult:
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
 
@@ -717,7 +717,7 @@ def delete_generation_batch_record(
     response_model=GenerationPriceQuote,
 )
 def read_batch_regeneration_quote(
-    batch_id: str, conn: Database, actor: AuthenticatedUser
+    batch_id: str, conn: ReadDatabase, actor: ShortAuthUser
 ) -> GenerationPriceQuote:
     return generation_regeneration_price_quote(
         conn, actor=actor, source_kind="batch", source_id=batch_id
@@ -769,16 +769,16 @@ def regenerate_batch(
 
 @router.get("/generation/runtime-limits", response_model=GenerationRuntimeLimits)
 def read_generation_runtime_limits(
-    conn: Database,
-    _actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    _actor: ShortAuthUser,
 ) -> GenerationRuntimeLimits:
     return generation_runtime_limits(conn)
 
 
 @router.get("/generation/price-quote", response_model=GenerationPriceQuote)
 def read_generation_price_quote(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     resolution: Literal["768P", "2K"] = Query(default="768P"),
     # 16-30 秒为长档计价（generation_price_quote 内拒绝 2K 超档组合）。
     duration_seconds: int = Query(default=8, ge=4, le=30),
@@ -819,8 +819,8 @@ def _generation_task_context(conn: Database, task_id: str) -> BusinessRow:
 )
 def read_generation_task_preview_url(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     verify: bool = Query(
         default=False,
         description="播放/下载失败后由客户端带上：服务端探测直链是否已失效。",
@@ -1012,7 +1012,7 @@ def retry_task(
     response_model=GenerationPriceQuote,
 )
 def read_task_regeneration_quote(
-    task_id: str, conn: Database, actor: AuthenticatedUser
+    task_id: str, conn: ReadDatabase, actor: ShortAuthUser
 ) -> GenerationPriceQuote:
     return generation_regeneration_price_quote(
         conn, actor=actor, source_kind="task", source_id=task_id
@@ -1142,8 +1142,8 @@ def reconcile_uncertain_task(
 )
 def read_generation_reconcile_operation(
     operation_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> GenerationReconcileOperationResponse:
     row = load_generation_reconcile_operation(conn, operation_id)
     require_batch_access(
@@ -1162,8 +1162,8 @@ def read_generation_reconcile_operation(
 )
 def read_latest_generation_reconcile_operation(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> GenerationReconcileOperationResponse | None:
     task = _generation_task_context(conn, task_id)
     require_batch_access(

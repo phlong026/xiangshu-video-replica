@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep, BusinessReadConn
 from app.db_pg import pg_transaction
 from app.media_routes import get_media_storage
@@ -64,7 +64,7 @@ def release_login(owner: str, login_id: str) -> None:
 
 
 @router.get("/accounts", response_model=list[BrowserAccount])
-def accounts(conn: Database, actor: AuthenticatedUser, response: Response) -> list[BrowserAccount]:
+def accounts(conn: ReadDatabase, actor: ShortAuthUser, response: Response) -> list[BrowserAccount]:
     response.headers["Cache-Control"] = "no-store"
     return list_browser_accounts(conn, actor.id)
 

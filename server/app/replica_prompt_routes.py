@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.analysis_routes import get_video_analysis_provider
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessRow
 from app.ops_metrics import get_or_create_request_id
@@ -204,8 +204,8 @@ def create_project_replica_prompt_task(
 @router.get("/replica-prompt-tasks/{task_id}", response_model=ReplicaPromptTaskResponse)
 def read_replica_prompt_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ReplicaPromptTaskResponse:
     row = load_replica_prompt_task(conn, task_id)
     try:
@@ -229,8 +229,8 @@ def read_replica_prompt_task(
 @router.get("/projects/{project_id}/replica-prompt-tasks/latest")
 def read_latest_replica_prompt_task(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ReplicaPromptTaskResponse | None:
     """项目内最新一次长视频拆解任务；没有历史时返回 null（前端据此判空）."""
     require_project_access(
@@ -264,8 +264,8 @@ def cancel_project_replica_prompt_task(
 @router.get("/projects/{project_id}/replica-prompt/latest")
 def read_latest_replica_prompt_result(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ReplicaPromptVersionResponse | None:
     """项目内最新一份长视频拆解结果；没有时返回 null."""
     require_project_access(

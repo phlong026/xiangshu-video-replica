@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Resp
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
 from app.billing_catalog import SERVICES
 from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
@@ -300,8 +300,8 @@ def _item(
 
 @router.get("/videos", response_model=ViralListResponse)
 def list_viral_videos(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     client: ViralSourceClientDep,
     platform: str = PLATFORM_DOUYIN,
     sort: str = SORT_HOT,
@@ -388,8 +388,8 @@ def list_viral_videos(
 
 @router.get("/favorites", response_model=ViralFavoritesResponse)
 def list_viral_favorites(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     platform: str | None = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 24,
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
@@ -1055,8 +1055,8 @@ def _detail_charged(
 
 @router.get("/videos/copy/extractions", response_model=ViralCopyExtractionsResponse)
 def list_viral_copy_extractions(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ViralCopyExtractionsResponse:
     """文案工坊「提取记录」：当前账号成功转写过正文的爆款视频清单（新→旧）.
 
@@ -1174,8 +1174,8 @@ def list_viral_copy_extractions(
 
 @router.get("/videos/{platform}/{video_id:path}", response_model=ViralVideoItem)
 def get_viral_video_detail(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     platform: str,
     video_id: str,
 ) -> ViralVideoItem:

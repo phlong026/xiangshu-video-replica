@@ -29,7 +29,7 @@ import app.wechat_native_provider  # noqa: F401
 # Import to trigger provider registration
 import app.zpay_provider  # noqa: F401
 from app.admin_dates import SHANGHAI
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.csv_export import spreadsheet_safe_cell
 from app.customer_fence import (
     BusinessDbDep,
@@ -1611,8 +1611,8 @@ def list_customer_recharge_orders(
 
 @router.get("/recharge-orders", response_model=RechargeOrderPage)
 def list_recharge_orders(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> RechargeOrderPage:
@@ -1645,8 +1645,8 @@ def list_recharge_orders(
 @router.get("/recharge-orders/{order_no}", response_model=RechargeOrderStatusResponse)
 def read_recharge_order_status(
     order_no: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> RechargeOrderStatusResponse:
     order = read_recharge_order(conn, merchant_order_no=order_no)
     if order is None or str(order["user_id"]) != actor.id:

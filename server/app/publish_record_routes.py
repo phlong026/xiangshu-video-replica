@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.publish_records import (
     PublishRecordActionResponse,
@@ -33,8 +33,8 @@ router = APIRouter(prefix="/api/studio/publish/records")
 
 @router.get("", response_model=PublishRecordListResponse)
 def read_publish_records(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     status: str | None = Query(default=None),
     platform: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
@@ -43,7 +43,7 @@ def read_publish_records(
 
 
 @router.get("/summary", response_model=PublishSummaryResponse)
-def read_publish_summary(conn: Database, actor: AuthenticatedUser) -> PublishSummaryResponse:
+def read_publish_summary(conn: ReadDatabase, actor: ShortAuthUser) -> PublishSummaryResponse:
     return summary(conn, actor_id=actor.id)
 
 
@@ -57,7 +57,7 @@ def create_publish_record(
 
 @router.get("/{record_id}", response_model=PublishRecordResponse)
 def read_publish_record(
-    record_id: str, conn: Database, actor: AuthenticatedUser
+    record_id: str, conn: ReadDatabase, actor: ShortAuthUser
 ) -> PublishRecordResponse:
     return get_record(conn, actor_id=actor.id, record_id=record_id)
 

@@ -24,6 +24,8 @@ from app.auth import (
     AuthenticatedUser,
     CurrentUser,
     Database,
+    ReadDatabase,
+    ShortAuthUser,
     authenticate_request,
     identity_source,
 )
@@ -449,8 +451,8 @@ def write_login_failure(
 
 @router.get("/projects", response_model=list[ProjectResponse])
 def list_projects(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
     # 可选分页（FIX-16）：不传 limit 时返回全部，保持旧客户端行为不变；工作台首屏只
     # 需要最近若干个项目，不必每次拉全量再在前端截断。
     limit: int | None = Query(default=None, ge=1, le=500),
@@ -880,8 +882,8 @@ def delete_project(
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
 def read_project(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ProjectResponse:
     require_project_access(conn, actor=actor, project_id=project_id, action="project.read")
     row = project_detail_row(conn, project_id)
@@ -971,8 +973,8 @@ def project_detail_row(
 @router.get("/assets/{asset_id}", response_model=AssetResponse)
 def read_asset(
     asset_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> AssetResponse:
     row = require_asset_access(conn, actor=actor, asset_id=asset_id, action="asset.read")
     if actor.role == "auditor":
@@ -1389,8 +1391,8 @@ def read_cached_character_asset(cache_name: str, request: Request) -> Response:
 
 @router.get("/audit-logs", response_model=list[AuditLogResponse])
 def read_audit_logs(
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[AuditLogResponse]:
     require_role(
         conn,

@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from app import replica_pipeline as rp
 from app import replica_pipeline_confirm as confirm
 from app import replica_pipeline_generation as generation
-from app.auth import AuthenticatedUser, Database
+from app.auth import Database, ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessRow
 from app.permissions import require_not_auditor
@@ -144,7 +144,7 @@ def initiate_replica_pipeline(
 
 
 @router.get("/replica-pipelines/characters")
-def list_pipeline_characters(conn: Database, actor: AuthenticatedUser) -> dict[str, object]:
+def list_pipeline_characters(conn: ReadDatabase, actor: ShortAuthUser) -> dict[str, object]:
     """发起弹层的人物候选（owner 的可用已发布人物版本）.
 
     归属链、发布状态与授权状态在 SQL 里一次过滤（域权威判定仍由
@@ -271,8 +271,8 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
 def find_active_replica_pipeline(
     platform: Literal["douyin", "xiaohongshu", "wechat_channels"],
     video_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> dict[str, object]:
     """从服务端恢复当前账号、当前视频的未完成任务，不信任本地缓存。"""
     row = conn.execute(
@@ -291,7 +291,7 @@ def find_active_replica_pipeline(
 
 @router.get("/replica-pipelines/{pipeline_id}")
 def read_replica_pipeline(
-    pipeline_id: str, conn: Database, actor: AuthenticatedUser
+    pipeline_id: str, conn: ReadDatabase, actor: ShortAuthUser
 ) -> dict[str, object]:
     """状态查询（owner 本人）：阶段/报价/产物断点/失败原因."""
     from fastapi import HTTPException

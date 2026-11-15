@@ -28,7 +28,7 @@ from pg_test_kit import (
     upgrade_test_database_to_head,
 )
 
-from app.auth import CurrentUser
+from app.auth import CurrentUser, get_current_user_short_tx
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 from app.db_portable import BusinessConnection
 from app.external_calls import (
@@ -1245,7 +1245,9 @@ def test_legacy_technical_settings_cannot_bypass_super_admin_flag(
         raw.execute("UPDATE users SET is_super_admin=%s WHERE id=%s", (int(super_admin), actor_id))
     route_client.app.include_router(legacy_router)
     # 旧身份层用明确的测试替身；技术权限仍读取真实隔离PG，不覆盖权限依赖。
-    route_client.app.dependency_overrides[get_current_user] = (
+    route_client.app.dependency_overrides[
+        get_current_user_short_tx
+    ] = route_client.app.dependency_overrides[get_current_user] = (
         _admin if actor_id == "admin_u" else _auditor
     )
     routes = [

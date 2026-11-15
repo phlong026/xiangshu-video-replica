@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.character_contracts import CharacterReferenceRecommendation, CharacterReferenceSelection
 from app.character_reference_matching import (
     create_character_reference_selection,
@@ -29,8 +29,8 @@ class SelectCharacterReferencesRequest(BaseModel):
 )
 def read_character_reference_recommendation(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> CharacterReferenceRecommendation:
     return get_character_reference_recommendation(
         conn,
@@ -66,8 +66,8 @@ def select_character_references(
 )
 def read_latest_character_reference_selection(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> CharacterReferenceSelection | None:
     try:
         return get_latest_character_reference_selection(

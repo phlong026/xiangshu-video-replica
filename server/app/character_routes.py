@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import ReadDatabase, ShortAuthUser
 from app.character_contracts import ProjectCharacterVersionOption
 from app.characters import get_project_main_character
 from app.customer_fence import BusinessDbDep
@@ -48,8 +48,8 @@ class ProjectMainCharacterResponse(BaseModel):
 )
 def read_project_main_character_route(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> ProjectMainCharacterResponse | None:
     require_project_access(
         conn,
@@ -76,8 +76,8 @@ def read_project_main_character_route(
 )
 def read_available_project_character_versions(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
 ) -> list[ProjectCharacterVersionOption]:
     require_project_access(
         conn,
