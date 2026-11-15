@@ -56,7 +56,7 @@ def _candidates(conn: BusinessConnection, *, service: str, limit: int) -> dict[s
           count(*) FILTER (WHERE o.state <> 'PENDING' AND a.cost_fen IS NULL
                              AND e.attempt_id IS NULL AND a.usage IS NULL) AS unmetered,
           count(*) FILTER (WHERE o.state = 'PENDING') AS pending,
-          count(*) AS total
+          count(*) FILTER (WHERE o.state <> 'PENDING') AS total_finished
         FROM billing_attempts a
         JOIN billing_operations o ON o.id = a.operation_id
         LEFT JOIN billing_evidence e ON e.attempt_id = a.id
@@ -68,7 +68,7 @@ def _candidates(conn: BusinessConnection, *, service: str, limit: int) -> dict[s
         "backfillable": int(row["backfillable"]),
         "unmetered": int(row["unmetered"]),
         "pending": int(row["pending"]),
-        "total": int(row["total"]),
+        "total_finished": int(row["total_finished"]),
     }
 
 
@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"service={args.service} tariff_v{tariff.version} "
                 f"unit_cost_fen={unit_cost} "
                 f"backfillable={stats['backfillable']} unmetered={stats['unmetered']} "
-                f"pending={stats['pending']} total_finished={stats['total']}"
+                f"pending={stats['pending']} total_finished={stats['total_finished']}"
             )
             if not args.apply:
                 # 只读模式（默认）：打印规模即退出。

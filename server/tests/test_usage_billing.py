@@ -2379,6 +2379,7 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
     assert "backfillable=1" in captured.out
     assert "unmetered=1" in captured.out
     assert "pending=1" in captured.out
+    assert "total_finished=3" in captured.out
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0
 
