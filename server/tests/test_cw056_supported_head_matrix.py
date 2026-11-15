@@ -109,7 +109,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
 # 列）追加其上；20261113T1000_replica_pipeline_submit_intents（M6b 发送意图
 # 表）再追加，故链尾为该值。
-HEAD_REVISION = "20261113T1000_replica_pipeline_submit_intents"
+HEAD_REVISION = "20261115T1000_display_settings"
 
 
 @pytest.mark.pg
