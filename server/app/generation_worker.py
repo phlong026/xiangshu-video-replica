@@ -1345,6 +1345,7 @@ def _run_recharge_order_sweep_once() -> None:
         WeChatNativeClient,
         merchant_config_from_settings,
     )
+    from app.zpay import ZPayOrderQueryResult
 
     try:
         config = resolve_database_config()
@@ -1378,11 +1379,24 @@ def _run_recharge_order_sweep_once() -> None:
                     zpay_merchant = zpay_provider.load_merchant_config(conn)
                     zpay_deployment = zpay_provider.load_deployment_config()
                     zpay_allowed_channels = zpay_merchant.allowed_channels
-                    zpay_query = lambda order_no: zpay_provider.query_order(  # noqa: E731
-                        merchant=zpay_merchant,
-                        deployment=zpay_deployment,
-                        merchant_order_no=order_no,
-                    )
+
+                    def zpay_query(order_no: str) -> ZPayOrderQueryResult:
+                        # provider 返回通用 OrderQueryResult；这里显式适配成
+                        # sweep 契约的专有应答类（字段逐一搬运，类型全程具体）。
+                        generic = zpay_provider.query_order(
+                            merchant=zpay_merchant,
+                            deployment=zpay_deployment,
+                            merchant_order_no=order_no,
+                        )
+                        return ZPayOrderQueryResult(
+                            paid=generic.paid,
+                            merchant_order_no=generic.merchant_order_no,
+                            provider_trade_no=generic.provider_trade_no,
+                            amount_fen=generic.amount_fen,
+                            channel=generic.channel,
+                            response_digest=generic.response_digest,
+                        )
+
                 except ValueError:
                     logger.info("recharge sweep: zpay channel not configured")
                 outcome = sweep_pending_recharge_orders(
@@ -1392,10 +1406,8 @@ def _run_recharge_order_sweep_once() -> None:
                     zpay_allowed_channels=tuple(zpay_allowed_channels)
                     if zpay_allowed_channels
                     else None,
-                    # 轮转游标按节流周期分桶：每轮换一页候选，查单失败的
-                    # 单不会饿死后面的掉单。
-                    rotation_index=int(time.time())
-                    // max(int(_recharge_sweep_interval_seconds()), 1),
+                    # 轮转游标缺省随机页（sweep 内部生成）：查单失败的单不会
+                    # 饿死后面的掉单，且不与调度节奏走样。
                 )
             finally:
                 raw.execute(

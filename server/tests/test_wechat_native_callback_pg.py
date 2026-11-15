@@ -1165,6 +1165,7 @@ def test_sweep_never_closes_an_order_it_did_not_confirm_unpaid(wechat_db: str) -
         wechat_query_order=None,
         zpay_query_order=flaky_query,
         limit=2,
+        rotation_index=0,
     )
 
     # 确认 unpaid 且过窗 → 关闭；查单失败与未查询 → 原样留在 PENDING。
