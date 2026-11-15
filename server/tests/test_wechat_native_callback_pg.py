@@ -63,16 +63,20 @@ from pg_test_kit import (
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.payment_routes import get_wechat_provider, get_zpay_provider, router
+from app.recharge_order_sweep import sweep_pending_recharge_orders
 from app.wechat_native_client import WeChatNativeError, WeChatOrderQueryResult
+from app.zpay import ZPayOrderQueryResult
 from app.zpay_payments import (
     WECHAT_NATIVE_SETTLEMENT_SPEC,
     NativeReconciliationOutcome,
     PaymentConfirmationError,
     close_expired_native_orders,
+    close_expired_zpay_orders,
     confirm_recharge_payment,
     count_expired_native_orders,
     count_stale_pending_native_orders,
     reconcile_stale_pending_native_orders,
+    reconcile_stale_pending_zpay_orders,
 )
 
 CW070_WECHAT_DB_NAME = "cw070_wechat_callback_test"
@@ -944,3 +948,179 @@ def test_reconciliation_honours_its_limit_and_leaves_the_rest(wechat_db: str) ->
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# M3（2026-11-15 审计修复）—— ZPay 侧兜底与双 provider 聚合 sweep。
+# 生产是 compose 部署，systemd maintenance timer 不存在：CLI 版 sweep 从未
+# 在生产跑过，34 笔待支付（含 ¥2980）挂 8 天。worker 常驻 sweep 必须把两个
+# provider 一并覆盖。
+# ---------------------------------------------------------------------------
+
+_ZPAY_TRADE_NO = "zp-20261115-0001"
+_ZPAY_DIGEST = "cw070-zpay-source-digest"
+
+
+def _zpay_sweep(*, limit: int = 100, validity_seconds: int = 2 * 60 * 60) -> int:
+    with pg_transaction() as raw:
+        return close_expired_zpay_orders(
+            BusinessConnection.postgres(raw), limit=limit, validity_seconds=validity_seconds
+        )
+
+
+def _zpay_paid_query(order_no: str) -> ZPayOrderQueryResult:
+    return ZPayOrderQueryResult(
+        paid=True,
+        merchant_order_no=order_no,
+        provider_trade_no=_ZPAY_TRADE_NO,
+        amount_fen=_ORDER_AMOUNT_FEN,
+        channel="alipay",
+        response_digest=_ZPAY_DIGEST,
+    )
+
+
+def _zpay_unpaid_query(order_no: str) -> ZPayOrderQueryResult:
+    return ZPayOrderQueryResult(
+        paid=False,
+        merchant_order_no=order_no,
+        provider_trade_no=None,
+        amount_fen=None,
+        channel=None,
+        response_digest=_ZPAY_DIGEST,
+    )
+
+
+def _zpay_reconcile(
+    query, *, grace_seconds: int = _RECONCILE_GRACE_SECONDS, limit: int = 100
+) -> NativeReconciliationOutcome:
+    with pg_transaction() as raw:
+        return reconcile_stale_pending_zpay_orders(
+            BusinessConnection.postgres(raw),
+            query_order=query,
+            grace_seconds=grace_seconds,
+            limit=limit,
+        )
+
+
+def test_zpay_expiry_sweep_closes_only_lapsed_unpaid_zpay_orders(wechat_db: str) -> None:
+    _seed_order(wechat_db, order_id="zfresh", merchant_order_no="zsweep_fresh", wechat=False)
+    _seed_order(
+        wechat_db,
+        order_id="zlapsed",
+        merchant_order_no="zsweep_lapsed",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+    )
+    _seed_order(
+        wechat_db,
+        order_id="zlapsed_paid",
+        merchant_order_no="zsweep_paid",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+        status="PAID",
+        provider_trade_no=OTHER_TRANSACTION_ID,
+        paid_at="2026-01-01 00:30:00+00",
+    )
+    _seed_order(
+        wechat_db,
+        order_id="wlapsed",
+        merchant_order_no="wsweep_lapsed",
+        wechat=True,
+        created_at=_LAPSED_CREATED_AT,
+    )
+
+    assert _zpay_sweep() == 1
+    assert _status(wechat_db, "zlapsed") == "CLOSED"
+    assert _status(wechat_db, "zfresh") == "PENDING"
+    assert _status(wechat_db, "zlapsed_paid") == "PAID"
+    # 微信单不属于 ZPay sweep 的管辖。
+    assert _status(wechat_db, "wlapsed") == "PENDING"
+
+
+def test_zpay_reconciliation_settles_a_gateway_confirmed_payment(wechat_db: str) -> None:
+    _seed_order(
+        wechat_db,
+        order_id="zorder_1",
+        merchant_order_no="zrecon_paid",
+        wechat=False,
+        created_at=_STALE_CREATED_AT,
+    )
+
+    outcome = _zpay_reconcile(_zpay_paid_query)
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=1, unpaid=0, skipped=0)
+    with psycopg.connect(wechat_db) as raw:
+        row = raw.execute(
+            "SELECT status, provider_trade_no, paid_at FROM recharge_orders WHERE id='zorder_1'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "PAID"
+    # ZPAY_SETTLEMENT_SPEC：凭证落 provider_trade_no 列（与微信的 transaction_id 相对）。
+    assert row[1] == _ZPAY_TRADE_NO
+    assert row[2] is not None
+    assert _wallet_credits(wechat_db) == _SEEDED_WALLET_CREDITS + _ORDER_CREDITS
+    # 幂等：已结算的订单退出候选集。
+    assert _zpay_reconcile(_zpay_paid_query) == NativeReconciliationOutcome(
+        queried=0, settled=0, unpaid=0, skipped=0
+    )
+
+
+def test_zpay_reconciliation_unpaid_answer_stays_pending(wechat_db: str) -> None:
+    _seed_order(
+        wechat_db,
+        order_id="zorder_2",
+        merchant_order_no="zrecon_unpaid",
+        wechat=False,
+        created_at=_STALE_CREATED_AT,
+    )
+
+    outcome = _zpay_reconcile(_zpay_unpaid_query)
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=0, unpaid=1, skipped=0)
+    assert _status(wechat_db, "zorder_2") == "PENDING"
+
+
+def test_aggregate_sweep_covers_both_providers_in_one_pass(wechat_db: str) -> None:
+    """一次 sweep：微信掉单补账 + ZPay 过期关闭，聚合计数正确；未配置通道跳过。"""
+    _seed_order(
+        wechat_db,
+        order_id="m_native",
+        merchant_order_no=OUT_TRADE_NO,
+        wechat=True,
+        created_at=_STALE_CREATED_AT,
+    )
+    _seed_order(
+        wechat_db,
+        order_id="m_zpay",
+        merchant_order_no="m_zpay_lapsed",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+    )
+
+    outcome = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=_paid_query,
+        zpay_query_order=_zpay_unpaid_query,
+    )
+
+    assert outcome.queried == 2
+    assert outcome.settled == 1
+    assert outcome.unpaid == 1
+    assert outcome.closed == 1
+    assert _status(wechat_db, "m_native") == "PAID"
+    assert _status(wechat_db, "m_zpay") == "CLOSED"
+
+    # 两个通道都未配置时：reconcile 段整段跳过（queried/settled 归零），关闭段照跑。
+    outcome_none = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=None,
+        zpay_query_order=None,
+    )
+    assert outcome_none.queried == 0
+    assert outcome_none.settled == 0
+    assert outcome_none.closed == 0
+
+
+def _autocommit(dsn: str):
+    """sweep 契约要求 autocommit 连接（外呼期间不持事务），测试同生产同构。"""
+    return psycopg.connect(dsn, autocommit=True)
