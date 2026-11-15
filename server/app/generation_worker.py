@@ -1330,9 +1330,14 @@ def _run_recharge_order_sweep_once() -> None:
 
     自管 autocommit 连接：结算/关闭各自成为短事务，网关查单期间不持任何
     事务；会话级 advisory lock 保证同一时刻全集群只有一个 worker 在跑。
+    通道闭包都走 provider 抽象（query_order 在 provider 内部做专有配置的
+    适配）——直接构造底层 client 会拿到通用 MerchantConfig/DeploymentConfig
+    而缺 pid/key/query_url，查单必然失败（评审 P1）。provider 注册发生在
+    模块导入副作用里，独立进程必须显式导入。
     """
     import psycopg
 
+    import app.zpay_provider  # noqa: F401 - 注册 provider（独立进程无路由导入）
     from app.payment_provider import get_payment_provider
     from app.recharge_order_sweep import sweep_pending_recharge_orders
     from app.settings import SettingsRepository
@@ -1340,16 +1345,11 @@ def _run_recharge_order_sweep_once() -> None:
         WeChatNativeClient,
         merchant_config_from_settings,
     )
-    from app.zpay import ZPayOrderQueryClient
 
     try:
         config = resolve_database_config()
-    except Exception:  # noqa: BLE001 - 配置不可用即本轮放弃，下轮再试
-        logger.warning("recharge order sweep skipped: database config unavailable")
-        return
-    if config.mode is not DatabaseMode.POSTGRES or not config.dsn:
-        return
-    try:
+        if config.mode is not DatabaseMode.POSTGRESQL or not config.dsn:
+            return
         with psycopg.connect(config.dsn, autocommit=True) as raw:
             if not raw.execute(
                 "SELECT pg_try_advisory_lock(hashtext(%s))",
@@ -1372,12 +1372,13 @@ def _run_recharge_order_sweep_once() -> None:
                 except ValueError:
                     logger.info("recharge sweep: wechat_native channel not configured")
                 zpay_query = None
+                zpay_allowed_channels = None
                 try:
                     zpay_provider = get_payment_provider("zpay")
                     zpay_merchant = zpay_provider.load_merchant_config(conn)
                     zpay_deployment = zpay_provider.load_deployment_config()
-                    zpay_client = ZPayOrderQueryClient()
-                    zpay_query = lambda order_no: zpay_client.query_order(  # noqa: E731
+                    zpay_allowed_channels = zpay_merchant.allowed_channels
+                    zpay_query = lambda order_no: zpay_provider.query_order(  # noqa: E731
                         merchant=zpay_merchant,
                         deployment=zpay_deployment,
                         merchant_order_no=order_no,
@@ -1388,6 +1389,9 @@ def _run_recharge_order_sweep_once() -> None:
                     conn,
                     wechat_query_order=wechat_query,
                     zpay_query_order=zpay_query,
+                    zpay_allowed_channels=tuple(zpay_allowed_channels)
+                    if zpay_allowed_channels
+                    else None,
                 )
             finally:
                 raw.execute(

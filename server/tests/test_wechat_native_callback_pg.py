@@ -808,7 +808,9 @@ def test_reconciliation_queries_only_stale_pending_native_orders(wechat_db: str)
     outcome = _reconcile(spy_query)
 
     assert queried == ["recon_stale"]
-    assert outcome == NativeReconciliationOutcome(queried=1, settled=0, unpaid=1, skipped=0)
+    assert outcome == NativeReconciliationOutcome(
+        queried=1, settled=0, unpaid=1, skipped=0, unpaid_order_nos=("recon_stale",)
+    )
     # The unpaid answer stays PENDING: retiring it is the expiry sweep's job.
     assert _status(wechat_db, "stale") == "PENDING"
     assert _stale_backlog() == 1
@@ -1076,7 +1078,9 @@ def test_zpay_reconciliation_unpaid_answer_stays_pending(wechat_db: str) -> None
 
     outcome = _zpay_reconcile(_zpay_unpaid_query)
 
-    assert outcome == NativeReconciliationOutcome(queried=1, settled=0, unpaid=1, skipped=0)
+    assert outcome == NativeReconciliationOutcome(
+        queried=1, settled=0, unpaid=1, skipped=0, unpaid_order_nos=("zrecon_unpaid",)
+    )
     assert _status(wechat_db, "zorder_2") == "PENDING"
 
 
@@ -1119,6 +1123,88 @@ def test_aggregate_sweep_covers_both_providers_in_one_pass(wechat_db: str) -> No
     assert outcome_none.queried == 0
     assert outcome_none.settled == 0
     assert outcome_none.closed == 0
+
+
+def test_sweep_never_closes_an_order_it_did_not_confirm_unpaid(wechat_db: str) -> None:
+    """评审 P1 回归：查单失败/没轮到查的单绝不被关闭，已确认 unpaid 的才关。
+
+    一旦 CLOSED，reconcile 与管理端补单都不再受理——把可能的掉单关在门外
+    等于把钱弄丢。
+    """
+    # paid 且查单会失败的单（挂单时间均已过各自窗口）。
+    _seed_order(
+        wechat_db,
+        order_id="q_fail",
+        merchant_order_no="q_fail_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+    )
+    _seed_order(
+        wechat_db,
+        order_id="q_unpaid",
+        merchant_order_no="q_unpaid_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+    )
+    # 超出 limit、本轮根本不会被查询的单。
+    _seed_order(
+        wechat_db,
+        order_id="q_beyond",
+        merchant_order_no="q_beyond_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+    )
+
+    def flaky_query(order_no: str) -> ZPayOrderQueryResult:
+        if order_no == "q_fail_no":
+            raise RuntimeError("gateway timeout")
+        return _zpay_unpaid_query(order_no)
+
+    outcome = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=None,
+        zpay_query_order=flaky_query,
+        limit=2,
+    )
+
+    # 确认 unpaid 且过窗 → 关闭；查单失败与未查询 → 原样留在 PENDING。
+    assert outcome.closed == 1
+    assert _status(wechat_db, "q_unpaid") == "CLOSED"
+    assert _status(wechat_db, "q_fail") == "PENDING"
+    assert _status(wechat_db, "q_beyond") == "PENDING"
+
+
+def test_zpay_reconciliation_settles_cross_channel_within_merchant_whitelist(
+    wechat_db: str,
+) -> None:
+    """评审 P2 回归：预选 alipay、实际 wxpay，商户同时启用两通道 → 合法结算。"""
+    _seed_order(
+        wechat_db,
+        order_id="zcross",
+        merchant_order_no="zcross_no",
+        wechat=False,
+        created_at=_STALE_CREATED_AT,
+    )
+    # 网关说这笔是用 wxpay 付的（订单预选 alipay）。
+    answer = ZPayOrderQueryResult(
+        paid=True,
+        merchant_order_no="zcross_no",
+        provider_trade_no=_ZPAY_TRADE_NO,
+        amount_fen=_ORDER_AMOUNT_FEN,
+        channel="wxpay",
+        response_digest=_ZPAY_DIGEST,
+    )
+
+    with pg_transaction() as raw:
+        outcome = reconcile_stale_pending_zpay_orders(
+            BusinessConnection.postgres(raw),
+            query_order=lambda _no: answer,
+            grace_seconds=_RECONCILE_GRACE_SECONDS,
+            allowed_channels=("alipay", "wxpay"),
+        )
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=1, unpaid=0, skipped=0)
+    assert _status(wechat_db, "zcross") == "PAID"
 
 
 def _autocommit(dsn: str):

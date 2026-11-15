@@ -174,3 +174,48 @@ def test_idle_wait_observes_stop_promptly() -> None:
     started = time.monotonic()
     generation_worker._idle_wait(5.0, lambda: time.monotonic() >= deadline["stop_at"])
     assert time.monotonic() - started < 2.0
+
+
+# ---------------------------------------------------------------------------
+# M3（2026-11-15 审计修复）：待支付订单 sweep 的节流与入口冒烟（纯单元）。
+# ---------------------------------------------------------------------------
+
+
+def test_recharge_sweep_interval_default_override_and_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(generation_worker._RECHARGE_SWEEP_INTERVAL_ENV, raising=False)
+    assert (
+        generation_worker._recharge_sweep_interval_seconds()
+        == generation_worker._DEFAULT_RECHARGE_SWEEP_INTERVAL_SECONDS
+    )
+    monkeypatch.setenv(generation_worker._RECHARGE_SWEEP_INTERVAL_ENV, "5")
+    assert generation_worker._recharge_sweep_interval_seconds() == 5.0
+    monkeypatch.setenv(generation_worker._RECHARGE_SWEEP_INTERVAL_ENV, "bogus")
+    assert (
+        generation_worker._recharge_sweep_interval_seconds()
+        == generation_worker._DEFAULT_RECHARGE_SWEEP_INTERVAL_SECONDS
+    )
+
+
+def test_recharge_sweep_due_throttles(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(generation_worker._RECHARGE_SWEEP_INTERVAL_ENV, "60")
+    generation_worker._recharge_sweep_deadline = 0.0
+    assert generation_worker._recharge_sweep_due() is True
+    # 刚跑过立刻再问：未到点。
+    assert generation_worker._recharge_sweep_due() is False
+    generation_worker._recharge_sweep_deadline = 0.0
+    assert generation_worker._recharge_sweep_due() is True
+
+
+def test_recharge_sweep_entry_is_safe_on_non_pg_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """评审 P1 回归：入口在任何数据库配置下都不得抛异常打断任务循环。
+
+    旧实现把模式枚举写错（POSTGRES，实际成员是 POSTGRESQL）且判断在
+    try 之外——AttributeError 会直接炸掉当轮 worker。
+    """
+    monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", "sqlite:///:memory:")
+    # 不得 raise；非 PG 配置下静默返回。
+    generation_worker._run_recharge_order_sweep_once()
