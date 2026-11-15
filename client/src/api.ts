@@ -3611,6 +3611,51 @@ export async function getLatestProjectAnalysis(
     "读取视频拆解失败",
   );
 }
+// 飞影封面模板（发布页「模板封面」来源）：生成是同步接口、实测 60-90s，
+// 超时放宽到 180 秒；服务端把图片转成 base64 内联返回（绕开 CDN 时效/CORS）。
+export async function fetchCoverStyles(): Promise<
+  Array<{ id: string; title: string; url: string }>
+> {
+  const response = await requestApiJson<{
+    items: Array<{ id: string; title: string; url: string }>;
+  }>("/api/studio/publish/cover-styles", "读取封面模板失败", {}, 20000);
+  return response.items ?? [];
+}
+
+export async function generateCoverFromTemplate(input: {
+  template: string;
+  content: string;
+  avatar?: string;
+  canvasPreset?: "9:16" | "3:4";
+  outputFormat?: "jpg" | "png";
+}): Promise<{ coverId: string; url: string; imageBase64: string }> {
+  const response = await requestApiJson<{
+    cover_id: string;
+    url: string;
+    image_base64: string;
+    output_format: string;
+  }>(
+    "/api/studio/publish/cover-generate",
+    "生成封面失败",
+    {
+      body: JSON.stringify({
+        template: input.template,
+        content: input.content,
+        avatar: input.avatar,
+        canvas_preset: input.canvasPreset ?? "9:16",
+        output_format: input.outputFormat ?? "jpg",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    180000,
+  );
+  return {
+    coverId: response.cover_id,
+    url: response.url,
+    imageBase64: response.image_base64,
+  };
+}
 
 /** 拆解历史：项目全部拆解版本的轻量列表（新→旧，不含 payload）。 */
 export async function fetchAnalysisVersions(projectId: string): Promise<{
