@@ -1675,8 +1675,7 @@ html:has(.studio-shell) {
   object-fit: cover;
   border-radius: 7px;
 }
-.studio-picker-grid--reference strong,
-.studio-picker-grid--reference small {
+.studio-picker-grid--reference :where(strong, small) {
   grid-column: 2;
   margin-top: 0;
   overflow: hidden;
