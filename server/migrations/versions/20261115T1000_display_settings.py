@@ -26,7 +26,12 @@ def upgrade() -> None:
         sa.Column("key", sa.Text(), primary_key=True),
         sa.Column("value", sa.Text(), nullable=False, server_default=""),
         sa.Column("updated_by_user_id", sa.Text(), nullable=True),
-        sa.Column("updated_at", sa.TIMESTAMP(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column(
+            "updated_at",
+            sa.TIMESTAMP(),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
     )
 
 
