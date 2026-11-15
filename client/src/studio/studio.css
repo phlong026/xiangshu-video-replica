@@ -181,6 +181,8 @@ html:has(.studio-shell) {
 .studio-nav-group button:hover {
   background: #151612;
 }
+/* biome-ignore lint/style/noDescendingSpecificity: 与文件后段 reference 选择器无实际级联关系，乱序重排风险更高
+ * biome-ignore lint/style/noDescendingSpecificity: hifly 封面批次遗留散排顺序 */
 .studio-nav-group button small {
   margin-left: auto;
   border-radius: 50%;
