@@ -651,6 +651,41 @@ class HiflyClient:
             raise HiflyError("数字人服务积分余额响应不完整")
         return credit
 
+    # -- 封面模板（2026-11-15 新增能力，文档 §封面；实测生成耗时 ~60-90s 同步） --
+
+    def cover_styles(self, *, page: int = 1, size: int = 100) -> dict[str, Any]:
+        """查询可用封面模板；``id`` 直接作为 :meth:`create_cover` 的 template。"""
+        return self._request(
+            "GET",
+            "/api/v2/hifly/project/cover_styles",
+            query={"page": page, "size": size},
+        )
+
+    def create_cover(
+        self,
+        *,
+        template: str,
+        content: str,
+        avatar: str | None = None,
+        canvas_preset: str = "9:16",
+        output_format: str = "jpg",
+    ) -> dict[str, Any]:
+        """按模板生成封面图；content 会由飞影自动分析填充模板文案槽。
+
+        ``avatar`` 传入数字人标识可把封面中的形象替换成用户自己的分身
+        （个性化卖点）；文档未标注积分消耗（2026-11-15 实测成功未扣）。
+        同步接口、实测 60-90 秒返回——调用方必须走异步/长超时通道。
+        """
+        payload: dict[str, Any] = {
+            "template": template,
+            "content": content,
+            "canvas_preset": canvas_preset,
+            "output_format": output_format,
+        }
+        if avatar:
+            payload["avatar"] = avatar
+        return self._request("POST", "/api/v2/hifly/project/covers", payload=payload)
+
     # -- 二进制传输 ---------------------------------------------------------
 
     def upload_file(self, target: HiflyUploadTarget, content: bytes) -> None:

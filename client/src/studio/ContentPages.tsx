@@ -15,11 +15,13 @@ import {
   createViralImportTask,
   downloadMaterialAsset,
   downloadVideoToFile,
+  fetchCoverStyles,
   fetchReplicaPipeline,
   fetchViralVideoMedia,
   fetchViralVideoSource,
   fetchViralVideoStatistics,
   findActiveReplicaPipeline,
+  generateCoverFromTemplate,
   getAssetDownloadUrl,
   getStudioDraft,
   getViralImportTask,
@@ -3280,6 +3282,19 @@ export function PublishPage() {
   } = useStudio();
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
+  // 模板封面（飞影，用户拍板 2026-11-15）：模板列表懒加载 + 文案自动填充。
+  const [coverSource, setCoverSource] = useState<"frames" | "templates">(
+    "frames",
+  );
+  const [coverStyles, setCoverStyles] = useState<
+    Array<{ id: string; title: string; url: string }>
+  >([]);
+  const [coverStylesLoading, setCoverStylesLoading] = useState(false);
+  const [coverStylesError, setCoverStylesError] = useState("");
+  const [selectedTemplate, setSelectedTemplate] = useState("");
+  const [coverContent, setCoverContent] = useState("");
+  const [generatingCover, setGeneratingCover] = useState(false);
+  const [generatedCoverUrl, setGeneratedCoverUrl] = useState("");
   const completedResultIds = new Set(
     data.tasks
       .filter((task) => taskHasDeliverable(task) && task.resultId)
@@ -3785,7 +3800,150 @@ export function PublishPage() {
             </section>
             <section className="content-publish-cover">
               <h3>封面选择</h3>
-              <Hint>从你的成片中抽取的候选帧；也可以上传自定义图片。</Hint>
+              <Hint>从你的成片中抽取的候选帧；也可以上传自定义图片或用飞影模板生成。</Hint>
+              <div
+                aria-label="封面来源"
+                className="content-cover-source"
+                role="tablist"
+              >
+                <button
+                  aria-selected={coverSource === "frames"}
+                  role="tab"
+                  type="button"
+                  onClick={() => setCoverSource("frames")}
+                >
+                  成片帧
+                </button>
+                <button
+                  aria-selected={coverSource === "templates"}
+                  role="tab"
+                  type="button"
+                  onClick={() => {
+                    setCoverSource("templates");
+                    if (coverStyles.length === 0 && !coverStylesLoading) {
+                      setCoverStylesLoading(true);
+                      setCoverStylesError("");
+                      void fetchCoverStyles()
+                        .then((items) => {
+                          setCoverStyles(items);
+                          if (items.length === 0)
+                            setCoverStylesError("暂无可用模板。");
+                        })
+                        .catch((cause: unknown) => {
+                          setCoverStylesError(
+                            cause instanceof Error
+                              ? cause.message
+                              : "读取封面模板失败",
+                          );
+                        })
+                        .finally(() => setCoverStylesLoading(false));
+                    }
+                  }}
+                >
+                  模板封面
+                </button>
+              </div>
+              {coverSource === "templates" ? (
+                <div className="content-cover-templates">
+                  {coverStylesLoading ? (
+                    <p className="admin-hint">正在读取模板…</p>
+                  ) : null}
+                  {coverStylesError ? (
+                    <p className="admin-hint">{coverStylesError}</p>
+                  ) : null}
+                  <div className="content-cover-options">
+                    {coverStyles.map((style) => (
+                      <button
+                        aria-label={`选择模板 ${style.title}`}
+                        className={
+                          selectedTemplate === style.id ? "is-selected" : ""
+                        }
+                        key={style.id}
+                        onClick={() => setSelectedTemplate(style.id)}
+                        type="button"
+                      >
+                        <img
+                          alt={style.title}
+                          loading="lazy"
+                          src={style.url}
+                        />
+                        <small>{style.title}</small>
+                      </button>
+                    ))}
+                  </div>
+                  {selectedTemplate ? (
+                    <div className="content-cover-generate">
+                      <textarea
+                        aria-label="封面文案"
+                        maxLength={500}
+                        onChange={(event) =>
+                          setCoverContent(event.target.value)
+                        }
+                        placeholder="封面文案（留空则用草稿标题生成）"
+                        rows={2}
+                        value={coverContent}
+                      />
+                      <Button
+                        disabled={generatingCover}
+                        variant="primary"
+                        onClick={() => {
+                          const content =
+                            coverContent.trim() ||
+                            (form.title ? form.title : "") ||
+                            "乡村自建房 · 建房指南";
+                          if (!selectedTemplate) return;
+                          setGeneratingCover(true);
+                          void (async () => {
+                            try {
+                              const generated = await generateCoverFromTemplate({
+                                canvasPreset: "9:16",
+                                content,
+                                template: selectedTemplate,
+                              });
+                              const response = await fetch(
+                                `data:image/${
+                                  generated.coverId ? "jpeg" : "jpeg"
+                                };base64,${generated.imageBase64}`,
+                              );
+                              const blob = await response.blob();
+                              const file = new File(
+                                [blob],
+                                `封面-${Date.now()}.jpg`,
+                                { type: "image/jpeg" },
+                              );
+                              setGeneratedCoverUrl(
+                                `data:image/jpeg;base64,${generated.imageBase64}`,
+                              );
+                              await uploadCover(file);
+                              notify("封面已生成并应用。");
+                            } catch (cause) {
+                              notify(
+                                cause instanceof Error
+                                  ? cause.message
+                                  : "生成封面失败，请稍后重试。",
+                              );
+                            } finally {
+                              setGeneratingCover(false);
+                            }
+                          })();
+                        }}
+                      >
+                        {generatingCover ? "生成中…约需 1 分钟" : "生成封面"}
+                      </Button>
+                      {generatingCover ? (
+                        <Hint>生成需要约 1 分钟，请勿关闭页面。</Hint>
+                      ) : null}
+                      {generatedCoverUrl && !generatingCover ? (
+                        <img
+                          alt="生成的封面预览"
+                          className="content-cover-generated"
+                          src={generatedCoverUrl}
+                        />
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               {coverCandidates.length ? (
                 <div className="content-cover-options">
                   {coverCandidates.map((asset, index) => (
