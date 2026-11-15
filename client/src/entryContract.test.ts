@@ -3,8 +3,11 @@
 
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import viteConfig from "../vite.config";
+import { PlatformLogo } from "./studio/PlatformLogo";
 
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>()),
@@ -12,6 +15,26 @@ vi.mock("node:fs", async (importOriginal) => ({
   cpSync: vi.fn(),
   mkdirSync: vi.fn(),
 }));
+
+it.each([
+  ["douyin", "抖音"],
+  ["wechat_channels", "视频号"],
+  ["xiaohongshu", "小红书"],
+])("%s 官方图标随组件内联，不依赖额外静态资源请求", (key, name) => {
+  const official = readFileSync(
+    new URL(`../public/platforms/${key}.ico`, import.meta.url),
+  );
+  for (const platform of [key, name]) {
+    const markup = renderToStaticMarkup(
+      createElement(PlatformLogo, { platform }),
+    );
+    const embedded = markup.match(
+      /src="data:image\/[^;]+;base64,([^"]+)"/,
+    )?.[1];
+    expect(embedded).toBeDefined();
+    expect(Buffer.from(embedded ?? "", "base64")).toEqual(official);
+  }
+});
 
 it("生产品牌资源通过校验，缺失、篡改图形或混入审核图仍被拒绝", async () => {
   const { assertProductionPublicAssets } = await import(

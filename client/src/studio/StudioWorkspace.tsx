@@ -89,6 +89,7 @@ import {
   ProfilePage,
   type StudioAccountSummary,
   TaskDetailPage,
+  TasksPage,
   WorkbenchPage,
 } from "./MainPages";
 import { PeoplePage, PersonPage } from "./PeoplePages";
@@ -262,7 +263,10 @@ export const navGroups: {
   pages: { id: StudioPage; title: string; icon: string }[];
 }[] = [
   {
-    pages: [{ id: "workbench", title: "工作台", icon: "home" }],
+    pages: [
+      { id: "workbench", title: "工作台", icon: "home" },
+      { id: "tasks", title: "任务列表", icon: "tasks" },
+    ],
   },
   {
     label: "创作",
@@ -2319,14 +2323,13 @@ export function StudioWorkspace({
   const savedAtLabel = pendingRestore
     ? formatDraftSavedAt(pendingRestore.updatedAt)
     : "";
-  // 任务中心已下沉为数据看板的页签（2026-10-31）：tasks / task-detail 都归属
-  // 「数据看板」导航项高亮，进行中任务角标也挪到该导航项上。
+  // 任务详情沿用任务列表导航高亮，便于查看结果后回到列表。
   const activeNav = state.page.startsWith("person-")
     ? "people"
     : state.page === "viral-detail"
       ? "viral"
-      : state.page === "task-detail" || state.page === "tasks"
-        ? "analytics"
+      : state.page === "task-detail"
+        ? "tasks"
         : creationPages.has(state.page)
           ? "replica"
           : state.page;
@@ -2409,7 +2412,7 @@ export function StudioWorkspace({
                   >
                     <Icon name={item.icon} />
                     <span>{item.title}</span>
-                    {item.id === "analytics" && activeCount > 0 && (
+                    {item.id === "tasks" && activeCount > 0 && (
                       <small>{activeCount}</small>
                     )}
                   </button>
@@ -2743,8 +2746,13 @@ function StudioPageContent({
     case "oral-audio":
       return <OralPage />;
     case "tasks":
+      return (
+        <>
+          <h1>任务列表</h1>
+          <TasksPage />
+        </>
+      );
     case "analytics":
-      // 任务中心是数据看板的页签；「任务进度」入口统一落在这里。
       return <AnalyticsPage />;
     case "task-detail":
       return <TaskDetailPage />;

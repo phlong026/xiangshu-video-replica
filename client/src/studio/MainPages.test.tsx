@@ -963,6 +963,12 @@ describe("V1.4 工作台新版首页布局", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("灵感视频 5")).toBeInTheDocument();
     expect(screen.queryByText("灵感视频 6")).not.toBeInTheDocument();
+    for (const video of videos.slice(0, 5)) {
+      expect(screen.getByText(video.author)).toHaveAttribute(
+        "title",
+        `作者：${video.author}`,
+      );
+    }
     expect(screen.getAllByRole("button", { name: /提取文案：/ })).toHaveLength(
       5,
     );
@@ -1000,6 +1006,52 @@ describe("V1.4 工作台新版首页布局", () => {
       selectedVideoId: "video-1",
       returnTo: "workbench",
     });
+  });
+
+  it.each([
+    [3_999, false],
+    [4_000, true],
+    [15_000, true],
+    [16_000, true],
+    [27_000, true],
+    [30_000, true],
+    [30_001, false],
+    [42_000, false],
+    [undefined, false],
+  ])("首页精选时长 %s 毫秒的一键复刻入口为 %s", (durationMs, eligible) => {
+    const source: StudioVideo = {
+      ...videos[0],
+      durationMs,
+      platformKey: "douyin",
+      nativeId: "native-home-replica",
+    };
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    const replicate = screen.queryByRole("button", {
+      name: `一键复刻：${source.title}`,
+    });
+    if (eligible) {
+      expect(replicate).toBeEnabled();
+      fireEvent.click(replicate as HTMLButtonElement);
+      expect(value.navigate).toHaveBeenCalledWith("viral-detail", {
+        selectedVideoId: source.id,
+        returnTo: "workbench",
+        viralReplicateIntent: true,
+      });
+      expect(
+        new URLSearchParams(window.location.search).get("viralVideoId"),
+      ).toBe(source.nativeId);
+    } else {
+      expect(replicate).not.toBeInTheDocument();
+    }
+    expect(
+      screen.getByRole("button", { name: `提取文案：${source.title}` }),
+    ).toBeEnabled();
   });
 
   it("首页精选按热度和稳定 ID 确定排序，不依赖接口数组顺序", () => {

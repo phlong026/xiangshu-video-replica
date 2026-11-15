@@ -1066,13 +1066,11 @@ html:has(.studio-shell) {
   padding: 0;
   background: #191b18;
 }
-.studio-home-viral-cover img {
-  width: 100%;
+.studio-home-viral-cover > .video-preview {
   height: 100%;
-  display: block;
-  object-fit: cover;
 }
 .studio-home-viral-platform,
+.studio-home-viral-author,
 .studio-home-viral-duration {
   position: absolute;
   z-index: 1;
@@ -1086,6 +1084,17 @@ html:has(.studio-shell) {
 .studio-home-viral-platform {
   top: 6px;
   left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.studio-home-viral-author {
+  left: 5px;
+  bottom: 5px;
+  max-width: calc(100% - 65px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .studio-home-viral-duration {
   right: 5px;
@@ -1131,6 +1140,9 @@ html:has(.studio-shell) {
   border-radius: 5px;
   padding: 3px 6px;
   font-size: var(--font-caption);
+}
+.studio-home-viral-actions .studio-button--primary {
+  grid-column: 1 / -1;
 }
 .studio-activity {
   min-height: 287px;

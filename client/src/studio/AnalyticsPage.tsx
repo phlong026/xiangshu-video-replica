@@ -147,9 +147,8 @@ function TrendChart({
   );
 }
 
-/** 数据看板 = 「数据概览 / 任务中心」两个页签的外壳（2026-10-31 信息架构
- * 精简：任务中心从一级导航下沉到这里）。页签直接映射路由 analytics / tasks，
- * 深链与既有 navigate("tasks") 调用点无需改动。 */
+/** 数据看板保留「数据概览 / 任务中心」两个页签，任务页签直达独立任务列表。
+ * 页签映射 analytics / tasks 路由，与侧边栏任务入口及历史深链保持一致。 */
 export function AnalyticsPage() {
   const { state, navigate } = useStudio();
   const tab: "overview" | "tasks" =
