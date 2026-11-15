@@ -727,11 +727,6 @@ export function AdminApp() {
               <img alt="众墅之家" src={zhongshuBrandLogo} />
             </div>
             <h1>运营管理后台</h1>
-            <ul className="admin-login__points">
-              <li>会话绑定当前浏览器环境，更换浏览器后需重新登录</li>
-              <li>登录与敏感操作全部记入审计日志</li>
-              <li>管理员与审计员分角色授权，审计员只读</li>
-            </ul>
           </section>
 
           <section className="admin-login__card" aria-label="后台登录">
