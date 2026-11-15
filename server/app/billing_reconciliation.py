@@ -55,6 +55,7 @@ _ESCALATE_HOURS_ENV = "VIDEO_REPLICA_BILLING_ESCALATE_AFTER_HOURS"
 # 重查熔断：ESCALATED 条目被重查这么多次后就不再自动重查（默认 96 次 ≈ 30 分钟
 # 间隔下两昼夜）。升级后条目的唯一自动出路是"底层计费已终态时被动对齐"，长期
 # 无证据的卡单继续每半小时烧一轮查询没有意义；人工收口与专项对账不受影响。
+# 只对 ESCALATED 生效——OPEN 条目若被熔断会连超时升级路径一起堵死。
 _RECHECK_MAX_COUNT_ENV = "VIDEO_REPLICA_BILLING_RECHECK_MAX_COUNT"
 _RECHECK_MAX_COUNT_DEFAULT = 96
 
@@ -291,7 +292,8 @@ def process_reconciliation_items(conn: BusinessConnection, *, limit: int = 50) -
     条目停止自动收口，只在底层计费已终态时被动对齐（迟到回调场景）。重查
     次数达到熔断上限（VIDEO_REPLICA_BILLING_RECHECK_MAX_COUNT，默认 96）的
     条目不再进入重查集——继续烧查询不会产生新信息，条目保持 ESCALATED 等
-    人工收口。
+    人工收口。熔断只限 ESCALATED：OPEN 条目不受影响，否则低上限配置会把
+    超时升级与自动结算路径一起堵死。
     """
     rows = conn.execute(
         """
@@ -299,7 +301,7 @@ def process_reconciliation_items(conn: BusinessConnection, *, limit: int = 50) -
                created_at
         FROM billing_reconciliation_items
         WHERE state IN ('OPEN', 'ESCALATED')
-          AND check_count < %s
+          AND (state = 'OPEN' OR check_count < %s)
           AND (last_checked_at IS NULL
                OR last_checked_at < now() - (%s * interval '1 minute'))
         ORDER BY created_at, id

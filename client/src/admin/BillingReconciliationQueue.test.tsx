@@ -37,8 +37,11 @@ const baseItem = {
   next_step: "已升级人工：请先用专项对账接口核对供应商实况，再回到这里收口。",
 };
 
-function mockQueue(items: typeof baseItem[]) {
-  vi.mocked(adminApi.adminRead).mockResolvedValue({ items, total: items.length });
+function mockQueue(items: (typeof baseItem)[]) {
+  vi.mocked(adminApi.adminRead).mockResolvedValue({
+    items,
+    total: items.length,
+  });
 }
 
 describe("BillingReconciliationQueue（2026-11-15 审计补闭环）", () => {
@@ -73,18 +76,25 @@ describe("BillingReconciliationQueue（2026-11-15 审计补闭环）", () => {
   });
 
   it("收口成功后刷新队列", async () => {
-    const resolvedItem = { ...baseItem, state: "RESOLVED" as const };
-    // StrictMode 会双跑挂载 effect：先供两条初始（ESCALATED），收口后的
-    // reload 才拿到 RESOLVED——按序供给，不依赖调用次数。
-    vi.mocked(adminApi.adminRead)
-      .mockResolvedValueOnce({ items: [baseItem], total: 1 })
-      .mockResolvedValueOnce({ items: [baseItem], total: 1 })
-      .mockResolvedValue({ items: [resolvedItem], total: 1 });
-    vi.mocked(adminApi.adminWrite).mockResolvedValue({
-      id: baseItem.id,
-      state: "RESOLVED",
-      resolution: "MANUAL_VERIFIED",
-      billing_state: "FAILED",
+    // 状态化供给：收口写入成功后的 reload 必须拿到 RESOLVED 行；
+    // 用共享标志驱动，调用次数（StrictMode 双跑与否）不影响结果。
+    let resolvedStage = false;
+    const escalatedItems = { items: [baseItem], total: 1 };
+    const resolvedItems = {
+      items: [{ ...baseItem, state: "RESOLVED" as const }],
+      total: 1,
+    };
+    vi.mocked(adminApi.adminRead).mockImplementation(async () =>
+      resolvedStage ? resolvedItems : escalatedItems,
+    );
+    vi.mocked(adminApi.adminWrite).mockImplementation(async () => {
+      resolvedStage = true;
+      return {
+        id: baseItem.id,
+        state: "RESOLVED",
+        resolution: "MANUAL_VERIFIED",
+        billing_state: "FAILED",
+      };
     });
     render(<BillingReconciliationQueue readOnly={false} />);
     fireEvent.click(await screen.findByRole("button", { name: "收口" }));
@@ -101,17 +111,57 @@ describe("BillingReconciliationQueue（2026-11-15 审计补闭环）", () => {
         expect.any(String),
       );
     });
+    // 行级断言：必须是 tbody 里的 RESOLVED 行，而不是状态筛选下拉里的
+    // 「已收口」选项（getByText 会撞上它）。
     await waitFor(() => {
-      expect(screen.getByText("已收口")).toBeInTheDocument();
+      expect(
+        document.querySelector("tbody tr[data-state='RESOLVED']"),
+      ).not.toBeNull();
     });
   });
 
+  it("筛选切换后丢弃过期响应（旧请求晚到不覆盖新列表）", async () => {
+    // 首个请求（ALL）先发后至：持有 promise，等 OPEN 响应落地后再放行，
+    // 界面必须仍显示 OPEN 的数据与总数。
+    let releaseAll: (value: {
+      items: (typeof baseItem)[];
+      total: number;
+    }) => void = () => {};
+    const allGate = new Promise<{ items: (typeof baseItem)[]; total: number }>(
+      (resolve) => {
+        releaseAll = resolve;
+      },
+    );
+    const openItems = {
+      items: [{ ...baseItem, state: "OPEN" as const }],
+      total: 7,
+    };
+    vi.mocked(adminApi.adminRead).mockImplementation(async (path: string) => {
+      if (path.includes("state=OPEN")) return openItems;
+      return await allGate;
+    });
+    render(<BillingReconciliationQueue readOnly={false} />);
+    fireEvent.change(screen.getByDisplayValue("全部状态"), {
+      target: { value: "OPEN" },
+    });
+    await screen.findByText("待核对");
+    expect(screen.getByText("共 7 条（当前筛选）")).toBeInTheDocument();
+    // 旧 ALL 响应此刻才返回：内容必须被丢弃。
+    releaseAll({ items: [baseItem], total: 1 });
+    await waitFor(() => {
+      expect(screen.getByText("共 7 条（当前筛选）")).toBeInTheDocument();
+    });
+    // 行级断言（绕开筛选下拉里的同名选项）：没有 ESCALATED 行被渲染。
+    expect(
+      document.querySelector("tbody tr[data-state='ESCALATED']"),
+    ).toBeNull();
+  });
+
   it("计费仍未终态时展示后端 409 原文，不吞错误", async () => {
-    // 同上：按序供两条初始响应，StrictMode 双跑也稳定。
-    vi.mocked(adminApi.adminRead)
-      .mockResolvedValueOnce({ items: [baseItem], total: 1 })
-      .mockResolvedValueOnce({ items: [baseItem], total: 1 })
-      .mockResolvedValue({ items: [baseItem], total: 1 });
+    const escalatedItems = { items: [baseItem], total: 1 };
+    vi.mocked(adminApi.adminRead).mockImplementation(
+      async () => escalatedItems,
+    );
     vi.mocked(adminApi.adminWrite).mockRejectedValue(
       new Error(
         "计费仍未收口：请先用专项对账接口核对供应商实况或补齐计费证据；涉及真实调账须走调账审批，本队列不能直接退分。",

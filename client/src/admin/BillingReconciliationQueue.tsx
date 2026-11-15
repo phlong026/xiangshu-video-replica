@@ -8,7 +8,7 @@
 // 卡单升级后只能永远挂在这里。现在行内提供「收口」——底层计费仍是 PENDING
 // 时后端会 409 并指回专项对账（这个 409 会原样展示，不吞错误）；同时补上
 // 状态筛选与总数，队列大的时候能只看待处理的。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { adminRead, adminWrite } from "../api.admin";
 import { DataTable } from "./ui/DataTable";
 
@@ -70,8 +70,12 @@ export function BillingReconciliationQueue({
   // 收口交互：正在填写收口备注的条目 id 与备注文本。
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [resolveNote, setResolveNote] = useState("");
+  // 请求序号：筛选切换后早发请求可能晚到，过期响应一律丢弃，
+  // 不让旧数据覆盖新筛选下的列表。
+  const loadSeq = useRef(0);
 
   const load = useCallback(async (state: StateFilter) => {
+    const seq = ++loadSeq.current;
     setBusy(true);
     setError("");
     try {
@@ -83,12 +87,14 @@ export function BillingReconciliationQueue({
         `/api/control/billing-reconciliation/queue?limit=100${query}`,
         "核对队列读取失败，请稍后重试。",
       );
+      if (seq !== loadSeq.current) return;
       setItems(body.items);
       setTotal(body.total);
     } catch (cause) {
+      if (seq !== loadSeq.current) return;
       setError(cause instanceof Error ? cause.message : "核对队列读取失败");
     } finally {
-      setBusy(false);
+      if (seq === loadSeq.current) setBusy(false);
     }
   }, []);
 

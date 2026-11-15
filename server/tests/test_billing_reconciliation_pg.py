@@ -474,31 +474,50 @@ def test_escalated_item_is_not_duplicated_by_rescan(reconcile_db: str) -> None:
     assert len(_queue_rows(dsn)) == 1
 
 
-def test_recheck_cap_stops_rechecking(reconcile_db: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """重查次数达到熔断上限后条目退出重查集，保持 ESCALATED 等人工收口。"""
+def test_recheck_cap_stops_rechecking(
+    reconcile_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """熔断只限 ESCALATED：到限的升级条目退出重查集；OPEN 条目不受影响。"""
     dsn = reconcile_db
     _reset(dsn)
+    # 升级条目（25h 前的未知结果）+ 活跃 OPEN 条目（2h 前的成功缺证据）。
     _seed_pending_operation(
         dsn,
         operation_id="op_cap",
         service="video_768p",
         source_id="video_cap",
+        age_hours=25.0,
+    )
+    _seed_video_task(
+        dsn, task_id="video_cap", status="SUBMISSION_UNCERTAIN", seconds=None
+    )
+    _seed_pending_operation(
+        dsn,
+        operation_id="op_open",
+        service="video_768p",
+        source_id="video_open",
         age_hours=2.0,
     )
-    _seed_video_task(dsn, task_id="video_cap", status="SUCCEEDED", seconds=None)
+    _seed_video_task(dsn, task_id="video_open", status="SUCCEEDED", seconds=None)
     with pg_transaction() as raw:
         enqueue_stuck_billing_operations(BusinessConnection.postgres(raw))
-    with pg_transaction() as raw:
-        first = process_reconciliation_items(BusinessConnection.postgres(raw))
-    assert first["rechecked"] == 1
-    rows = _queue_rows(dsn)
-    assert int(rows[0]["check_count"]) == 1
-
-    # 上限=1：第一次重查已耗尽额度，第二轮不再选中该条目。
     monkeypatch.setenv("VIDEO_REPLICA_BILLING_RECHECK_MAX_COUNT", "1")
     with pg_transaction() as raw:
+        first = process_reconciliation_items(BusinessConnection.postgres(raw))
+    assert first["escalated"] == 1
+    assert first["rechecked"] == 1
+    rows = {str(r["source_id"]): r for r in _queue_rows(dsn)}
+    assert rows["video_cap"]["state"] == "ESCALATED"
+    assert int(rows["video_cap"]["check_count"]) == 1
+    assert rows["video_open"]["state"] == "OPEN"
+    assert int(rows["video_open"]["check_count"]) == 1
+
+    # ESCALATED 已到上限 1：第二轮不再选中；OPEN 不看上限，照常重查。
+    with pg_transaction() as raw:
         second = process_reconciliation_items(BusinessConnection.postgres(raw))
-    assert second["rechecked"] == 0
+    assert second["rechecked"] == 1
     assert second["resolved"] == 0
-    rows = _queue_rows(dsn)
-    assert int(rows[0]["check_count"]) == 1
+    assert second["escalated"] == 0
+    rows = {str(r["source_id"]): r for r in _queue_rows(dsn)}
+    assert int(rows["video_cap"]["check_count"]) == 1
+    assert int(rows["video_open"]["check_count"]) == 2
