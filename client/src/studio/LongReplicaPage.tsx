@@ -674,7 +674,9 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                 选择 MP4 / MOV 文件
               </Button>
             }
-            description="上传 4–180 秒的爆款视频，AI 看完整片后产出一段可直接使用的复刻提示词、逐句口播文案与全片摘要。支持 600 MB 以内的 MP4 / MOV，提交后按次计费；拆解预计 5–15 分钟，可以离开本页稍后回来查看。"
+            // 空态只保留两句核心：产出什么 + 硬性限制/计费。预计时长与
+            // 「可离开本页」在拆解进行态提示，此处不再重复。
+            description="上传 4–180 秒的爆款视频，AI 拆解出复刻提示词、口播文案与全片摘要。支持 600 MB 内 MP4 / MOV，按次计费。"
             title="还没有上传长视频"
           />
         ) : null}

@@ -88,6 +88,22 @@
 .person-card__meta span.is-warning {
   color: #e5aa36;
 }
+/* 人物卡三动作按钮组（2026-11-15 用户拍板重新设计）：主操作金色、次操作
+   描边、删除弱化描边（默认灰字、悬停转红），三键等宽对齐——删除仍是
+   标准按钮但视觉权重最低，不与主操作抢视线。 */
+.person-card__actions .studio-button {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 8px;
+}
+.person-card__actions .studio-button--outline.person-card__actions__delete {
+  color: #969892;
+}
+.person-card__actions
+  .studio-button--outline.person-card__actions__delete:hover:not(:disabled) {
+  border-color: #8a4038;
+  color: #e5695f;
+}
 .person-card__actions,
 .panel-heading > div:last-child,
 .avatar-card > button,

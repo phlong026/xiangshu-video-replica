@@ -398,8 +398,9 @@ function PersonCard({
             用于创作
           </Button>
           <Button
-            variant="quiet"
+            className="person-card__actions__delete"
             disabled={deleting}
+            variant="outline"
             onClick={() => {
               setDeleteMode("purge");
               setRemoveProjectRefs(false);
@@ -1418,13 +1419,15 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           {ready.map((avatar) => (
             <article className="oral-library-card" key={avatar.id}>
               <div className="oral-library-preview">
+                {/* 不带 fitContainer：Media 会按素材自然宽高比写内联样式，
+                    预览框随视频真实比例自适应（2026-11-15 用户要求），
+                    竖屏分身不再被横向 cover 裁掉头脚。 */}
                 <Media
                   asset={data.assets.find(
                     (asset) => asset.id === avatar.imageId,
                   )}
                   alt={avatar.name}
                   presentation="video"
-                  fitContainer
                 />
                 {review ? <span className="oral-demo-badge">示例</span> : null}
                 <span className="oral-video-badge">

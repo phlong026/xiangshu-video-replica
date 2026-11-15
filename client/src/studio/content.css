@@ -628,6 +628,9 @@
 .content-material-card__cover img,
 .content-material-card__cover video {
   aspect-ratio: 16 / 9;
+  /* 窄屏单列时卡片会很宽，封面上限 220px 防止比例失衡（16:9 之外的部分
+     由 object-fit/占位布局居中裁齐）。 */
+  max-height: 220px;
   object-fit: cover;
   width: 100%;
 }
@@ -637,9 +640,17 @@
   color: #6f726b;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   justify-content: center;
+  max-height: 220px;
   width: 100%;
+}
+.content-material-card__placeholder svg {
+  height: 36px;
+  width: 36px;
+}
+.content-material-card__placeholder small {
+  font-size: 13px;
 }
 .content-material-card__placeholder[data-kind="doc"] {
   color: #8fc7ff;

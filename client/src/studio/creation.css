@@ -405,6 +405,7 @@
   cursor: pointer;
   font-size: 12px;
   padding: 2px 4px;
+  white-space: nowrap;
 }
 
 .creation-script-card__meta-actions button:hover {
@@ -413,6 +414,31 @@
 
 .creation-script-card__meta-actions .creation-script-card__delete:hover {
   color: #e5695f;
+}
+
+/* 提取记录 meta 行的「查看 / 复用到工坊」：成对的紧凑描边按钮（用户要求
+   重新设计，原先文字按钮被挤成竖排折行）。查看弱化、复用保持描边主次。 */
+.creation-extraction-card__meta .creation-script-card__meta-actions button {
+  border: 1px solid #3d3e39;
+  border-radius: 8px;
+  color: #969892;
+  font-size: 13px;
+  min-height: 30px;
+  padding: 4px 12px;
+}
+
+.creation-extraction-card__meta
+  .creation-script-card__meta-actions
+  button:hover:not(:disabled) {
+  border-color: #57594f;
+  color: #e8e8e4;
+}
+
+.creation-extraction-card__meta
+  .creation-script-card__meta-actions
+  .studio-button--outline:hover:not(:disabled) {
+  border-color: #57594f;
+  background: #171610;
 }
 
 /* 「打开查看」全文弹层：我的文案与提取记录共用（用户要求两列表可查看，
