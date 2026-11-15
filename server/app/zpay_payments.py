@@ -506,7 +506,7 @@ def reconcile_stale_pending_zpay_orders(
             unpaid += 1
             unpaid_order_nos.append(order_no)
             continue
-        if answer.provider_trade_no is None or answer.amount_fen is None:
+        if answer.provider_trade_no is None or answer.amount_fen is None or answer.channel is None:
             logger.warning(
                 "zpay reconciliation query for order %s is paid but incomplete; settling nothing",
                 order_no,

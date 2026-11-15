@@ -1352,10 +1352,11 @@ def _run_recharge_order_sweep_once() -> None:
         if config.mode is not DatabaseMode.POSTGRESQL or not config.dsn:
             return
         with psycopg.connect(config.dsn, autocommit=True) as raw:
-            if not raw.execute(
+            lock_row = raw.execute(
                 "SELECT pg_try_advisory_lock(hashtext(%s))",
                 (_RECHARGE_SWEEP_LOCK_NAMESPACE,),
-            ).fetchone()[0]:
+            ).fetchone()
+            if lock_row is None or not lock_row[0]:
                 return
             try:
                 conn = BusinessConnection.postgres(raw)
