@@ -209,9 +209,10 @@
         "20261111T1000_uncertain_auto_reopen"
       ],
       "20261113T1000_replica_pipeline_submit_intents": "20261112T1200_merge_training_pan123_pipeline",
-      "20261115T1000_display_settings": "20261113T1000_replica_pipeline_submit_intents"
+      "20261115T1000_display_settings": "20261115T1900_billing_reconciliation_active_dedupe",
+      "20261115T1900_billing_reconciliation_active_dedupe": "20261113T1000_replica_pipeline_submit_intents"
     },
-    "revision_count": 187
+    "revision_count": 188
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -972,7 +973,11 @@
     },
     "20261115T1000_display_settings": {
       "file": "versions/20261115T1000_display_settings.py",
-      "sha256": "08dda31d2f5550a68edbd13dec7c75b23b9b8ae8c4cbfaec05200b559d03959a"
+      "sha256": "a39f90f7c0d607ae4288dcda44e4b90b12e79fbd3abff5b7024daa6cadf5795d"
+    },
+    "20261115T1900_billing_reconciliation_active_dedupe": {
+      "file": "versions/20261115T1900_billing_reconciliation_active_dedupe.py",
+      "sha256": "3534ed24ac31d6beb05156a34e9c28cbf469b2ff8d071832ee331e875abe7512"
     }
   },
   "task": "MIGRATION-GUARD-20260912"
