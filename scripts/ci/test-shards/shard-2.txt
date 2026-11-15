@@ -44,6 +44,7 @@ server/tests/test_upload_proxy_contract.py
 server/tests/test_viral_cohort_sources_pg.py
 server/tests/test_viral_decrypt.py
 server/tests/test_viral_detail_billing_pg.py
+server/tests/test_scene_look_delete_pg.py
 server/tests/test_viral_push_pg.py
 server/tests/test_viral_wechat_link.py
 server/tests/test_wechat_native_callback_pg.py
