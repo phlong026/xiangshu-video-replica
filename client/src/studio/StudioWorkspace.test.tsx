@@ -904,6 +904,42 @@ describe("V1.4 workspace integration", () => {
     expect(screen.getByText("张工本人音色 V1")).toBeInTheDocument();
     expect(screen.getByText(/去文案工坊修改/)).toBeInTheDocument();
   });
+
+  it("侧边栏恢复任务列表，显示进行中数量并直接进入任务页面", () => {
+    const reviewData = createReviewData();
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={reviewData}
+        initialState={createReviewState("workbench")}
+      />,
+    );
+    const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
+    const tasks = nav.getByRole("button", { name: /任务列表/ });
+    const activeCount = reviewData.tasks.filter((task) =>
+      ["running", "queued"].includes(task.status),
+    ).length;
+    expect(tasks.querySelector("small")).toHaveTextContent(String(activeCount));
+    expect(nav.getByRole("button", { name: "数据看板" })).not.toHaveAttribute(
+      "aria-current",
+    );
+
+    fireEvent.click(tasks);
+    expect(window.location.hash).toBe("#studio/tasks");
+    expect(
+      screen.getByRole("heading", { name: "任务列表" }),
+    ).toBeInTheDocument();
+    expect(tasks).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("tab", { name: "全部" })).toBeInTheDocument();
+
+    fireEvent.click(nav.getByRole("button", { name: "数据看板" }));
+    expect(window.location.hash).toBe("#studio/analytics");
+    expect(nav.getByRole("button", { name: "数据看板" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(tasks).not.toHaveAttribute("aria-current");
+  });
   it("任务详情与人物子页把对象和返回位置写入可恢复 URL", async () => {
     const reviewData = createReviewData();
     reviewData.tasks = [
@@ -927,6 +963,12 @@ describe("V1.4 workspace integration", () => {
     expect(window.location.hash).toBe(
       "#studio/task-detail/generation_batch/batch-deep?returnTo=tasks",
     );
+    expect(
+      within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
+        "button",
+        { name: /任务列表/ },
+      ),
+    ).toHaveAttribute("aria-current", "page");
 
     window.history.pushState(
       null,

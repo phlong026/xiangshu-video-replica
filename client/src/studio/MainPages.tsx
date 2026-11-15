@@ -932,10 +932,7 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          支持抖音、小红书、视频号的分享链接；其他平台请上传 MP4/MOV
-          文件；视频复刻支持 4-30 秒、200 MB
-          以内的视频，更长的视频会自动提取音轨用于提取文案
-          （桌面端，原视频不上传）。
+          支持抖音、小红书的分享链接，其他平台请上传 MP4文件；
         </p>
         {linkState.status === "loading" && (
           <p className="studio-upload-status" role="status">
@@ -1184,8 +1181,14 @@ export function WorkbenchPage() {
                     >
                       <VideoPreview poster={video.poster} />
                       <span className="studio-home-viral-platform">
-                        <PlatformLogo platform={video.platform} size={18} />{" "}
+                        <PlatformLogo platform={video.platform} size={18} />
                         {video.platform}
+                      </span>
+                      <span
+                        className="studio-home-viral-author"
+                        title={`作者：${video.author.trim() || "未知"}`}
+                      >
+                        {video.author.trim() || "作者未知"}
                       </span>
                       <span className="studio-home-viral-duration">
                         {video.duration}
@@ -1504,7 +1507,7 @@ export function TasksPage() {
   };
   return (
     <section className="studio-tasks-page">
-      {/* 页面标题由数据看板外壳（页签行）提供，这里不再重复 h1。 */}
+      {/* 独立任务列表与数据看板页签共用表格，标题由各自页面入口提供。 */}
       <div className="studio-page-actions">
         {!review && (
           <Button onClick={() => openLive("tasks")}>历史任务与下载</Button>
