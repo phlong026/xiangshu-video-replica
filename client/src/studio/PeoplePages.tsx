@@ -15,6 +15,7 @@ import {
   deleteOralAvatar,
   deleteOralVoice,
   deleteSimpleCharacterIdentity,
+  deleteSimpleSceneLook,
   listOralAvatars,
   listOralVoices,
   type OralVoiceLanguage,
@@ -47,6 +48,7 @@ import {
   validateOralAudioFile,
 } from "./live";
 import type {
+  StudioAsset,
   StudioAvatar,
   StudioPage,
   StudioPerson,
@@ -769,6 +771,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
   } = useStudio();
   const readOnly = user.role === "auditor";
   const [loadingMore, setLoadingMore] = useState(false);
+  const [deletingSceneId, setDeletingSceneId] = useState("");
   const assets = data.assets.filter(
     (asset) => asset.personId === person.id && asset.kind === "image",
   );
@@ -872,6 +875,23 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
       notify(customerVisibleErrorMessage(cause, "加载更多场景失败，请重试。"));
     } finally {
       setLoadingMore(false);
+    }
+  };
+  const removeScene = async (asset: StudioAsset) => {
+    if (review || readOnly || deletingSceneId) return;
+    // 删除不可逆；场景被项目选用/存在进行中任务时后端会 409 并给出中文原因。
+    if (!window.confirm(`删除场景造型「${asset.name}」？删除后不可恢复。`)) return;
+    setDeletingSceneId(asset.id);
+    try {
+      await deleteSimpleSceneLook(person.id, asset.contactSheetId ?? asset.id);
+      notify("场景造型已删除。");
+      await refreshScenes();
+    } catch (cause) {
+      notify(
+        customerVisibleErrorMessage(cause, "删除场景造型失败，请稍后重试。"),
+      );
+    } finally {
+      setDeletingSceneId("");
     }
   };
   return (
@@ -1006,7 +1026,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
               {asset.contactSheetId ? (
                 <p className="scene-set-label">1 套 · 五视图合成图</p>
               ) : null}
-              <div>
+              <div className="scene-card__actions">
                 <Button
                   disabled={
                     readOnly ||
@@ -1023,6 +1043,14 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                   }}
                 >
                   用于人物置换
+                </Button>
+                <Button
+                  className="scene-card__delete"
+                  disabled={readOnly || deletingSceneId === asset.id}
+                  variant="outline"
+                  onClick={() => void removeScene(asset)}
+                >
+                  {deletingSceneId === asset.id ? "删除中…" : "删除"}
                 </Button>
               </div>
             </Panel>

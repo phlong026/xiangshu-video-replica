@@ -104,6 +104,24 @@
   border-color: #8a4038;
   color: #e5695f;
 }
+/* 场景造型卡动作组（场景删除 2026-11-15）：置换主操作 + 删除弱化描边，
+   与人物卡三键按钮组同一套语言。 */
+.scene-card__actions {
+  display: flex;
+  gap: 8px;
+}
+.scene-card__actions .studio-button {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 8px;
+}
+.scene-card__actions .studio-button--outline.scene-card__delete {
+  color: #969892;
+}
+.scene-card__actions .studio-button--outline.scene-card__delete:hover:not(:disabled) {
+  border-color: #8a4038;
+  color: #e5695f;
+}
 .person-card__actions,
 .panel-heading > div:last-child,
 .avatar-card > button,

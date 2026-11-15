@@ -4530,6 +4530,16 @@ describe("全自动复刻入口（M8 v1）", () => {
     expect(screen.getByRole("tab", { name: "视频1" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "文档1" })).toBeInTheDocument();
     expect(screen.getByText("共 2 个素材")).toBeInTheDocument();
+
+    // 类型页签真实过滤列表（回归：曾出现只改高亮不过滤的缺陷）。
+    fireEvent.click(screen.getByRole("tab", { name: "文档1" }));
+    expect(await screen.findByText("结算规则讲义")).toBeInTheDocument();
+    expect(screen.queryByText("三步完成爆款复刻")).not.toBeInTheDocument();
+    expect(screen.getByText("共 1 个素材")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "全部2" }));
+    expect(await screen.findByText("三步完成爆款复刻")).toBeInTheDocument();
+    expect(screen.getByText("共 2 个素材")).toBeInTheDocument();
   });
 
   it("站内搜索按标题与标签过滤并更新总数", async () => {

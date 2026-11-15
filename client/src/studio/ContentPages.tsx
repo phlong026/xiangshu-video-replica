@@ -2808,22 +2808,19 @@ export function MaterialsPage() {
     notify("文件将在新窗口打开；若浏览器显示预览，请使用另存为保存。");
   }
 
-  // 站内搜索：标题 / 描述 / 标签包含即命中（大小写不敏感，全量内过滤）。
+  // 类型页签 + 站内搜索：先按类型（空 tab=全部）再按关键词命中
+  // （标题 / 描述 / 标签，大小写不敏感），全量内过滤。
   const keyword = search.trim().toLowerCase();
-  const filtered = useMemo(
-    () =>
-      keyword
-        ? library.filter(
-            (item) =>
-              item.title.toLowerCase().includes(keyword) ||
-              item.description.toLowerCase().includes(keyword) ||
-              item.tags.some((tag) =>
-                `#${tag}`.toLowerCase().includes(keyword),
-              ),
-          )
-        : library,
-    [library, keyword],
-  );
+  const filtered = useMemo(() => {
+    const byKind = tab ? library.filter((item) => item.kind === tab) : library;
+    if (!keyword) return byKind;
+    return byKind.filter(
+      (item) =>
+        item.title.toLowerCase().includes(keyword) ||
+        item.description.toLowerCase().includes(keyword) ||
+        item.tags.some((tag) => `#${tag}`.toLowerCase().includes(keyword)),
+    );
+  }, [library, keyword, tab]);
   const items = filtered.slice(
     (page - 1) * TRAINING_PAGE_SIZE,
     page * TRAINING_PAGE_SIZE,
