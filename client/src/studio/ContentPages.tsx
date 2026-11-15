@@ -2,7 +2,6 @@ import type { RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   TrainingMaterialPublicItem,
-  TrainingMaterialPublicPage,
   ViralImportPurpose,
   ViralImportTask,
   ViralPlatform,
@@ -2672,6 +2671,8 @@ const TRAINING_TABS: Array<{ id: string; label: string }> = [
   { id: "doc", label: "文档" },
 ];
 const TRAINING_PAGE_SIZE = 24;
+// 骨架屏占位卡数量：静态键名数组，避免数组索引 key（biome noArrayIndexKey）。
+const SKELETON_KEYS = ["s1", "s2", "s3", "s4", "s5", "s6"];
 // Office Online 预览入口（用户拍板，2026-11-12）：直链 URL 会经微软服务转码
 // 渲染；预览失败/超限时弹层内常驻下载按钮兜底（方案 §5.2）。
 function officeViewerUrl(directUrl: string): string {
@@ -2698,43 +2699,60 @@ export function MaterialsPage() {
   const { notify } = useStudio();
   const [tab, setTab] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  const [data, setData] = useState<TrainingMaterialPublicPage | null>(null);
+  // 全量素材元数据（当前标签筛选维度）：素材库是运营上传的小体量只读列表，
+  // 全量在手才能做类型计数、站内搜索与纯前端分页，不必为计数加服务端 facet。
+  const [library, setLibrary] = useState<TrainingMaterialPublicItem[]>([]);
+  const [tagFacet, setTagFacet] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  // 预览地址按需签发（30 分钟防盗链直链），会话内已签的复用；文档在弹层内
-  // 取链，媒体在卡片内取链。直链过期由媒体 error 事件触发重签一次（§5.2）。
+  // 预览地址按需签发（30 分钟防盗链直链），会话内已签的复用；弹层内取链，
+  // 封面同理。直链过期由媒体 error 事件触发重签一次（§5.2）。
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState("");
+  // 封面/弹层媒体加载失败的记录：只有失败的卡才显示「重试」，正常卡不暴露
+  // 「重新加载」这类实现细节词汇（MATERIAL-UX P0，2026-11-15）。
+  const [failedIds, setFailedIds] = useState<string[]>([]);
   const renewedMedia = useRef(new Set<string>());
-  const [docPreview, setDocPreview] =
+  const [previewItem, setPreviewItem] =
     useState<TrainingMaterialPublicItem | null>(null);
 
-  const load = useCallback(
-    async (kind: string, tagFilter: string[], targetPage: number) => {
-      try {
-        setLoading(true);
-        setError("");
-        const result = await listTrainingMaterials({
-          kind: kind || undefined,
+  const load = useCallback(async (tagFilter: string[]) => {
+    try {
+      setLoading(true);
+      setError("");
+      // 服务端 pageSize 上限 100：循环翻页拿全量（上限 10 页 = 1000 条，
+      // 培训素材实际量远低于此；触顶时按已取得的条目呈现）。
+      const first = await listTrainingMaterials({
+        tags: tagFilter.length ? tagFilter : undefined,
+        page: 1,
+        pageSize: 100,
+      });
+      const collected = [...first.items];
+      const pages = Math.min(Math.ceil(first.total / 100), 10);
+      for (let next = 2; next <= pages; next += 1) {
+        const part = await listTrainingMaterials({
           tags: tagFilter.length ? tagFilter : undefined,
-          page: targetPage,
-          pageSize: TRAINING_PAGE_SIZE,
+          page: next,
+          pageSize: 100,
         });
-        setData(result);
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : "读取培训素材失败");
-      } finally {
-        setLoading(false);
+        collected.push(...part.items);
       }
-    },
-    [],
-  );
+      setLibrary(collected);
+      setTagFacet(first.tag_facet);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "读取培训素材失败");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  // 换账号时按 key 重挂载由调用方保证（与旧页同语义）；这里随筛选与页码重拉。
+  // 换账号时按 key 重挂载由调用方保证（与旧页同语义）；标签变化时重拉全量。
   useEffect(() => {
-    void load(tab, tags, page);
-  }, [load, tab, tags, page]);
+    void load(tags);
+    setPage(1);
+  }, [load, tags]);
 
   async function ensurePreviewUrl(
     item: TrainingMaterialPublicItem,
@@ -2759,18 +2777,20 @@ export function MaterialsPage() {
   async function resignOnMediaError(item: TrainingMaterialPublicItem) {
     if (renewedMedia.current.has(item.id)) return;
     renewedMedia.current.add(item.id);
+    const url = await ensurePreviewUrl(item, true);
+    if (!url) setFailedIds((current) => [...current, item.id]);
+  }
+
+  async function retryPreview(item: TrainingMaterialPublicItem) {
+    // 用户主动重试开启新一轮，自动重签每轮仍只允许一次。
+    renewedMedia.current.delete(item.id);
+    setFailedIds((current) => current.filter((id) => id !== item.id));
     await ensurePreviewUrl(item, true);
   }
 
-  function reloadPreview(item: TrainingMaterialPublicItem) {
-    // 用户主动重试开启新一轮，自动重签每轮仍只允许一次。
-    renewedMedia.current.delete(item.id);
-    void ensurePreviewUrl(item, true);
-  }
-
-  async function openDocPreview(item: TrainingMaterialPublicItem) {
+  async function openPreview(item: TrainingMaterialPublicItem) {
     const url = await ensurePreviewUrl(item);
-    if (url) setDocPreview(item);
+    if (url) setPreviewItem(item);
   }
 
   async function download(item: TrainingMaterialPublicItem) {
@@ -2788,44 +2808,92 @@ export function MaterialsPage() {
     notify("文件将在新窗口打开；若浏览器显示预览，请使用另存为保存。");
   }
 
-  const items = data?.items ?? [];
-  const total = data?.total ?? 0;
+  // 站内搜索：标题 / 描述 / 标签包含即命中（大小写不敏感，全量内过滤）。
+  const keyword = search.trim().toLowerCase();
+  const filtered = useMemo(
+    () =>
+      keyword
+        ? library.filter(
+            (item) =>
+              item.title.toLowerCase().includes(keyword) ||
+              item.description.toLowerCase().includes(keyword) ||
+              item.tags.some((tag) =>
+                `#${tag}`.toLowerCase().includes(keyword),
+              ),
+          )
+        : library,
+    [library, keyword],
+  );
+  const items = filtered.slice(
+    (page - 1) * TRAINING_PAGE_SIZE,
+    page * TRAINING_PAGE_SIZE,
+  );
+  const total = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / TRAINING_PAGE_SIZE));
-  const tagFacet = data?.tag_facet ?? [];
-  const docUrl = docPreview ? previewUrls[docPreview.id] : undefined;
+  const kindCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const item of library) {
+      counts[item.kind] = (counts[item.kind] ?? 0) + 1;
+    }
+    return counts;
+  }, [library]);
+  const previewUrl = previewItem ? previewUrls[previewItem.id] : undefined;
 
   return (
     <section className="content-page content-materials">
       <header className="content-title content-material-title">
         <div>
           <h1>素材库</h1>
-          <p className="le-sub">
-            平台统一提供的培训课程、示例视频与资料文档；按分组与标签查找，
-            卡片上即可预览或下载。
-          </p>
+          <p className="le-sub">平台统一提供的培训课程、示例视频与资料文档。</p>
         </div>
+      </header>
+      {/* 筛选区收敛为一行下划线页签 + 搜索框（对齐同行素材库的紧凑工具栏，
+          不让筛选占据版面）；标签降为小巧胶囊，仅在有标签时出现。 */}
+      <div className="content-material-toolbar">
         <div
           className="content-view-switch"
           role="tablist"
           aria-label="素材类型"
         >
-          {TRAINING_TABS.map((entry) => (
-            <button
-              key={entry.id || "all"}
-              type="button"
-              role="tab"
-              aria-selected={tab === entry.id}
-              className={tab === entry.id ? "is-active" : undefined}
-              onClick={() => {
-                setTab(entry.id);
-                setPage(1);
-              }}
-            >
-              {entry.label}
-            </button>
-          ))}
+          {TRAINING_TABS.map((entry) => {
+            // 计数随标签筛选联动（标签变了全量重拉，计数天然联动）；
+            // 「全部」= 库内总数。
+            const count = entry.id
+              ? (kindCounts[entry.id] ?? 0)
+              : library.length;
+            return (
+              <button
+                key={entry.id || "all"}
+                type="button"
+                role="tab"
+                aria-selected={tab === entry.id}
+                className={tab === entry.id ? "is-active" : undefined}
+                onClick={() => {
+                  setTab(entry.id);
+                  setPage(1);
+                }}
+              >
+                {entry.label}
+                <small>{count}</small>
+              </button>
+            );
+          })}
         </div>
-      </header>
+        <input
+          aria-label="搜索素材"
+          className="content-material-search"
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setPage(1);
+          }}
+          placeholder="搜索标题、描述、标签"
+          type="search"
+          value={search}
+        />
+        {!loading ? (
+          <span className="content-material-total">共 {total} 个素材</span>
+        ) : null}
+      </div>
       {tagFacet.length > 0 ? (
         <fieldset
           className="content-material-tags"
@@ -2869,164 +2937,205 @@ export function MaterialsPage() {
       ) : null}
       {error ? <p className="le-hint le-hint--error">{error}</p> : null}
       {loading ? (
-        <p className="le-hint">正在读取培训素材…</p>
+        // 骨架屏占位（MATERIAL-UX P0）：加载形态与结果一致，不再跳变。
+        <div aria-hidden="true" className="content-material-grid">
+          {SKELETON_KEYS.map((key) => (
+            <div
+              className="content-material-card content-material-card--skeleton"
+              key={key}
+            />
+          ))}
+        </div>
       ) : items.length === 0 ? (
-        <p className="le-hint">暂无素材，请等待运营上传。</p>
+        keyword ? (
+          <Empty
+            description="换个关键词，或清除标签筛选后再试。"
+            title="没有找到匹配的素材"
+          />
+        ) : (
+          <Empty
+            action={
+              <Button variant="outline" onClick={() => void load(tags)}>
+                刷新
+              </Button>
+            }
+            description="运营上传的培训素材会集中显示在这里。"
+            title="暂无素材"
+          />
+        )
       ) : (
-        <div className="content-asset-grid">
+        <div className="content-material-grid">
           {items.map((item) => {
             const url = previewUrls[item.id];
+            const failed = failedIds.includes(item.id);
             return (
               <article
-                key={item.id}
-                className="content-asset"
+                className="content-material-card"
                 data-kind={item.kind}
+                key={item.id}
               >
-                {item.kind === "image" && url ? (
-                  <img
-                    alt={item.title}
-                    loading="lazy"
-                    src={url}
-                    onError={() => void resignOnMediaError(item)}
-                  />
-                ) : item.kind === "video" && url ? (
-                  // biome-ignore lint/a11y/useMediaCaption: 平台培训视频不提供字幕轨，浏览器原生控件即可。
-                  <video
-                    controls
-                    preload="metadata"
-                    src={url}
-                    onError={() => void resignOnMediaError(item)}
-                  />
-                ) : item.kind === "audio" && url ? (
-                  // biome-ignore lint/a11y/useMediaCaption: 平台培训音频不提供字幕轨。
-                  <audio
-                    controls
-                    src={url}
-                    onError={() => void resignOnMediaError(item)}
-                  />
-                ) : (
-                  <div className="content-asset__quick">
-                    <span className="studio-status">{item.kind_label}</span>
-                    <strong>{item.title}</strong>
-                    {item.description ? (
-                      <p className="le-sub">{item.description}</p>
-                    ) : null}
-                    {item.tags.length > 0 ? (
-                      <p className="le-sub">
-                        {item.tags.map((entry) => `#${entry}`).join(" ")}
-                      </p>
-                    ) : null}
-                  </div>
-                )}
-                <footer>
-                  <small>
-                    {formatTaskTime(item.created_at)} ·{" "}
-                    {formatMaterialSizeBytes(item.size_bytes)}
-                  </small>
-                  <span>
-                    {item.kind === "video" || item.kind === "audio" ? (
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => reloadPreview(item)}
-                      >
-                        {url ? "重新加载" : "播放"}
-                      </button>
-                    ) : item.kind === "image" ? (
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => reloadPreview(item)}
-                      >
-                        {url ? "重新加载" : "查看"}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => void openDocPreview(item)}
-                      >
-                        预览
-                      </button>
-                    )}{" "}
-                    <button
-                      type="button"
-                      disabled={busyId === item.id}
-                      onClick={() => void download(item)}
+                <button
+                  aria-label={`预览${item.title}`}
+                  className="content-material-card__cover"
+                  disabled={busyId === item.id}
+                  onClick={() => void openPreview(item)}
+                  type="button"
+                >
+                  {item.kind === "image" && url ? (
+                    <img
+                      alt={item.title}
+                      loading="lazy"
+                      onError={() => void resignOnMediaError(item)}
+                      src={url}
+                    />
+                  ) : item.kind === "video" && url ? (
+                    <video
+                      muted
+                      preload="metadata"
+                      src={url}
+                      onError={() => void resignOnMediaError(item)}
+                    />
+                  ) : (
+                    <span
+                      className="content-material-card__placeholder"
+                      data-kind={item.kind}
                     >
-                      {busyId === item.id ? "获取链接…" : "下载"}
-                    </button>
+                      <Icon
+                        aria-hidden="true"
+                        name={
+                          item.kind === "video"
+                            ? "video"
+                            : item.kind === "audio"
+                              ? "audio"
+                              : item.kind === "doc"
+                                ? "copy"
+                                : "image"
+                        }
+                        size={30}
+                      />
+                      <small>{item.kind_label}</small>
+                    </span>
+                  )}
+                  {item.kind === "video" && url ? (
+                    <span
+                      aria-hidden="true"
+                      className="content-material-card__play"
+                    >
+                      <Icon name="play" size={16} />
+                    </span>
+                  ) : null}
+                </button>
+                <div className="content-material-card__body">
+                  <strong>{item.title}</strong>
+                  {item.description ? <p>{item.description}</p> : null}
+                  <span className="content-material-card__meta">
+                    <em data-kind={item.kind}>{item.kind_label}</em>
+                    {formatMaterialSizeBytes(item.size_bytes)} ·{" "}
+                    {formatTaskTime(item.created_at)}
                   </span>
+                </div>
+                <footer className="content-material-card__actions">
+                  <button
+                    disabled={busyId === item.id}
+                    onClick={() => void openPreview(item)}
+                    type="button"
+                  >
+                    预览
+                  </button>
+                  <button
+                    disabled={busyId === item.id}
+                    onClick={() => void download(item)}
+                    type="button"
+                  >
+                    {busyId === item.id ? "获取链接…" : "下载"}
+                  </button>
+                  {failed ? (
+                    // 直链过期且自动重签失败：仅此时给「重试」，正常卡不暴露。
+                    <button
+                      onClick={() => void retryPreview(item)}
+                      type="button"
+                    >
+                      重试
+                    </button>
+                  ) : null}
                 </footer>
               </article>
             );
           })}
         </div>
       )}
-      {docPreview ? (
+      {previewItem ? (
         <div
-          aria-label="文档预览"
+          aria-label="素材预览"
+          className="content-material-dialog"
           role="dialog"
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 60,
-            background: "rgba(0,0,0,.55)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 24,
-          }}
         >
-          <div
-            style={{
-              background: "var(--panel-bg, #fff)",
-              borderRadius: 12,
-              width: "min(960px, 100%)",
-              maxHeight: "90vh",
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-            }}
-          >
-            <header
-              style={{
-                display: "flex",
-                gap: 12,
-                alignItems: "center",
-                padding: "10px 14px",
-              }}
-            >
-              <strong style={{ flex: 1 }}>{docPreview.title}</strong>
+          <div className="content-material-dialog__panel">
+            <header className="content-material-dialog__head">
+              <strong>{previewItem.title}</strong>
               <button
                 type="button"
                 onClick={() => {
-                  if (docPreview) void download(docPreview);
+                  if (previewItem) void download(previewItem);
                 }}
               >
                 下载文件
               </button>
-              <button type="button" onClick={() => setDocPreview(null)}>
+              <button type="button" onClick={() => setPreviewItem(null)}>
                 关闭
               </button>
             </header>
-            {docUrl ? (
-              isOfficeDoc(docPreview) ? (
-                <iframe
-                  src={officeViewerUrl(docUrl)}
-                  style={{ flex: 1, border: 0, minHeight: 480 }}
-                  title={`${docPreview.title} 预览`}
-                />
+            <div className="content-material-dialog__body">
+              {previewUrl ? (
+                previewItem.kind === "video" ? (
+                  // biome-ignore lint/a11y/useMediaCaption: 平台培训视频不提供字幕轨。
+                  <video
+                    autoPlay
+                    controls
+                    src={previewUrl}
+                    onError={() => void resignOnMediaError(previewItem)}
+                  />
+                ) : previewItem.kind === "audio" ? (
+                  // biome-ignore lint/a11y/useMediaCaption: 平台培训音频不提供字幕轨。
+                  <audio
+                    autoPlay
+                    controls
+                    src={previewUrl}
+                    onError={() => void resignOnMediaError(previewItem)}
+                  />
+                ) : previewItem.kind === "image" ? (
+                  <img
+                    alt={`${previewItem.title} 预览`}
+                    src={previewUrl}
+                    onError={() => void resignOnMediaError(previewItem)}
+                  />
+                ) : isOfficeDoc(previewItem) ? (
+                  <iframe
+                    src={officeViewerUrl(previewUrl)}
+                    title={`${previewItem.title} 预览`}
+                  />
+                ) : (
+                  <iframe
+                    src={previewUrl}
+                    title={`${previewItem.title} 预览`}
+                  />
+                )
               ) : (
-                <iframe
-                  src={docUrl}
-                  style={{ flex: 1, border: 0, minHeight: 480 }}
-                  title={`${docPreview.title} 预览`}
-                />
-              )
-            ) : (
-              <p className="le-hint">正在获取预览地址…</p>
-            )}
+                <p className="le-hint">正在获取预览地址…</p>
+              )}
+              {failedIds.includes(previewItem.id) ? (
+                <p className="le-hint le-hint--error">
+                  预览地址已失效。
+                  <button
+                    type="button"
+                    onClick={() => void retryPreview(previewItem)}
+                  >
+                    重试
+                  </button>
+                  或直接使用「下载文件」。
+                </p>
+              ) : null}
+            </div>
           </div>
         </div>
       ) : null}

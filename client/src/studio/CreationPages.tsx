@@ -180,6 +180,13 @@ const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
 // 否则超长转写稿只会在生成按钮旁看到一个没有上下文的「不能超过 20000 字符」。
 const COPY_SOURCE_TEXT_LIMIT = 20000;
 
+// 参考生视频提示词教程（用户拍板 2026-11-15：先飞书文档外链，运营改内容
+// 不发版；内容稳定后再考虑站内页）。TODO(上线前): 把下面的占位地址换成
+// 正式飞书分享链接，并把分享权限设为「互联网上获得链接的人可阅读」，
+// 否则客户打开会是飞书登录墙。
+const PROMPT_TUTORIAL_URL =
+  "https://feishu.cn/docx/TODO-replace-with-official-tutorial-link";
+
 // 清空页面与云端取消是两件事；只有服务端明确返回取消终态才可告知已取消。
 async function cancelPreviousAnalysisTask(taskId: string): Promise<string> {
   try {
@@ -479,6 +486,10 @@ export function CopyPage() {
   const [candidate, setCandidate] = useState(state.draft.rewriteCandidate);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState("");
+  // 「打开查看」弹窗：列表里只露预览，全文进弹层（用户要求两列表都可查看）。
+  const [viewingScript, setViewingScript] = useState<StudioScript | null>(null);
+  const [viewingExtraction, setViewingExtraction] =
+    useState<ViralCopyExtractionRecord | null>(null);
   const savedOperation = useRef(0);
   const current = useRef({ state, patchDraft, patchState, notify });
   current.current = { state, patchDraft, patchState, notify };
@@ -1046,13 +1057,21 @@ export function CopyPage() {
                     {record.times > 1 ? ` · 提取 ${record.times} 次` : ""}
                     {` · ${shortVideoId(record.videoId)}`}
                   </small>
-                  <Button
-                    variant="outline"
-                    disabled={readOnly || !record.text}
-                    onClick={() => reuseExtraction(record)}
-                  >
-                    复用到工坊
-                  </Button>
+                  <span className="creation-script-card__meta-actions">
+                    <button
+                      onClick={() => setViewingExtraction(record)}
+                      type="button"
+                    >
+                      查看
+                    </button>
+                    <Button
+                      variant="outline"
+                      disabled={readOnly || !record.text}
+                      onClick={() => reuseExtraction(record)}
+                    >
+                      复用到工坊
+                    </Button>
+                  </span>
                 </div>
               </div>
             ))
@@ -1128,15 +1147,23 @@ export function CopyPage() {
                   </button>
                   <div className="creation-script-card__meta">
                     <small>{metaParts.join(" · ")}</small>
-                    <button
-                      aria-label={`删除${displayTitle}`}
-                      className="creation-script-card__delete"
-                      disabled={readOnly}
-                      type="button"
-                      onClick={() => void removeSavedScript(script)}
-                    >
-                      删除
-                    </button>
+                    <span className="creation-script-card__meta-actions">
+                      <button
+                        onClick={() => setViewingScript(script)}
+                        type="button"
+                      >
+                        查看
+                      </button>
+                      <button
+                        aria-label={`删除${displayTitle}`}
+                        className="creation-script-card__delete"
+                        disabled={readOnly}
+                        type="button"
+                        onClick={() => void removeSavedScript(script)}
+                      >
+                        删除
+                      </button>
+                    </span>
                   </div>
                 </div>
               );
@@ -1528,6 +1555,83 @@ export function CopyPage() {
           ) : null}
         </>
       )}
+      {viewingScript ? (
+        <StudioDialog
+          title={viewingScript.title || "查看文案"}
+          onClose={() => setViewingScript(null)}
+        >
+          <div className="creation-copy-viewer">
+            <p className="creation-copy-viewer__meta">
+              {viewingScript.updatedAt
+                ? `${viewingScript.updatedAt.slice(0, 16).replace("T", " ")} · `
+                : ""}
+              {`${viewingScript.text.length} 字 · `}
+              {viewingScript.confirmed ? "已确认" : "草稿"}
+            </p>
+            <pre className="creation-copy-viewer__text">
+              {viewingScript.text}
+            </pre>
+            <div className="creation-copy-viewer__actions">
+              <Button
+                variant="primary"
+                disabled={readOnly}
+                onClick={() => {
+                  applySavedScript(viewingScript);
+                  setViewingScript(null);
+                }}
+              >
+                载入工坊编辑
+              </Button>
+              <Button variant="outline" onClick={() => setViewingScript(null)}>
+                关闭
+              </Button>
+            </div>
+          </div>
+        </StudioDialog>
+      ) : null}
+      {viewingExtraction ? (
+        <StudioDialog
+          title="提取记录详情"
+          onClose={() => setViewingExtraction(null)}
+        >
+          <div className="creation-copy-viewer">
+            <p className="creation-copy-viewer__meta">
+              {`${viewingExtraction.platform} · `}
+              {viewingExtraction.lastExtractedAt.slice(0, 16).replace("T", " ")}
+              {viewingExtraction.times > 1
+                ? ` · 提取 ${viewingExtraction.times} 次`
+                : ""}
+              {` · ${shortVideoId(viewingExtraction.videoId)}`}
+            </p>
+            {viewingExtraction.title ? (
+              <p className="creation-copy-viewer__headline">
+                {viewingExtraction.title}
+              </p>
+            ) : null}
+            <pre className="creation-copy-viewer__text">
+              {viewingExtraction.text || "暂无正文。"}
+            </pre>
+            <div className="creation-copy-viewer__actions">
+              <Button
+                variant="primary"
+                disabled={readOnly || !viewingExtraction.text}
+                onClick={() => {
+                  reuseExtraction(viewingExtraction);
+                  setViewingExtraction(null);
+                }}
+              >
+                复用到工坊
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setViewingExtraction(null)}
+              >
+                关闭
+              </Button>
+            </div>
+          </div>
+        </StudioDialog>
+      ) : null}
     </section>
   );
 }
@@ -4943,16 +5047,32 @@ export function VideoPage() {
       aria-label="AI 视频"
     >
       <CreationNavigation />
-      <Tabs
-        items={[
-          { id: "video", label: "文/图生视频" },
-          { id: "reference", label: "参考生视频" },
-        ]}
-        value={referenceMode ? "reference" : "video"}
-        onChange={(value) =>
-          navigate(value === "reference" ? "reference" : "video")
-        }
-      />
+      <div className="creation-reference-toolbar">
+        <Tabs
+          items={[
+            { id: "video", label: "文/图生视频" },
+            { id: "reference", label: "参考生视频" },
+          ]}
+          value={referenceMode ? "reference" : "video"}
+          onChange={(value) =>
+            navigate(value === "reference" ? "reference" : "video")
+          }
+        />
+        {referenceMode ? (
+          // 教程是参考生视频六段式提示词的玩法说明，只在参考生视频页签展示；
+          // 外链新窗口打开，运营在飞书侧更新内容无需发版。
+          <button
+            className="creation-prompt-tutorial"
+            type="button"
+            onClick={() =>
+              window.open(PROMPT_TUTORIAL_URL, "_blank", "noopener,noreferrer")
+            }
+          >
+            <Icon aria-hidden="true" name="info" size={14} />
+            提示词教程
+          </button>
+        ) : null}
+      </div>
       <div
         className={`creation-video-grid ${referenceMode ? "reference" : ""}`}
       >

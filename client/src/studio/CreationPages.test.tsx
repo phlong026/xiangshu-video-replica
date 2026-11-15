@@ -1208,6 +1208,74 @@ describe("V1.4 创作页面", () => {
     expect(screen.queryByText("douyin · 7706102670993509675")).toBeNull();
   });
 
+  it("我的文案与提取记录都可打开查看全文并从弹窗直接使用", async () => {
+    // 用户要求两列表都能「打开查看」：列表露预览，全文进弹层，
+    // 弹窗内提供 载入工坊/复用 的直达动作，不必先回列表再点。
+    replicaApi.fetchViralCopyExtractions.mockReset().mockResolvedValue({
+      items: [
+        {
+          platform: "douyin",
+          videoId: "7706102670993509675",
+          title: "",
+          lastExtractedAt: "2026-11-14T09:09:00+00:00",
+          times: 2,
+          text: "放下你手里的东西。哎呦，你打我脸干嘛？我排了半天队。",
+          updatedAt: null,
+        },
+      ],
+    });
+    const value = studio({ review: false });
+    value.state.savedScripts = [
+      {
+        id: "saved-view",
+        title: "预算清单",
+        original: "",
+        text: "主体砖混每平米约1200元，框架结构每平米约1500元。",
+        version: 2,
+        confirmed: true,
+        updatedAt: "2026-11-15T08:00:00+00:00",
+      },
+    ];
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    // 我的文案：查看 → 全文弹窗 → 载入工坊会关闭弹窗并写入草稿。
+    fireEvent.click(await screen.findByRole("tab", { name: "我的文案" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+    const scriptDialog = await screen.findByRole("dialog", {
+      name: "预算清单",
+    });
+    expect(scriptDialog).toHaveTextContent(
+      "主体砖混每平米约1200元，框架结构每平米约1500元。",
+    );
+    fireEvent.click(
+      within(scriptDialog).getByRole("button", { name: "载入工坊编辑" }),
+    );
+    await waitFor(() => expect(scriptDialog).not.toBeInTheDocument());
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        script: expect.objectContaining({ id: "saved-view" }),
+      }),
+    );
+
+    // 提取记录：查看 → 全文弹窗 → 复用到工坊同样直达。
+    fireEvent.click(await screen.findByRole("tab", { name: "提取记录" }));
+    const viewButtons = await screen.findAllByRole("button", { name: "查看" });
+    fireEvent.click(viewButtons[0]);
+    const extractionDialog = await screen.findByRole("dialog", {
+      name: "提取记录详情",
+    });
+    expect(extractionDialog).toHaveTextContent(
+      "放下你手里的东西。哎呦，你打我脸干嘛？我排了半天队。",
+    );
+    fireEvent.click(
+      within(extractionDialog).getByRole("button", { name: "复用到工坊" }),
+    );
+    expect(value.notify).toHaveBeenCalledWith(
+      "已复用提取文案，请核对后确认终稿。",
+    );
+  });
+
   it("审计员可查看创作内容但文案、视频与口播提交控件只读", () => {
     const value = studio({
       review: false,

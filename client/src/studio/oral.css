@@ -562,25 +562,13 @@
   cursor: default;
   opacity: 0.6;
 }
-.oral-library-footer {
-  border-top: 1px solid #30332a;
-  padding-top: 22px;
-  margin-top: 46px;
-  display: flex;
-  gap: 14px;
-  color: #b2b6aa;
-  font-size: 14px;
-  line-height: 1.8;
-}
-.oral-library-footer p {
-  margin: 0 0 5px;
-}
-.oral-library-footer > .studio-icon {
-  flex-shrink: 0;
-  margin-top: 3px;
-}
-.oral-library-footer span {
+/* 分身页侧栏精简（2026-11-15）：分步教程与页脚提示语移除，拍摄建议压成
+   单行要点——老用户不受噪音干扰，创建弹窗内保留逐步引导。 */
+.oral-guide-compact {
+  color: #a5a99a;
   font-size: 13px;
+  line-height: 1.8;
+  margin: 0 0 22px;
 }
 .oral-library-guide {
   border-left: 1px solid #30332a;
@@ -607,78 +595,6 @@
   font-size: 17px;
   font-weight: 500;
   margin: 0 0 10px;
-}
-.oral-shooting-guide {
-  list-style: none;
-  padding: 0;
-  margin: 24px 0 36px;
-  display: grid;
-  gap: 24px;
-}
-.oral-shooting-guide li {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-}
-.oral-shooting-guide li > span {
-  display: grid;
-  place-items: center;
-  background: #242720;
-  border-radius: 50%;
-  color: #b4b9aa;
-  width: 46px;
-  height: 46px;
-  flex: 0 0 46px;
-}
-.oral-shooting-guide h4 {
-  font-size: 14px;
-  font-weight: 500;
-  margin: 0 0 5px;
-}
-.oral-shooting-guide p {
-  margin: 0;
-  color: #a5a99a;
-  font-size: 12px;
-  line-height: 1.8;
-}
-.oral-create-steps {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  padding: 0;
-  margin: 20px 0 28px;
-  list-style: none;
-  text-align: center;
-}
-.oral-create-steps li {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-.oral-create-steps li > span {
-  display: grid;
-  place-items: center;
-  background: #252820;
-  border-radius: 50%;
-  color: #aeb5a2;
-  width: 45px;
-  height: 45px;
-  margin-bottom: 2px;
-}
-.oral-create-steps li:first-child > span {
-  color: #e8b749;
-  background: #312b19;
-  border: 1px solid #856a2a;
-}
-.oral-create-steps strong {
-  font-size: 12px;
-  font-weight: 500;
-}
-.oral-create-steps small {
-  color: #a4a999;
-  font-size: 11px;
-  line-height: 1.7;
 }
 .oral-library-voice {
   border-top: 1px solid #30332a;

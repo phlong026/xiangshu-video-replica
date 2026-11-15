@@ -502,94 +502,327 @@
 .content-asset-cell:focus-within .content-asset__quick {
   display: flex;
 }
-/* 素材库网格（.content-asset-grid）没有 .content-asset-cell 这个 hover 容器，
-   quick 信息块（标题/描述/标签，无媒体封面时的卡片主体）若沿用上面的
-   hover-only 规则会永久 display:none，卡片只剩 footer 按钮。这里让它
-   在素材库场景常显为文档流内的信息块。 */
-
-/* 素材卡是「信息块 + footer」两元素结构，不能沿用爆款卡片的
-   160px 媒体行模板（160/24/18/22）：footer 被压进 24px 行导致
-   时间与按钮挤行重叠，剩余行空成中部挖空。改为信息块自适应撑满、
-   footer 自然高度贴底。 */
-.content-asset-grid .content-asset {
-  align-content: stretch;
-  cursor: default;
-  grid-template-rows: minmax(0, 1fr) auto;
+/* 素材库 MATERIAL-UX P0（2026-11-15）：卡片同构重排——封面区（固定 16:9，
+   视频取首帧+播放角标，无封面用类型占位块）+ 标题/描述/元信息 + 动作行；
+   媒体播放统一进弹层，卡内不再嵌原生播放器。筛选区收敛：一行下划线页签
+   （带计数）+ 右侧搜索与总数；标签为小巧胶囊，不再用大金块占版面。 */
+.content-material-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 0;
+}
+.content-materials .content-view-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+}
+.content-materials .content-view-switch button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #969892;
+  cursor: pointer;
+  font-size: 14px;
+  min-height: 34px;
+  padding: 4px 12px;
+}
+.content-materials .content-view-switch button small {
+  color: #6f726b;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.content-materials .content-view-switch button:hover {
+  color: #e8e8e4;
+}
+.content-materials .content-view-switch button.is-active {
+  border-bottom-color: var(--accent-strong, #c6a45f);
+  color: var(--accent-strong, #c6a45f);
+}
+.content-materials .content-view-switch button.is-active small {
+  color: var(--accent-strong, #c6a45f);
+  opacity: 0.75;
+}
+.content-material-search {
+  background: #0e100f;
+  border: 1px solid #292a27;
+  border-radius: 8px;
+  color: #e8e8e4;
+  flex: 0 1 280px;
+  margin-left: auto;
+  min-height: 34px;
+  padding: 0 12px;
+}
+.content-material-search:focus-visible {
+  border-color: #3d3e39;
+  outline: none;
+}
+.content-material-total {
+  color: #969892;
+  flex: none;
+  font-size: 13px;
+}
+.content-material-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0 0;
+}
+.content-material-tags button {
+  background: transparent;
+  border: 1px solid #2e302c;
+  border-radius: 999px;
+  color: #969892;
+  cursor: pointer;
+  font-size: 12px;
+  min-height: 0;
+  padding: 3px 12px;
+}
+.content-material-tags button:hover {
+  border-color: #3d3e39;
+  color: #b7baaf;
+}
+.content-material-tags button.is-active {
+  border-color: var(--accent-strong, #c6a45f);
+  color: var(--accent-strong, #c6a45f);
+}
+.content-material-tags button[aria-label="清除全部标签筛选"] {
+  border: 0;
+  padding: 3px 6px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.content-material-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+  margin-top: 14px;
+}
+.content-material-card {
+  background: #0e100f;
+  border: 1px solid #242622;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   transition:
     border-color 0.15s ease,
     transform 0.15s ease;
 }
-.content-asset-grid .content-asset:hover {
+.content-material-card:hover {
   border-color: #3d3e39;
   transform: translateY(-1px);
 }
-.content-asset-grid .content-asset__quick {
+.content-material-card__cover {
+  align-items: stretch;
+  background: #171817;
+  border: 0;
+  cursor: pointer;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 0;
-  position: static;
+  padding: 0;
+  position: relative;
+  width: 100%;
 }
-.content-asset-grid .content-asset__quick strong {
-  display: -webkit-box;
-  font-size: 15px;
-  line-height: 1.35;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+.content-material-card__cover img,
+.content-material-card__cover video {
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  width: 100%;
 }
-.content-asset-grid .content-asset__quick p.le-sub {
-  display: -webkit-box;
-  margin: 0;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.content-asset-grid .content-asset footer {
-  border-top: 1px solid #292a27;
+.content-material-card__placeholder {
+  align-items: center;
+  aspect-ratio: 16 / 9;
+  color: #6f726b;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-top: 8px;
+  justify-content: center;
+  width: 100%;
 }
-.content-asset-grid .content-asset footer small {
+.content-material-card__placeholder[data-kind="doc"] {
+  color: #8fc7ff;
+}
+.content-material-card__placeholder[data-kind="audio"] {
+  color: #f0c65b;
+}
+.content-material-card__placeholder[data-kind="video"] {
+  color: #f09a6a;
+}
+.content-material-card__placeholder[data-kind="image"] {
+  color: #b9e28c;
+}
+.content-material-card__placeholder small {
+  font-size: 12px;
+}
+.content-material-card__play {
+  align-items: center;
+  background: rgba(8, 9, 9, 0.66);
+  border-radius: 50%;
+  bottom: 8px;
+  color: #fff;
+  display: flex;
+  height: 30px;
+  justify-content: center;
+  position: absolute;
+  right: 8px;
+  width: 30px;
+}
+.content-material-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px 10px;
+}
+.content-material-card__body strong {
+  display: -webkit-box;
+  font-size: 14px;
+  line-height: 1.4;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+.content-material-card__body p {
+  color: #969892;
+  display: -webkit-box;
+  font-size: 12px;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+.content-material-card__meta {
+  color: #6f726b;
+  font-size: 12px;
+  margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.content-asset-grid .content-asset footer span {
-  display: flex;
-  gap: 8px;
+.content-material-card__meta em {
+  font-style: normal;
+  margin-right: 6px;
 }
-.content-asset-grid .content-asset footer button {
-  flex: 1;
-  white-space: nowrap;
-}
-/* 按素材类型给 kind 徽标着色，无媒体封面的卡片多一层视觉锚点 */
-.content-asset[data-kind="doc"] .content-asset__quick .studio-status {
+.content-material-card__meta em[data-kind="doc"] {
   color: #8fc7ff;
 }
-.content-asset[data-kind="image"] .content-asset__quick .studio-status {
+.content-material-card__meta em[data-kind="image"] {
   color: #b9e28c;
 }
-.content-asset[data-kind="audio"] .content-asset__quick .studio-status {
+.content-material-card__meta em[data-kind="audio"] {
   color: #f0c65b;
 }
-.content-asset[data-kind="video"] .content-asset__quick .studio-status {
+.content-material-card__meta em[data-kind="video"] {
   color: #f09a6a;
 }
-.content-asset__quick button {
-  background: rgba(23, 26, 33, 0.86);
-  border: 0;
+.content-material-card__actions {
+  border-top: 1px solid #292a27;
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding: 10px 14px;
+}
+.content-material-card__actions button {
+  background: none;
+  border: 1px solid #3d3e39;
   border-radius: 8px;
-  color: #fff;
+  color: #d8d9d3;
   cursor: pointer;
   flex: 1;
-  font-size: var(--font-caption, 12px);
-  padding: 6px 8px;
+  font-size: 13px;
+  min-height: 32px;
+  white-space: nowrap;
 }
-.content-asset__quick button:hover {
-  background: rgba(23, 26, 33, 0.96);
+.content-material-card__actions button:hover:not(:disabled) {
+  border-color: #57594f;
+  color: #fff;
+}
+.content-material-card__actions button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+/* 骨架屏：与卡片同形的 shimmer 占位，加载不再跳变。 */
+.content-material-card--skeleton {
+  animation: content-material-skeleton 1.4s ease-in-out infinite;
+  background: linear-gradient(100deg, #141514 40%, #1d1e1c 50%, #141514 60%)
+    #141514;
+  background-size: 200% 100%;
+  min-height: 210px;
+}
+@keyframes content-material-skeleton {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+/* 预览弹层：文档（Office Online）与视频/音频/图片共用同一壳。 */
+.content-material-dialog {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 60;
+}
+.content-material-dialog__panel {
+  background: var(--panel-bg, #fff);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+  overflow: hidden;
+  width: min(960px, 100%);
+}
+.content-material-dialog__head {
+  align-items: center;
+  color: #1d1d1b;
+  display: flex;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.content-material-dialog__head strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.content-material-dialog__body {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+  padding: 0 0 12px;
+}
+.content-material-dialog__body video,
+.content-material-dialog__body img {
+  max-height: 72vh;
+  max-width: 100%;
+}
+.content-material-dialog__body audio {
+  width: min(560px, 92%);
+}
+.content-material-dialog__body iframe {
+  border: 0;
+  flex: 1;
+  min-height: 480px;
+  width: 100%;
+}
+.content-material-dialog__body .le-hint--error button {
+  background: none;
+  border: 0;
+  color: #e5695f;
+  cursor: pointer;
+  font-size: inherit;
+  padding: 0 4px;
+  text-decoration: underline;
 }
 .content-asset__status.is-direct {
   color: #b7791f;
