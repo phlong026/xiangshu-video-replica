@@ -20,10 +20,10 @@ from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.usage_billing import finish_source
+from app.viral_routes import _require_client_enabled
 from app.viral_search import archive_search_covers_bounded
 from app.viral_search_routes import require_priced_viral_service
 from app.viral_store import get_viral_video, update_viral_cover, upsert_viral_videos
-from app.viral_routes import _require_client_enabled
 from app.viral_tikhub import (
     ViralSourceClient,
     ViralSourceError,
