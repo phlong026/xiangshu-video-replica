@@ -234,7 +234,11 @@ function priceChange(item: AuditLogItem) {
 // 伪装成状态（2026-09-12 评审 P3 的「伪状态反模式」）。
 const PAGE_SIZE = 20;
 
-export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
+export function AuditEventsPage({
+  readOnly: _readOnly = false,
+}: {
+  readOnly?: boolean;
+}) {
   const canExport = useCan()("export");
   const [items, setItems] = useState<AuditLogItem[]>([]);
   const [loading, setLoading] = useState(true);

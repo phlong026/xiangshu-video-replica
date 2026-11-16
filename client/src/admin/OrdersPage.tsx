@@ -146,7 +146,8 @@ export function OrdersPage({
       if (synced.gateway_paid === true) {
         gatewayNote = "网关确认已支付，已入账。";
       } else if (synced.gateway_paid === false) {
-        gatewayNote = "本次网关查询未支付；若订单已关闭，网关侧二维码可能仍可支付。";
+        gatewayNote =
+          "本次网关查询未支付；若订单已关闭，网关侧二维码可能仍可支付。";
       }
       setNotice(`订单 ${pendingSyncOrderNo} 状态已同步。${gatewayNote}`);
       setPendingSyncOrderNo(null);
@@ -388,7 +389,8 @@ export function OrdersPage({
                     微信订单不再需要绕道客户详情核验。CLOSED 单同样可查
                     （2026-11-16 漏账缺口修复）：关单只是本地记账态，网关侧
                     可能已支付且回调丢失，人工查单是唯一的补账入口。 */}
-                {!(order.status === "PENDING" || order.status === "CLOSED") || readOnly ? (
+                {!(order.status === "PENDING" || order.status === "CLOSED") ||
+                readOnly ? (
                   "—"
                 ) : (
                   <button

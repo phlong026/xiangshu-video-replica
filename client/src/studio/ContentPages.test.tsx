@@ -4449,7 +4449,7 @@ describe("全自动复刻入口（M8 v1）", () => {
         links.push({ href: this.href, target: this.target, rel: this.rel });
       });
     try {
-      const view = render(<MaterialsPage />);
+      const _view = render(<MaterialsPage />);
       // 播放进弹层（MATERIAL-UX P0）：卡内不再嵌原生播放器；两张卡各有
       // 一个「预览」，点第一张（视频卡）。
       const previewButtons = await screen.findAllByRole("button", {
@@ -4490,7 +4490,7 @@ describe("全自动复刻入口（M8 v1）", () => {
     trainingMaterialDownloadUrl
       .mockResolvedValueOnce("https://signed/old")
       .mockResolvedValueOnce("https://signed/new");
-    const view = render(<MaterialsPage />);
+    const _view = render(<MaterialsPage />);
     const previewButtons = await screen.findAllByRole("button", {
       name: "预览",
     });
