@@ -74,7 +74,6 @@ import {
   loadProjectDraft,
   loadSavedScriptList,
   loadStudioData,
-  loadViralVideos,
   mergePolledTasks,
   persistCloudDraft,
   persistSavedScript,

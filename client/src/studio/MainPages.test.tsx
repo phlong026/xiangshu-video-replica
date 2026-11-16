@@ -912,15 +912,9 @@ describe("V1.4 工作台新版首页布局（爆款精选已下线）", () => {
       }),
     );
     render(<WorkbenchPage />);
-    expect(
-      screen.queryByRole("heading", { name: "爆款视频精选" }),
-    ).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: "查看全部爆款" }),
-    ).toBeNull();
-    expect(
-      screen.queryAllByText(/提取文案：/),
-    ).toHaveLength(0);
+    expect(screen.queryByRole("heading", { name: "爆款视频精选" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看全部爆款" })).toBeNull();
+    expect(screen.queryAllByText(/提取文案：/)).toHaveLength(0);
   });
 });
 
