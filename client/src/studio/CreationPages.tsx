@@ -1806,6 +1806,19 @@ export function ReplicaPage() {
     useState<FinalReplicaSnapshot | null>(() =>
       state.draft.projectId ? (state.draft.finalSnapshot ?? null) : null,
     );
+  // 16–30s 源片走长档（video_768p_long 价目启用后 capabilities 放开到 30；
+  // 2K 恒为 15——上游契约，价目启用也不放开）。档位未启用时钳回 15。
+  // 终稿编译（finalInput）与生成上下文（PromptEditor duration_seconds）必须
+  // 同源引用这一个上限：终稿入口曾漏带 max 参数按默认 15 钳制，768P 长档
+  // 启用后 16–30 秒素材会被按 15 秒编译并误触「源视频长于目标时长」压缩门禁。
+  const replicaDurationMax = customerDurationMax(
+    videoCapabilities,
+    state.draft.resolution,
+  );
+  const replicaDuration = normalizeCustomerDuration(
+    state.draft.duration,
+    replicaDurationMax,
+  );
   const finalInput = {
     projectId: state.draft.projectId ?? "",
     scriptText: state.draft.script.text,
@@ -1814,7 +1827,7 @@ export function ReplicaPage() {
     // `duration <= 9 ? 4 : 15`；PR #160 把契约放开到 4–15 每秒后该映射即失效，
     // 默认 8 秒会被悄悄发成 4 秒。与 generation_context 共用同一个归一函数，
     // 免得两处对「目标时长」的理解再次走岔。
-    duration: normalizeCustomerDuration(state.draft.duration),
+    duration: replicaDuration,
     resolution: (state.draft.resolution === "2K" ? "2K" : "768P") as
       | "768P"
       | "2K",
@@ -2250,17 +2263,6 @@ export function ReplicaPage() {
   );
 
   const replicaProjectId = state.draft.projectId;
-  // 16–30s 源片走长档（video_768p_long 价目启用后 capabilities 放开到 30；
-  // 2K 恒为 15——上游契约，价目启用也不放开）。档位未启用时钳回 15。
-  const replicaDurationMax = customerDurationMax(
-    videoCapabilities,
-    state.draft.resolution,
-  );
-  const replicaDuration = normalizeCustomerDuration(
-    state.draft.duration,
-    replicaDurationMax,
-  );
-
   // S13：真实画幅一到手就把草稿画幅对齐过去。首帧已选时以首帧图片为准
   // （i2v 由首帧决定画面比例，用户在首帧面板显式选过 9:16 也要跟随），
   // 否则跟随参考视频；值没变就不写草稿，避免无谓的 inputKey 抖动。
