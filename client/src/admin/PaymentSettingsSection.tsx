@@ -161,7 +161,9 @@ export function PaymentSettingsSection({
             pid: zpayPid,
             key: zpayKey,
             enabled_channels: channels,
-            rotation_acknowledged: rotationAck,
+            // 只在勾选时携带：未确认的保存保持旧 wire 格式（服务端默认 false），
+            // 免得每次普通保存都多一个无意义字段。
+            ...(rotationAck ? { rotation_acknowledged: true } : {}),
           },
           reason,
           retry.current.key,
@@ -194,7 +196,8 @@ export function PaymentSettingsSection({
                     pid: zpayPid,
                     key: zpayKey,
                     enabled_channels: channels,
-                    rotation_acknowledged: rotationAck,
+                    // 同 zpay 直存路径：只在勾选时携带确认位。
+                    ...(rotationAck ? { rotation_acknowledged: true } : {}),
                   },
                 }
               : { wechat_native: wechat }),
