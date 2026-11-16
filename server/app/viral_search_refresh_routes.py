@@ -23,6 +23,7 @@ from app.usage_billing import finish_source
 from app.viral_search import archive_search_covers_bounded
 from app.viral_search_routes import require_priced_viral_service
 from app.viral_store import get_viral_video, update_viral_cover, upsert_viral_videos
+from app.viral_routes import _require_client_enabled
 from app.viral_tikhub import (
     ViralSourceClient,
     ViralSourceError,
@@ -100,6 +101,7 @@ def refresh_viral_video(
     client: ViralSearchRefreshSourceClientDep,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> ViralSearchRefreshResponse:
+    _require_client_enabled()
     """刷新单条视频资源.
 
     不声明 ``AuthenticatedUser``：它会在**请求级**连接上做一次加行锁的会话校验

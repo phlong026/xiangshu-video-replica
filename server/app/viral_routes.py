@@ -79,8 +79,9 @@ from app.viral_tikhub import (
 router = APIRouter(prefix="/api/viral", tags=["viral"])
 
 # 爆款数据功能下线开关（2026-11-16 定价决策：该系列免费提供但平台持续承担
-# tikhub 成本，业务拍板下线）。默认关闭；env 置 1 可临时重开（回滚用）。
-_VIRAL_CLIENT_DISABLED = os.environ.get("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "0") == "1"
+# tikhub 成本，业务拍板下线）。**默认即下线**；如需临时重开，env 显式置
+# VIDEO_REPLICA_VIRAL_CLIENT_DISABLED=0（回滚窗口用，用完应恢复下线）。
+_VIRAL_CLIENT_DISABLED = os.environ.get("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1") == "1"
 
 
 def _require_client_enabled() -> None:

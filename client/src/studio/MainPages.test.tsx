@@ -888,406 +888,39 @@ describe("V1.4 工作台正在进行行", () => {
   });
 });
 
-describe("V1.4 工作台新版首页布局", () => {
-  const videos: StudioVideo[] = Array.from({ length: 7 }, (_, index) => ({
-    homepageFeatured: true,
-    id: `video-${index + 1}`,
-    title: `灵感视频 ${index + 1}`,
-    author: `作者 ${index + 1}`,
-    platform: index % 2 === 0 ? "抖音" : "视频号",
-    category: "乡墅",
-    poster: `/poster-${index + 1}.jpg`,
-    duration: "00:56",
-    likes: 128000 - index * 1000,
-    collections: 100,
-    shares: 20,
-    description: "乡墅爆款案例",
-  }));
-
-  beforeEach(() => {
-    window.sessionStorage.clear();
-    createViralImportTask.mockReset();
-    getViralImportTask.mockReset();
-  });
-
-  it("浏览普通周榜或解析链接后，回到首页仍只展示人工精选", () => {
-    const value = studio(undefined, {
-      state: createState("workbench"),
-      data: data([], [videos[0]]),
-    });
-    useStudio.mockReturnValue(value);
-    const view = render(<WorkbenchPage />);
-    expect(screen.getByText("灵感视频 1")).toBeInTheDocument();
-    value.data = {
-      ...value.data,
-      videos: [
-        {
-          ...videos[1],
-          homepageFeatured: false,
-          title: "周榜高点赞未精选",
-          likes: 99999999,
-        },
-        {
-          ...videos[2],
-          homepageFeatured: undefined,
-          title: "主动解析链接未精选",
-          likes: 99999998,
-        },
-      ],
-    };
-    view.rerender(<WorkbenchPage />);
-    expect(screen.getByText("灵感视频 1")).toBeInTheDocument();
-    expect(screen.queryByText("周榜高点赞未精选")).not.toBeInTheDocument();
-    expect(screen.queryByText("主动解析链接未精选")).not.toBeInTheDocument();
-  });
-
-  it("展示新版主标题、居中辅助文案、五个竖屏爆款与四个快捷入口", () => {
-    const value = studio(undefined, {
-      state: createState("workbench"),
-      data: data([runningTask], videos),
-    });
-    useStudio.mockReturnValue(value);
-
-    render(<WorkbenchPage />);
-
-    expect(
-      screen.getByRole("heading", {
-        name: "粘贴一条爆款乡墅视频链接，快速生成它的原创视频",
-      }),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/支持抖音、小红书的分享链接/)).toHaveClass(
-      "studio-start-helper",
-    );
-    expect(
-      screen.getByRole("heading", { name: "爆款视频精选" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("灵感视频 5")).toBeInTheDocument();
-    expect(screen.queryByText("灵感视频 6")).not.toBeInTheDocument();
-    for (const video of videos.slice(0, 5)) {
-      expect(screen.getByText(video.author)).toHaveAttribute(
-        "title",
-        `作者：${video.author}`,
-      );
-    }
-    expect(screen.getAllByRole("button", { name: /提取文案：/ })).toHaveLength(
-      5,
-    );
-    expect(screen.getAllByRole("button", { name: /查看详情：/ })).toHaveLength(
-      5,
-    );
-    expect(
-      screen.queryByRole("button", { name: /用它复刻/ }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "查看全部爆款" }),
-    ).toBeInTheDocument();
-    for (const name of ["文案工坊", "人物库", "素材库", "数据看板"]) {
-      expect(
-        screen.getByRole("button", { name: `快捷入口：${name}` }),
-      ).toBeInTheDocument();
-    }
-  });
-
-  it("审核首页从爆款卡片提取文案时复用既有草稿与导航流程", () => {
-    const value = studio(undefined, {
-      review: true,
-      state: createState("workbench"),
-      data: data([], videos),
-    });
-    useStudio.mockReturnValue(value);
-
-    render(<WorkbenchPage />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "提取文案：灵感视频 1" }),
-    );
-
-    expect(value.patchDraft).toHaveBeenCalledWith({ sourceId: "video-1" });
-    expect(value.navigate).toHaveBeenCalledWith("copy", {
-      selectedVideoId: "video-1",
-      returnTo: "workbench",
-    });
-  });
-
-  it.each([
-    [3_999, false],
-    [4_000, true],
-    [15_000, true],
-    [16_000, true],
-    [27_000, true],
-    [30_000, true],
-    [30_001, false],
-    [42_000, false],
-    [undefined, false],
-  ])("首页精选时长 %s 毫秒的一键复刻入口为 %s", (durationMs, eligible) => {
-    const source: StudioVideo = {
-      ...videos[0],
-      durationMs,
-      platformKey: "douyin",
-      nativeId: "native-home-replica",
-    };
-    const value = studio(undefined, {
-      state: createState("workbench"),
-      data: data([], [source]),
-    });
-    useStudio.mockReturnValue(value);
-    render(<WorkbenchPage />);
-
-    const replicate = screen.queryByRole("button", {
-      name: `一键复刻：${source.title}`,
-    });
-    if (eligible) {
-      expect(replicate).toBeEnabled();
-      fireEvent.click(replicate as HTMLButtonElement);
-      expect(value.navigate).toHaveBeenCalledWith("viral-detail", {
-        selectedVideoId: source.id,
-        returnTo: "workbench",
-        viralReplicateIntent: true,
-      });
-      expect(
-        new URLSearchParams(window.location.search).get("viralVideoId"),
-      ).toBe(source.nativeId);
-    } else {
-      expect(replicate).not.toBeInTheDocument();
-    }
-    expect(
-      screen.getByRole("button", { name: `提取文案：${source.title}` }),
-    ).toBeEnabled();
-  });
-
-  it("首页精选按热度和稳定 ID 确定排序，不依赖接口数组顺序", () => {
-    const value = studio(undefined, {
-      state: createState("workbench"),
-      data: data([], [...videos].reverse()),
-    });
-    useStudio.mockReturnValue(value);
-
-    render(<WorkbenchPage />);
-
-    expect(screen.getByText("灵感视频 1")).toBeInTheDocument();
-    expect(screen.getByText("灵感视频 5")).toBeInTheDocument();
-    expect(screen.queryByText("灵感视频 6")).not.toBeInTheDocument();
-  });
-
-  it("未知点赞保留待核验，真实零点赞可显示且排序高于未知", () => {
+describe("V1.4 工作台新版首页布局（爆款精选已下线）", () => {
+  it("首页不再渲染爆款视频精选区（2026-11-16 定价决策下线）", () => {
     useStudio.mockReturnValue(
       studio(undefined, {
         state: createState("workbench"),
         data: data(
           [],
-          [
-            {
-              ...videos[0],
-              id: "unknown",
-              title: "待核验视频",
-              likes: null,
-              likeDisplay: "0",
-            },
-            { ...videos[1], id: "zero", title: "零赞视频", likes: 0 },
-          ],
+          Array.from({ length: 5 }, (_, index) => ({
+            id: `video-${index + 1}`,
+            title: `爆款 ${index + 1}`,
+            author: `作者 ${index + 1}`,
+            platform: "抖音" as const,
+            category: "乡墅",
+            poster: `/poster-${index + 1}.jpg`,
+            duration: "00:56",
+            likes: 1000,
+            collections: 10,
+            shares: 5,
+            description: "乡墅爆款案例",
+          })),
         ),
       }),
     );
-    const { container } = render(<WorkbenchPage />);
-    expect(screen.getByText("热度 待核验")).toBeInTheDocument();
-    const cards = container.querySelectorAll(".studio-home-viral-card");
-    expect(cards[0]).toHaveTextContent("零赞视频");
-    expect(cards[0]).toHaveTextContent("0");
-    expect(cards[1]).toHaveTextContent("待核验");
-  });
-
-  it("首页精选先按跨平台置顶顺序展示，未置顶再按热度排序", () => {
-    const rankedVideos: StudioVideo[] = [
-      { ...videos[0], id: "douyin-hot", title: "抖音高热", likes: 999_999 },
-      {
-        ...videos[1],
-        id: "wechat-pinned-second",
-        title: "视频号置顶第二",
-        likes: 1,
-        homepageRank: 2,
-      },
-      {
-        ...videos[2],
-        id: "douyin-pinned-first",
-        title: "抖音置顶第一",
-        likes: 0,
-        homepageRank: 1,
-      },
-      ...videos.slice(3),
-    ];
-    const value = studio(undefined, {
-      state: createState("workbench"),
-      data: data([], rankedVideos),
-    });
-    useStudio.mockReturnValue(value);
-
-    const { container } = render(<WorkbenchPage />);
-    const titles = Array.from(
-      container.querySelectorAll(".studio-home-viral-card h3"),
-      (heading) => heading.textContent,
-    );
-
-    expect(titles.slice(0, 3)).toEqual([
-      "抖音置顶第一",
-      "视频号置顶第二",
-      "抖音高热",
-    ]);
-  });
-
-  it("真实爆款从首页提取文案时先导入项目素材", async () => {
-    createViralImportTask.mockResolvedValue({
-      taskId: "import-home",
-      status: "SUCCEEDED",
-      projectId: "project-home",
-      sourceAssetId: "asset-home",
-      canTranscribe: true,
-    });
-    const source = {
-      ...videos[0],
-      platformKey: "douyin" as const,
-      nativeId: "native-home",
-    };
-    const value = studio(undefined, {
-      state: createState("workbench"),
-      data: data([], [source]),
-    });
-    useStudio.mockReturnValue(value);
     render(<WorkbenchPage />);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "提取文案：灵感视频 1" }),
-    );
-
-    await waitFor(() =>
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "project-home",
-        sourceId: "asset-home",
-        sourceAssetId: "asset-home",
-      }),
-    );
-    expect(createViralImportTask).toHaveBeenCalledWith(
-      "douyin",
-      "native-home",
-      "copy",
-      expect.any(String),
-    );
-    expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
-      "project-home",
-      "asset-home",
-    );
-  });
-
-  it("首页爆款永久失败后使用新幂等键重试", async () => {
-    createViralImportTask
-      .mockResolvedValueOnce({
-        id: "home-expired",
-        status: "FAILED",
-        retryable: false,
-        errorMessage: "首页来源已失效",
-      })
-      .mockResolvedValueOnce({
-        id: "home-replacement",
-        status: "SUCCEEDED",
-        projectId: "home-project-new",
-        sourceAssetId: "home-asset-new",
-        canTranscribe: true,
-      });
-    const source = {
-      ...videos[0],
-      platformKey: "douyin" as const,
-      nativeId: "native-home-expired",
-    };
-    const value = studio(undefined, {
-      user: {
-        id: "customer-home",
-        username: "customer-home",
-        display_name: "首页客户",
-        role: "customer",
-      },
-      state: createState("workbench"),
-      data: data([], [source]),
-    });
-    useStudio.mockReturnValue(value);
-    render(<WorkbenchPage />);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "提取文案：灵感视频 1" }),
-    );
-    await waitFor(() =>
-      expect(value.notify).toHaveBeenCalledWith("首页来源已失效"),
-    );
-    const failedKey = createViralImportTask.mock.calls[0][3];
-    fireEvent.click(
-      screen.getByRole("button", { name: "提取文案：灵感视频 1" }),
-    );
-    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
-
-    expect(createViralImportTask.mock.calls[1][3]).not.toBe(failedKey);
-  });
-
-  it("首页爆款畸形成功后不写草稿且使用新幂等键重试", async () => {
-    createViralImportTask.mockResolvedValue({
-      id: "home-malformed",
-      status: "SUCCEEDED",
-      projectId: "home-project",
-      sourceAssetId: "home-audio",
-      canTranscribe: false,
-    });
-    const source = {
-      ...videos[0],
-      platformKey: "douyin" as const,
-      nativeId: "native-home-malformed",
-    };
-    const value = studio(undefined, {
-      user: {
-        id: "customer-home-malformed",
-        username: "customer-home-malformed",
-        display_name: "首页客户",
-        role: "customer",
-      },
-      state: createState("workbench"),
-      data: data([], [source]),
-    });
-    useStudio.mockReturnValue(value);
-    render(<WorkbenchPage />);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "提取文案：灵感视频 1" }),
-    );
-    await waitFor(() =>
-      expect(value.notify).toHaveBeenCalledWith("该来源暂不支持提取文案"),
-    );
-    const malformedKey = createViralImportTask.mock.calls[0][3];
-    fireEvent.click(
-      screen.getByRole("button", { name: "提取文案：灵感视频 1" }),
-    );
-    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
-
-    expect(createViralImportTask.mock.calls[1][3]).not.toBe(malformedKey);
-    expect(value.patchDraft).not.toHaveBeenCalled();
-    expect(value.navigate).not.toHaveBeenCalled();
-  });
-
-  it("正式首页爆款缺少平台原生 ID 时不创建伪文案项目", () => {
-    const source = {
-      ...videos[0],
-      platformKey: undefined,
-      nativeId: undefined,
-    };
-    const value = studio(undefined, {
-      review: false,
-      state: createState("workbench"),
-      data: data([], [source]),
-    });
-    useStudio.mockReturnValue(value);
-    render(<WorkbenchPage />);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "提取文案：灵感视频 1" }),
-    );
-
-    expect(value.notify).toHaveBeenCalledWith("该视频缺少可导入的平台标识");
-    expect(value.patchDraft).not.toHaveBeenCalled();
-    expect(value.navigate).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("heading", { name: "爆款视频精选" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "查看全部爆款" }),
+    ).toBeNull();
+    expect(
+      screen.queryAllByText(/提取文案：/),
+    ).toHaveLength(0);
   });
 });
 
@@ -1322,13 +955,12 @@ describe("V1.4 工作台对齐网格", () => {
     const areas = Array.from(grid.children).map(
       (cell) => (cell as HTMLElement).dataset.area,
     );
-    expect(areas).toEqual(["running", "activity", "viral", "shortcuts"]);
+    // 爆款区块已下线（2026-11-16 定价决策）：网格三区块
+    expect(areas).toEqual(["running", "activity", "shortcuts"]);
 
     // 标题必须位于卡片内部（此前左栏 h2 悬在卡片外，行首高度受外部标题影响）
     const runningCell = grid.children[0] as HTMLElement;
     expect(runningCell.querySelector("h2")?.textContent).toBe("正在进行");
-    const viralCell = grid.children[2] as HTMLElement;
-    expect(viralCell.querySelector("h2")?.textContent).toBe("爆款视频精选");
   });
 
   it("任务动态最多展示 4 条，超出时提供进入任务中心出口", () => {

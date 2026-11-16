@@ -87,11 +87,10 @@ _SECOND_USAGE_SOURCES: dict[str, tuple[str, str]] = {
 
 
 def _pending_stats(conn: BusinessConnection, service: str) -> dict[str, int]:
+    """该科目 UNKNOWN 调用的积压分布（可确认=操作内至少一条可定价调用）。"""
     row = conn.execute(
         """
-        SELECT
-          count(*) FILTER (WHERE ba.usage IS NOT NULL) AS with_usage,
-          count(*) FILTER (WHERE ba.usage IS NULL) AS without_usage
+        SELECT COUNT(DISTINCT o.id) AS operations
         FROM billing_attempts ba
         JOIN billing_operations o ON o.id = ba.operation_id
         LEFT JOIN billing_evidence e ON e.attempt_id = ba.id
@@ -103,10 +102,7 @@ def _pending_stats(conn: BusinessConnection, service: str) -> dict[str, int]:
         """,
         (service,),
     ).fetchone()
-    return {
-        "with_usage": int(row["with_usage"]),
-        "without_usage": int(row["without_usage"]),
-    }
+    return {"operations": int(row["operations"])}
 
 
 def _fetch_batch(
@@ -118,9 +114,16 @@ def _fetch_batch(
     extra_where_sql: str,
     limit: int,
 ) -> list[psycopg.Row]:
+    """每个操作只取一条 UNKNOWN 调用（DISTINCT ON）。
+
+    同一操作多轮重试调用会产生多条 UNKNOWN attempt——若逐条按全量时长确认
+    会重复计成本。正确语义：**每个操作确认一次**，成本 = 任务交付量 × 单价，
+    即该任务的真实平台总成本；其余 attempt 放弃确认，留痕在队列外。
+    """
     return conn.execute(
         f"""
-        SELECT ba.id AS attempt_id, ba.operation_id,
+        SELECT DISTINCT ON (o.id)
+               ba.id AS attempt_id, ba.operation_id,
                {usage_expr_sql} AS usage
         FROM billing_attempts ba
         JOIN billing_operations o ON o.id = ba.operation_id
@@ -132,7 +135,7 @@ def _fetch_batch(
           AND e.attempt_id IS NULL
           AND o.state <> 'PENDING'
           {extra_where_sql}
-        ORDER BY ba.completed_at, ba.id
+        ORDER BY o.id, ba.completed_at DESC, ba.id DESC
         LIMIT %s
         FOR UPDATE OF ba SKIP LOCKED
         """,  # noqa: S608 - 白名单表/列名 + 固定片段
@@ -145,21 +148,27 @@ def _backfill_service(
     *,
     service: str,
     unit_cost: Decimal,
+    tariff_version: int,
     actor_id: str,
     reason: str,
-    reference: str,
     limit: int,
 ) -> tuple[int, Decimal]:
-    """单科目回填；返回 (确认条数, 成本合计分)。"""
+    """单科目回填；返回 (确认操作数, 成本合计分)。"""
     is_call_unit = service in _CALL_UNIT_SERVICES
-    usage_expr = "1" if is_call_unit else _SECOND_USAGE_SOURCES[service][1]
-    task_join = "" if is_call_unit else _SECOND_USAGE_SOURCES[service][0]
-    extra_where = "" if is_call_unit else _SECOND_USAGE_SOURCES[service][2]
+    if is_call_unit:
+        usage_expr = "COALESCE(ba.usage, 1)"
+        task_join = ""
+        extra_where = ""
+    else:
+        _, usage_expr, extra_where = _SECOND_USAGE_SOURCES[service]
+        task_join = _SECOND_USAGE_SOURCES[service][0]
 
+    reference = f"attempt-usage-backfill:{service}@v{tariff_version}"
     total = 0
     cost_total = Decimal(0)
     while total < limit:
-        # 每批一个独立事务：批内锁定行 → 写证据+审计 → 提交；重跑幂等。
+        # autocommit 连接上每个 with conn.transaction() 是独立显式事务：
+        # 批内锁定行 → 写证据+审计 → 提交；外呼无、无长事务。
         with conn.transaction():
             rows = _fetch_batch(
                 conn,
@@ -247,7 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit < 1:
         print("error: --limit must be positive", file=sys.stderr)
         return 1
-    services = [s.strip() for s in args.services.split(",") if s.strip()]
+    # 去重：重复科目会让 limit 语义失真
+    services = list(dict.fromkeys(s.strip() for s in args.services.split(",") if s.strip()))
     if not services:
         print("error: --services is empty", file=sys.stderr)
         return 1
@@ -267,7 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    with psycopg.connect(database_url) as conn:
+    # autocommit=True：每个 with conn.transaction() 都是独立显式事务，
+    # 没有外层隐式事务包裹，批次真正逐批提交。
+    with psycopg.connect(database_url, autocommit=True) as conn:
         with conn.transaction():
             actor = conn.execute(
                 "SELECT id FROM users WHERE id = %s", (args.actor_user_id,)
@@ -278,7 +290,9 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # 一次冻结全部科目的单价与版本（单位：分）
             tariffs: dict[str, Decimal] = {}
+            versions: dict[str, int] = {}
             for service in services:
                 tariff = read_tariff(conn, service)
                 if tariff is None or tariff.unit_cost_fen is None:
@@ -289,24 +303,30 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 1
                 tariffs[service] = Decimal(str(tariff.unit_cost_fen))
+                versions[service] = int(tariff.version)
 
         if not args.apply:
-            print("DRY-RUN（未写库）。加 --apply 执行。services=" + ",".join(services))
+            # dry-run 预演：打印每个科目的可确认操作数与无法定价的用量缺失数
+            for service in services:
+                stats = _pending_stats(conn, service)
+                print(
+                    f"service={service} unit_cost_fen={tariffs[service]} "
+                    f"operations_to_confirm={stats['with_usage']} "
+                    f"usage_missing={stats['without_usage']}"
+                )
+            print("DRY-RUN（未写库）。加 --apply 执行。")
             return 0
 
         actor_id = str(actor["id"])
         for service in services:
             unit_cost = tariffs[service]
-            tariff = read_tariff(conn, service)
-            reference = (
-                args.reference + f":{service}@v{tariff.version}"
-                if tariff is not None
-                else args.reference + f":{service}"
-            )
+            version = versions[service]
+            reference = f"{args.reference}:{service}@v{version}"
             confirmed, cost_total = _backfill_service(
                 conn,
                 service=service,
                 unit_cost=unit_cost,
+                tariff_version=version,
                 actor_id=actor_id,
                 reason=args.reason,
                 reference=reference,

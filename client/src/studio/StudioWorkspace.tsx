@@ -1466,25 +1466,7 @@ export function StudioWorkspace({
             ],
           });
       });
-    void loadViralVideos()
-      .then((viral) =>
-        coreLoad.then(() => {
-          if (!active) return;
-          setData((previous) => ({
-            ...previous,
-            homepageVideos: viral.videos,
-            errors: [
-              ...previous.errors.filter(
-                (message) => !message.includes("爆款失败"),
-              ),
-              ...viral.errors,
-            ],
-          }));
-        }),
-      )
-      .catch(() => {
-        // 爆款区独立容错，不覆盖已加载的项目和任务。
-      });
+    // 爆款数据功能已下线（2026-11-16 定价决策）：不再请求爆款列表。
     return () => {
       active = false;
     };
