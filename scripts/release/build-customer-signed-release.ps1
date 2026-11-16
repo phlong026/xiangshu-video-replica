@@ -129,7 +129,16 @@ try {
   # The release gate: an installer whose Authenticode signature is not valid
   # must never leave this machine. A failed check means NO artifact, not a
   # repackaged unsigned one.
-  $installer = Get-ChildItem -LiteralPath '.cargo-target/release/bundle/nsis' -Filter '*.exe' |
+  # CARGO_TARGET_DIR 必须尊重：签名机仓库路径含非 ASCII 时（lib.exe/响应文件
+  # 过不了 ANSI 编码，aws-lc-sys 归档 LNK1104），靠它把 target 挪到纯 ASCII 盘符
+  # 路径；默认仍落在仓库内 .cargo-target，与 CI/desktop-build 工作流的取物路径
+  # 保持一致。
+  $nsisBundleDir = if ($env:CARGO_TARGET_DIR) {
+    Join-Path $env:CARGO_TARGET_DIR 'release/bundle/nsis'
+  } else {
+    '.cargo-target/release/bundle/nsis'
+  }
+  $installer = Get-ChildItem -LiteralPath $nsisBundleDir -Filter '*.exe' |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($null -eq $installer) { throw 'customer NSIS installer was not produced' }
   $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
