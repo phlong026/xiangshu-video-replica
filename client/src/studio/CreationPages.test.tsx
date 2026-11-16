@@ -5322,7 +5322,22 @@ describe("视频复刻（模块①）", () => {
     expect(replicaLive.readVideoDuration).not.toHaveBeenCalled();
   });
 
-  it("上传本地预检：超过 15 秒的参考视频选完文件就拦截", async () => {
+  it("上传本地预检：超过 30 秒的参考视频选完文件就拦截", async () => {
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+    replicaLive.readVideoDuration.mockResolvedValue(45);
+
+    pickUploadFile("long.mp4");
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "参考视频时长不能超过 30 秒，请裁剪后再上传。",
+      ),
+    );
+    expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+  });
+
+  it("上传本地预检：16–30 秒的参考视频放行（复刻链路已支持到 30 秒）", async () => {
     const value = openReplicaUpload();
     replicaLive.uploadWorkbenchSourceVideo.mockClear();
     replicaLive.readVideoDuration.mockResolvedValue(20);
@@ -5330,11 +5345,11 @@ describe("视频复刻（模块①）", () => {
     pickUploadFile("long.mp4");
 
     await waitFor(() =>
-      expect(value.notify).toHaveBeenCalledWith(
-        "参考视频时长不能超过 15 秒，请裁剪后再上传。",
-      ),
+      expect(replicaLive.uploadWorkbenchSourceVideo).toHaveBeenCalled(),
     );
-    expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+    expect(value.notify).not.toHaveBeenCalledWith(
+      "参考视频时长不能超过 30 秒，请裁剪后再上传。",
+    );
   });
 
   it("上传本地预检：少于 4 秒的参考视频同样拦截", async () => {

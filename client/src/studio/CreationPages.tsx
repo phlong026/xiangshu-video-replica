@@ -183,12 +183,12 @@ const EMPTY_GENERATION_VERSION_STATE: GenerationVersionState = {
 };
 
 // S10（本地预检）：参考视频的硬性门槛，与 server/app/media.py 同源
-// （MAX_UPLOAD_BYTES = 200MB，MIN/MAX_DURATION_SECONDS = 4.0 / 15.0，
+// （MAX_UPLOAD_BYTES = 200MB，MIN/MAX_DURATION_SECONDS = 4.0 / 30.0，
 // DURATION_ROUNDING_TOLERANCE_SECONDS = 0.1）。超限文件不必整段上传完、
 // 等服务端 ffprobe 才拒绝；取整容差同样对齐，本地预检不比服务端更严。
 const MAX_REPLICA_SOURCE_BYTES = 200 * 1024 * 1024;
 const MIN_REPLICA_SOURCE_SECONDS = 4;
-const MAX_REPLICA_SOURCE_SECONDS = 15;
+const MAX_REPLICA_SOURCE_SECONDS = 30;
 const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
 
 // 改写原文上限（M5，与 POST /script-rewrite 的 422 校验、worker 复核同源）。
@@ -1739,6 +1739,7 @@ export function ReplicaPage() {
     notify,
     openLive,
     user,
+    videoCapabilities,
   } = useStudio();
   const readOnly = user.role === "auditor";
   const project = data.projects.find(
@@ -2249,7 +2250,16 @@ export function ReplicaPage() {
   );
 
   const replicaProjectId = state.draft.projectId;
-  const replicaDuration = normalizeCustomerDuration(state.draft.duration);
+  // 16–30s 源片走长档（video_768p_long 价目启用后 capabilities 放开到 30；
+  // 2K 恒为 15——上游契约，价目启用也不放开）。档位未启用时钳回 15。
+  const replicaDurationMax = customerDurationMax(
+    videoCapabilities,
+    state.draft.resolution,
+  );
+  const replicaDuration = normalizeCustomerDuration(
+    state.draft.duration,
+    replicaDurationMax,
+  );
 
   // S13：真实画幅一到手就把草稿画幅对齐过去。首帧已选时以首帧图片为准
   // （i2v 由首帧决定画面比例，用户在首帧面板显式选过 9:16 也要跟随），
@@ -2286,7 +2296,7 @@ export function ReplicaPage() {
         duration >
         MAX_REPLICA_SOURCE_SECONDS + REPLICA_DURATION_TOLERANCE_SECONDS
       ) {
-        notify("参考视频时长不能超过 15 秒，请裁剪后再上传。");
+        notify("参考视频时长不能超过 30 秒，请裁剪后再上传。");
         return;
       }
       if (
@@ -2769,12 +2779,13 @@ export function ReplicaPage() {
   );
   // 输出时长跟随源视频。复刻页没有时长控件（时长下拉框属于独立创作页的
   // ParameterControls），草稿默认的 8 秒对用户既不可见也不可改；源视频在上传时
-  // 已被限定为 4–15 秒（契约本身已放宽到 4–30，但那是独立创作长档专用），
+  // 已被限定为 4–30 秒（16–30 秒走长档 video_768p_long，需后台启用价目，
+  // capabilities 未放开时 normalizeCustomerDuration 会钳回 15；2K 恒 15），
   // 所以按源时长生成总是可行的。不对齐的话，15 秒的源在默认 8 秒下必然撞上
   // 压缩门禁，而用户手上没有任何把时长调上去的入口。向上取整是为了让对齐后的
   // 值不会反过来落进 PromptEditor 那 0.25 秒容差的压缩判定里。
   const alignedDuration = sourceDuration
-    ? normalizeCustomerDuration(Math.ceil(sourceDuration))
+    ? normalizeCustomerDuration(Math.ceil(sourceDuration), replicaDurationMax)
     : 0;
   useEffect(() => {
     if (readOnly || !alignedDuration) return;

@@ -597,6 +597,32 @@ def create_project_generation_batch(
                 status_code=422,
                 detail={"code": "GENERATION_REQUEST_REQUIRED"},
             )
+        # 长档（16-30 秒）前置闸，与独立创作同源：2K 不支持超 15 秒（上游契约）；
+        # 768P 长档必须在后台启用价目——没有启用的价目就没有可冻结的单价，
+        # 绝不能让长任务按 0 积分放行（复刻 30s 分流上线后，16-30s 批量走这里）。
+        if request.output_duration_seconds > 15:
+            if request.resolution == "2K":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "DURATION_RESOLUTION_UNSUPPORTED",
+                        "message": "2K 分辨率目前最长支持 15 秒，请选择 768P 或缩短时长。",
+                    },
+                )
+            from app.billing_catalog import generation_service_for, read_tariff
+
+            tier = read_tariff(
+                conn,
+                generation_service_for(request.resolution, request.output_duration_seconds),
+            )
+            if tier is None or not tier.enabled or not tier.unit_credits:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "LONG_DURATION_TIER_DISABLED",
+                        "message": "16-30 秒时长档暂未开放，请选择 15 秒及以内的时长。",
+                    },
+                )
         return create_generation_batch(
             conn,
             project_id=project_id,
