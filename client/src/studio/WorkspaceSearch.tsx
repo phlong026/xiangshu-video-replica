@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  fetchViralVideo,
   getStudioSavedScript,
   resolveMaterials,
   searchWorkspace,
@@ -13,14 +12,14 @@ import {
   loadPeopleEntries,
   savedScriptFromRecord,
   studioAssetFromMaterial,
-  studioVideoFromViral,
 } from "./live";
 import { createDraft, pageTitles } from "./state";
 import type { StudioPage } from "./types";
 import { Button, Empty } from "./ui";
 
+// 爆款数据功能已下线（2026-11-16 定价决策）：搜索不再提供「视频」类型，
+// 避免结果点开后只剩下线说明。文案/人物/素材仍走原工作区搜索。
 const kinds = {
-  video: "视频",
   script: "文案",
   person: "人物",
   material: "素材",
@@ -35,7 +34,7 @@ export function WorkspaceSearch({
 }) {
   const { data, state, review, user, navigate, patchState, updateData } =
     useStudio();
-  const [kind, setKind] = useState<WorkspaceSearchKind>("video");
+  const [kind, setKind] = useState<WorkspaceSearchKind>("script");
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<WorkspaceSearchPage | null>(null);
   const [error, setError] = useState("");
@@ -69,16 +68,14 @@ export function WorkspaceSearch({
   }, [q, kind, page, review, retry, user.id]);
 
   const reviewItems: WorkspaceSearchItem[] = (
-    kind === "video"
-      ? data.videos.map((item) => ({ id: item.id, title: item.title }))
-      : kind === "person"
-        ? data.people.map((item) => ({ id: item.id, title: item.name }))
-        : kind === "script"
-          ? state.savedScripts.map((item) => ({
-              id: item.id,
-              title: item.title,
-            }))
-          : data.assets.map((item) => ({ id: item.id, title: item.name }))
+    kind === "person"
+      ? data.people.map((item) => ({ id: item.id, title: item.name }))
+      : kind === "script"
+        ? state.savedScripts.map((item) => ({
+            id: item.id,
+            title: item.title,
+          }))
+        : data.assets.map((item) => ({ id: item.id, title: item.name }))
   )
     .filter((item) => item.title.includes(q))
     .map((item) => ({
@@ -96,27 +93,7 @@ export function WorkspaceSearch({
     setBusy(true);
     setError("");
     try {
-      if (item.kind === "video") {
-        let id = item.id;
-        if (!review) {
-          if (!item.platform) throw new Error("视频平台信息缺失，请刷新搜索。");
-          const response = await fetchViralVideo(item.platform, item.id);
-          const video = studioVideoFromViral(
-            "item" in response ? response.item : response,
-          );
-          if (current !== operation.current) return;
-          id = video.id;
-          const url = new URL(window.location.href);
-          url.searchParams.set("viralPlatform", item.platform);
-          url.searchParams.set("viralVideoId", item.id);
-          window.history.replaceState({}, "", url);
-          updateData((previous) => ({
-            ...previous,
-            videos: [...previous.videos.filter((v) => v.id !== id), video],
-          }));
-        }
-        navigate("viral-detail", { selectedVideoId: id });
-      } else if (item.kind === "person") {
+      if (item.kind === "person") {
         if (!review) {
           if (!item.person) throw new Error("人物信息缺失，请刷新搜索。");
           const loaded = await loadPeopleEntries([item.person], null, 1);
@@ -181,12 +158,15 @@ export function WorkspaceSearch({
 
   return (
     <div>
-      <p>{q ? `搜索“${q}”` : "输入关键词搜索视频、已保存文案、人物与素材"}</p>
+      <p>{q ? `搜索“${q}”` : "输入关键词搜索已保存文案、人物与素材"}</p>
       <div className="studio-search-results">
         {Object.entries(pageTitles)
           .filter(
             ([id, title]) =>
               (!q || title.includes(q)) &&
+              // 下线路由保留兼容（旧书签仍能解析），但不再作为可见入口。
+              id !== "viral" &&
+              id !== "viral-detail" &&
               (id !== "settings" || user.role === "admin"),
           )
           .map(([id, title]) => (
@@ -205,7 +185,7 @@ export function WorkspaceSearch({
         <>
           <fieldset className="studio-search-kinds">
             <legend>搜索类型</legend>
-            {(Object.keys(kinds) as WorkspaceSearchKind[]).map((value) => (
+            {(Object.keys(kinds) as Array<keyof typeof kinds>).map((value) => (
               <Button
                 key={value}
                 aria-pressed={kind === value}

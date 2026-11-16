@@ -62,14 +62,14 @@ it("切换关键词后丢弃迟到的旧搜索结果", async () => {
   await screen.findByText("没有匹配结果");
   await act(async () =>
     complete({
-      items: [{ id: "old", kind: "video", title: "旧数据" }],
+      items: [{ id: "old", kind: "script", title: "旧数据" }],
       total: 1,
       page: 1,
       page_size: 12,
     }),
   );
   expect(screen.queryByText("旧数据")).toBeNull();
-  expect(mocks.searchWorkspace).toHaveBeenLastCalledWith("新词", "video", 1);
+  expect(mocks.searchWorkspace).toHaveBeenLastCalledWith("新词", "script", 1);
 });
 
 it("搜索读取服务器分页，打开文案重置其他创作来源", async () => {

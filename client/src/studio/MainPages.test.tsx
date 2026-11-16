@@ -940,7 +940,7 @@ describe("V1.4 工作台对齐网格", () => {
     });
   }
 
-  it("四区块锁定为两行等高网格，标题收进卡片内部", () => {
+  it("三区块按两行布局，标题收进卡片内部", () => {
     useStudio.mockReturnValue(workbench());
     const { container } = render(<WorkbenchPage />);
 

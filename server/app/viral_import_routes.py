@@ -54,9 +54,7 @@ from app.viral_media import (
     ViralMediaPipeline,
 )
 from app.viral_media_preparation import ViralMediaBusy
-from app.viral_routes import (
-    ViralVideoItem,
-)
+from app.viral_routes import ViralVideoItem
 from app.viral_store import (
     LINK_IMPORT_CATEGORY,
     update_viral_cover,
@@ -600,6 +598,8 @@ def create_viral_import_task(
     db: BusinessDbDep,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> ViralImportTaskResponse:
+    # 分享链接解析已在受理阶段将媒体归档；worker 只读取该归档，不会触发 TikHub。
+    # 因此下线 TikHub 爆款目录后，仍允许用户继续从抖音/小红书/视频号分享链接创作。
     key = (idempotency_key or "").strip()
     if not key or len(key) > 128:
         raise HTTPException(

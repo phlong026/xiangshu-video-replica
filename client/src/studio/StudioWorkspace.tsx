@@ -38,12 +38,7 @@ import {
 import { SettingsPanel } from "../SettingsPanel";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { AnalyticsPage } from "./AnalyticsPage";
-import {
-  MaterialsPage,
-  PublishPage,
-  ViralDetailPage,
-  ViralPage,
-} from "./ContentPages";
+import { MaterialsPage, PublishPage } from "./ContentPages";
 import {
   CopyPage,
   customerDurationMax,
@@ -1447,13 +1442,10 @@ export function StudioWorkspace({
     void coreLoad
       .then((result) => {
         if (active)
-          setData((previous) => ({
+          setData({
             ...result,
-            // 爆款列表独立加载；基础资料的空占位不能擦掉先返回的公共列表回执。
-            videos: previous.videos.length ? previous.videos : result.videos,
-            homepageVideos: previous.homepageVideos,
             assets: mergeStudioAssets(result.assets, restoredAssetsRef.current),
-          }));
+          });
       })
       .catch((cause: unknown) => {
         if (active)
@@ -2308,13 +2300,11 @@ export function StudioWorkspace({
   // 任务详情沿用任务列表导航高亮，便于查看结果后回到列表。
   const activeNav = state.page.startsWith("person-")
     ? "people"
-    : state.page === "viral-detail"
-      ? "viral"
-      : state.page === "task-detail"
-        ? "tasks"
-        : creationPages.has(state.page)
-          ? "replica"
-          : state.page;
+    : state.page === "task-detail"
+      ? "tasks"
+      : creationPages.has(state.page)
+        ? "replica"
+        : state.page;
   const activeCount = data.tasks.filter((task) =>
     ["running", "queued"].includes(task.status),
   ).length;
@@ -2710,9 +2700,8 @@ function StudioPageContent({
     case "workbench":
       return <WorkbenchPage />;
     case "viral":
-      return <ViralPage />;
     case "viral-detail":
-      return <ViralDetailPage />;
+      return <ViralFeatureRetiredPage />;
     case "copy":
       return <CopyPage />;
     case "replica":
@@ -2761,6 +2750,17 @@ function StudioPageContent({
         <ProfilePage accountSummary={accountSummary} />
       );
   }
+}
+
+function ViralFeatureRetiredPage() {
+  const { navigate } = useStudio();
+  return (
+    <Empty
+      title="爆款数据功能已下线"
+      description="此页面已停止提供服务，请返回工作台继续创作。"
+      action={<Button onClick={() => navigate("workbench")}>返回工作台</Button>}
+    />
+  );
 }
 
 function StudioSettingsPage() {

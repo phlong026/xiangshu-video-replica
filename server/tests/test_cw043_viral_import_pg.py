@@ -326,7 +326,6 @@ def test_preview_and_import_share_one_object_across_every_import(pg_state, monke
                 attempt=attempt,
             ),
             video=video,
-            client=None,
             storage=storage,
             prefer="video",
         )
@@ -388,7 +387,6 @@ def test_broken_copy_backend_cannot_fail_an_import(pg_state, monkeypatch):
             attempt=1,
         ),
         video=video,
-        client=None,
         storage=storage,
         prefer="video",
     )
@@ -439,7 +437,6 @@ def test_copy_import_prefers_audio_and_falls_back_to_archived_video(pg_state, mo
                 attempt=1,
             ),
             video=video,
-            client=None,
             storage=storage,
             prefer="audio",
         )

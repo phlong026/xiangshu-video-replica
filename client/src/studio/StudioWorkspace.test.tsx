@@ -906,6 +906,41 @@ describe("V1.4 workspace integration", () => {
     expect(screen.getByText(/去文案工坊修改/)).toBeInTheDocument();
   });
 
+  it.each(["viral", "viral-detail"] as const)(
+    "旧书签的 %s 路由显示下线说明，且不读取爆款数据",
+    (page) => {
+      window.history.replaceState(null, "", `/#studio/${page}?video=抖音-1`);
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          reviewData={createReviewData()}
+        />,
+      );
+
+      expect(
+        screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+      ).toBeInTheDocument();
+      expect(api.listViralVideos).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
+      expect(window.location.hash).toBe("#studio/workbench");
+    },
+  );
+
+  it("旧恢复状态不再渲染爆款页面", () => {
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={createReviewData()}
+        initialState={createReviewState("viral-detail")}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+    ).toBeInTheDocument();
+    expect(api.listViralVideos).not.toHaveBeenCalled();
+  });
+
   it("侧边栏恢复任务列表，显示进行中数量并直接进入任务页面", () => {
     const reviewData = createReviewData();
     render(
@@ -982,43 +1017,6 @@ describe("V1.4 workspace integration", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("← 返回创作")).toBeInTheDocument();
   });
-  it("基础资料晚到不会擦除已先返回的爆款列表", async () => {
-    const core = {
-      ...createReviewData(),
-      videos: [],
-      homepageVideos: [],
-      loading: false,
-    };
-    let resolveCore: (value: typeof core) => void = () => {};
-    live.loadStudioData.mockReturnValue(
-      new Promise((resolve) => {
-        resolveCore = resolve;
-      }),
-    );
-    render(
-      <StudioWorkspace
-        currentUser={reviewUser}
-        initialState={createState("workbench")}
-      />,
-    );
-    await waitFor(() => expect(live.loadStudioData).toHaveBeenCalled());
-    const video = {
-      ...createReviewData().videos[0],
-      id: "published-first",
-      title: "先返回的公共视频",
-    };
-    act(() =>
-      currentExtractionContext().updateData((previous) => ({
-        ...previous,
-        videos: [video],
-      })),
-    );
-    await act(async () => resolveCore(core));
-    expect(
-      currentExtractionContext().data.videos.map((item) => item.id),
-    ).toContain("published-first");
-  });
-
   it("素材选择器已加载的尾帧预览在选中后保留到创作页面", async () => {
     const material = {
       id: "tail-cloud",
@@ -2372,6 +2370,42 @@ describe("V1.4 workspace integration", () => {
           screen.queryByRole("dialog", { name: "选择人物 IP" }),
         ).not.toBeInTheDocument(),
       );
+    });
+
+    it("确认终稿立即持久化并带 projectId 时发布到项目脚本版本", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.script.text = "终稿内容";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "确认终稿" }));
+      await waitFor(() =>
+        expect(live.publishScriptVersion).toHaveBeenCalledWith(
+          "project-1",
+          "终稿内容",
+        ),
+      );
+      expect(live.persistCloudDraft).toHaveBeenCalled();
+      const savedDraft = live.persistCloudDraft.mock.calls[0][0] as unknown as {
+        script: { confirmed: boolean };
+      };
+      expect(savedDraft.script.confirmed).toBe(true);
+    });
+
+    it("确认终稿无项目来源时不发布脚本版本", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("copy");
+      state.draft.script.text = "无项目终稿";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "确认终稿" }));
+      await waitFor(() => expect(live.persistCloudDraft).toHaveBeenCalled());
+      expect(live.publishScriptVersion).not.toHaveBeenCalled();
     });
 
     // 爆款数据功能已下线（2026-11-16 定价决策）：

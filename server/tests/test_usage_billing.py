@@ -47,6 +47,17 @@ def record_attempt(
     return attempt_id
 
 
+def backfill_admin_actor(raw: psycopg.Connection) -> str:
+    """新增资金修复脚本须将审计归因到管理角色，不能伪造为客户。"""
+    actor_id = "usage-backfill-admin"
+    raw.execute(
+        "INSERT INTO users(id,username,display_name,role) "
+        "VALUES(%s,'usage-backfill-admin','补录管理员','admin')",
+        (actor_id,),
+    )
+    return actor_id
+
+
 def test_panorama_name_and_stable_id_filter_match_operations(pricing_client, route_state):
     from app.billing_routes import router
 
@@ -2403,3 +2414,460 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
     assert backfill_main([*base_args, "--apply"]) == 0
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 1
+
+
+def test_backfill_attempt_usage_costs_recovers_call_usage_once_per_operation(
+    pricing_client, route_state, capsys
+):
+    """已成功交付的按次 UNKNOWN 调用可回填，且同一操作的重试 attempt 只计一次。
+
+    覆盖 CLI 的 dry-run、失败请求跳过、实际写入、指定 reference、项目行映射连接和重跑幂等，
+    防止维护脚本只通过导入/命令登记测试却在生产实跑时崩溃。
+    """
+    from scripts.backfill_attempt_usage_costs import main as backfill_main
+
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        actor_id = backfill_admin_actor(raw)
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('first_frame',true,5,2),('analysis',true,1,NULL) "
+            "ON CONFLICT (service) DO UPDATE SET "
+            "enabled=excluded.enabled,unit_credits=excluded.unit_credits,"
+            "unit_cost_fen=excluded.unit_cost_fen"
+        )
+        operation_id = accept_operation(
+            conn, user_id=uid, service="first_frame", source_id="usage-backfill-call", units=1
+        )
+        first_unknown = record_attempt(
+            conn,
+            operation_id=operation_id,
+            attempt_key="analysis-attempt-1",
+            usage=None,
+            service="analysis",
+        )
+        second_unknown = record_attempt(
+            conn,
+            operation_id=operation_id,
+            attempt_key="analysis-attempt-2",
+            usage=None,
+            service="analysis",
+        )
+        finish_operation(conn, operation_id=operation_id, units=1, succeeded=True)
+        # 请求已开始但失败时，UNKNOWN 只表示供应商成本不明，不能自动假定为已调用。
+        failed_operation_id = accept_operation(
+            conn,
+            user_id=uid,
+            service="first_frame",
+            source_id="usage-backfill-failed-call",
+            units=1,
+        )
+        record_attempt(
+            conn,
+            operation_id=failed_operation_id,
+            attempt_key="analysis-attempt-failed",
+            usage=None,
+            service="analysis",
+        )
+        finish_operation(conn, operation_id=failed_operation_id, units=0, succeeded=False)
+        raw.execute("UPDATE billing_tariffs SET unit_cost_fen=7 WHERE service='analysis'")
+        # 不确定首轮 + 成功重试：交付只能证明后者的已知成本，不能倒推前者已到达供应商。
+        known_retry_operation_id = accept_operation(
+            conn,
+            user_id=uid,
+            service="first_frame",
+            source_id="usage-backfill-known-retry",
+            units=1,
+        )
+        record_attempt(
+            conn,
+            operation_id=known_retry_operation_id,
+            attempt_key="analysis-attempt-uncertain",
+            usage=None,
+            service="analysis",
+        )
+        record_attempt(
+            conn,
+            operation_id=known_retry_operation_id,
+            attempt_key="analysis-attempt-confirmed",
+            usage=1,
+            service="analysis",
+        )
+        finish_operation(conn, operation_id=known_retry_operation_id, units=1, succeeded=True)
+
+    base_args = [
+        "--services",
+        "analysis",
+        "--actor-user-id",
+        actor_id,
+        "--reason",
+        "按源任务交付事实补录历史视频分析成本",
+        "--reference",
+        "historical-analysis",
+        "--database-url",
+        route_state,
+    ]
+
+    # 默认 dry-run 需要正确走 BusinessConnection 的具名行映射，且只报一次操作。
+    assert backfill_main(base_args) == 0
+    captured = capsys.readouterr()
+    assert "operations_to_confirm=1" in captured.out
+    assert "usage_missing=0" in captured.out
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0
+
+    assert backfill_main([*base_args, "--apply"]) == 0
+    with psycopg.connect(route_state) as raw:
+        rows = raw.execute("SELECT attempt_id,cost_fen,reference FROM billing_evidence").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] in {first_unknown, second_unknown}
+        assert rows[0][1] == Decimal(7)
+        assert rows[0][2].startswith("historical-analysis:analysis@v")
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM audit_logs WHERE "
+                "action='billing.evidence.append' AND "
+                "metadata_json::text LIKE '%backfill_attempt_usage_costs%'"
+            ).fetchone()[0]
+            == 1
+        )
+
+    # 已有同科目 evidence 的操作不允许因为另一条重试 attempt 被再次补录。
+    assert backfill_main([*base_args, "--apply"]) == 0
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 1
+
+
+def test_backfill_attempt_usage_costs_yields_to_manual_evidence_after_selection(
+    pricing_client, route_state, monkeypatch
+):
+    """人工先核实 retry 成本时，批处理的陈旧候选不得再补另一条 attempt。"""
+    from threading import Event, Thread
+
+    from app.billing_evidence import record_evidence
+    from scripts import backfill_attempt_usage_costs as backfill
+
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        actor_id = backfill_admin_actor(raw)
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('first_frame',true,5,2),('analysis',true,1,7) "
+            "ON CONFLICT (service) DO UPDATE SET "
+            "enabled=excluded.enabled,unit_credits=excluded.unit_credits,"
+            "unit_cost_fen=excluded.unit_cost_fen"
+        )
+        operation_id = accept_operation(
+            conn,
+            user_id=uid,
+            service="first_frame",
+            source_id="usage-backfill-manual-race",
+            units=1,
+        )
+        manual_attempt = record_attempt(
+            conn,
+            operation_id=operation_id,
+            attempt_key="analysis-attempt-manual",
+            usage=None,
+            service="analysis",
+        )
+        record_attempt(
+            conn,
+            operation_id=operation_id,
+            attempt_key="analysis-attempt-batch",
+            usage=None,
+            service="analysis",
+        )
+        finish_operation(conn, operation_id=operation_id, units=1, succeeded=True)
+
+    fetched = Event()
+    resume_batch = Event()
+    original_fetch_batch = backfill._fetch_batch
+    paused_once = False
+
+    def pause_after_selection(*args, **kwargs):
+        nonlocal paused_once
+        rows = original_fetch_batch(*args, **kwargs)
+        if not paused_once:
+            paused_once = True
+            fetched.set()
+            if not resume_batch.wait(timeout=10):
+                raise RuntimeError("backfill test did not resume")
+        return rows
+
+    monkeypatch.setattr(backfill, "_fetch_batch", pause_after_selection)
+    exit_codes: list[int] = []
+    thread_errors: list[BaseException] = []
+
+    def run_backfill() -> None:
+        try:
+            exit_codes.append(
+                backfill.main(
+                    [
+                        "--services",
+                        "analysis",
+                        "--actor-user-id",
+                        actor_id,
+                        "--reason",
+                        "人工已核验重试成本",
+                        "--reference",
+                        "manual-race",
+                        "--database-url",
+                        route_state,
+                        "--apply",
+                    ]
+                )
+            )
+        except BaseException as exc:  # 线程异常需回传 pytest 主线程。
+            thread_errors.append(exc)
+
+    worker = Thread(target=run_backfill, daemon=True)
+    worker.start()
+    try:
+        assert fetched.wait(timeout=10)
+        # 模拟后台人工证据端点：与批处理使用相同 advisory lock，而其 evidence
+        # 目标是同一业务操作的另一条 retry attempt。
+        with psycopg.connect(route_state) as raw:
+            conn = BusinessConnection.postgres(raw)
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("billing:evidence:" + operation_id,),
+            )
+            record_evidence(
+                conn,
+                operation_id=operation_id,
+                actor_id=uid,
+                attempt_id=manual_attempt,
+                cost_fen=Decimal(9),
+                reference="manual-verified-attempt",
+                reason="人工核实供应商账单",
+            )
+            raw.commit()
+    finally:
+        resume_batch.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert thread_errors == []
+    assert exit_codes == [0]
+    with psycopg.connect(route_state) as raw:
+        rows = raw.execute("SELECT attempt_id,reference FROM billing_evidence").fetchall()
+        assert rows == [(manual_attempt, "manual-verified-attempt")]
+
+
+def test_backfill_attempt_usage_costs_uses_delivered_video_duration(
+    pricing_client, route_state, capsys
+):
+    """秒计视频只从已成功交付任务的实际成片时长确认成本。"""
+    from scripts.backfill_attempt_usage_costs import main as backfill_main
+
+    _, uid = account(pricing_client)
+    task_id = "usage-backfill-video"
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        actor_id = backfill_admin_actor(raw)
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('video_768p',true,1,NULL) ON CONFLICT (service) DO UPDATE SET "
+            "enabled=excluded.enabled,unit_credits=excluded.unit_credits,"
+            "unit_cost_fen=excluded.unit_cost_fen"
+        )
+        raw.execute(
+            "INSERT INTO projects (id,owner_user_id,name) VALUES (%s,%s,%s)",
+            ("usage-backfill-project", uid, "成本补录视频项目"),
+        )
+        raw.execute(
+            "INSERT INTO generation_batches("
+            "id,project_id,created_by_user_id,idempotency_key,request_hash,request_snapshot_json"
+            ") VALUES (%s,%s,%s,%s,%s,'{}')",
+            (
+                "usage-backfill-batch",
+                "usage-backfill-project",
+                uid,
+                "usage-backfill-key",
+                "usage-backfill-request",
+            ),
+        )
+        raw.execute(
+            "INSERT INTO generation_tasks("
+            "id,batch_id,generation_mode,provider,model,status,actual_output_seconds"
+            ") VALUES (%s,%s,'I2V','fake_h3','MiniMax-H3','SUCCEEDED',%s)",
+            (task_id, "usage-backfill-batch", Decimal("9.5")),
+        )
+        operation_id = accept_operation(
+            conn, user_id=uid, service="video_768p", source_id=task_id, units=10
+        )
+        unknown_attempt = record_attempt(
+            conn,
+            operation_id=operation_id,
+            attempt_key="video-attempt",
+            usage=None,
+            service="video_768p",
+        )
+        finish_operation(conn, operation_id=operation_id, units=10, succeeded=True)
+        raw.execute("UPDATE billing_tariffs SET unit_cost_fen=7 WHERE service='video_768p'")
+
+    base_args = [
+        "--services",
+        "video_768p",
+        "--actor-user-id",
+        actor_id,
+        "--reason",
+        "按已成功交付视频的实际秒数补录成本",
+        "--database-url",
+        route_state,
+    ]
+
+    assert backfill_main(base_args) == 0
+    captured = capsys.readouterr()
+    assert "operations_to_confirm=1" in captured.out
+    assert "usage_missing=0" in captured.out
+
+    assert backfill_main([*base_args, "--apply"]) == 0
+    with psycopg.connect(route_state) as raw:
+        row = raw.execute("SELECT attempt_id,cost_fen FROM billing_evidence").fetchone()
+        assert tuple(row) == (unknown_attempt, Decimal("66.5"))
+
+
+def test_backfill_attempt_usage_costs_requires_archived_oral_output(
+    pricing_client, route_state, capsys
+):
+    """口播仅有成功状态和时长时，未归档成片不得自动确认供应商成本。"""
+    from scripts.backfill_attempt_usage_costs import main as backfill_main
+
+    _, uid = account(pricing_client)
+    task_id = "usage-backfill-oral-without-asset"
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        actor_id = backfill_admin_actor(raw)
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('oral',true,1,15) ON CONFLICT (service) DO UPDATE SET "
+            "enabled=excluded.enabled,unit_credits=excluded.unit_credits,"
+            "unit_cost_fen=excluded.unit_cost_fen"
+        )
+        raw.execute(
+            "INSERT INTO person_identities(id,owner_user_id,display_name,"
+            "authorization_status,source_quality_status,status,created_by) "
+            "VALUES(%s,%s,'补录口播人物','AUTHORIZED','PASSED','ACTIVE',%s)",
+            ("usage-backfill-oral-identity", uid, uid),
+        )
+        raw.execute(
+            "INSERT INTO assets(id,kind,storage_uri,sha256,size_bytes,content_type,"
+            "metadata_json) VALUES(%s,'character','fake://avatars/source.png',%s,9,"
+            "'image/png','{}')",
+            ("usage-backfill-oral-avatar-asset", "b" * 64),
+        )
+        raw.execute(
+            "INSERT INTO oral_avatars(id,identity_id,owner_user_id,title,status,"
+            "source_kind,source_asset_id) VALUES(%s,%s,%s,'补录口播分身','READY',"
+            "'IMAGE',%s)",
+            (
+                "usage-backfill-oral-avatar",
+                "usage-backfill-oral-identity",
+                uid,
+                "usage-backfill-oral-avatar-asset",
+            ),
+        )
+        raw.execute(
+            "INSERT INTO oral_tasks(id,owner_user_id,identity_id,avatar_id,mode,title,"
+            "script_text,status,duration_sec,estimated_cost_fen,idempotency_key,"
+            "request_hash,billing_round) VALUES(%s,%s,%s,%s,'TTS','未归档口播',"
+            "'口播词','SUCCEEDED',9,0,'usage-backfill-oral-key',"
+            "'usage-backfill-oral-request',1)",
+            (
+                task_id,
+                uid,
+                "usage-backfill-oral-identity",
+                "usage-backfill-oral-avatar",
+            ),
+        )
+        operation_id = accept_operation(
+            conn, user_id=uid, service="oral", source_id=task_id, units=9
+        )
+        unknown_attempt = record_attempt(
+            conn,
+            operation_id=operation_id,
+            attempt_key="oral-attempt-without-asset",
+            usage=None,
+            service="oral",
+        )
+        finish_operation(conn, operation_id=operation_id, units=9, succeeded=True)
+
+    base_args = [
+        "--services",
+        "oral",
+        "--actor-user-id",
+        actor_id,
+        "--reason",
+        "缺归档成片时不应自动补录口播成本",
+        "--database-url",
+        route_state,
+    ]
+
+    assert backfill_main(base_args) == 0
+    captured = capsys.readouterr()
+    assert "operations_to_confirm=0" in captured.out
+    assert "usage_missing=1" in captured.out
+
+    assert backfill_main([*base_args, "--apply"]) == 0
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_evidence WHERE attempt_id=%s",
+                (unknown_attempt,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_backfill_attempt_usage_costs_rejects_non_admin_actor(pricing_client, route_state, capsys):
+    """成本确认必须归因到管理角色，普通客户 id 不能充当操作者。"""
+    from scripts.backfill_attempt_usage_costs import main as backfill_main
+
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('analysis',true,1,7) ON CONFLICT (service) DO UPDATE SET "
+            "enabled=excluded.enabled,unit_credits=excluded.unit_credits,"
+            "unit_cost_fen=excluded.unit_cost_fen"
+        )
+        operation_id = accept_operation(
+            conn, user_id=uid, service="analysis", source_id="usage-backfill-customer", units=1
+        )
+        record_attempt(
+            conn,
+            operation_id=operation_id,
+            attempt_key="analysis-attempt-customer",
+            usage=None,
+            service="analysis",
+        )
+        finish_operation(conn, operation_id=operation_id, units=1, succeeded=True)
+
+    exit_code = backfill_main(
+        [
+            "--services",
+            "analysis",
+            "--actor-user-id",
+            uid,
+            "--reason",
+            "普通客户不得充当资金修复操作者",
+            "--database-url",
+            route_state,
+            "--apply",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "administrator" in captured.err
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0

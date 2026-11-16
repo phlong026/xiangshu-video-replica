@@ -19,6 +19,7 @@ import hashlib
 import html
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -1107,6 +1108,15 @@ class ViralSourceClient:
         )
 
 
+def viral_feature_retired() -> bool:
+    """Whether TikHub-backed viral features are globally retired.
+
+    默认关闭确保新部署不会因为漏配环境变量继续产生供应商调用；测试和紧急回滚
+    需显式设置 ``VIDEO_REPLICA_VIRAL_CLIENT_DISABLED=0``。
+    """
+    return os.environ.get("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1") == "1"
+
+
 def viral_source_client_from_config(config: Mapping[str, str]) -> ViralSourceClient:
     api_key = (config.get("api_key") or "").strip()
     if not api_key:
@@ -1119,6 +1129,10 @@ def viral_source_client_from_config(config: Mapping[str, str]) -> ViralSourceCli
 
 
 def viral_source_client_from_settings(conn: BusinessConnection) -> ViralSourceClient:
+    # 所有客户/API/后台采集/worker 的 TikHub 调用都从此入口构造客户端。
+    # 在读取凭据前拒绝，确保功能下线期间不存在任何供应商网络请求。
+    if viral_feature_retired():
+        raise ViralSourceUnavailable("爆款数据功能已下线。")
     try:
         config = SettingsRepository(conn).load_provider_config("tikhub")
     except SettingsUnavailableError as exc:

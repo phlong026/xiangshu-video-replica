@@ -14,7 +14,6 @@ import hmac
 import json
 import logging
 import math
-import os
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn
@@ -73,19 +72,19 @@ from app.viral_tikhub import (
     ViralSourceError,
     ViralSourceUnavailable,
     ViralVideo,
+    viral_feature_retired,
     viral_source_client_from_settings,
 )
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
 
+
 # 爆款数据功能下线开关（2026-11-16 定价决策：该系列免费提供但平台持续承担
-# tikhub 成本，业务拍板下线）。**默认即下线**；如需临时重开，env 显式置
+# tikhub 成本，业务拍板下线）。默认即下线；如需临时重开，env 显式置
 # VIDEO_REPLICA_VIRAL_CLIENT_DISABLED=0（回滚窗口用，用完应恢复下线）。
-_VIRAL_CLIENT_DISABLED = os.environ.get("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1") == "1"
-
-
+# 同一判断由 viral_tikhub 的客户端构造入口复用，避免 worker/管理端绕过。
 def _require_client_enabled() -> None:
-    if _VIRAL_CLIENT_DISABLED:
+    if viral_feature_retired():
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail={"code": "VIRAL_FEATURE_RETIRED", "message": "爆款数据功能已下线。"},
@@ -602,12 +601,12 @@ def audit_local_viral_cache(
     conn: Database,
     actor: AuthenticatedUser,
 ) -> ViralCacheReclaimResponse:
-    _require_client_enabled()
     """回答「这些本地缓存条目还有没有服务端来源」，供桌面端回收。
 
     只读、不计费：回收动作发生在用户机器上，但判据必须由服务端给出——删除与下架
     都不会在客户端的旧分页数据里留下痕迹。
     """
+    _require_client_enabled()
     if payload.platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -666,7 +665,6 @@ def fetch_viral_video_source(
     client: ViralSourceClientDep,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> ViralSourceResponse:
-    _require_client_enabled()
     """下发源站直链（视频号额外**同批**下发 ``decode_key``），不代理下载、不落存储.
 
     P2 客户端本地缓存的前置：客户端拿到直链后自行多线程取回并在本地解密
@@ -681,6 +679,7 @@ def fetch_viral_video_source(
     否则漏配即「能取直链但不收钱」。只有 PENDING（在途重试）复用同一计费轮次，
     已终态的轮次一律开新一轮——每一次真实外呼都对应一次扣费。
     """
+    _require_client_enabled()
     key = (idempotency_key or "").strip()
     if not key or len(key) > 128:
         raise HTTPException(

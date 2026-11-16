@@ -32,7 +32,6 @@ import {
   uploadWorkbenchSourceVideo,
 } from "./live";
 import { handOffLongReplicaSource } from "./longReplicaSession";
-import { PlatformLogo } from "./PlatformLogo";
 import { readPageCache, writePageCache } from "./pageCache";
 import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
@@ -96,23 +95,6 @@ const statusIcons: Record<StudioTask["status"], string> = {
   partial: "check",
   cancelled: "close",
 };
-
-function formatWorkbenchLikes(video: StudioVideo) {
-  if (video.likes == null) return "待核验";
-  if (video.likeDisplay) return video.likeDisplay;
-  if (video.likes >= 10000) {
-    return `${(video.likes / 10000).toFixed(1).replace(".0", "")}万`;
-  }
-  return video.likes.toLocaleString("zh-CN");
-}
-
-function persistWorkbenchViralDetailUrl(video: StudioVideo) {
-  if (!video.platformKey || !video.nativeId) return;
-  const url = new URL(window.location.href);
-  url.searchParams.set("viralPlatform", video.platformKey);
-  url.searchParams.set("viralVideoId", video.nativeId);
-  window.history.replaceState(null, "", url);
-}
 
 function Status({ task }: { task: StudioTask }) {
   return (
@@ -293,7 +275,6 @@ export function WorkbenchPage() {
   // >15s 原片登记：上传时只抽音轨供提取文案，原片留在本机；「开始复刻」
   // 时按 replica_prompt 用途补传整片并跳长视频拆解页签。仅当前挂载有效。
   const longOriginalRef = useRef<{ file: File; duration: number } | null>(null);
-  const [viralImportingId, setViralImportingId] = useState<string>();
   const [linkStateValue, setLinkState] = useState<{
     accountContextKey: string;
     status: "idle" | "loading" | "error";
@@ -322,33 +303,9 @@ export function WorkbenchPage() {
     },
     [],
   );
-  useEffect(() => {
-    if (activeAccountRef.current !== accountId) return;
-    setViralImportingId(undefined);
-  }, [accountId]);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
   );
-  const featuredVideos = [...(data.homepageVideos ?? [])]
-    .filter((video) => video.homepageFeatured === true)
-    .sort((left, right) => {
-      if (left.homepageRank !== null && left.homepageRank !== undefined) {
-        if (right.homepageRank === null || right.homepageRank === undefined)
-          return -1;
-        if (left.homepageRank !== right.homepageRank)
-          return left.homepageRank - right.homepageRank;
-      } else if (
-        right.homepageRank !== null &&
-        right.homepageRank !== undefined
-      ) {
-        return 1;
-      }
-      return (
-        (right.likes ?? -1) - (left.likes ?? -1) ||
-        left.id.localeCompare(right.id, undefined, { numeric: true })
-      );
-    })
-    .slice(0, 5);
   const beginViralCreation = async (
     video: StudioVideo,
     purpose: "copy" | "replica" = "replica",
@@ -404,7 +361,6 @@ export function WorkbenchPage() {
       viralIdempotencyKeysRef.current.delete(memoryKey);
       clearViralImportIdempotencyKey(requestAccount, actionKey, idempotencyKey);
     };
-    setViralImportingId(video.id);
     try {
       let task: ViralImportTask = await createViralImportTask(
         video.platformKey,
@@ -486,12 +442,6 @@ export function WorkbenchPage() {
       ) {
         notify(error instanceof Error ? error.message : "参考素材导入失败");
       }
-    } finally {
-      if (
-        operation === viralOperationRef.current &&
-        requestAccount === activeAccountRef.current
-      )
-        setViralImportingId(undefined);
     }
   };
   const pendingViralSource = !state.draft.projectId
@@ -891,7 +841,6 @@ export function WorkbenchPage() {
                 value: event.target.value,
               });
               setLinkState({ accountContextKey, status: "idle" });
-              setViralImportingId(undefined);
             }}
           />
           <input
@@ -1161,7 +1110,7 @@ export function WorkbenchPage() {
               >
                 <Icon name="pen" size={28} />
                 <span>
-                  文案工坊<small>创作爆款文案</small>
+                  文案工坊<small>创作视频文案</small>
                 </span>
                 <Icon name="chevron" />
               </button>

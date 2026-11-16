@@ -101,7 +101,6 @@ def refresh_viral_video(
     client: ViralSearchRefreshSourceClientDep,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> ViralSearchRefreshResponse:
-    _require_client_enabled()
     """刷新单条视频资源.
 
     不声明 ``AuthenticatedUser``：它会在**请求级**连接上做一次加行锁的会话校验
@@ -110,6 +109,7 @@ def refresh_viral_video(
     idle_in_transaction_session_timeout(60s) 才解开。鉴权由栅栏权威完成
     （fenced_pg_transaction 在行锁下复核会话并抛 401），此处无需预解析。
     """
+    _require_client_enabled()
     from app.usage_billing import accept_operation
 
     key = (idempotency_key or "").strip()
