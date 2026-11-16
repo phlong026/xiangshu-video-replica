@@ -76,6 +76,24 @@ class OrderQueryResult:
 
 
 @dataclass(frozen=True)
+class OrderCloseResult:
+    """Outcome of asking the gateway to retire an order's payment code.
+
+    ``closed`` 只有在网关侧给出确定答复时才可为 True：关单成功、幂等重复关单、
+    或订单在网关根本不存在（该商户名下无从支付）。“网关说已支付”是
+    ``closed=False`` 的确定答复——钱可能到了，但入账只能走已验证的查单，
+    错误文本永不作为结算证据（2026-11-16 评审 P1）。
+
+    ``known=False`` 表示结果未知：请求可能已经到达网关（超时/网络错误/未建模
+    业务码），此时既不能断定码已作废也不能断定仍可支付，唯一可信的后续动作
+    是 query_order（或交给 sweep/人工查单兜底）。
+    """
+
+    closed: bool
+    known: bool = True
+
+
+@dataclass(frozen=True)
 class NotificationVerification:
     """Result of verifying a payment notification/callback."""
 
@@ -173,6 +191,26 @@ class PaymentProvider(Protocol):
         """
         ...
 
+    def close_order(
+        self,
+        *,
+        merchant: MerchantConfig,
+        merchant_order_no: str,
+    ) -> OrderCloseResult:
+        """Retire the gateway-side order so its payment code can no longer be paid.
+
+        F2（2026-11-16 漏账缺口修复）：客户删除订单只改本地状态，网关侧二维码
+        若仍可支付，「关单后支付且回调丢失」就成了漏账缺口——本地关单的下一个
+        动作就是把网关侧也关掉。有网关关单 API 的渠道（微信 v3 close）实现它；
+        没有的渠道（zpay submit API 无关单接口）抛 :class:`OrderCloseUnsupported`
+        ——调用方按渠道分支，不会对 unsupported 渠道发起调用。
+
+        Raises OrderCloseError when the outcome could not be determined (the
+        request may still have reached the gateway — callers must treat the
+        order's gateway state as unknown, never assume either way).
+        """
+        ...
+
     def verify_notification(
         self,
         params: Mapping[str, str],
@@ -207,6 +245,27 @@ class PaymentCodeError(PaymentProviderError):
 
 class OrderQueryError(PaymentProviderError):
     """Error querying order status."""
+
+    pass
+
+
+class OrderCloseError(PaymentProviderError):
+    """Gateway close outcome could not be determined.
+
+    与查询失败的本质区别：关单请求可能**已经到达网关并生效**。调用方不得
+    据此断定二维码仍可支付或已作废——订单的网关侧状态只能靠后续 query_order
+    澄清（删除流程告警后交给 sweep/人工查单兜底）。
+    """
+
+    pass
+
+
+class OrderCloseUnsupported(OrderCloseError):
+    """The provider has no gateway-side close API (e.g. ZPay submit).
+
+    语义是「渠道无此能力」而非「结果未知」：调用方按渠道分支不应走到这里，
+    走到即说明分支缺失，报错暴露而不是静默吞掉。
+    """
 
     pass
 

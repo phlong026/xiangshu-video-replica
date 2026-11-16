@@ -16,7 +16,7 @@ from app.admin_auth_routes import FundsWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.admin_write_contract import require_write_contract as _require_write_contract
 from app.auth import CurrentUser
-from app.control_auth import ControlUserShortTx
+from app.control_auth import ControlFundsWriterShortTx
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.ops_metrics import get_or_create_request_id
@@ -373,7 +373,7 @@ def sync_recharge_order(
     order_no: str,
     body: AdminWriteContract,
     request: Request,
-    _actor: ControlUserShortTx,
+    actor: ControlFundsWriterShortTx,
 ) -> RechargeOrderStatusResponse:
     """Manual single-order query with the admin write contract (A4, A2).
 
@@ -386,11 +386,20 @@ def sync_recharge_order(
     资金中心方案（P1）：所有渠道统一一个「查单补单」入口，网关按订单自身的
     provider 字段分派——微信订单不再只能从客户详情核验。
 
-    事务边界（2026-11-02 池饿死事故改造）：认证走 ControlUserShortTx；
-    审计行+订单预读+商户配置在一个**前置短事务**先行提交——查单外呼
-    （provider.query_order，慢网络/慢 DNS 下可远超 60s）期间不持任何事务；
-    结算自开短事务。行为差异：查单失败/结算失败时审计行保留（改前随请求级
-    事务一并回滚）——「谁发起」的意图记录因此更完整，属有意收紧。
+    关闭单可查（2026-11-16 漏账缺口修复）：本地 CLOSED 只是记账态——网关侧
+    订单可能仍可支付（zpay 网关无过期字段；微信有 time_expire 但存在查单/
+    关单竞态与客户删除后 2h 窗口）。关单后支付且回调丢失的订单此前没有任何
+    补账路径（sweep 只查 PENDING、repair-ledger 只认 PAID），因此本入口对
+    CLOSED 放行查询，入账仍走 confirm_recharge_payment 的全套资金防线
+    （商户/金额/渠道白名单/交易号绑定/PAID 幂等短路）。FAILED 不放行。
+    权限走 ControlFundsWriterShortTx（funds.write 权限点 + 短事务纪律）：
+    人工查单等于发起一次资金结算，把关与 repair-ledger 对齐。
+
+    事务边界（2026-11-02 池饿死事故改造）：审计行+订单预读+商户配置在一个
+    **前置短事务**先行提交——查单外呼（provider.query_order，慢网络/慢 DNS
+    下可远超 60s）期间不持任何事务；结算自开短事务。行为差异：查单失败/
+    结算失败时审计行保留（改前随请求级事务一并回滚）——「谁发起」的意图
+    记录因此更完整，属有意收紧。
     """
     _syncable_providers = ("zpay", "wechat_native")
     _key, reason = _require_write_contract(request, body)
@@ -399,7 +408,7 @@ def sync_recharge_order(
         conn = BusinessConnection.postgres(pg_conn)
         write_audit(
             conn,
-            actor=_actor,
+            actor=actor,
             action="payment.sync",
             entity_type="recharge_order",
             entity_id=order_no,
@@ -416,7 +425,7 @@ def sync_recharge_order(
             )
         if str(local_order["status"]) == "PAID":
             result = RechargeOrderStatusResponse(**serialize_recharge_order(local_order))
-        elif str(local_order["status"]) != "PENDING":
+        elif str(local_order["status"]) not in {"PENDING", "CLOSED"}:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -469,7 +478,25 @@ def sync_recharge_order(
         ) from exc
 
     if not remote_order.paid:
-        return RechargeOrderStatusResponse(**serialize_recharge_order(local_order))
+        # 网关说「没付」≠ 本地还是预读时的状态：外呼窗口内晚到回调或 sweep
+        # 可能已把单结算成 PAID，拿着预读快照作答会误导运营（2026-11-16 评审
+        # P2）。自开短事务重读一次再答；只读不改状态，无资金副作用。
+        with pg_transaction() as pg_conn:
+            fresh_order = read_recharge_order(
+                BusinessConnection.postgres(pg_conn), merchant_order_no=order_no
+            )
+        if fresh_order is not None:
+            return RechargeOrderStatusResponse(
+                **serialize_recharge_order(fresh_order), gateway_paid=False
+            )
+        # 订单行不会物理删除，走到这里说明库被外力清空——按原口径报不存在。
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "RECHARGE_ORDER_NOT_FOUND",
+                "message": "Recharge order does not exist.",
+            },
+        )
     if (
         remote_order.merchant_order_no != order_no
         or remote_order.provider_trade_no is None
@@ -506,7 +533,7 @@ def sync_recharge_order(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
-    return RechargeOrderStatusResponse(**serialize_recharge_order(confirmed))
+    return RechargeOrderStatusResponse(**serialize_recharge_order(confirmed), gateway_paid=True)
 
 
 def _load_merchant_config(

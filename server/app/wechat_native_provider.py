@@ -25,6 +25,8 @@ from app.payment_provider import (
     DeploymentConfig,
     MerchantConfig,
     NotificationVerification,
+    OrderCloseError,
+    OrderCloseResult,
     OrderQueryError,
     OrderQueryResult,
     PaymentCodeError,
@@ -221,6 +223,37 @@ class WeChatNativeProvider(PaymentProvider):
             channel=WECHAT_NATIVE_CHANNEL,
             response_digest=result.response_digest,
         )
+
+    def close_order(
+        self,
+        *,
+        merchant: MerchantConfig,
+        merchant_order_no: str,
+    ) -> OrderCloseResult:
+        """Close the gateway-side order so its QR can no longer be paid (F2).
+
+        业务码映射（2026-11-16 评审 P1：不依赖单一错误码、错误文本不作入账
+        证据）——
+
+        - ``204`` / ``ORDER_CLOSED``（幂等重复关单）/ ``ORDER_NOT_EXIST``（该
+          商户名下无从支付）→ **确定已关**；
+        - ``ORDERPAID`` → **确定没关**：网关说钱已付——但入账只能走已验证的
+          查单结算，这里只如实报告「没关」，由调用方立即查单；
+        - 其余业务码（``TRADE_ERROR``/``INVALID_REQUEST``/``SYSTEM_ERROR``）
+          与超时/网络错误 → **结果未知**（:class:`OrderCloseError`）：请求可能
+          已到达网关，调用方不得臆断两个方向，交给查单/sweep 澄清。
+        """
+        wechat_merchant = merchant_config_from_settings(merchant.raw)
+        client = self._client or WeChatNativeClient()
+        try:
+            client.close_order(merchant=wechat_merchant, out_trade_no=merchant_order_no)
+        except WeChatNativeError as exc:
+            if exc.wechat_code in {"ORDER_CLOSED", "ORDER_NOT_EXIST"}:
+                return OrderCloseResult(closed=True)
+            if exc.wechat_code == "ORDERPAID":
+                return OrderCloseResult(closed=False)
+            raise OrderCloseError(str(exc), status_code=exc.status_code) from exc
+        return OrderCloseResult(closed=True)
 
     def verify_notification(
         self,

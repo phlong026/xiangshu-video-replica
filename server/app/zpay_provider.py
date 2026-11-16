@@ -13,12 +13,14 @@ import hashlib
 import hmac
 from collections.abc import Mapping
 from datetime import datetime
+from typing import NoReturn
 
 from app.db_portable import BusinessConnection
 from app.payment_provider import (
     DeploymentConfig,
     MerchantConfig,
     NotificationVerification,
+    OrderCloseUnsupported,
     OrderQueryError,
     OrderQueryResult,
     PaymentCodeError,
@@ -163,6 +165,23 @@ class ZPayProvider(PaymentProvider):
             amount_fen=result.amount_fen,
             channel=result.channel,
             response_digest=result.response_digest,
+        )
+
+    def close_order(
+        self,
+        *,
+        merchant: MerchantConfig,
+        merchant_order_no: str,
+    ) -> NoReturn:
+        """ZPay submit API has no order-close endpoint — unsupported (F2).
+
+        这正是 zpay 敞口无上界的根源之一：本地关单后网关侧二维码的寿命不受
+        我们控制，只能靠查单补账兜底（人工查单已放开 CLOSED + sweep 的
+        CLOSED 扫描段）。调用方按 provider 分支不应走到这里；走到即报错暴露
+        分支缺失，绝不静默吞掉或混同成功。
+        """
+        raise OrderCloseUnsupported(
+            "ZPay has no gateway close API; rely on query-based reconciliation"
         )
 
     def verify_notification(

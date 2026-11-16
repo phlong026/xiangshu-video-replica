@@ -176,6 +176,8 @@ export function updateCustomerPaymentZPay(
     pid: string;
     key?: string;
     enabled_channels: Array<"alipay" | "wxpay">;
+    /** F4：换绑影响面显式确认（pid 变更/渠道收窄 + 在途单>0 时后端要求）。 */
+    rotation_acknowledged?: boolean;
   },
   reason: string,
   key?: string,

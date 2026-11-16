@@ -67,6 +67,7 @@ from app.customer_ledger import (
     read_ledger_page,
 )
 from app.customer_pricing import read_pricing
+from app.db_pg import pg_transaction
 from app.db_portable import (
     BusinessConnection,
     BusinessRow,
@@ -102,7 +103,11 @@ from app.wechat_native_client import (
     NATIVE_ORDER_VALIDITY_SECONDS,
 )
 from app.zpay import generate_merchant_order_no
-from app.zpay_payments import read_recharge_order, serialize_recharge_order
+from app.zpay_payments import (
+    read_recharge_order,
+    serialize_recharge_order,
+    settle_wechat_order_from_verified_query,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +167,11 @@ class RechargeOrderStatusResponse(BaseModel):
     channel: str
     created_at: str
     paid_at: str | None
+    # 只有管理端「查单补单」端点会填（2026-11-16 评审 P3）：本地状态与本次
+    # 网关查询结果是两个维度——网关确认未付 ≠ 订单已不可付（zpay 码无过期、
+    # 微信存在竞态窗口），运营必须能从响应里分开读这两件事。其余端点缺省
+    # None（未发起网关查询）。
+    gateway_paid: bool | None = None
 
 
 class RechargeOrderPage(BaseModel):
@@ -800,12 +810,21 @@ def close_customer_recharge_order(order_no: str, request: Request) -> Response:
 
     The UI calls this action "delete", while the database keeps the order as
     CLOSED so callbacks, support and reconciliation retain one authoritative
-    record. Repeating the request is intentionally idempotent.
+    record. Repeating the request is intentionally idempotent — and for WeChat
+    orders the repeat now doubles as a controlled gateway-close retry (F2:
+    the previous attempt may have ended unknown).
+
+    F2（2026-11-16 漏账缺口修复）：本地关单落库后，微信订单顺手关掉网关侧
+    订单（zpay 无网关关单 API，靠查单兜底）。外呼在删除事务提交之后、不持
+    任何锁地执行；失败只告警不回滚删除——sweep 的 CLOSED 扫描段与人工查单
+    兜底（含「提交后进程中断」，评审 P1 的可恢复性要求）。
     """
     snapshot = _require_customer_snapshot(request)
+    already_closed = False
+    order_provider = ""
     with fenced_pg_transaction(snapshot) as (conn, ctx):
         row = conn.execute(
-            "SELECT id, status FROM recharge_orders "
+            "SELECT id, status, provider FROM recharge_orders "
             "WHERE merchant_order_no = %s AND user_id = %s FOR UPDATE",
             (order_no, ctx.user_id),
         ).fetchone()
@@ -818,9 +837,10 @@ def close_customer_recharge_order(order_no: str, request: Request) -> Response:
                 },
             )
         current_status = str(row[1])
+        order_provider = str(row[2])
         if current_status == "CLOSED":
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
-        if current_status != "PENDING":
+            already_closed = True
+        elif current_status != "PENDING":
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -828,18 +848,102 @@ def close_customer_recharge_order(order_no: str, request: Request) -> Response:
                     "message": "Only an unpaid recharge order can be closed.",
                 },
             )
-        conn.execute(
-            "UPDATE recharge_orders SET status = 'CLOSED' WHERE id = %s",
-            (str(row[0]),),
-        )
-        _insert_customer_audit(
-            conn,
-            user_id=ctx.user_id,
-            action="customer.recharge_order.closed",
-            entity_type="recharge_order",
-            entity_id=order_no,
-        )
+        else:
+            conn.execute(
+                "UPDATE recharge_orders SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP "
+                "WHERE id = %s",
+                (str(row[0]),),
+            )
+            _insert_customer_audit(
+                conn,
+                user_id=ctx.user_id,
+                action="customer.recharge_order.closed",
+                entity_type="recharge_order",
+                entity_id=order_no,
+            )
+    if order_provider == "wechat_native":
+        _close_wechat_gateway_order_after_commit(order_no, repeat=already_closed)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _close_wechat_gateway_order_after_commit(order_no: str, *, repeat: bool) -> None:
+    """删除落库后关闭微信网关侧订单（F2，2026-11-16 漏账缺口修复）.
+
+    事务纪律：在删除事务**提交之后**运行，全程不持事务/行锁——商户配置读取
+    自开短事务，关单与查单外呼不带任何连接（2026-11-02 池饿死事故口径：
+    外呼期间绝不停在 idle-in-transaction）。失败只告警不回滚删除：网关码最多
+    再活到 ``time_expire``（≤2h），sweep 的 CLOSED 扫描段与人工查单兜底，
+    「提交后进程中断」同样由 sweep 兜底（评审 P1 的可恢复性要求）。
+
+    结果处理不依赖单一错误码（评审 P1）：关单确定成功即完事；**确定没关**
+    （ORDERPAID）与**结果未知**（超时/TRADE_ERROR/INVALID_REQUEST 等，关单
+    请求可能已到达网关）都走同一条验签查单路径——只有验签通过的 SUCCESS
+    应答经 :func:`settle_wechat_order_from_verified_query` 幂等入账，错误文本
+    永不作为结算证据。同步外呼最坏拖住该请求约两个超时周期（微信客户端
+    10s×2）：删除是低频操作，换取确定性；已默认在 threadpool 上运行，不占
+    事件循环。
+    """
+    try:
+        provider = get_payment_provider("wechat_native")
+        with pg_transaction() as pg_conn:
+            merchant = provider.load_merchant_config(BusinessConnection.postgres(pg_conn))
+    except Exception as exc:  # noqa: BLE001 — 配置缺失不阻塞删除，告警后交给兜底
+        logger.warning(
+            "gateway close skipped for order %s: merchant config unavailable (%s)",
+            order_no,
+            type(exc).__name__,
+        )
+        return
+    close_known_not_closed = False
+    try:
+        outcome = provider.close_order(merchant=merchant, merchant_order_no=order_no)
+    except Exception as exc:  # noqa: BLE001 — 结果未知：请求可能已到达网关并生效
+        logger.warning(
+            "gateway close outcome unknown for order %s (%s); querying to verify",
+            order_no,
+            type(exc).__name__,
+        )
+    else:
+        if outcome.closed:
+            if repeat:
+                logger.info("gateway close retry confirmed for order %s", order_no)
+            return
+        # 网关明确说已支付（ORDERPAID）：确定没关，钱可能已到——立即查单结算。
+        close_known_not_closed = True
+    # 「确定没关」与「结果未知」汇合到同一条查单路径：入账只认验签通过的
+    # SUCCESS 应答，查单本身失败则交由 sweep/人工兜底。
+    try:
+        deployment = provider.load_deployment_config()
+        answer = provider.query_order(
+            merchant=merchant, deployment=deployment, merchant_order_no=order_no
+        )
+    except Exception as exc:  # noqa: BLE001 — 查单失败交给 sweep/人工兜底
+        logger.warning(
+            "post-close query failed for order %s (%s; close_known_not_closed=%s); "
+            "reconciliation will verify",
+            order_no,
+            type(exc).__name__,
+            close_known_not_closed,
+        )
+        return
+    try:
+        with pg_transaction() as pg_conn:
+            settle_outcome = settle_wechat_order_from_verified_query(
+                BusinessConnection.postgres(pg_conn),
+                order_no=order_no,
+                paid=answer.paid,
+                transaction_id=answer.provider_trade_no,
+                amount_fen=answer.amount_fen,
+                source_digest=answer.response_digest,
+            )
+    except Exception as exc:  # noqa: BLE001 — 连接/池/提交失败不冒泡成删除失败
+        logger.warning(
+            "post-close settlement failed for order %s (%s); reconciliation will verify",
+            order_no,
+            type(exc).__name__,
+        )
+        return
+    logger.info("post-close settlement for order %s: %s", order_no, settle_outcome)
 
 
 @router.post(

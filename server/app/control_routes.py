@@ -72,6 +72,7 @@ from app.settings import (
 from app.sql_pagination import PAGE_CLAUSE
 from app.storage import StorageBackendUnavailable, storage_object_ref_from_uri
 from app.zpay import deployment_config_from_environment
+from app.zpay_payments import count_zpay_unresolved_orders
 
 router = APIRouter(prefix="/api/control", tags=["control"])
 logger = logging.getLogger(__name__)
@@ -402,6 +403,11 @@ class ZPaySettingsUpdate(AdminWriteContract):
     pid: str = Field(min_length=1)
     key: str | None = None
     enabled_channels: list[Literal["alipay", "wxpay"]] = Field(min_length=1)
+    # F4（2026-11-16 评审 Q5）：pid 变更=商户身份切换——旧单的查单与回调验签
+    # 随当前配置整体失效，F1/F3 的补账能力一起丢；收窄渠道白名单会让真实历史
+    # 付款被结算防线拒绝。这两种变更必须显式确认，确认时后端把在途单影响面
+    # 写进审计（未决单清单）。
+    rotation_acknowledged: bool = False
 
 
 class BillingSettingsUpdate(AdminWriteContract):
@@ -663,6 +669,38 @@ def _update_control_zpay_settings_business(
         incoming_key = (payload.key or "").strip()
         if incoming_key.startswith("********") or not incoming_key:
             incoming_key = current.get("key", "")
+        # F4（2026-11-16 评审 Q5 + 二轮评审）：身份切换/渠道收窄的影响面必须
+        # 显式确认。不做无限期硬拦截（在途单网关寿命不受控，「过窗即可换」的
+        # 承诺做不到），但确认时后端把未决单清单写进审计——换绑后旧单的查单/
+        # 回调恢复能力随当前配置失效，这份清单就是人工对账的责任起点。仅换
+        # key（同身份凭据轮换）不拦：查单请求同样携带 key（zpay.py），换后旧单
+        # 查单一样失效——所以**每次保存**都审计 key_changed 与当时影响面
+        # （二轮评审 P2：轮换必须与无变化保存可区分）。
+        pid_changed = str(current.get("pid", "")) != payload.pid
+        key_changed = incoming_key != current.get("key", "")
+        current_channels = {
+            item for item in str(current.get("enabled_channels", "")).split(",") if item
+        }
+        removed_channels = sorted(current_channels - set(payload.enabled_channels))
+        impact = count_zpay_unresolved_orders(conn)
+        unresolved_total = impact["pending"] + impact["closed"]
+        rotation_risk = (pid_changed or bool(removed_channels)) and unresolved_total > 0
+        if rotation_risk and not payload.rotation_acknowledged:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PAYMENT_SETTINGS_ROTATION_RISK",
+                    "message": (
+                        "本次修改会切换商户身份或收窄渠道白名单，"
+                        f"当前有 {unresolved_total} 笔在途/已关单的 zpay 订单，"
+                        "换绑后它们可能无法再查单补账。请确认已核对未决单清单后重试"
+                        "（请求体加 rotation_acknowledged=true）。"
+                    ),
+                    "impact": impact,
+                    "pid_changed": pid_changed,
+                    "removed_channels": removed_channels,
+                },
+            )
         result = repo.save_zpay_config(
             {
                 "pid": payload.pid,
@@ -685,6 +723,13 @@ def _update_control_zpay_settings_business(
                 {"enabled_channels": str(current.get("enabled_channels", "")).split(",")},
                 {"enabled_channels": payload.enabled_channels},
             ),
+            # F4：每次保存都带凭据轮换标记与当时影响面快照（脱敏，不含 key 本
+            # 身）——事后对账与「哪些单在换绑前后失效」从这里起步。
+            "pid_changed": pid_changed,
+            "key_changed": key_changed,
+            "removed_channels": removed_channels,
+            "unresolved_orders": impact,
+            "rotation_acknowledged": payload.rotation_acknowledged,
             "reason": payload.reason.strip(),
             "request_id": request_id,
         },

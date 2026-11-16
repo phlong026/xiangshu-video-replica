@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hashlib
 import io
 import json
 import re
@@ -794,6 +795,128 @@ def test_query_order_not_paid_returns_unpaid(
     assert result.trade_state == "NOTPAY"
     assert result.transaction_id is None
     assert result.amount_fen is None
+
+
+# --- Order close (F2, 2026-11-16 漏账缺口修复) --------------------------------
+
+
+def _close_routes(
+    handler: object, platform_cert_pem: bytes, platform_serial: str
+) -> dict[str, object]:
+    return {
+        "/transactions/out-trade-no": handler,
+        CERTIFICATES_PATH: _certificates_response(API_V3_KEY, platform_cert_pem, platform_serial),
+    }
+
+
+def test_close_order_verifies_the_empty_204_body_and_succeeds(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    """微信关单成功回 **204 空包体**：没有 JSON 可解析，但验签头照带。
+
+    空体验签通过才算成功——不能照搬查询的 JSON 解析流程，也不能跳过验签。
+    显式构造 HTTP 204（评审 P3：_signed_response 缺省 200，会漏掉真实成功
+    路径的状态码形态）。
+    """
+    signed_204 = _signed_response(platform_key, b"", platform_serial)
+    assert isinstance(signed_204, _MockResponse)
+    signed = _MockResponse(
+        body=signed_204.read(),
+        headers={
+            "Wechatpay-Timestamp": signed_204.getheader("Wechatpay-Timestamp"),
+            "Wechatpay-Nonce": signed_204.getheader("Wechatpay-Nonce"),
+            "Wechatpay-Signature": signed_204.getheader("Wechatpay-Signature"),
+            "Wechatpay-Serial": signed_204.getheader("Wechatpay-Serial"),
+        },
+        status=204,
+    )
+    opener = _RouteOpener(_close_routes(signed, platform_cert_pem, platform_serial))
+    result = WeChatNativeClient(opener=opener).close_order(
+        merchant=merchant_config, out_trade_no="OUT_C_001"
+    )
+    assert result.response_digest == hashlib.sha256(b"").hexdigest()
+    assert opener.calls[0].get_method() == "POST"
+    assert opener.calls[0].full_url.endswith("/close")
+    assert json.loads(opener.calls[0].data.decode("utf-8")) == {"mchid": merchant_config.mchid}
+
+
+def test_close_order_rejects_a_forged_empty_body_response(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    """伪造应答没有平台私钥签不出来：签名对不上空包体必须拒绝，不能当成功。"""
+    # 头部是对非空内容签的，应答体却是空——验签必须失败。
+    mismatched = _signed_response(platform_key, b"tampered", platform_serial)
+    forged = _MockResponse(
+        body=b"",
+        headers={
+            "Wechatpay-Timestamp": mismatched.getheader("Wechatpay-Timestamp"),
+            "Wechatpay-Nonce": mismatched.getheader("Wechatpay-Nonce"),
+            "Wechatpay-Signature": mismatched.getheader("Wechatpay-Signature"),
+            "Wechatpay-Serial": platform_serial,
+        },
+        status=204,
+    )
+    opener = _RouteOpener(_close_routes(forged, platform_cert_pem, platform_serial))
+    with pytest.raises(WeChatSignatureError):
+        WeChatNativeClient(opener=opener).close_order(
+            merchant=merchant_config, out_trade_no="OUT_C_002"
+        )
+
+
+@pytest.mark.parametrize(
+    ("wechat_code", "http_status"),
+    [
+        ("ORDERPAID", 403),
+        ("TRADE_ERROR", 403),
+        ("INVALID_REQUEST", 400),
+        ("SYSTEM_ERROR", 500),
+    ],
+)
+def test_close_order_surfaces_wechat_business_codes(
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    wechat_code: str,
+    http_status: int,
+) -> None:
+    """业务码（含 ORDERPAID）原样带在 WeChatNativeError.wechat_code 上——
+
+    「确定没关」与「结果未知」的区分是 provider 层的职责，客户端只如实上报。
+    """
+    body = json.dumps({"code": wechat_code, "message": "business error"}).encode()
+
+    def rejected(request: Request) -> HTTPError:
+        return HTTPError(request.full_url, http_status, "Error", {}, io.BytesIO(body))
+
+    opener = _RouteOpener(_close_routes(rejected, platform_cert_pem, platform_serial))
+    with pytest.raises(WeChatNativeError, match=wechat_code) as caught:
+        WeChatNativeClient(opener=opener).close_order(
+            merchant=merchant_config, out_trade_no="OUT_C_003"
+        )
+    assert caught.value.wechat_code == wechat_code
+
+
+def test_close_order_timeout_maps_to_504(
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    """超时=结果未知（请求可能已到达网关）：504 语义由 provider 映射为未知。"""
+    opener = _RouteOpener(
+        _close_routes(TimeoutError("timed out"), platform_cert_pem, platform_serial)
+    )
+    with pytest.raises(WeChatNativeError) as caught:
+        WeChatNativeClient(opener=opener).close_order(
+            merchant=merchant_config, out_trade_no="OUT_C_004"
+        )
+    assert caught.value.status_code == 504
+    assert caught.value.wechat_code is None
 
 
 # --- Order expiry (time_expire) ----------------------------------------------

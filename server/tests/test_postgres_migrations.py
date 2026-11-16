@@ -61,7 +61,9 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 20260930T1100（告警推送防打扰去重表）继续追加其上，20260930T1400（注册赠送
 # 积分单行配置表）追加在其后，故链尾为 20260930T1400_registration_bonus_settings。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20261115T1000_display_settings"
+# 20261116T1000_recharge_orders_closed_at（2026-11-16 漏账缺口修复 F3）追加
+# recharge_orders.closed_at 与 CLOSED 扫描部分索引，链尾随之前移。
+HEAD_REVISION = "20261116T1000_recharge_orders_closed_at"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

@@ -78,6 +78,16 @@ const pendingWechatOrder: AdminRechargeOrder = {
   provider: "wechat_native",
 };
 
+/** A locally closed order stays queryable: the gateway side may still get
+ *  paid (zpay has no gateway expiry) and manual sync is the only recovery
+ *  path when the callback is lost (2026-11-16 漏账缺口修复 F1). */
+const closedOrder: AdminRechargeOrder = {
+  ...pendingOrder,
+  id: "order-4",
+  order_no: "202608190004",
+  status: "CLOSED",
+};
+
 function installFetch(orders: AdminRechargeOrder[] = [pendingOrder]) {
   const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
     if (url.includes("/api/control/recharge-orders?")) {
@@ -326,6 +336,18 @@ describe("OrdersPage", () => {
     const table = await screen.findByRole("table", { name: "充值订单列表" });
     expect(within(table).getByText("微信")).toBeInTheDocument();
     // 微信订单同样走统一查单补单（后端按渠道分派网关，方案 P1）。
+    expect(
+      screen.getByRole("button", { name: "查单补单" }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers the unified 查单补单 on a locally closed order too", async () => {
+    installFetch([closedOrder]);
+    render(<OrdersPage />);
+
+    await screen.findByText("202608190004");
+    // 关单只是本地记账态：网关侧可能已支付且回调丢失，人工查单是唯一
+    // 补账入口（2026-11-16 漏账缺口修复 F1）。
     expect(
       screen.getByRole("button", { name: "查单补单" }),
     ).toBeInTheDocument();
