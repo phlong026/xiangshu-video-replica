@@ -9,11 +9,13 @@ import {
 } from "./api";
 import {
   AdminActivationError,
+  adminResolveViralLink,
   clearAdminActivationSession,
   createActivationCodeBatch,
   deleteAdminSession,
   deliverActivationCode,
   downloadActivationCodeExport,
+  estimateViralOperation,
   exchangeAdminSession,
   exportBillingReportCsv,
   fetchAdminSession,
@@ -696,6 +698,80 @@ describe("admin activation API adapter", () => {
     const last = fetchMock.mock.calls.at(-1) as [string, RequestInit];
     expect(last[0]).toBe(
       "http://127.0.0.1:8000/api/control/settings/customer-payments/wechat-native/self-check",
+    );
+    expect(last[1].method).toBe("POST");
+    expect(new Headers(last[1].headers).get("X-Admin-CSRF")).toBe(
+      CSRF_TOKEN_TEXT,
+    );
+  });
+
+  it("resolves a viral share link with the CSRF header on the control POST lane", async () => {
+    // link-resolve 是控制面的 POST，缺 X-Admin-CSRF 会被服务端 403
+    // ADMIN_CSRF_REQUIRED 拒掉（#125 引入两段式采集时漏带，生产表现为
+    // 「缺少 CSRF 令牌，请重新登录」且重新登录无效）。这条钉住必须带 CSRF.
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    fetchMock.mockImplementationOnce(() =>
+      jsonResponse({
+        platform: "douyin",
+        videoId: "v-1",
+        title: "爆款",
+        author: "作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 0,
+        likes: null,
+        comments: null,
+        shares: null,
+        collects: null,
+        publishedAt: null,
+        tags: [],
+      }),
+    );
+
+    const resolved = await adminResolveViralLink("https://v.douyin.com/v-1/");
+
+    expect(resolved.videoId).toBe("v-1");
+    const last = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(last[0]).toBe(
+      "http://127.0.0.1:8000/api/control/viral/link-resolve",
+    );
+    expect(last[1].method).toBe("POST");
+    expect(new Headers(last[1].headers).get("X-Admin-CSRF")).toBe(
+      CSRF_TOKEN_TEXT,
+    );
+    // 预检只解析不入库，不走 adminWrite 写契约（无 confirm/reason/幂等键）。
+    expect(new Headers(last[1].headers).get("Idempotency-Key")).toBeNull();
+  });
+
+  it("estimates viral operation cost with the CSRF header on the control POST lane", async () => {
+    // 同 link-resolve 的同类缺陷：费用预估 POST 原先也不带 CSRF 头，
+    // 一旦接上 UI 就是必 403 的地雷。钉住它必须带 X-Admin-CSRF.
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    fetchMock.mockImplementationOnce(() =>
+      jsonResponse({
+        snapshot: "s-1",
+        unitCostFen: null,
+        logicalCallsMax: 1,
+        normalRetryCallsMax: 2,
+        dataCostMaxFen: null,
+        reusedVideos: 0,
+        mediaDownloadsMax: 0,
+        totalCostFen: null,
+        note: "n",
+      }),
+    );
+
+    const estimate = await estimateViralOperation({ action: "search" });
+
+    expect(estimate.snapshot).toBe("s-1");
+    const last = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(last[0]).toBe(
+      "http://127.0.0.1:8000/api/control/viral/operations/estimate",
     );
     expect(last[1].method).toBe("POST");
     expect(new Headers(last[1].headers).get("X-Admin-CSRF")).toBe(

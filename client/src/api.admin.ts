@@ -4381,7 +4381,13 @@ export async function adminResolveViralLink(
 ): Promise<AdminViralLinkResolveResult> {
   const response = await requestControl(
     "/api/control/viral/link-resolve",
-    { method: "POST", body: JSON.stringify({ url }) },
+    {
+      method: "POST",
+      // 控制面 POST 强制 CSRF（autoCsrfForWrites=false），缺头即 403
+      // ADMIN_CSRF_REQUIRED——reconcileFirstFrameTask 的同类教训。
+      headers: { [CSRF_HEADER]: requireCsrfToken() },
+      body: JSON.stringify({ url }),
+    },
     // 解析通道外呼（视频号为三步链）+ 短链 302 还原，同采集量级。
     240_000,
   );
@@ -5002,6 +5008,8 @@ async function readViralOperationEstimate(
     "/api/control/viral/operations/estimate",
     {
       method: "POST",
+      // 同 link-resolve：控制面 POST 缺 CSRF 头即 403 ADMIN_CSRF_REQUIRED.
+      headers: { [CSRF_HEADER]: requireCsrfToken() },
       body: JSON.stringify(payload),
     },
   );
