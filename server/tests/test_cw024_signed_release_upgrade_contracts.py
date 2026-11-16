@@ -194,7 +194,7 @@ def test_signed_release_flow_is_the_only_release_entrypoint() -> None:
     package = json.loads(_read(PACKAGE_JSON))
 
     assert package["scripts"].get("release:customer") == (
-        "powershell -NoProfile -ExecutionPolicy Bypass -File "
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File "
         "scripts/release/build-customer-signed-release.ps1"
     )
 
