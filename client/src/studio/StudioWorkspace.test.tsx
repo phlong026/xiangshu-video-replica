@@ -4561,6 +4561,29 @@ describe("视频生成（C2 独立创作）", () => {
     expect(submit).toBeEnabled();
   });
 
+  it("口播确认弹窗可改作品名并随任务提交", async () => {
+    api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+
+    fireEvent.click(await findEnabledButton("生成口播视频"));
+    expect(await screen.findByText("5.00 元/秒")).toBeInTheDocument();
+    const titleInput = screen.getByRole("textbox", { name: "作品名称" });
+    expect(titleInput).toHaveValue("张工 · 建房预算");
+    fireEvent.change(titleInput, { target: { value: "乡墅口播 · 预算篇" } });
+    fireEvent.click(await findEnabledButton("确认费用并提交"));
+
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
+    expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ title: "乡墅口播 · 预算篇" }),
+    );
+  });
+
   it("口播报价失败时禁止提交并支持重试", async () => {
     api.getOralPrice
       .mockRejectedValueOnce(new Error("口播报价暂不可用"))

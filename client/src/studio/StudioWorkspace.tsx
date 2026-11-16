@@ -1108,7 +1108,7 @@ export function StudioWorkspace({
       const request = {
         identityId: input.ipId,
         avatarId: input.avatarId,
-        title: draft.script.title || "未命名口播",
+        title: draft.script.title.trim() || "未命名口播",
         mode: "TTS" as const,
         voiceId: input.voiceId,
         scriptText: draft.script.text,
@@ -2558,9 +2558,27 @@ export function StudioWorkspace({
               <div>
                 <dt>作品</dt>
                 <dd>
-                  {generation === "视频生成"
-                    ? state.draft.videoName?.trim() || "未命名视频"
-                    : state.draft.script.title || "未命名创作"}
+                  {generation === "视频生成" ? (
+                    state.draft.videoName?.trim() || "未命名视频"
+                  ) : generation === "数字人口播" ? (
+                    <input
+                      aria-label="作品名称"
+                      className="studio-generation-title"
+                      maxLength={120}
+                      onChange={(event) =>
+                        patchDraft({
+                          script: {
+                            ...state.draft.script,
+                            title: event.target.value,
+                          },
+                        })
+                      }
+                      placeholder="未命名口播"
+                      value={state.draft.script.title}
+                    />
+                  ) : (
+                    state.draft.script.title || "未命名创作"
+                  )}
                 </dd>
               </div>
               <div>
