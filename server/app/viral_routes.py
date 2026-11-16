@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, NoReturn
@@ -76,6 +77,18 @@ from app.viral_tikhub import (
 )
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
+
+# 爆款数据功能下线开关（2026-11-16 定价决策：该系列免费提供但平台持续承担
+# tikhub 成本，业务拍板下线）。默认关闭；env 置 1 可临时重开（回滚用）。
+_VIRAL_CLIENT_DISABLED = os.environ.get("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "0") == "1"
+
+
+def _require_client_enabled() -> None:
+    if _VIRAL_CLIENT_DISABLED:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={"code": "VIRAL_FEATURE_RETIRED", "message": "爆款数据功能已下线。"},
+        )
 
 SORT_HOT = "hot"
 SORT_LATEST = "latest"
@@ -311,6 +324,7 @@ def list_viral_videos(
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
     featured_only: bool = False,
 ) -> ViralListResponse:
+    _require_client_enabled()
     if platform not in _VALID_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -396,6 +410,7 @@ def list_viral_favorites(
     limit: Annotated[int, Query(ge=1, le=50)] = 24,
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
 ) -> ViralFavoritesResponse:
+    _require_client_enabled()
     if platform is not None and platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -497,6 +512,7 @@ def add_viral_video_favorite(
     platform: str,
     video_id: str,
 ) -> ViralFavoriteMutationResponse:
+    _require_client_enabled()
     with db.write() as (conn, actor):
         require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
         add_viral_favorite(conn, user_id=actor.id, platform=platform, video_id=video_id)
@@ -511,6 +527,7 @@ def remove_viral_video_favorite(
     platform: str,
     video_id: str,
 ) -> ViralFavoriteMutationResponse:
+    _require_client_enabled()
     if platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -528,6 +545,7 @@ def fetch_viral_video_statistics(
     actor: AuthenticatedUser,
     client: ViralSourceClientDep,
 ) -> ViralStatisticsResponse:
+    _require_client_enabled()
     from app.viral_statistics import _load_wechat_videos
 
     videos = _load_wechat_videos(conn, payload.videoIds)
@@ -582,6 +600,7 @@ def audit_local_viral_cache(
     conn: Database,
     actor: AuthenticatedUser,
 ) -> ViralCacheReclaimResponse:
+    _require_client_enabled()
     """回答「这些本地缓存条目还有没有服务端来源」，供桌面端回收。
 
     只读、不计费：回收动作发生在用户机器上，但判据必须由服务端给出——删除与下架
@@ -645,6 +664,7 @@ def fetch_viral_video_source(
     client: ViralSourceClientDep,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> ViralSourceResponse:
+    _require_client_enabled()
     """下发源站直链（视频号额外**同批**下发 ``decode_key``），不代理下载、不落存储.
 
     P2 客户端本地缓存的前置：客户端拿到直链后自行多线程取回并在本地解密

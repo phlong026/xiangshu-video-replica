@@ -886,8 +886,9 @@ describe("V1.4 workspace integration", () => {
       />,
     );
     const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
+    // 爆款数据功能已下线（2026-11-16 定价决策）：入口下架后导航不再含爆款视频。
     expect(nav.getAllByRole("button").map((node) => node.textContent)).toEqual(
-      expect.arrayContaining(["爆款视频", "文案工坊", "视频拆解"]),
+      expect.arrayContaining(["文案工坊", "视频拆解"]),
     );
     // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
     expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
