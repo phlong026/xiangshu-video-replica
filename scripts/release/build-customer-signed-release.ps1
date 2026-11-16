@@ -99,14 +99,18 @@ try {
   $overlayPath = Join-Path ([System.IO.Path]::GetTempPath()) (
     'cw24-release-overlay-' + [guid]::NewGuid().ToString('N') + '.json'
   )
+  # 时间戳可选：`-TimestampUrl ''` 表示签名时不带 RFC3161 时间戳（仅供
+  # 时间戳服务不可达时的应急出包；正式发版应保留默认 digicert 时间戳，
+  # 否则证书过期后签名失效时间点无法延展）。键缺省即 tauri 不传 /tr。
+  $windowsBundle = @{
+    certificateThumbprint = $env:VIDEO_REPLICA_RELEASE_SIGN_THUMBPRINT
+    digestAlgorithm = 'sha256'
+  }
+  if ($TimestampUrl) { $windowsBundle.timestampUrl = $TimestampUrl }
   $overlay = @{
     bundle = @{
       createUpdaterArtifacts = $true
-      windows = @{
-        certificateThumbprint = $env:VIDEO_REPLICA_RELEASE_SIGN_THUMBPRINT
-        digestAlgorithm = 'sha256'
-        timestampUrl = $TimestampUrl
-      }
+      windows = $windowsBundle
     }
     plugins = @{
       updater = @{
@@ -126,10 +130,41 @@ try {
   npm run tauri --workspace client -- build --config src-tauri/tauri.customer.conf.json --config $overlayPath --bundles nsis --ci -- --no-default-features
   if ($LASTEXITCODE -ne 0) { throw 'customer NSIS release build failed' }
 
+  # 更新端点门禁（2026-11-16 事故复盘）：2.6.5 的安装包内置了 CI 占位端点
+  # https://staging.example.invalid/…，客户端每天那次静默检查永远失败且不报错，
+  # 结果 2.6.4→2.6.5、2.6.5→2.6.6 两次「自动更新」全程没发生，直到用户手点
+  # 「检查更新」才看到「更新失败」。stable.json 本身是对的，坏的是 exe 内的
+  # updater 配置——所以门禁必须直接检查**产物二进制**，不能信任配置合并。
+  # 命中即 fail-closed：不出包，而不是发出一个永远升不了级的安装包。
+  $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { '.cargo-target' }
+  $appExe = Join-Path $targetRoot 'release/video-replica-desktop.exe'
+  if (-not (Test-Path -LiteralPath $appExe)) {
+    throw "release app executable was not produced: $appExe"
+  }
+  $appText = [System.Text.Encoding]::Latin1.GetString(
+    [System.IO.File]::ReadAllBytes($appExe)
+  )
+  $expectedEndpoint = "$($env:VITE_API_BASE_URL.TrimEnd('/'))/downloads/customer-cloud/stable.json"
+  if (-not $appText.Contains($expectedEndpoint)) {
+    throw "release app does not embed the production updater endpoint: $expectedEndpoint"
+  }
+  if ($appText.Contains('staging.example.invalid')) {
+    throw 'release app still embeds the CI placeholder updater endpoint (staging.example.invalid)'
+  }
+
   # The release gate: an installer whose Authenticode signature is not valid
   # must never leave this machine. A failed check means NO artifact, not a
   # repackaged unsigned one.
-  $installer = Get-ChildItem -LiteralPath '.cargo-target/release/bundle/nsis' -Filter '*.exe' |
+  # CARGO_TARGET_DIR 必须尊重：签名机仓库路径含非 ASCII 时（lib.exe/响应文件
+  # 过不了 ANSI 编码，aws-lc-sys 归档 LNK1104），靠它把 target 挪到纯 ASCII 盘符
+  # 路径；默认仍落在仓库内 .cargo-target，与 CI/desktop-build 工作流的取物路径
+  # 保持一致。
+  $nsisBundleDir = if ($env:CARGO_TARGET_DIR) {
+    Join-Path $env:CARGO_TARGET_DIR 'release/bundle/nsis'
+  } else {
+    '.cargo-target/release/bundle/nsis'
+  }
+  $installer = Get-ChildItem -LiteralPath $nsisBundleDir -Filter '*.exe' |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($null -eq $installer) { throw 'customer NSIS installer was not produced' }
   $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
