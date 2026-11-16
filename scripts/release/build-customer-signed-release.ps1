@@ -130,6 +130,28 @@ try {
   npm run tauri --workspace client -- build --config src-tauri/tauri.customer.conf.json --config $overlayPath --bundles nsis --ci -- --no-default-features
   if ($LASTEXITCODE -ne 0) { throw 'customer NSIS release build failed' }
 
+  # 更新端点门禁（2026-11-16 事故复盘）：2.6.5 的安装包内置了 CI 占位端点
+  # https://staging.example.invalid/…，客户端每天那次静默检查永远失败且不报错，
+  # 结果 2.6.4→2.6.5、2.6.5→2.6.6 两次「自动更新」全程没发生，直到用户手点
+  # 「检查更新」才看到「更新失败」。stable.json 本身是对的，坏的是 exe 内的
+  # updater 配置——所以门禁必须直接检查**产物二进制**，不能信任配置合并。
+  # 命中即 fail-closed：不出包，而不是发出一个永远升不了级的安装包。
+  $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { '.cargo-target' }
+  $appExe = Join-Path $targetRoot 'release/video-replica-desktop.exe'
+  if (-not (Test-Path -LiteralPath $appExe)) {
+    throw "release app executable was not produced: $appExe"
+  }
+  $appText = [System.Text.Encoding]::Latin1.GetString(
+    [System.IO.File]::ReadAllBytes($appExe)
+  )
+  $expectedEndpoint = "$($env:VITE_API_BASE_URL.TrimEnd('/'))/downloads/customer-cloud/stable.json"
+  if (-not $appText.Contains($expectedEndpoint)) {
+    throw "release app does not embed the production updater endpoint: $expectedEndpoint"
+  }
+  if ($appText.Contains('staging.example.invalid')) {
+    throw 'release app still embeds the CI placeholder updater endpoint (staging.example.invalid)'
+  }
+
   # The release gate: an installer whose Authenticode signature is not valid
   # must never leave this machine. A failed check means NO artifact, not a
   # repackaged unsigned one.
