@@ -886,8 +886,9 @@ describe("V1.4 workspace integration", () => {
       />,
     );
     const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
+    // 爆款数据功能已下线（2026-11-16 定价决策）：入口下架后导航不再含爆款视频。
     expect(nav.getAllByRole("button").map((node) => node.textContent)).toEqual(
-      expect.arrayContaining(["爆款视频", "文案工坊", "视频拆解"]),
+      expect.arrayContaining(["文案工坊", "视频拆解"]),
     );
     // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
     expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
@@ -903,6 +904,41 @@ describe("V1.4 workspace integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "用于数字人口播" }));
     expect(screen.getByText("张工本人音色 V1")).toBeInTheDocument();
     expect(screen.getByText(/去文案工坊修改/)).toBeInTheDocument();
+  });
+
+  it.each(["viral", "viral-detail"] as const)(
+    "旧书签的 %s 路由显示下线说明，且不读取爆款数据",
+    (page) => {
+      window.history.replaceState(null, "", `/#studio/${page}?video=抖音-1`);
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          reviewData={createReviewData()}
+        />,
+      );
+
+      expect(
+        screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+      ).toBeInTheDocument();
+      expect(api.listViralVideos).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
+      expect(window.location.hash).toBe("#studio/workbench");
+    },
+  );
+
+  it("旧恢复状态不再渲染爆款页面", () => {
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={createReviewData()}
+        initialState={createReviewState("viral-detail")}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+    ).toBeInTheDocument();
+    expect(api.listViralVideos).not.toHaveBeenCalled();
   });
 
   it("侧边栏恢复任务列表，显示进行中数量并直接进入任务页面", () => {
@@ -981,43 +1017,6 @@ describe("V1.4 workspace integration", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("← 返回创作")).toBeInTheDocument();
   });
-  it("基础资料晚到不会擦除已先返回的爆款列表", async () => {
-    const core = {
-      ...createReviewData(),
-      videos: [],
-      homepageVideos: [],
-      loading: false,
-    };
-    let resolveCore: (value: typeof core) => void = () => {};
-    live.loadStudioData.mockReturnValue(
-      new Promise((resolve) => {
-        resolveCore = resolve;
-      }),
-    );
-    render(
-      <StudioWorkspace
-        currentUser={reviewUser}
-        initialState={createState("workbench")}
-      />,
-    );
-    await waitFor(() => expect(live.loadStudioData).toHaveBeenCalled());
-    const video = {
-      ...createReviewData().videos[0],
-      id: "published-first",
-      title: "先返回的公共视频",
-    };
-    act(() =>
-      currentExtractionContext().updateData((previous) => ({
-        ...previous,
-        videos: [video],
-      })),
-    );
-    await act(async () => resolveCore(core));
-    expect(
-      currentExtractionContext().data.videos.map((item) => item.id),
-    ).toContain("published-first");
-  });
-
   it("素材选择器已加载的尾帧预览在选中后保留到创作页面", async () => {
     const material = {
       id: "tail-cloud",
@@ -2409,163 +2408,9 @@ describe("V1.4 workspace integration", () => {
       expect(live.publishScriptVersion).not.toHaveBeenCalled();
     });
 
-    it.each([false, true])(
-      "首页爆款提取使用刚导入的项目素材（已有旧来源：%s）",
-      async (hasOldSource) => {
-        const source = {
-          ...createReviewData().videos[0],
-          id: "fresh-viral",
-          title: "新导入的爆款",
-          homepageFeatured: true,
-          platformKey: "douyin" as const,
-          nativeId: "fresh-native",
-        };
-        live.loadStudioData.mockResolvedValue({
-          ...emptyStudioData,
-          videos: [source],
-        });
-        live.loadViralVideos.mockResolvedValue({
-          videos: [source],
-          errors: [],
-        });
-        live.loadCloudDraft.mockResolvedValue(undefined);
-        api.createViralImportTask.mockResolvedValue({
-          taskId: "fresh-import",
-          status: "SUCCEEDED",
-          projectId: "fresh-project",
-          sourceAssetId: "fresh-asset",
-          canTranscribe: true,
-        });
-        live.extractScriptFromUpload.mockResolvedValue({
-          text: "新来源的提取结果",
-        });
-        const state = createState("workbench");
-        if (hasOldSource) {
-          state.draft.projectId = "old-project";
-          state.draft.sourceAssetId = "old-asset";
-        }
-        render(
-          <StudioWorkspace currentUser={reviewUser} initialState={state} />,
-        );
-        fireEvent.click(
-          await screen.findByRole("button", { name: "提取文案：新导入的爆款" }),
-        );
-        await waitFor(() =>
-          expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
-            "fresh-project",
-            "fresh-asset",
-          ),
-        );
-        expect(api.createViralImportTask).toHaveBeenCalledWith(
-          "douyin",
-          "fresh-native",
-          "copy",
-          expect.any(String),
-        );
-        // 工作台两端统一直接服务端导入：正文随本人转写任务直出，不再有
-        // claim 旁路（共享文案缓存已退役）。
-        expect(await screen.findByLabelText("来源原文")).toHaveValue(
-          "新来源的提取结果",
-        );
-        expect(live.extractScriptFromUpload).toHaveBeenCalledTimes(1);
-      },
-    );
-
-    it("工作台爆款提取：入队后转写任务直出正文并回填", async () => {
-      const source = {
-        ...createReviewData().videos[0],
-        id: "cached-viral",
-        title: "自带转写正文的爆款",
-        homepageFeatured: true,
-        platformKey: "douyin" as const,
-        nativeId: "cached-native",
-      };
-      live.loadStudioData.mockResolvedValue({
-        ...emptyStudioData,
-        videos: [source],
-      });
-      live.loadViralVideos.mockResolvedValue({
-        videos: [source],
-        errors: [],
-      });
-      live.loadCloudDraft.mockResolvedValue(undefined);
-      api.createViralImportTask.mockResolvedValue({
-        taskId: "cached-import",
-        status: "SUCCEEDED",
-        projectId: "cached-project",
-        sourceAssetId: "cached-asset",
-        canTranscribe: true,
-      });
-      live.extractScriptFromUpload.mockResolvedValue({
-        text: "任务直出的转写正文",
-      });
-      render(
-        <StudioWorkspace
-          currentUser={reviewUser}
-          initialState={createState("workbench")}
-        />,
-      );
-      fireEvent.click(
-        await screen.findByRole("button", {
-          name: "提取文案：自带转写正文的爆款",
-        }),
-      );
-      await waitFor(() =>
-        expect(api.createViralImportTask).toHaveBeenCalledWith(
-          "douyin",
-          "cached-native",
-          "copy",
-          expect.any(String),
-        ),
-      );
-      // 正文随本人任务直出：转写完成即回填，无需 claim 交付。
-      await waitFor(() =>
-        expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
-          "cached-project",
-          "cached-asset",
-        ),
-      );
-      expect(await screen.findByLabelText("来源原文")).toHaveValue(
-        "任务直出的转写正文",
-      );
-    });
-
-    it("工作台导入受理失败：如实提示且不建转写任务", async () => {
-      const source = {
-        ...createReviewData().videos[0],
-        id: "unpriced-viral",
-        title: "未定价的爆款",
-        homepageFeatured: true,
-        platformKey: "douyin" as const,
-        nativeId: "unpriced-native",
-      };
-      live.loadStudioData.mockResolvedValue({
-        ...emptyStudioData,
-        videos: [source],
-      });
-      live.loadViralVideos.mockResolvedValue({
-        videos: [source],
-        errors: [],
-      });
-      live.loadCloudDraft.mockResolvedValue(undefined);
-      api.createViralImportTask.mockRejectedValueOnce(
-        new Error("爆款文案尚未配置价格"),
-      );
-      render(
-        <StudioWorkspace
-          currentUser={reviewUser}
-          initialState={createState("workbench")}
-        />,
-      );
-      fireEvent.click(
-        await screen.findByRole("button", { name: "提取文案：未定价的爆款" }),
-      );
-      // 失败如实提示；不建转写任务，避免白花一次转写费。
-      expect(
-        await screen.findByText("爆款文案尚未配置价格"),
-      ).toBeInTheDocument();
-      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
-    });
+    // 爆款数据功能已下线（2026-11-16 定价决策）：
+    // 「首页爆款提取使用刚导入的项目素材」「工作台导入受理失败」「工作台爆款提取」
+    // 三个流程测试随功能下线删除（恢复功能时 revert 本段上方历史可找回）。
 
     it("提取文案后往返视频复刻不会被空项目版本覆盖", async () => {
       live.loadStudioData.mockResolvedValue({

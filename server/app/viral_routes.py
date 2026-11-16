@@ -72,10 +72,24 @@ from app.viral_tikhub import (
     ViralSourceError,
     ViralSourceUnavailable,
     ViralVideo,
+    viral_feature_retired,
     viral_source_client_from_settings,
 )
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
+
+
+# 爆款数据功能下线开关（2026-11-16 定价决策：该系列免费提供但平台持续承担
+# tikhub 成本，业务拍板下线）。默认即下线；如需临时重开，env 显式置
+# VIDEO_REPLICA_VIRAL_CLIENT_DISABLED=0（回滚窗口用，用完应恢复下线）。
+# 同一判断由 viral_tikhub 的客户端构造入口复用，避免 worker/管理端绕过。
+def _require_client_enabled() -> None:
+    if viral_feature_retired():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={"code": "VIRAL_FEATURE_RETIRED", "message": "爆款数据功能已下线。"},
+        )
+
 
 SORT_HOT = "hot"
 SORT_LATEST = "latest"
@@ -311,6 +325,7 @@ def list_viral_videos(
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
     featured_only: bool = False,
 ) -> ViralListResponse:
+    _require_client_enabled()
     if platform not in _VALID_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -396,6 +411,7 @@ def list_viral_favorites(
     limit: Annotated[int, Query(ge=1, le=50)] = 24,
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
 ) -> ViralFavoritesResponse:
+    _require_client_enabled()
     if platform is not None and platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -497,6 +513,7 @@ def add_viral_video_favorite(
     platform: str,
     video_id: str,
 ) -> ViralFavoriteMutationResponse:
+    _require_client_enabled()
     with db.write() as (conn, actor):
         require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
         add_viral_favorite(conn, user_id=actor.id, platform=platform, video_id=video_id)
@@ -511,6 +528,7 @@ def remove_viral_video_favorite(
     platform: str,
     video_id: str,
 ) -> ViralFavoriteMutationResponse:
+    _require_client_enabled()
     if platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -528,6 +546,7 @@ def fetch_viral_video_statistics(
     actor: AuthenticatedUser,
     client: ViralSourceClientDep,
 ) -> ViralStatisticsResponse:
+    _require_client_enabled()
     from app.viral_statistics import _load_wechat_videos
 
     videos = _load_wechat_videos(conn, payload.videoIds)
@@ -587,6 +606,7 @@ def audit_local_viral_cache(
     只读、不计费：回收动作发生在用户机器上，但判据必须由服务端给出——删除与下架
     都不会在客户端的旧分页数据里留下痕迹。
     """
+    _require_client_enabled()
     if payload.platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -659,6 +679,7 @@ def fetch_viral_video_source(
     否则漏配即「能取直链但不收钱」。只有 PENDING（在途重试）复用同一计费轮次，
     已终态的轮次一律开新一轮——每一次真实外呼都对应一次扣费。
     """
+    _require_client_enabled()
     key = (idempotency_key or "").strip()
     if not key or len(key) > 128:
         raise HTTPException(

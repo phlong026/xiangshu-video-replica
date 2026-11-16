@@ -7,7 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Literal, cast
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -26,7 +26,7 @@ from app.storage import (
 from app.viral_media import ViralMediaPipeline
 from app.viral_media_preparation import ViralMediaBusy
 from app.viral_store import get_viral_video, viral_video_availability
-from app.viral_tikhub import ViralSourceUnavailable, ViralVideo, viral_source_client_from_settings
+from app.viral_tikhub import ViralVideo
 
 logger = logging.getLogger(__name__)
 VIRAL_IMPORT_LEASE_MINUTES = 20
@@ -449,7 +449,6 @@ class ViralImportLease:
 class ViralImportWork:
     lease: ViralImportLease
     video: ViralVideo
-    client: Any
     storage: StorageAdapter
     prefer: Literal["audio", "video"]
 
@@ -575,15 +574,9 @@ def prepare_viral_import_task(
     # 文案导入直接消费解析返回的音频（2026-09-30 拍板），复刻仍以完整视频为准；
     # 只归档过视频的同一视频由 perform 的回落兜底（见 perform_viral_import_task）。
     prefer: Literal["audio", "video"] = "audio" if lease.purpose == "copy" else "video"
-    try:
-        client = viral_source_client_from_settings(conn)
-    except ViralSourceUnavailable:
-        # Any already cached object remains importable while the source is offline.
-        client = None
     return ViralImportWork(
         lease=lease,
         video=video,
-        client=client,
         storage=storage,
         prefer=prefer,
     )

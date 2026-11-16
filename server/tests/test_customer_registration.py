@@ -1090,6 +1090,8 @@ def test_password_customer_xiaohongshu_resolution_import_and_replay_on_postgres(
             return b'{"code":0,"data":{"note_id":"66e012345678901234abcdef","video":["https://cdn.example/note.mp4"],"audio":["https://cdn.example/background-music.m4a"]}}'
 
     storage = FakeStorageAdapter(provider="fake", bucket="private")
+    # 下线只覆盖 TikHub 爆款目录；豆一豆解析 + 已归档媒体导入必须继续可用。
+    monkeypatch.setenv("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1")
 
     class Pipeline:
         def __init__(self, *, client: Any, storage: Any, **kwargs: Any) -> None:
@@ -1125,7 +1127,6 @@ def test_password_customer_xiaohongshu_resolution_import_and_replay_on_postgres(
         lambda *args, **kwargs: renew_session() if renew_during == "media" else None,
     )
     monkeypatch.setattr(domain, "ViralMediaPipeline", Pipeline)
-    monkeypatch.setattr(domain, "viral_source_client_from_settings", lambda conn: None)
     with psycopg.connect(route_state) as conn:
         conn.execute(
             "INSERT INTO viral_runtime_controls (id, collection_enabled, import_enabled) "

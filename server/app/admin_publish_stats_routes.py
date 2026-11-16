@@ -38,7 +38,7 @@ from app.usage_billing import (
     finish_source,
     next_platform_billing_round,
 )
-from app.viral_tikhub import viral_source_client_from_settings
+from app.viral_tikhub import ViralSourceUnavailable, viral_source_client_from_settings
 
 router = APIRouter(prefix="/api/control", tags=["admin-publish-stats"])
 logger = logging.getLogger(__name__)
@@ -249,7 +249,13 @@ def refresh_published_record_stats(
         api_metadata={"kind": "publish_stats_sync", "platform": platform},
         billing_round=billing_round,
     )
-    client = viral_source_client_from_settings(conn)
+    try:
+        client = viral_source_client_from_settings(conn)
+    except ViralSourceUnavailable as exc:
+        # 爆款功能下线后本链路无可用数据源：结束本次平台计费操作再明确报错，
+        # 不留 pending 操作给对账队列。
+        finish_source(conn, source_id, units=0, succeeded=False, service="viral_data")
+        raise _http(503, "VIRAL_FEATURE_RETIRED", str(exc)) from exc
     try:
         videos = client.douyin_refresh(platform="douyin", video_id=item_id)
         matched = next((video for video in videos if video.video_id == item_id), None)

@@ -1485,6 +1485,27 @@ def _seed_source_video(raw, uid, *, platform: str, video_id: str, tariff: int | 
         )
 
 
+def test_retired_viral_source_endpoint_returns_gone_before_provider_work(
+    source_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧客户端直达外呼端点时明确下线，且不进入上游/计费路径。"""
+    headers, _ = account(source_client, "retired_source")
+    _use_source_stub(source_client, _SourceStub())
+    monkeypatch.setenv("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1")
+
+    response = source_client.post(
+        "/api/viral/videos/source",
+        json={"platform": "douyin", "videoId": "retired-source"},
+        headers=headers,
+    )
+
+    assert response.status_code == 410, response.text
+    assert response.json()["detail"] == {
+        "code": "VIRAL_FEATURE_RETIRED",
+        "message": "爆款数据功能已下线。",
+    }
+
+
 def test_source_requires_valid_idempotency_key(source_client) -> None:
     """缺 Idempotency-Key → 422 前缀化错误码，且不预留计费。"""
     headers, _ = account(source_client, "source_key")

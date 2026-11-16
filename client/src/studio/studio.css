@@ -701,7 +701,7 @@ html:has(.studio-shell) {
   grid-template-columns: minmax(0, 1.74fr) minmax(360px, 1fr);
   grid-template-areas:
     "running activity"
-    "viral shortcuts";
+    "shortcuts shortcuts";
   gap: 14px;
 }
 /* 行锁定等高网格：每个单元格是网格直接子项，行内两卡顶边/底边强制对齐 */
@@ -715,9 +715,6 @@ html:has(.studio-shell) {
 }
 .studio-home-cell[data-area="activity"] {
   grid-area: activity;
-}
-.studio-home-cell[data-area="viral"] {
-  grid-area: viral;
 }
 .studio-home-cell[data-area="shortcuts"] {
   grid-area: shortcuts;
@@ -1029,109 +1026,6 @@ html:has(.studio-shell) {
   min-height: 30px;
   font-size: var(--font-label);
   padding: 4px 6px;
-}
-.studio-home-viral-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-  align-content: start;
-}
-.studio-home-viral-card {
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid #2b2e27;
-  border-radius: 8px;
-  background: #101111;
-  padding-bottom: 5px;
-}
-.studio-home-viral-cover {
-  position: relative;
-  display: block;
-  width: 100%;
-  aspect-ratio: 9 / 16;
-  overflow: hidden;
-  border: 0;
-  border-radius: 7px 7px 0 0;
-  padding: 0;
-  background: #191b18;
-}
-.studio-home-viral-cover > .video-preview {
-  height: 100%;
-}
-.studio-home-viral-platform,
-.studio-home-viral-author,
-.studio-home-viral-duration {
-  position: absolute;
-  z-index: 1;
-  font-size: var(--font-caption);
-  line-height: 1;
-  color: #fff;
-  background: rgba(13, 14, 13, 0.72);
-  border-radius: 4px;
-  padding: 4px 5px;
-}
-.studio-home-viral-platform {
-  top: 6px;
-  left: 6px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.studio-home-viral-author {
-  left: 5px;
-  bottom: 5px;
-  max-width: calc(100% - 65px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.studio-home-viral-duration {
-  right: 5px;
-  bottom: 5px;
-}
-.studio-home-viral-card h3 {
-  overflow: hidden;
-  margin: 6px 7px 2px;
-  font-size: var(--font-label);
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.studio-home-viral-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 3px;
-  padding: 0 5px;
-  color: #aaa99f;
-}
-.studio-home-viral-meta > span {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  gap: 3px;
-  font-size: var(--font-caption);
-  white-space: nowrap;
-}
-.studio-home-viral-meta > span svg {
-  color: #e2aa2d;
-}
-.studio-home-viral-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-  padding: 6px 5px;
-}
-.studio-home-viral-actions .studio-button {
-  min-width: 0;
-  min-height: 25px;
-  border: 1px solid #5c461d;
-  border-radius: 5px;
-  padding: 3px 6px;
-  font-size: var(--font-caption);
-}
-.studio-home-viral-actions .studio-button--primary {
-  grid-column: 1 / -1;
 }
 .studio-activity {
   min-height: 287px;
@@ -1763,15 +1657,6 @@ html:has(.studio-shell) {
   .studio-source-input .studio-button {
     padding-inline: 13px;
   }
-  .studio-home-viral-grid {
-    gap: 7px;
-  }
-  .studio-home-viral-meta > span {
-    font-size: var(--font-caption);
-  }
-  .studio-home-viral-actions .studio-button {
-    padding-inline: 4px;
-  }
   .studio-result-grid {
     grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr);
   }
@@ -1819,12 +1704,7 @@ html:has(.studio-shell) {
     grid-template-columns: 1fr 1fr;
     grid-template-areas:
       "running running"
-      "activity shortcuts"
-      "viral viral";
-  }
-  .studio-home-viral-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    padding: 0;
+      "activity shortcuts";
   }
   .studio-result-grid,
   .studio-profile-grid {
@@ -1918,7 +1798,6 @@ html:has(.studio-shell) {
     grid-template-areas:
       "running"
       "activity"
-      "viral"
       "shortcuts";
   }
   .studio-home-metrics {

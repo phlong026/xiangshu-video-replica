@@ -1555,12 +1555,10 @@ def search_viral_videos_for_admin(
         try:
             client = viral_source_client_from_settings(BusinessConnection.postgres(conn))
         except ViralSourceUnavailable as exc:
-            fail_admin_search_record(
-                batch_id, "数据服务尚未配置或配置无效，请核对服务配置。", "CONFIGURATION"
-            )
-            raise http_error(
-                503, "VIRAL_ADMIN_SEARCH_UNAVAILABLE", "爆款视频数据源暂不可用，请先配置数据源。"
-            ) from exc
+            # 下线闸与配置缺失都从这里出：直接透传各自的中性文案，避免把
+            # 「功能已下线」误报成「尚未配置」让运营反复检查配置。
+            fail_admin_search_record(batch_id, str(exc), "CONFIGURATION")
+            raise http_error(503, "VIRAL_ADMIN_SEARCH_UNAVAILABLE", str(exc)) from exc
         try:
             # 限时外呼：服务器 DNS/出网挂起是 urllib 超时盖不住的盲区，
             # 必须有界失败，否则外呼挂在本写事务里直到被 PG 会话超时击穿。
@@ -2133,7 +2131,7 @@ def refresh_collected_wechat_statistics(
 ) -> dict[str, object]:
     from app.viral_statistics import refresh_viral_statistics
     from app.viral_store import STATISTICS_CHECKED_AT_KEY, STATISTICS_RETRY_AT_KEY
-    from app.viral_tikhub import viral_source_client_from_settings
+    from app.viral_tikhub import ViralSourceUnavailable, viral_source_client_from_settings
     from app.viral_wechat_link import wechat_link_client_from_settings_or_none
 
     def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
@@ -2154,9 +2152,15 @@ def refresh_collected_wechat_statistics(
         ):
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
         conn = BusinessConnection.postgres(raw)
+        # 下线/未配置时 client=None：refresh_viral_statistics 已有该分支，
+        # 返回库内已有统计且不产生任何上游外呼。
+        try:
+            tikhub_client = viral_source_client_from_settings(conn)
+        except ViralSourceUnavailable:
+            tikhub_client = None
         videos = refresh_viral_statistics(
             conn,
-            viral_source_client_from_settings(conn),
+            tikhub_client,
             [video_id],
             wechat_client=wechat_link_client_from_settings_or_none(conn),
         )

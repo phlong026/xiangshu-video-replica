@@ -223,6 +223,19 @@ HISTORICAL_CLI_ROWS: tuple[CommandRow, ...] = tuple(
             "idempotent; 2026-11 爆款链路改造 WP4",
         ),
         (
+            "python -m scripts.backfill_attempt_usage_costs",
+            "scripts/backfill_attempt_usage_costs.py",
+            "current-pg",
+            "PostgreSQL (business)",
+            "backfill (one-shot)",
+            "dry-run by default; writes billing_evidence only with --apply "
+            "(usage recovered from source task delivery facts x configured "
+            "tariff unit_cost_fen); call-unit services use usage=1 per "
+            "executed attempt, second-unit services use delivered seconds; "
+            "one evidence per operation (DISTINCT ON); batches with audit; "
+            "idempotent; 2026-11-16 爆款下线/用量缺失积压清理",
+        ),
+        (
             "python -m scripts.backfill_operation_costs",
             "scripts/backfill_operation_costs.py",
             "current-pg",

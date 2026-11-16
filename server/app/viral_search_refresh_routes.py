@@ -20,6 +20,7 @@ from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.usage_billing import finish_source
+from app.viral_routes import _require_client_enabled
 from app.viral_search import archive_search_covers_bounded
 from app.viral_search_routes import require_priced_viral_service
 from app.viral_store import get_viral_video, update_viral_cover, upsert_viral_videos
@@ -108,6 +109,7 @@ def refresh_viral_video(
     idle_in_transaction_session_timeout(60s) 才解开。鉴权由栅栏权威完成
     （fenced_pg_transaction 在行锁下复核会话并抛 401），此处无需预解析。
     """
+    _require_client_enabled()
     from app.usage_billing import accept_operation
 
     key = (idempotency_key or "").strip()

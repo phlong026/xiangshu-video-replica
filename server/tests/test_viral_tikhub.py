@@ -43,6 +43,7 @@ from app.viral_tikhub import (
     pick_douyin_play_url,
     strip_highlight,
     viral_source_client_from_config,
+    viral_source_client_from_settings,
 )
 
 
@@ -73,6 +74,14 @@ def _client(
         detail_transport=transports[1],
     )
     return client, transports
+
+
+def test_settings_client_is_blocked_when_viral_feature_is_retired(monkeypatch) -> None:
+    """全局下线闸必须在读取凭据和任意网络请求之前生效。"""
+    monkeypatch.setenv("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1")
+
+    with pytest.raises(ViralSourceUnavailable, match="功能已下线"):
+        viral_source_client_from_settings(None)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

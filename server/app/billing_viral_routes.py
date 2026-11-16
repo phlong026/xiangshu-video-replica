@@ -16,7 +16,7 @@ from app.customer_fence import BusinessDbDep
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.viral_collection_billing import collection_batch_rows
-from app.viral_routes import ViralStatisticsResponse, _item
+from app.viral_routes import ViralStatisticsResponse, _item, _require_client_enabled
 
 router = APIRouter(tags=["viral-billing"])
 
@@ -40,6 +40,7 @@ def refresh_statistics(
     触发的外呼次数（24h 缓存命中不产生外呼、不计费）。供应商成本由 ``viral_tikhub``
     内的 ``meter_call("viral_data")`` 自动落平台侧，与客户零售价无关。
     """
+    _require_client_enabled()
     from app.permissions import require_not_auditor
     from app.usage_billing import accept_operation, finish_source
     from app.viral_search_routes import require_priced_viral_service
