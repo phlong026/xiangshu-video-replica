@@ -323,7 +323,9 @@ class GenerationBatchRequest(BaseModel):
     prompt_text: str | None = Field(default=None, min_length=1, max_length=7000)
     prompt_context: PromptContext | None = None
     first_frame_asset_id: str = Field(min_length=1)
-    output_duration_seconds: int = Field(ge=4, le=15)
+    # 16–30 秒走 video_768p_long 长档（路由层有价目启用双闸；2K 仍限 15 秒，
+    # 由 _validate_h3_duration 在构建上游请求时兜底拒绝）。
+    output_duration_seconds: int = Field(ge=4, le=30)
     resolution: Literal["768P", "2K"] = "768P"
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
     idempotency_key: str = Field(min_length=1, max_length=128)
@@ -3225,7 +3227,7 @@ def _regeneration_quote_parameters(
         if (
             worker_resolution not in {"768P", "2K"}
             or type(worker_duration) is not int
-            or not 4 <= worker_duration <= 15
+            or not 4 <= worker_duration <= 30
         ):
             raise ValueError("原批次冻结规格无效")
         specifications = []

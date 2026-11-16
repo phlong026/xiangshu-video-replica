@@ -1072,7 +1072,11 @@ def parse_replica_prompt_payload(
     画幅/时长要素缺失与超长记入 warnings 随 payload 落库（方案 T10）。
     """
     try:
-        payload = json.loads(text)
+        # gemini-4-carbon 经网关的产出会把原始换行注进 JSON 键名与数字字面量
+        # 中间（T15 同源缺陷，实测次次命中，"replica_prompt" 键名亦会被切断）。
+        # 剔除全部原始换行后解析：pretty-print 缩进换行与注入换行一并移除，
+        # JSON 语义不变；字符串值内部由 \n 转义承载的换行不受影响。
+        payload = json.loads(text.replace("\r", "").replace("\n", ""))
     except (json.JSONDecodeError, ValueError) as exc:
         raise AnalysisProviderFailed(
             "长视频拆解结果格式无效，请重新拆解。",
@@ -1130,23 +1134,29 @@ def parse_replica_prompt_payload(
             }
         )
     summary_raw = payload.get("summary")
-    summary = {
-        field: (summary_raw.get(field, "") if isinstance(summary_raw, dict) else "")
-        for field in _REPLICA_PROMPT_SUMMARY_FIELDS
-    }
+    # 键名同样可能被网关注入换行（如 "\nvisual_style"）：strip 后再按字段取值。
+    summary_source = (
+        {key.strip(): value for key, value in summary_raw.items() if isinstance(key, str)}
+        if isinstance(summary_raw, dict)
+        else {}
+    )
+    summary = {field: summary_source.get(field, "") for field in _REPLICA_PROMPT_SUMMARY_FIELDS}
     spoken_raw = payload.get("spoken_script")
     spoken_script: list[dict[str, Any]] = []
     if isinstance(spoken_raw, list):
         for item in spoken_raw:
             if not isinstance(item, dict):
                 continue
-            line = item.get("text")
+            item_fields = {
+                key.strip(): value for key, value in item.items() if isinstance(key, str)
+            }
+            line = item_fields.get("text")
             if not isinstance(line, str) or not line.strip():
                 continue
             spoken_script.append(
                 {
-                    "start_time": item.get("start_time"),
-                    "end_time": item.get("end_time"),
+                    "start_time": item_fields.get("start_time"),
+                    "end_time": item_fields.get("end_time"),
                     "text": line,
                 }
             )

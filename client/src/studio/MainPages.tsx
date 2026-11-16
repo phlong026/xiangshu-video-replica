@@ -672,10 +672,10 @@ export function WorkbenchPage() {
       completed: false,
     });
     // 首页上传尚未选择复刻或文案提取；只存素材，后续动作入口再推进。
-    // 超过 15 秒的视频默认只抽音轨上传供提取文案（原片不出本机）；原片与
+    // 超过 30 秒的视频默认只抽音轨上传供提取文案（原片不出本机）；原片与
     // 实测时长登记进 longOriginalRef——用户点「开始复刻」时按 replica_prompt
-    // 用途补传整片并跳长视频拆解页签。读不出时长、非桌面端或抽轨失败时
-    // 回退整片上传（服务端 script 门禁已放开 15 秒）。
+    // 用途补传整片并跳长视频拆解页签（4–30 秒源片留在复刻页签直接拆解）。
+    // 读不出时长、非桌面端或抽轨失败时回退整片上传（服务端 script 门禁无上限）。
     const pickUploadFile = async (): Promise<{
       file: File;
       longDuration?: number;
@@ -686,7 +686,7 @@ export function WorkbenchPage() {
       } catch {
         duration = undefined;
       }
-      if (duration === undefined || duration <= 15.1) return { file };
+      if (duration === undefined || duration <= 30.1) return { file };
       notify("正在提取视频音轨…");
       try {
         return {

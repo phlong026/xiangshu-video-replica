@@ -32,8 +32,10 @@ import { Button, Empty, Icon, Panel } from "./ui";
 import "./longReplica.css";
 
 // 与服务端 media.py 的 replica_prompt 门禁同口径；放开时两边一起改。
+// 下限 30 秒：本页签承接 >30s 拆解（2026-11-16 分界线口径），30 秒以内
+// 的视频走「<30s 视频拆解」页签的完整复刻链路。
 const MAX_SOURCE_BYTES = 600 * 1024 * 1024;
-const MIN_SOURCE_SECONDS = 4;
+const MIN_SOURCE_SECONDS = 30;
 const MAX_SOURCE_SECONDS = 180;
 const DURATION_TOLERANCE_SECONDS = 0.1;
 const COPY_FEEDBACK_MS = 2000;
@@ -365,7 +367,9 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         return;
       }
       if (duration < MIN_SOURCE_SECONDS - DURATION_TOLERANCE_SECONDS) {
-        notify("长视频时长不能少于 4 秒，请更换素材。");
+        notify(
+          "长视频拆解仅支持 30 秒以上的视频，30 秒以内请到「<30s 视频拆解」页签。",
+        );
         return;
       }
     }
@@ -676,7 +680,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
             }
             // 空态只保留两句核心：产出什么 + 硬性限制/计费。预计时长与
             // 「可离开本页」在拆解进行态提示，此处不再重复。
-            description="上传 4–180 秒的爆款视频，AI 拆解出复刻提示词、口播文案与全片摘要。支持 600 MB 内 MP4 / MOV，按次计费。"
+            description="上传 30–180 秒的爆款视频，AI 拆解出复刻提示词、口播文案与全片摘要。支持 600 MB 内 MP4 / MOV，按次计费。"
             title="还没有上传长视频"
           />
         ) : null}

@@ -472,6 +472,21 @@ def test_optimizer_protects_plain_dialogue_and_explicit_silence() -> None:
     assert any(w["code"] == "DIALOGUE_CHANGED" for w in result["warnings"])
 
 
+def test_replica_batch_accepts_30s_output_for_long_tier() -> None:
+    """复刻 30s 分流：批量契约放宽到 le=30（16-30s 走 video_768p_long 长档，
+    路由层另有价目启用双闸与 2K 拒绝，这里只钉模型层合同）。"""
+    base = dict(
+        quantity=1,
+        first_frame_asset_id="frame",
+        output_duration_seconds=30,
+        idempotency_key="click-30s",
+        prompt_text="复刻提示词正文",
+    )
+    assert GenerationBatchRequest(**base).output_duration_seconds == 30
+    with pytest.raises(ValidationError):
+        GenerationBatchRequest(**base | {"output_duration_seconds": 31})
+
+
 def test_final_text_and_legacy_version_are_exclusive() -> None:
     base = dict(
         quantity=1,

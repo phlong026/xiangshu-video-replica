@@ -193,14 +193,14 @@ describe("LongReplicaPage 上传门禁", () => {
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
 
-  it("不足 4 秒的视频在上传前被拦截", async () => {
+  it("不足 30 秒的视频在上传前被拦截并引导去 <30s 页签", async () => {
     const { notify } = setupContext();
     readVideoDuration.mockResolvedValue(3);
     render(<LongReplicaPage />);
     await pickFile(makeFile());
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
-        "长视频时长不能少于 4 秒，请更换素材。",
+        "长视频拆解仅支持 30 秒以上的视频，30 秒以内请到「<30s 视频拆解」页签。",
       );
     });
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
