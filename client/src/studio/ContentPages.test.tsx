@@ -4490,7 +4490,7 @@ describe("全自动复刻入口（M8 v1）", () => {
     trainingMaterialDownloadUrl
       .mockResolvedValueOnce("https://signed/old")
       .mockResolvedValueOnce("https://signed/new");
-    const view = render(<MaterialsPage />);
+    const _view = render(<MaterialsPage />);
     const previewButtons = await screen.findAllByRole("button", {
       name: "预览",
     });

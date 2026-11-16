@@ -1819,3 +1819,166 @@ def test_admin_key_discovery_rejects_zero_padded_version_suffixes() -> None:
     assert _configured_admin_session_keys({padded: key}) == []
     legal = f"{_ADMIN_KEY_VERSION_PREFIX}2"
     assert _configured_admin_session_keys({legal: key}) == [(legal, key)]
+
+
+# ---------------------------------------------------------------------------
+# F4（2026-11-16 漏账缺口修复）：zpay 商户身份切换 / 渠道收窄的影响面确认.
+# 人工与自动查单都加载当前商户配置——换 pid 后旧单的查单/回调恢复能力一起
+# 失效，所以身份切换必须显式确认，且确认时把未决单清单写进审计。
+# ---------------------------------------------------------------------------
+
+
+def _seed_f4_unresolved_order(dsn: str) -> None:
+    """clean_sessions 不清 recharge_orders：先删固定种子行，保证幂等。"""
+    with psycopg.connect(dsn) as conn:
+        conn.execute("DELETE FROM recharge_orders WHERE id = 'f4_order'")
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('zpay_u', 'zpay_u', 'Zpay U', 'customer') ON CONFLICT (id) DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO wallets (user_id, available_credits, reserved_credits) "
+            "VALUES ('zpay_u', 100, 0) ON CONFLICT (user_id) DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, status, "
+            "pricing_scope, channel, base_unit_price_fen_snapshot, "
+            "charged_unit_price_fen_snapshot, min_recharge_fen_snapshot, "
+            "recharge_step_fen_snapshot, amount_fen, credits) "
+            "VALUES ('f4_order', 'zpay_u', 'F4-ZPAY-1', 'zpay', 'PENDING', 'INTERNAL', "
+            "'alipay', 1000, 1000, 10000, 1000, 10000, 10)"
+        )
+        conn.commit()
+
+
+def _f4_control_admin_with_dsn(client: TestClient, dsn: str) -> dict[str, str]:
+    from app.admin_auth_routes import ADMIN_CSRF_HEADER
+
+    with psycopg.connect(dsn) as conn:
+        conn.execute("UPDATE users SET is_super_admin=1 WHERE id='admin_u'")
+        conn.commit()
+    exchange = password_admin_session(client, "admin_u")
+    assert exchange.status_code == 201, exchange.text
+    return {ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]}
+
+
+def test_zpay_identity_change_with_unresolved_orders_requires_acknowledgement(
+    customer_production_control_client: TestClient,
+    clean_sessions: str,
+) -> None:
+    client = customer_production_control_client
+    _seed_f4_unresolved_order(clean_sessions)
+    headers = _f4_control_admin_with_dsn(client, clean_sessions)
+
+    # 现库无既有 zpay 配置 → current pid 为空，任何 pid 都是身份切换；在途单
+    # 存在而未确认 → 409，响应携带影响面与触发原因。
+    blocked = client.patch(
+        "/api/control/settings/zpay",
+        headers={**headers, "Idempotency-Key": "f4-rotate-block-1"},
+        json={
+            "pid": "brand-new-pid",
+            "key": "merchant-secret",
+            "enabled_channels": ["alipay"],
+            "confirm": True,
+            "reason": "切换收款商户",
+        },
+    )
+    assert blocked.status_code == 409, blocked.text
+    detail = blocked.json()["detail"]
+    assert detail["code"] == "PAYMENT_SETTINGS_ROTATION_RISK"
+    assert detail["pid_changed"] is True
+    assert detail["removed_channels"] == []
+    assert detail["impact"]["pending"] == 1
+
+    # 显式确认后放行；审计必须带上 pid_changed 与未决单清单。
+    accepted = client.patch(
+        "/api/control/settings/zpay",
+        headers={**headers, "Idempotency-Key": "f4-rotate-ack-2"},
+        json={
+            "pid": "brand-new-pid",
+            "key": "merchant-secret",
+            "enabled_channels": ["alipay"],
+            "rotation_acknowledged": True,
+            "confirm": True,
+            "reason": "切换收款商户（已核对未决单）",
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+    with psycopg.connect(clean_sessions) as conn:
+        row = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action = 'zpay_settings.update' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    metadata = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
+    assert metadata["pid_changed"] is True
+    assert metadata["rotation_acknowledged"] is True
+    assert metadata["unresolved_orders"] == {"pending": 1, "closed": 0}
+
+
+def test_zpay_channel_removal_with_unresolved_orders_requires_acknowledgement(
+    customer_production_control_client: TestClient,
+    clean_sessions: str,
+) -> None:
+    """渠道收窄同样触发确认：真实历史付款会被结算防线的白名单拒绝。"""
+    client = customer_production_control_client
+    _seed_f4_unresolved_order(clean_sessions)
+    headers = _f4_control_admin_with_dsn(client, clean_sessions)
+    # 先落一个双渠道配置（首次保存：current 为空 → pid 变更 + 在途单 → 需要 ack）。
+    first = client.patch(
+        "/api/control/settings/zpay",
+        headers={**headers, "Idempotency-Key": "f4-channel-init"},
+        json={
+            "pid": "p-1",
+            "key": "merchant-secret",
+            "enabled_channels": ["alipay", "wxpay"],
+            "rotation_acknowledged": True,
+            "confirm": True,
+            "reason": "初始化双渠道",
+        },
+    )
+    assert first.status_code == 200, first.text
+
+    # 同 pid 下收窄渠道（去掉 wxpay）+ 在途单 → 仍需确认（pid_changed=False）。
+    blocked = client.patch(
+        "/api/control/settings/zpay",
+        headers={**headers, "Idempotency-Key": "f4-channel-shrink"},
+        json={
+            "pid": "p-1",
+            "key": "merchant-secret",
+            "enabled_channels": ["alipay"],
+            "confirm": True,
+            "reason": "收窄渠道",
+        },
+    )
+    assert blocked.status_code == 409, blocked.text
+    detail = blocked.json()["detail"]
+    assert detail["pid_changed"] is False
+    assert detail["removed_channels"] == ["wxpay"]
+    assert detail["impact"]["pending"] == 1
+
+
+def test_zpay_settings_change_without_unresolved_orders_needs_no_acknowledgement(
+    customer_production_control_client: TestClient,
+    clean_sessions: str,
+) -> None:
+    """空库换绑不拦：影响面为零时确认要求不得挡住正常配置."""
+    client = customer_production_control_client
+    # clean_sessions 不清 recharge_orders：清掉兄弟用例的种子行，保证「影响面
+    # 为零」这个前提成立（批跑顺序无关）。
+    with psycopg.connect(clean_sessions) as conn:
+        conn.execute("DELETE FROM recharge_orders WHERE id = 'f4_order'")
+        conn.commit()
+    headers = _f4_control_admin_with_dsn(client, clean_sessions)
+    response = client.patch(
+        "/api/control/settings/zpay",
+        headers={**headers, "Idempotency-Key": "f4-empty-rotate"},
+        json={
+            "pid": "fresh-pid",
+            "key": "merchant-secret",
+            "enabled_channels": ["alipay"],
+            "confirm": True,
+            "reason": "首次配置",
+        },
+    )
+    assert response.status_code == 200, response.text

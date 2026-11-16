@@ -5,12 +5,14 @@ import re
 
 import pytest
 
+from app.payment_provider import MerchantConfig, OrderCloseUnsupported
 from app.zpay import (
     generate_merchant_order_no,
     parse_zpay_money_to_fen,
     sign_zpay_params,
     zpay_signing_string,
 )
+from app.zpay_provider import ZPayProvider
 
 
 def test_zpay_signature_matches_official_sorting_and_unencoded_values() -> None:
@@ -65,3 +67,14 @@ def test_zpay_money_is_converted_to_integer_fen(money: str, amount_fen: int) -> 
 def test_zpay_money_rejects_non_positive_or_non_decimal_values(money: str) -> None:
     with pytest.raises(ValueError):
         parse_zpay_money_to_fen(money)
+
+
+def test_zpay_provider_close_order_is_explicitly_unsupported() -> None:
+    """zpay submit API 无网关关单端点：必须报错暴露，绝不混同成功（F2）.
+
+    这正是 zpay 敞口无上界的根源——本地关单后网关二维码寿命不受控，只能靠
+    查单补账兜底；调用方按 provider 分支不应走到这里，走到即说明分支缺失。
+    """
+    merchant = MerchantConfig(provider="zpay", raw={}, allowed_channels=("alipay",))
+    with pytest.raises(OrderCloseUnsupported):
+        ZPayProvider().close_order(merchant=merchant, merchant_order_no="ZP-CLOSE-1")

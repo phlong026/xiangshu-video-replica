@@ -1325,6 +1325,22 @@ def _recharge_sweep_due() -> bool:
     return True
 
 
+# F3 长尾段（评审 P1）的慢频节流：默认每 30 分钟随某一轮 sweep 顺带跑一次
+# （长尾候选多、每轮小限额，靠持续轮转覆盖全部候选），不出高频段的节拍。
+_RECHARGE_LONG_TAIL_INTERVAL_SECONDS = 30 * 60.0
+
+_recharge_long_tail_deadline = 0.0
+
+
+def _recharge_long_tail_due() -> bool:
+    global _recharge_long_tail_deadline
+    now = time.monotonic()
+    if now < _recharge_long_tail_deadline:
+        return False
+    _recharge_long_tail_deadline = now + _RECHARGE_LONG_TAIL_INTERVAL_SECONDS
+    return True
+
+
 def _run_recharge_order_sweep_once() -> None:
     """跑一轮待支付订单兜底（查单补账 + 过期关闭），失败只记日志不打断任务。
 
@@ -1400,6 +1416,10 @@ def _run_recharge_order_sweep_once() -> None:
 
                 except ValueError:
                     logger.info("recharge sweep: zpay channel not configured")
+                # 长尾段慢频档（评审 P1：高频窗出窗 ≠ 资金责任截止）：到期随
+                # 本轮顺带跑；advisory lock 保证同刻全集群只有一个在跑，节流
+                # 状态是进程内的近似即可。
+                long_tail = _recharge_long_tail_due()
                 outcome = sweep_pending_recharge_orders(
                     conn,
                     wechat_query_order=wechat_query,
@@ -1407,6 +1427,7 @@ def _run_recharge_order_sweep_once() -> None:
                     zpay_allowed_channels=tuple(zpay_allowed_channels)
                     if zpay_allowed_channels
                     else None,
+                    long_tail=long_tail,
                     # 轮转游标缺省随机页（sweep 内部生成）：查单失败的单不会
                     # 饿死后面的掉单，且不与调度节奏走样。
                 )
@@ -1419,12 +1440,31 @@ def _run_recharge_order_sweep_once() -> None:
         logger.warning("recharge order sweep failed: %s", type(exc).__name__)
         return
     logger.info(
-        "recharge order sweep: %d queried, %d settled, %d unpaid, %d skipped, %d closed",
+        "recharge order sweep: %d queried, %d settled, %d unpaid, %d skipped, %d closed; "
+        "closed-scan native %d queried/%d settled/%d unpaid/%d skipped, zpay %d queried/"
+        "%d settled/%d unpaid/%d skipped; long-tail native %d queried/%d settled/%d "
+        "unpaid/%d skipped, zpay %d queried/%d settled/%d unpaid/%d skipped",
         outcome.queried,
         outcome.settled,
         outcome.unpaid,
         outcome.skipped,
         outcome.closed,
+        outcome.closed_native.queried,
+        outcome.closed_native.settled,
+        outcome.closed_native.unpaid,
+        outcome.closed_native.skipped,
+        outcome.closed_zpay.queried,
+        outcome.closed_zpay.settled,
+        outcome.closed_zpay.unpaid,
+        outcome.closed_zpay.skipped,
+        outcome.tail_native.queried,
+        outcome.tail_native.settled,
+        outcome.tail_native.unpaid,
+        outcome.tail_native.skipped,
+        outcome.tail_zpay.queried,
+        outcome.tail_zpay.settled,
+        outcome.tail_zpay.unpaid,
+        outcome.tail_zpay.skipped,
     )
 
 

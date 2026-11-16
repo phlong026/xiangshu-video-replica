@@ -280,6 +280,24 @@ class SettingsRepository:
                     "(payment window + callback retry horizon); changing merchant "
                     "identity would strand them. Wait for the window to pass."
                 )
+        if current and any(
+            config.get(key) != current.get(key)
+            for key in ("api_v3_key", "private_key", "serial_no", "public_key_id", "public_key")
+        ):
+            # F4（2026-11-16 评审 Q5）：身份切换与同身份凭据轮换分开处理。凭据
+            # 轮换不拦（旧单回调验签会失败，但换 key 常因泄露所迫，不能为兼容
+            # 而继续信任旧密钥）——只要求留下可操作的痕迹：在途单还在窗口内时
+            # 告警，提示人工核对换绑窗口内的回调是否已丢失。
+            from app.zpay_payments import count_blocking_native_orders
+
+            blocking_during_rotation = count_blocking_native_orders(self.conn)
+            if blocking_during_rotation:
+                logger.warning(
+                    "WeChat credential rotation with %d order(s) still inside their "
+                    "settlement window: late callbacks may fail signature verification; "
+                    "reconcile those orders manually after the swap",
+                    blocking_during_rotation,
+                )
         self._save_encrypted_config("wechat_native", config, actor_user_id=actor_user_id)
         return self.read_wechat_native_config()
 

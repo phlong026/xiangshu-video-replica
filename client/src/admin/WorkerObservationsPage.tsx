@@ -42,7 +42,7 @@ function recordsHref(recordType: string, status: string) {
 }
 
 export function WorkerObservationsPage({
-  readOnly = false,
+  readOnly: _readOnly = false,
 }: {
   readOnly?: boolean;
 }) {

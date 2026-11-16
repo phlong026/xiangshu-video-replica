@@ -205,7 +205,7 @@ def close_expired_native_orders(
     """
     updated = conn.execute(
         f"""
-        UPDATE recharge_orders SET status = 'CLOSED'
+        UPDATE recharge_orders SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP
         WHERE id IN (
             SELECT id FROM recharge_orders
             WHERE {_PENDING_NATIVE_OLDER_THAN}
@@ -309,6 +309,47 @@ class NativeReconciliationOutcome:
     unpaid: int
     skipped: int
     unpaid_order_nos: tuple[str, ...] = ()
+
+
+def settle_wechat_order_from_verified_query(
+    conn: BusinessConnection,
+    *,
+    order_no: str,
+    paid: bool,
+    transaction_id: str | None,
+    amount_fen: int | None,
+    source_digest: str,
+) -> Literal["settled", "unpaid", "skipped"]:
+    """把一条**已验签**的微信查单应答落到资金上（幂等，2026-11-16 F2/F3 共用）.
+
+    客户删除订单的关单后补结算与 sweep 的 CLOSED 扫描段共用这一个入口：
+    只有应答确认已付且单号/凭证完整才走 ``confirm_recharge_payment``（全套
+    资金防线：商户/金额/渠道白名单/交易号绑定/PAID 短路原样生效）。错误
+    文本永不作为入账证据——结算拒绝（PaymentConfirmationError）按 skipped
+    处理并告警，不向上抛，避免一笔问题单拖垮调用方流程。
+    """
+    if not paid:
+        return "unpaid"
+    if transaction_id is None or amount_fen is None:
+        logger.warning(
+            "wechat query answer for order %s is paid but incomplete; settling nothing",
+            order_no,
+        )
+        return "skipped"
+    try:
+        confirm_recharge_payment(
+            conn,
+            merchant_order_no=order_no,
+            provider_trade_no=transaction_id,
+            amount_fen=amount_fen,
+            channel=_WECHAT_NATIVE_CHANNEL,
+            source_digest=source_digest,
+            provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC,
+        )
+    except PaymentConfirmationError as exc:
+        logger.warning("refused to settle order %s from verified query: %s", order_no, exc.code)
+        return "skipped"
+    return "settled"
 
 
 def reconcile_stale_pending_native_orders(
@@ -447,7 +488,7 @@ def close_expired_zpay_orders(
     """
     updated = conn.execute(
         f"""
-        UPDATE recharge_orders SET status = 'CLOSED'
+        UPDATE recharge_orders SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP
         WHERE id IN (
             SELECT id FROM recharge_orders
             WHERE {_PENDING_ZPAY_OLDER_THAN}
@@ -542,6 +583,385 @@ def reconcile_stale_pending_zpay_orders(
     )
 
 
+# ---------------------------------------------------------------------------
+# F3（2026-11-16 漏账缺口修复）：CLOSED 订单的自动对账扫描段
+# ---------------------------------------------------------------------------
+# 关单不是「不可支付」的证明：zpay 网关无过期字段、微信存在查单/关单竞态与
+# 客户删除后 2h 窗口——「关单后支付且回调丢失」此前无任何补账路径（人工
+# 查单已由 F1 放开 CLOSED，这里是它的自动层）。两个通道的扫描窗口不同：
+# 微信只扫码仍可能存活的窗口（关单后 validity+grace；再往后 time_expire 已
+# 退休二维码，查单必然 unpaid）；zpay 无网关过期，给全窗（评审 Q2：7 天是
+# 高频重试层，到期转待核对由低频长尾层/账单对账接手，不是资金责任截止线）。
+
+
+CLOSED_RECONCILIATION_WINDOW_SECONDS = 7 * 24 * 60 * 60
+# 长尾层（评审 P1 定案落地，二轮评审收敛为**无时间上界**）：高频窗出窗 ≠
+# 资金责任截止。二维码在到期时退休，但「到期前的历史支付」查单永远答
+# SUCCESS——worker 停机跨窗、zpay 第 8 天付款、迁移前 NULL 存量，任何时间
+# 上界都会制造永久盲区（二轮评审 P1 实锤 181 天反例）。长尾候选=该通道的
+# 全部 CLOSED 单（含 closed_at IS NULL 的历史存量，created_at 仅作分页锚点
+# 不冒充关单时间）；无界集合靠慢频小限额轮转覆盖（sweep 的 long_tail 档），
+# 体量随业务线性、单轮配额恒定。
+_CLOSED_NATIVE_SCAN_PREDICATE = (
+    "provider = 'wechat_native' AND status = 'CLOSED' AND closed_at IS NOT NULL "
+    "AND closed_at::timestamptz + make_interval(secs => %s) > now()"
+)
+_CLOSED_ZPAY_SCAN_PREDICATE = (
+    "provider = 'zpay' AND status = 'CLOSED' AND closed_at IS NOT NULL "
+    "AND closed_at::timestamptz + make_interval(secs => %s) > now()"
+)
+
+
+def _native_closed_scan_window(*, window_seconds: int | None) -> int:
+    """微信 CLOSED 扫描窗：缺省=关单后二维码的剩余可付窗（validity+grace）。"""
+    if window_seconds is not None:
+        return window_seconds
+    return NATIVE_ORDER_VALIDITY_SECONDS + NATIVE_RECONCILIATION_GRACE_SECONDS
+
+
+_CLOSED_LONG_TAIL_PREDICATE = "provider = %s AND status = 'CLOSED'"
+
+
+def _count_closed_long_tail(conn: BusinessConnection, *, provider: str) -> int:
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_CLOSED_LONG_TAIL_PREDICATE}",  # noqa: S608
+        (provider,),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _list_closed_long_tail(
+    conn: BusinessConnection,
+    *,
+    provider: str,
+    limit: int,
+    offset: int,
+) -> list[str]:
+    rows = conn.execute(
+        f"""
+        SELECT merchant_order_no FROM recharge_orders
+        WHERE {_CLOSED_LONG_TAIL_PREDICATE}
+        ORDER BY closed_at NULLS FIRST, created_at
+        LIMIT %s OFFSET %s
+        """,  # noqa: S608
+        (provider, limit, max(0, offset)),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def count_closed_native_long_tail(conn: BusinessConnection) -> int:
+    return _count_closed_long_tail(conn, provider="wechat_native")
+
+
+def count_closed_zpay_long_tail(conn: BusinessConnection) -> int:
+    return _count_closed_long_tail(conn, provider="zpay")
+
+
+def count_zpay_unresolved_orders(conn: BusinessConnection) -> dict[str, int]:
+    """换绑影响面（F4）：zpay 渠道仍可能落到资金的订单计数.
+
+    人工/自动查单都加载**当前**商户配置（换 pid 后旧单查单与回调验签一起
+    失效，F1/F3 的恢复能力随之丢失），因此换绑前必须把影响面摆到台面上。
+    两档**互斥**口径（评审二轮 P2：分档相加不得重复计数）：PENDING（未付，
+    旧码仍可能被扫）与 CLOSED（全部关单——zpay 网关无过期、微信到期前的
+    历史支付查单永远可查，不加时间窗，与长尾层同一口径）。同一事务快照内
+    两次 COUNT，只读，供配置保存路由在拦截/审计时引用。
+    """
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM recharge_orders WHERE provider = 'zpay' AND status = 'PENDING'"
+    ).fetchone()
+    assert pending is not None
+    closed = conn.execute(
+        "SELECT COUNT(*) FROM recharge_orders WHERE provider = 'zpay' AND status = 'CLOSED'"
+    ).fetchone()
+    assert closed is not None
+    return {"pending": int(pending[0]), "closed": int(closed[0])}
+
+
+def count_recently_closed_native_orders(
+    conn: BusinessConnection, *, window_seconds: int | None = None
+) -> int:
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_CLOSED_NATIVE_SCAN_PREDICATE}",  # noqa: S608
+        (float(_native_closed_scan_window(window_seconds=window_seconds)),),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def list_recently_closed_native_orders(
+    conn: BusinessConnection,
+    *,
+    window_seconds: int | None = None,
+    limit: int,
+    offset: int = 0,
+) -> list[str]:
+    rows = conn.execute(
+        f"""
+        SELECT merchant_order_no FROM recharge_orders
+        WHERE {_CLOSED_NATIVE_SCAN_PREDICATE}
+        ORDER BY closed_at
+        LIMIT %s OFFSET %s
+        """,  # noqa: S608
+        (
+            float(_native_closed_scan_window(window_seconds=window_seconds)),
+            limit,
+            max(0, offset),
+        ),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def count_recently_closed_zpay_orders(
+    conn: BusinessConnection, *, window_seconds: int = CLOSED_RECONCILIATION_WINDOW_SECONDS
+) -> int:
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_CLOSED_ZPAY_SCAN_PREDICATE}",  # noqa: S608
+        (float(window_seconds),),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def list_recently_closed_zpay_orders(
+    conn: BusinessConnection,
+    *,
+    window_seconds: int = CLOSED_RECONCILIATION_WINDOW_SECONDS,
+    limit: int,
+    offset: int = 0,
+) -> list[str]:
+    rows = conn.execute(
+        f"""
+        SELECT merchant_order_no FROM recharge_orders
+        WHERE {_CLOSED_ZPAY_SCAN_PREDICATE}
+        ORDER BY closed_at
+        LIMIT %s OFFSET %s
+        """,  # noqa: S608
+        (float(window_seconds), limit, max(0, offset)),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def reconcile_recently_closed_native_orders(
+    conn: BusinessConnection,
+    *,
+    query_order: Callable[[str], WeChatOrderQueryResult],
+    window_seconds: int | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> NativeReconciliationOutcome:
+    """扫 CLOSE 后仍可能被支付的微信单：已付即幂等入账，未付原样留在 CLOSED.
+
+    与 PENDING 版的关键差异：这里没有「确认未付就关闭」的下游——订单已是
+    CLOSED，未付应答只意味着下一轮继续问（窗内）。入账走
+    :func:`settle_wechat_order_from_verified_query`（全套资金防线 + 错误文本
+    不作结算证据）。连接契约同 PENDING 版：autocommit 连接，结算自开短事务，
+    外呼期间不持任何锁。
+    """
+    return _reconcile_closed_native_order_nos(
+        conn,
+        order_nos=list_recently_closed_native_orders(
+            conn, window_seconds=window_seconds, limit=limit, offset=offset
+        ),
+        query_order=query_order,
+    )
+
+
+def reconcile_closed_native_long_tail(
+    conn: BusinessConnection,
+    *,
+    query_order: Callable[[str], WeChatOrderQueryResult],
+    limit: int = 20,
+    offset: int = 0,
+) -> NativeReconciliationOutcome:
+    """长尾层微信段：全部 CLOSED 微信单持续问网关（评审 P1，无时间上界）.
+
+    到期前的历史支付查单永远答 SUCCESS，所以任何时间上界都是盲区；候选=
+    全部 CLOSED 微信单（含 NULL 存量），逐单结算语义与高频段完全一致。调度
+    上由 sweep 的慢频档驱动（worker 默认 30 分钟一档），每轮小限额轮转覆盖
+    无界集合，网关配额恒定可控。
+    """
+    return _reconcile_closed_native_order_nos(
+        conn,
+        order_nos=_list_closed_long_tail(
+            conn,
+            provider="wechat_native",
+            limit=limit,
+            offset=offset,
+        ),
+        query_order=query_order,
+    )
+
+
+def _reconcile_closed_native_order_nos(
+    conn: BusinessConnection,
+    *,
+    order_nos: list[str],
+    query_order: Callable[[str], WeChatOrderQueryResult],
+) -> NativeReconciliationOutcome:
+    queried = settled = unpaid = skipped = 0
+    unpaid_order_nos: list[str] = []
+    for order_no in order_nos:
+        try:
+            answer = query_order(order_no)
+        except Exception as exc:  # noqa: BLE001 — 一笔坏单不能拖垮整轮
+            logger.warning(
+                "closed-order query for %s failed (%s); it stays CLOSED",
+                order_no,
+                exc,
+            )
+            skipped += 1
+            continue
+        queried += 1
+        if answer.out_trade_no != order_no:
+            logger.warning(
+                "closed-order query answered for %s while asking about %s; settling nothing",
+                answer.out_trade_no,
+                order_no,
+            )
+            skipped += 1
+            continue
+        outcome = settle_wechat_order_from_verified_query(
+            conn,
+            order_no=order_no,
+            paid=answer.paid,
+            transaction_id=answer.transaction_id,
+            amount_fen=answer.amount_fen,
+            source_digest=answer.response_digest,
+        )
+        if outcome == "settled":
+            settled += 1
+        elif outcome == "unpaid":
+            unpaid += 1
+            unpaid_order_nos.append(order_no)
+        else:
+            skipped += 1
+    return NativeReconciliationOutcome(
+        queried=queried,
+        settled=settled,
+        unpaid=unpaid,
+        skipped=skipped,
+        unpaid_order_nos=tuple(unpaid_order_nos),
+    )
+
+
+def reconcile_recently_closed_zpay_orders(
+    conn: BusinessConnection,
+    *,
+    query_order: Callable[[str], ZPayOrderQueryResult],
+    window_seconds: int = CLOSED_RECONCILIATION_WINDOW_SECONDS,
+    limit: int = 200,
+    allowed_channels: Collection[str] | None = None,
+    offset: int = 0,
+) -> NativeReconciliationOutcome:
+    """zpay 的 CLOSED 扫描段（无网关过期 → 7 天全窗），与 Native 版逐语义对齐."""
+    return _reconcile_closed_zpay_order_nos(
+        conn,
+        order_nos=list_recently_closed_zpay_orders(
+            conn, window_seconds=window_seconds, limit=limit, offset=offset
+        ),
+        query_order=query_order,
+        allowed_channels=allowed_channels,
+    )
+
+
+def reconcile_closed_zpay_long_tail(
+    conn: BusinessConnection,
+    *,
+    query_order: Callable[[str], ZPayOrderQueryResult],
+    limit: int = 20,
+    allowed_channels: Collection[str] | None = None,
+    offset: int = 0,
+) -> NativeReconciliationOutcome:
+    """长尾层 zpay 段：这是历史风险敞口的主承接（zpay 码无网关过期）.
+
+    全部 CLOSED zpay 单（含高频窗 7 天出窗的、迁移前 closed_at IS NULL 的
+    存量）持续问网关——「已付未入账」无论多久之前发生都有自动发现入口
+    （评审二轮 P1：181 天盲区反例）。无界集合靠慢频小限额轮转覆盖。
+    """
+    return _reconcile_closed_zpay_order_nos(
+        conn,
+        order_nos=_list_closed_long_tail(
+            conn,
+            provider="zpay",
+            limit=limit,
+            offset=offset,
+        ),
+        query_order=query_order,
+        allowed_channels=allowed_channels,
+    )
+
+
+def _reconcile_closed_zpay_order_nos(
+    conn: BusinessConnection,
+    *,
+    order_nos: list[str],
+    query_order: Callable[[str], ZPayOrderQueryResult],
+    allowed_channels: Collection[str] | None,
+) -> NativeReconciliationOutcome:
+    queried = settled = unpaid = skipped = 0
+    unpaid_order_nos: list[str] = []
+    for order_no in order_nos:
+        try:
+            answer = query_order(order_no)
+        except Exception as exc:  # noqa: BLE001 — 一笔坏单不能拖垮整轮
+            logger.warning(
+                "zpay closed-order query for %s failed (%s); it stays CLOSED",
+                order_no,
+                exc,
+            )
+            skipped += 1
+            continue
+        queried += 1
+        if answer.merchant_order_no != order_no:
+            logger.warning(
+                "zpay closed-order query answered for %s while asking about %s; settling nothing",
+                answer.merchant_order_no,
+                order_no,
+            )
+            skipped += 1
+            continue
+        if not answer.paid:
+            unpaid += 1
+            unpaid_order_nos.append(order_no)
+            continue
+        if answer.provider_trade_no is None or answer.amount_fen is None or answer.channel is None:
+            logger.warning(
+                "zpay closed-order query for %s is paid but incomplete; settling nothing",
+                order_no,
+            )
+            skipped += 1
+            continue
+        try:
+            confirm_recharge_payment(
+                conn,
+                merchant_order_no=order_no,
+                provider_trade_no=answer.provider_trade_no,
+                amount_fen=answer.amount_fen,
+                channel=answer.channel,
+                source_digest=answer.response_digest,
+                allowed_channels=allowed_channels,
+                provider_spec=ZPAY_SETTLEMENT_SPEC,
+            )
+        except PaymentConfirmationError as exc:
+            logger.warning(
+                "zpay closed-order reconciliation refused to settle %s: %s",
+                order_no,
+                exc.code,
+            )
+            skipped += 1
+            continue
+        settled += 1
+    return NativeReconciliationOutcome(
+        queried=queried,
+        settled=settled,
+        unpaid=unpaid,
+        skipped=skipped,
+        unpaid_order_nos=tuple(unpaid_order_nos),
+    )
+
+
 def close_lapsed_orders_by_no(
     conn: BusinessConnection,
     *,
@@ -560,7 +980,7 @@ def close_lapsed_orders_by_no(
         return 0
     updated = conn.execute(
         """
-        UPDATE recharge_orders SET status = 'CLOSED'
+        UPDATE recharge_orders SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP
         WHERE provider = %s AND status = 'PENDING'
           AND merchant_order_no = ANY(%s)
           AND created_at::timestamptz + make_interval(secs => %s) <= now()

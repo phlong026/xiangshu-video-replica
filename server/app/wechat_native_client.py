@@ -65,6 +65,7 @@ WECHAT_API_BASE = "https://api.mch.weixin.qq.com"
 NATIVE_ORDER_PATH = "/v3/pay/transactions/native"
 CERTIFICATES_PATH = "/v3/certificates"
 ORDER_QUERY_PATH_TEMPLATE = "/v3/pay/transactions/out-trade-no/{out_trade_no}"
+ORDER_CLOSE_PATH_TEMPLATE = "/v3/pay/transactions/out-trade-no/{out_trade_no}/close"
 WECHAT_NOTIFY_PATH = "/api/payments/wechat_native/notify"
 AUTH_SCHEMA = "WECHATPAY2-SHA256-RSA2048"
 PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
@@ -85,6 +86,7 @@ WECHAT_USER_AGENT = "customer-v3-wechat-native/1.0"
 WECHAT_CALL_PROVIDER = "wechat_pay"
 ENDPOINT_NATIVE_ORDER = "native_order"
 ENDPOINT_ORDER_QUERY = "order_query"
+ENDPOINT_ORDER_CLOSE = "order_close"
 ENDPOINT_CERTIFICATES = "certificates"
 # 微信答了 2xx 却没能通过验签 / 解析 / 字段校验时写进调用日志的错误码。
 WECHAT_INVALID_RESPONSE_CODE = "WECHAT_RESPONSE_INVALID"
@@ -352,6 +354,18 @@ class WeChatOrderQueryResult:
     out_trade_no: str
     transaction_id: str | None
     amount_fen: int | None
+    response_digest: str
+
+
+@dataclass(frozen=True)
+class WeChatOrderCloseResult:
+    """Result of a successful gateway close (HTTP 204, empty body).
+
+    非成功应答（含 ORDERPAID/TRADE_ERROR 等业务码与超时）不返回结果对象——
+    客户端直接抛 :class:`WeChatNativeError`（业务码在 ``wechat_code``），由
+    provider 层映射成确定的/未知的结果；错误文本永不作为入账证据。
+    """
+
     response_digest: str
 
 
@@ -1019,6 +1033,36 @@ class WeChatNativeClient:
                 return
             raise
         raise WeChatNativeError("自检探测订单意外存在，无法判断凭据状态")
+
+    def close_order(
+        self, *, merchant: WeChatMerchantConfig, out_trade_no: str
+    ) -> WeChatOrderCloseResult:
+        """Merchant-side close (``POST /v3/pay/transactions/out-trade-no/{no}/close``).
+
+        F2（2026-11-16 漏账缺口修复）：客户删除/过期关单只改本地状态，网关侧
+        二维码在 ``time_expire`` 之前仍可支付——主动关单把这条窗口关死。微信
+        对成功关单回 **204 空包体**：没有 JSON 可解析，但 ``Wechatpay-*`` 验签
+        头照带，必须对空体验签（伪造应答没有私钥签不出来），不能照搬查询的
+        JSON 解析流程。
+
+        非成功应答抛 :class:`WeChatNativeError`：HTTP 错误体里的业务码
+        （``ORDER_CLOSED`` 已关、``ORDER_NOT_EXIST`` 不存在、``ORDERPAID``
+        已支付、``TRADE_ERROR``/``INVALID_REQUEST``/超时等）由 provider 层
+        区分「确定已关」「确定没关」「结果未知」——文本永不作为入账证据。
+        """
+        url_path = ORDER_CLOSE_PATH_TEMPLATE.format(out_trade_no=quote(out_trade_no, safe=""))
+        body = json.dumps({"mchid": merchant.mchid}, ensure_ascii=False, separators=(",", ":"))
+        with external_call_context("RECHARGE_ORDER", out_trade_no):
+            raw = self._request(
+                merchant,
+                method="POST",
+                url_path=url_path,
+                body=body,
+                endpoint=ENDPOINT_ORDER_CLOSE,
+            )
+        with _validated(raw):
+            self._verify_response(merchant, raw)
+        return WeChatOrderCloseResult(response_digest=hashlib.sha256(raw.body).hexdigest())
 
     def _request(
         self,

@@ -267,6 +267,10 @@ ADMIN_WRITE_AUTHORITIES = {
     "get_content_writer",
     "get_control_funds_writer",
     "get_control_settings_writer",
+    # 2026-11-16 漏账缺口修复：funds.write 权限点的短事务变体——连接占用
+    # 纪律与 get_control_route_user_short_tx 逐字一致，权限语义与
+    # get_control_funds_writer 逐字一致（sync 充值订单路由专用）。
+    "get_control_funds_writer_short_tx",
 }
 ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {
     "get_admin_actor",
@@ -577,3 +581,59 @@ def test_legacy_proxy_token_only_works_outside_customer_production(
         headers={"Cookie": f"admin_session={session['admin_session']}"},
     )
     assert ok.status_code == 200, ok.text
+
+
+def test_control_funds_writer_short_tx_requires_the_funds_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """客户生产线：funds.write 短事务变体与 get_funds_writer 同一把关（评审 P1）.
+
+    人工查单可向钱包入账资金——role==admin 不再够用，缺 ``funds.write``
+    权限点的管理员必须 403；补上权限点后放行且署名走 CurrentUser。本用例
+    打桩 admin 会话解析，专测权限增量，不重复 cw029 的资金防线矩阵。
+    """
+    from fastapi import HTTPException
+
+    from app import admin_auth_routes, control_auth
+    from app.admin_permissions import FUNDS_WRITE
+
+    def _actor(permissions: frozenset[str] | None, role: str = "admin") -> object:
+        return admin_auth_routes.AdminActor(
+            user_id="u-funds-1",
+            username="op-1",
+            display_name="运营一号",
+            role=role,
+            is_super_admin=False,
+            auth_method="session",
+            session_id="sess-funds-1",
+            session_expires_at=FUTURE_EXPIRY,
+            last_activity_at="2026-01-01T00:00:00+00:00",
+            permissions=permissions,
+        )
+
+    monkeypatch.setattr(control_auth, "is_customer_production", lambda: True)
+
+    # 审计员：先撞写级角色门槛（AUDITOR_READ_ONLY）。
+    monkeypatch.setattr(
+        admin_auth_routes, "get_admin_actor", lambda request: _actor(None, role="auditor")
+    )
+    with pytest.raises(HTTPException) as auditor_exc:
+        control_auth.get_control_funds_writer_short_tx(object(), proxy_token=None)
+    assert auditor_exc.value.status_code == 403
+    assert auditor_exc.value.detail["code"] == "AUDITOR_READ_ONLY"
+
+    # 管理员但缺 funds.write：403 PERMISSION_DENIED（与 admin 侧同文案）。
+    monkeypatch.setattr(admin_auth_routes, "get_admin_actor", lambda request: _actor(frozenset()))
+    with pytest.raises(HTTPException) as denied_exc:
+        control_auth.get_control_funds_writer_short_tx(object(), proxy_token=None)
+    assert denied_exc.value.status_code == 403
+    assert denied_exc.value.detail["code"] == "PERMISSION_DENIED"
+
+    # 补上权限点：放行，署名是 CurrentUser（role 固定 admin）。
+    monkeypatch.setattr(
+        admin_auth_routes,
+        "get_admin_actor",
+        lambda request: _actor(frozenset({FUNDS_WRITE})),
+    )
+    actor = control_auth.get_control_funds_writer_short_tx(object(), proxy_token=None)
+    assert actor.id == "u-funds-1" and actor.role == "admin"

@@ -108,8 +108,14 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261101T1000_video_long_tier（视频生成 16-30 秒档价目种子）追加其上；
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
 # 列）追加其上；20261113T1000_replica_pipeline_submit_intents（M6b 发送意图
-# 表）再追加，故链尾为该值。
-HEAD_REVISION = "20261115T1000_display_settings"
+# 表）再追加；20261115T1000_display_settings（展示配置 KV，tables/primary_keys
+# 各 +1、columns +4）追加其上；20261116T1000_recharge_orders_closed_at
+# （2026-11-16 漏账缺口修复 F3：recharge_orders.closed_at，Text 可空，与本表
+# created_at/paid_at 同列型，timestamptz 计数不变；附一个 partial 查询索引
+# status='CLOSED' AND closed_at IS NOT NULL 上的 provider+closed_at），故
+# columns +1、partial_indexes +1，表名集与其余计数不变；digest 在空库→新
+# head 的 PG16 探针库重算。链尾为该值。
+HEAD_REVISION = "20261116T1000_recharge_orders_closed_at"
 
 
 @pytest.mark.pg
@@ -443,13 +449,16 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # updated_at 四列，时间戳走 sa.TIMESTAMP() 即 timestamptz 计数不变），故
 # tables/primary_keys 各 +1、columns +4；digest 由 --print-schema 在空库→新
 # head 的 PG16 探针库（cw056_probe）重算。
+# 2026-11-16 漏账缺口修复 F3：recharge_orders 追加 closed_at（Text 可空，与本表
+# created_at/paid_at 同列型，timestamptz 计数不变）+ 一个 partial 查询索引，
+# 故 columns +1、partial_indexes +1；digest 在空库→新 head 的 PG16 探针库重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "check_constraints": 409,
-    "columns": 1585,
+    "columns": 1586,
     "foreign_keys": 221,
     "identity_columns": 0,
     "jsonb_columns": 16,
-    "partial_indexes": 49,
+    "partial_indexes": 50,
     "primary_keys": 140,
     "sequences": 8,
     "tables": 140,
@@ -720,7 +729,10 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
 # 2026-11-13 M6b 发送意图表追加后，在空库→新 head 的 PG16 探针库再重算。
-HEAD_SCHEMA_DIGEST = "af07d1611cd50529eba6841f3fdcaa179ffab0aa7f3eb3e1b82a787d9cacf4be"
+# 2026-11-16 F3 追加 recharge_orders.closed_at 与 CLOSED 扫描部分索引后，
+# 在空库→新 head 的 PG16 探针库（本机 16.15 dev 容器 cw056_head_matrix_test）
+# 重算（实测计数与上方 HEAD_SCHEMA_COUNTS 完全一致）。
+HEAD_SCHEMA_DIGEST = "6ada62c50aad235245136d77beb11b0e10fee9c4f231ea64cd09c2273451ccd1"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

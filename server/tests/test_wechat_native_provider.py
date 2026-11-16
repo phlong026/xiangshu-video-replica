@@ -14,6 +14,8 @@ import pytest
 from app.payment_provider import (
     DeploymentConfig,
     MerchantConfig,
+    OrderCloseError,
+    OrderCloseResult,
     OrderQueryError,
     OrderQueryResult,
     PaymentCodeError,
@@ -42,13 +44,16 @@ class _FakeNativeClient:
         query_result: WeChatOrderQueryResult | None = None,
         order_error: WeChatNativeError | None = None,
         query_error: WeChatNativeError | None = None,
+        close_error: WeChatNativeError | None = None,
     ) -> None:
         self._order_result = order_result
         self._query_result = query_result
         self._order_error = order_error
         self._query_error = query_error
+        self._close_error = close_error
         self.order_calls: list[dict[str, object]] = []
         self.query_calls: list[dict[str, object]] = []
+        self.close_calls: list[dict[str, object]] = []
 
     def create_native_order(self, **kwargs: object) -> WeChatNativeOrderResult:
         self.order_calls.append(kwargs)
@@ -63,6 +68,15 @@ class _FakeNativeClient:
             raise self._query_error
         assert self._query_result is not None
         return self._query_result
+
+    def close_order(self, **kwargs: object) -> object:
+        """成功=204 空包体（WeChatOrderCloseResult）；失败抛带业务码的 WeChatNativeError."""
+        self.close_calls.append(kwargs)
+        if self._close_error is not None:
+            raise self._close_error
+        from app.wechat_native_client import WeChatOrderCloseResult
+
+        return WeChatOrderCloseResult(response_digest="digest-close")
 
 
 @pytest.fixture
@@ -306,6 +320,67 @@ def test_provider_is_registered_in_registry() -> None:
     provider = get_payment_provider("wechat_native")
     assert isinstance(provider, WeChatNativeProvider)
     assert provider.name == "wechat_native"
+
+
+# --- F2（2026-11-16）：close_order 业务码映射 ---------------------------------
+
+
+def test_close_order_success_maps_to_closed(generic_merchant: MerchantConfig) -> None:
+    fake = _FakeNativeClient()
+    result = WeChatNativeProvider(client=fake).close_order(
+        merchant=generic_merchant, merchant_order_no="OUT_CLOSE_OK"
+    )
+    assert result == OrderCloseResult(closed=True)
+    # provider 把通用商户配置转换成 WeChatMerchantConfig 后才下发。
+    assert len(fake.close_calls) == 1
+    assert fake.close_calls[0]["out_trade_no"] == "OUT_CLOSE_OK"
+
+
+@pytest.mark.parametrize("wechat_code", ["ORDER_CLOSED", "ORDER_NOT_EXIST"])
+def test_close_order_definite_codes_map_to_closed(
+    generic_merchant: MerchantConfig, wechat_code: str
+) -> None:
+    """幂等重复关单（ORDER_CLOSED）与订单不存在 → 同样「确定已关」."""
+    fake = _FakeNativeClient(close_error=WeChatNativeError("business", wechat_code=wechat_code))
+    result = WeChatNativeProvider(client=fake).close_order(
+        merchant=generic_merchant, merchant_order_no="OUT_CLOSE_IDEM"
+    )
+    assert result.closed is True and result.known is True
+
+
+def test_close_order_orderpaid_maps_to_known_not_closed(
+    generic_merchant: MerchantConfig,
+) -> None:
+    """网关说已付 → 确定没关（known=True）：调用方立即查单，错误文本不作入账证据."""
+    fake = _FakeNativeClient(close_error=WeChatNativeError("paid", wechat_code="ORDERPAID"))
+    result = WeChatNativeProvider(client=fake).close_order(
+        merchant=generic_merchant, merchant_order_no="OUT_CLOSE_PAID"
+    )
+    assert result.closed is False and result.known is True
+
+
+@pytest.mark.parametrize("wechat_code", ["TRADE_ERROR", "INVALID_REQUEST", "SYSTEM_ERROR"])
+def test_close_order_unmodeled_codes_map_to_unknown(
+    generic_merchant: MerchantConfig, wechat_code: str
+) -> None:
+    """未建模业务码与超时 → 结果未知（OrderCloseError）：两个方向都不得臆断."""
+    fake = _FakeNativeClient(
+        close_error=WeChatNativeError("unknown", status_code=502, wechat_code=wechat_code)
+    )
+    with pytest.raises(OrderCloseError):
+        WeChatNativeProvider(client=fake).close_order(
+            merchant=generic_merchant, merchant_order_no="OUT_CLOSE_UNKNOWN"
+        )
+
+
+def test_close_order_timeout_maps_to_unknown(generic_merchant: MerchantConfig) -> None:
+    fake = _FakeNativeClient(
+        close_error=WeChatNativeError("timed out", status_code=504, wechat_code=None)
+    )
+    with pytest.raises(OrderCloseError):
+        WeChatNativeProvider(client=fake).close_order(
+            merchant=generic_merchant, merchant_order_no="OUT_CLOSE_TIMEOUT"
+        )
 
 
 if __name__ == "__main__":

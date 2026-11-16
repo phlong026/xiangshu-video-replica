@@ -139,8 +139,17 @@ export function OrdersPage({
     setError("");
     setNotice("");
     try {
-      await syncControlRechargeOrder(pendingSyncOrderNo, reason);
-      setNotice(`订单 ${pendingSyncOrderNo} 状态已同步。`);
+      const synced = await syncControlRechargeOrder(pendingSyncOrderNo, reason);
+      // 本地状态与网关查询结果是两个维度（评审 P3）：网关未付 ≠ 不可支付，
+      // 已关闭订单尤其要让运营看见「网关侧可能仍可支付」。
+      let gatewayNote = "";
+      if (synced.gateway_paid === true) {
+        gatewayNote = "网关确认已支付，已入账。";
+      } else if (synced.gateway_paid === false) {
+        gatewayNote =
+          "本次网关查询未支付；若订单已关闭，网关侧二维码可能仍可支付。";
+      }
+      setNotice(`订单 ${pendingSyncOrderNo} 状态已同步。${gatewayNote}`);
       setPendingSyncOrderNo(null);
       await loadOrders();
     } catch (cause) {
@@ -376,11 +385,14 @@ export function OrdersPage({
               <td>{formatDateTime(order.created_at)}</td>
               <td>{formatDateTime(order.paid_at)}</td>
               <td>
-                {order.status !== "PENDING" || readOnly ? (
+                {/* 查单补单统一入口（方案 P1）：后端按订单渠道分派网关，
+                    微信订单不再需要绕道客户详情核验。CLOSED 单同样可查
+                    （2026-11-16 漏账缺口修复）：关单只是本地记账态，网关侧
+                    可能已支付且回调丢失，人工查单是唯一的补账入口。 */}
+                {!(order.status === "PENDING" || order.status === "CLOSED") ||
+                readOnly ? (
                   "—"
                 ) : (
-                  // 查单补单统一入口（方案 P1）：后端按订单渠道分派网关，
-                  // 微信订单不再需要绕道客户详情核验。
                   <button
                     type="button"
                     onClick={() => setPendingSyncOrderNo(order.order_no)}
@@ -405,7 +417,7 @@ export function OrdersPage({
       <ConfirmDialog
         busy={syncing}
         confirmLabel="确认查单"
-        description="将立即向支付通道查询该订单的最新支付状态；若已支付，会当场完成入账。原因将写入审计日志。"
+        description="将立即向支付通道查询该订单的最新支付状态；若已支付，会当场完成入账。已关闭的订单同样可以查询，网关确认已付即补账。原因将写入审计日志。"
         level="reason"
         open={pendingSyncOrderNo !== null}
         title={`查单补单 ${pendingSyncOrderNo ?? ""}`}

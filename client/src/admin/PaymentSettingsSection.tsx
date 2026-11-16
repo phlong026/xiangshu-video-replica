@@ -61,6 +61,8 @@ export function PaymentSettingsSection({
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [selfChecking, setSelfChecking] = useState(false);
   const [confirmError, setConfirmError] = useState("");
+  // F4：换绑影响面显式确认（随保存请求发送 rotation_acknowledged）。
+  const [rotationAck, setRotationAck] = useState(false);
   const saving = useRef(false);
   const retry = useRef<{ fingerprint: string; key: string } | null>(null);
   const disabled = readOnly || !settings || pendingConfirm !== null;
@@ -155,7 +157,14 @@ export function PaymentSettingsSection({
     try {
       if (pendingConfirm === "zpay") {
         const zpay = await updateCustomerPaymentZPay(
-          { pid: zpayPid, key: zpayKey, enabled_channels: channels },
+          {
+            pid: zpayPid,
+            key: zpayKey,
+            enabled_channels: channels,
+            // 只在勾选时携带：未确认的保存保持旧 wire 格式（服务端默认 false），
+            // 免得每次普通保存都多一个无意义字段。
+            ...(rotationAck ? { rotation_acknowledged: true } : {}),
+          },
           reason,
           retry.current.key,
         );
@@ -187,6 +196,8 @@ export function PaymentSettingsSection({
                     pid: zpayPid,
                     key: zpayKey,
                     enabled_channels: channels,
+                    // 同 zpay 直存路径：只在勾选时携带确认位。
+                    ...(rotationAck ? { rotation_acknowledged: true } : {}),
                   },
                 }
               : { wechat_native: wechat }),
@@ -309,6 +320,18 @@ export function PaymentSettingsSection({
             </label>
           </fieldset>
           <p className="admin-hint">支付接口地址由系统自动配置，无需填写。</p>
+          {/* F4（2026-11-16 评审 Q5）：切换商户身份（pid）或收窄渠道白名单会
+              让存量订单的查单/回调恢复能力失效——后端在影响面非零时要求显式
+              确认，确认记录与未决单清单写入审计。 */}
+          <label className="admin-hint">
+            <input
+              checked={rotationAck}
+              type="checkbox"
+              onChange={(event) => setRotationAck(event.target.checked)}
+            />
+            我已核对本商户的在途与已关订单：切换商户身份或收窄渠道后，
+            这些订单可能无法再查单补账
+          </label>
           <button disabled={disabled} type="submit">
             保存 ZPay 设置
           </button>

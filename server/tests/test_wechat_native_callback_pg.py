@@ -73,8 +73,16 @@ from app.zpay_payments import (
     close_expired_native_orders,
     close_expired_zpay_orders,
     confirm_recharge_payment,
+    count_closed_native_long_tail,
+    count_closed_zpay_long_tail,
     count_expired_native_orders,
+    count_recently_closed_native_orders,
+    count_recently_closed_zpay_orders,
     count_stale_pending_native_orders,
+    reconcile_closed_native_long_tail,
+    reconcile_closed_zpay_long_tail,
+    reconcile_recently_closed_native_orders,
+    reconcile_recently_closed_zpay_orders,
     reconcile_stale_pending_native_orders,
     reconcile_stale_pending_zpay_orders,
 )
@@ -1262,3 +1270,271 @@ def test_sweep_rotation_reaches_orders_behind_failing_queries(wechat_db: str) ->
     )
     assert outcome_b.settled == 1
     assert _status(wechat_db, "rot_paid") == "PAID"
+
+
+# ---------------------------------------------------------------------------
+# F3（2026-11-16 漏账缺口修复）：CLOSED 扫描段——关单不是「不可支付」的证明。
+# zpay 无网关过期 → 7 天全窗；微信窗=关单后 validity+grace（竞态掉单在窗内）。
+# ---------------------------------------------------------------------------
+
+
+def _mark_closed(dsn: str, order_id: str, *, closed_at_sql: str | None = "now()") -> None:
+    """置为 CLOSED 并按测试指定的 SQL 表达式落 ``closed_at``.
+
+    ``closed_at_sql`` 是测试内受控的 SQL 字面量（``now()`` / ``now() - interval
+    '8 days'``），必须内插进 SET 让数据库**求值**——走 %s 参数绑定会把表达式
+    原样存成文本，扫描谓词的 ``::timestamptz`` 转换直接报错（评审 P2 实锤）。
+    """
+    assert closed_at_sql is None or closed_at_sql.startswith("now()"), (
+        "只允许 now() 系表达式，防误绑字面量"
+    )
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        if closed_at_sql is None:
+            conn.execute(
+                "UPDATE recharge_orders SET status = 'CLOSED', closed_at = NULL WHERE id = %s",
+                (order_id,),
+            )
+        else:
+            conn.execute(
+                f"UPDATE recharge_orders SET status = 'CLOSED', "
+                f"closed_at = {closed_at_sql} WHERE id = %s",
+                (order_id,),
+            )
+
+
+def _wallet_credits(dsn: str) -> int:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = 'user_1'"
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_closed_scan_settles_a_zpay_order_paid_after_close(wechat_db: str) -> None:
+    """zpay 关单后（网关无过期）用户拿旧码付款且回调丢失：扫描段当场补账。"""
+    _seed_order(
+        wechat_db,
+        order_id="cs_zpaid",
+        merchant_order_no="cs_zpaid_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    _mark_closed(wechat_db, "cs_zpaid")
+    before = _wallet_credits(wechat_db)
+
+    with pg_transaction() as raw:
+        outcome = reconcile_recently_closed_zpay_orders(
+            BusinessConnection.postgres(raw),
+            query_order=_zpay_paid_query,
+        )
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=1, unpaid=0, skipped=0)
+    assert _status(wechat_db, "cs_zpaid") == "PAID"
+    assert _wallet_credits(wechat_db) == before + _ORDER_CREDITS
+
+
+def test_closed_scan_leaves_unpaid_orders_closed_and_untouched(wechat_db: str) -> None:
+    """未付应答：原样留在 CLOSED（下一轮继续问），零资金副作用。"""
+    _seed_order(
+        wechat_db,
+        order_id="cs_zunpaid",
+        merchant_order_no="cs_zunpaid_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    _mark_closed(wechat_db, "cs_zunpaid")
+    before = _wallet_credits(wechat_db)
+
+    with pg_transaction() as raw:
+        outcome = reconcile_recently_closed_zpay_orders(
+            BusinessConnection.postgres(raw),
+            query_order=_zpay_unpaid_query,
+        )
+
+    assert outcome == NativeReconciliationOutcome(
+        queried=1, settled=0, unpaid=1, skipped=0, unpaid_order_nos=("cs_zunpaid_no",)
+    )
+    assert _status(wechat_db, "cs_zunpaid") == "CLOSED"
+    assert _wallet_credits(wechat_db) == before
+
+
+def test_closed_scan_windows_exclude_out_of_window_and_null_history(wechat_db: str) -> None:
+    """窗口边界（评审 T5）：过期窗/无 closed_at 的历史存量都不进候选。"""
+    _seed_order(
+        wechat_db,
+        order_id="cs_z_old",
+        merchant_order_no="cs_z_old_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    # zpay：关单已 8 天 > 7 天窗 → 出窗。
+    _mark_closed(wechat_db, "cs_z_old", closed_at_sql="now() - interval '8 days'")
+    _seed_order(
+        wechat_db,
+        order_id="cs_w_old",
+        merchant_order_no="cs_w_old_no",
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    # 微信：关单已 3 小时 > validity(2h)+grace(10min) → 出窗（time_expire 已退休码）。
+    _mark_closed(wechat_db, "cs_w_old", closed_at_sql="now() - interval '3 hours'")
+    _seed_order(
+        wechat_db,
+        order_id="cs_null",
+        merchant_order_no="cs_null_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    # 历史 NULL（迁移前的 sweep/CLI 关单存量）→ 永不进候选，走独立追查批次。
+    _mark_closed(wechat_db, "cs_null", closed_at_sql=None)
+    _seed_order(
+        wechat_db,
+        order_id="cs_w_in",
+        merchant_order_no="cs_w_in_no",
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    # 微信：关单 1 小时（< 2h+10min）→ 在窗内，竞态窗口未关死。
+    _mark_closed(wechat_db, "cs_w_in", closed_at_sql="now() - interval '1 hour'")
+
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert count_recently_closed_zpay_orders(conn) == 0
+        assert count_recently_closed_native_orders(conn) == 1
+
+        # 出窗单与 NULL 历史都不产生任何网关查询。
+        outcome_z = reconcile_recently_closed_zpay_orders(conn, query_order=_zpay_unpaid_query)
+        assert outcome_z.queried == 0
+        outcome_w = reconcile_recently_closed_native_orders(conn, query_order=_unpaid_query)
+        assert outcome_w.queried == 1
+        assert outcome_w.unpaid_order_nos == ("cs_w_in_no",)
+    assert _status(wechat_db, "cs_w_in") == "CLOSED"
+
+
+def test_sweep_race_notpay_then_paid_is_recovered_in_the_next_pass(wechat_db: str) -> None:
+    """确定性竞态（评审 T2）：查单 NOTPAY → 到期前付款 → 关单 → 下一段捞回.
+
+    同一轮 sweep 内：PENDING 段查到 unpaid 并关单；CLOSED 段随即再问同一单，
+    此时网关已答 paid——当场补账。这正是「本地关单后支付成功且回调丢失」的
+    最短闭环，也是微信通道必须纳入 F3 的原因。
+    """
+    _seed_order(
+        wechat_db,
+        order_id="race_z",
+        merchant_order_no="race_z_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+    )
+    calls: list[str] = []
+
+    def racing_query(order_no: str) -> ZPayOrderQueryResult:
+        calls.append(order_no)
+        if len(calls) == 1:
+            return _zpay_unpaid_query(order_no)  # 第一段：查单说没付
+        return _zpay_paid_query(order_no)  # 关单后：其实已付
+
+    outcome = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=None,
+        zpay_query_order=racing_query,
+    )
+    assert calls == ["race_z_no", "race_z_no"], "同一单被 PENDING 段与 CLOSED 段各问一次"
+    assert outcome.closed == 1, "PENDING 段按当时应答关单"
+    assert outcome.closed_zpay.settled == 1, "CLOSED 段把竞态掉单当场补回"
+    assert _status(wechat_db, "race_z") == "PAID"
+    assert _wallet_credits(wechat_db) == 100 + _ORDER_CREDITS
+
+
+def test_long_tail_recovers_orders_past_the_high_freq_window(wechat_db: str) -> None:
+    """长尾层（评审 P1 落地，二轮收敛为无时间上界）：高频窗出窗的单仍被覆盖.
+
+    覆盖三类候选：zpay 关单 8 天（> 7 天高频窗）、微信关单 3 小时（>
+    validity+grace，worker 停机跨窗场景）、迁移前 closed_at IS NULL 存量。
+    长尾候选=通道全部 CLOSED 单——到期前的历史支付查单永远答 SUCCESS，
+    任何时间上界都会制造永久盲区（二轮评审 P1 的 181 天反例），因此这里
+    **不设**排除用例。
+    """
+    _seed_order(
+        wechat_db,
+        order_id="tail_z_8d",
+        merchant_order_no="tail_z_8d_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    _mark_closed(wechat_db, "tail_z_8d", closed_at_sql="now() - interval '8 days'")
+    _seed_order(
+        wechat_db,
+        order_id="tail_w_3h",
+        merchant_order_no="tail_w_3h_no",
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    _mark_closed(wechat_db, "tail_w_3h", closed_at_sql="now() - interval '3 hours'")
+    _seed_order(
+        wechat_db,
+        order_id="tail_z_null",
+        merchant_order_no="tail_z_null_no",
+        wechat=False,
+        created_at="2024-01-01 00:00:00+00",
+        status="CLOSED",
+    )
+    # 迁移前存量：NULL 关单时间，created_at 远古 → 仍是候选（NULL 只影响
+    # 排序锚点，不产生盲区）。
+    _mark_closed(wechat_db, "tail_z_null", closed_at_sql=None)
+    before = _wallet_credits(wechat_db)
+
+    def tail_zpay_query(order_no: str) -> ZPayOrderQueryResult:
+        # 8 天前关的单其实已付（每单独立交易号——共享桩的固定交易号会让第二单
+        # 撞 TRADE_ALREADY_BOUND，测不出 unpaid 分支）；NULL 存量未付。
+        if order_no == "tail_z_8d_no":
+            return _zpay_paid_query(order_no)
+        return _zpay_unpaid_query(order_no)
+
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert count_closed_zpay_long_tail(conn) == 2
+        assert count_closed_native_long_tail(conn) == 1
+
+        outcome_z = reconcile_closed_zpay_long_tail(conn, query_order=tail_zpay_query, limit=20)
+        outcome_w = reconcile_closed_native_long_tail(conn, query_order=_unpaid_query, limit=20)
+
+    assert outcome_z.queried == 2 and outcome_z.settled == 1
+    assert outcome_z.unpaid_order_nos == ("tail_z_null_no",), "NULL 存量未付 → 留在 CLOSED"
+    assert outcome_w.queried == 1 and outcome_w.unpaid == 1
+    assert _status(wechat_db, "tail_z_8d") == "PAID", "第 8 天才付的 zpay 单被长尾捞回"
+    assert _wallet_credits(wechat_db) == before + _ORDER_CREDITS
+
+
+def test_sweep_long_tail_flag_runs_the_tail_segment(wechat_db: str) -> None:
+    """sweep 的 long_tail 慢频档：默认轮次不跑，long_tail=True 才跑长尾段."""
+    _seed_order(
+        wechat_db,
+        order_id="tailflag_z",
+        merchant_order_no="tailflag_z_no",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+        status="CLOSED",
+    )
+    _mark_closed(wechat_db, "tailflag_z", closed_at_sql="now() - interval '8 days'")
+
+    default_outcome = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=None,
+        zpay_query_order=_zpay_unpaid_query,
+    )
+    assert default_outcome.tail_zpay.queried == 0, "默认轮次不跑长尾段"
+
+    tail_outcome = sweep_pending_recharge_orders(
+        BusinessConnection.postgres(_autocommit(wechat_db)),
+        wechat_query_order=None,
+        zpay_query_order=_zpay_unpaid_query,
+        long_tail=True,
+    )
+    assert tail_outcome.tail_zpay.queried == 1
+    assert _status(wechat_db, "tailflag_z") == "CLOSED", "未付应答原样保留"

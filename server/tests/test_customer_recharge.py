@@ -1272,3 +1272,247 @@ def test_customer_recharge_zpay_notify_credits_wallet_on_pg_lane(
             (user_id,),
         ).fetchone()
     assert charges is not None and int(charges[0]) == 1
+
+
+# ---------------------------------------------------------------------------
+# F2（2026-11-16 漏账缺口修复）：删除微信订单同步关闭网关侧订单；重复删除
+# 触发受控重试；网关答已付 → 立即查单结算；未知结果只告警、204 不受影响。
+# ---------------------------------------------------------------------------
+
+
+class _GatewayCloseStub:
+    """微信 provider 替身：记录 close/query 调用，应答由用例注入."""
+
+    def __init__(
+        self,
+        *,
+        close_result: object = None,
+        close_exc: Exception | None = None,
+        query_result: object = None,
+        query_exc: Exception | None = None,
+    ) -> None:
+        self.close_calls: list[str] = []
+        self.query_calls: list[str] = []
+        self._close_result = close_result
+        self._close_exc = close_exc
+        self._query_result = query_result
+        self._query_exc = query_exc
+
+    def load_merchant_config(self, conn):  # noqa: ANN001, ARG002
+        from app.payment_provider import MerchantConfig
+
+        return MerchantConfig(provider="wechat_native", raw={}, allowed_channels=("wxpay",))
+
+    def load_deployment_config(self):
+        from app.payment_provider import DeploymentConfig
+
+        return DeploymentConfig(notify_url="https://cb.example.test", return_url="", gateway_url="")
+
+    def close_order(self, *, merchant, merchant_order_no):  # noqa: ANN001, ARG002
+        self.close_calls.append(merchant_order_no)
+        if self._close_exc is not None:
+            raise self._close_exc
+        assert self._close_result is not None
+        return self._close_result
+
+    def query_order(self, **kwargs):  # noqa: ANN003
+        self.query_calls.append(kwargs["merchant_order_no"])
+        if self._query_exc is not None:
+            raise self._query_exc
+        assert self._query_result is not None
+        return self._query_result
+
+
+def test_closing_a_wechat_order_also_closes_the_gateway_order(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import recharge_routes
+    from app.payment_provider import OrderCloseResult
+
+    session_token = _activated_session(client, clean_state, "native-close-gw")
+    order_no = _create_customer_order(client, session_token)
+    _make_order_native(clean_state, order_no)
+    stub = _GatewayCloseStub(close_result=OrderCloseResult(closed=True))
+    monkeypatch.setattr(recharge_routes, "get_payment_provider", lambda name: stub)
+
+    response = client.delete(
+        f"/api/customer/recharge-orders/{order_no}",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+    assert response.status_code == 204, response.text
+    assert stub.close_calls == [order_no], "关单后必须关闭网关侧订单"
+    assert stub.query_calls == [], "网关确认已关时不得再查单结算"
+    with psycopg.connect(clean_state) as conn:
+        row = conn.execute(
+            "SELECT status FROM recharge_orders WHERE merchant_order_no = %s",
+            (order_no,),
+        ).fetchone()
+    assert row is not None and row[0] == "CLOSED"
+
+
+def test_repeated_wechat_delete_retries_the_gateway_close(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重复删除=受控重试（评审 P1 可恢复性）：上次 close 可能未知失败。"""
+    from app import recharge_routes
+    from app.payment_provider import OrderCloseResult
+
+    session_token = _activated_session(client, clean_state, "native-close-retry")
+    order_no = _create_customer_order(client, session_token)
+    _make_order_native(clean_state, order_no)
+    stub = _GatewayCloseStub(close_result=OrderCloseResult(closed=True))
+    monkeypatch.setattr(recharge_routes, "get_payment_provider", lambda name: stub)
+    bearer = {"Authorization": f"Bearer {session_token}"}
+
+    first = client.delete(f"/api/customer/recharge-orders/{order_no}", headers=bearer)
+    second = client.delete(f"/api/customer/recharge-orders/{order_no}", headers=bearer)
+
+    assert first.status_code == 204 and second.status_code == 204
+    assert stub.close_calls == [order_no, order_no], "重复删除必须重试网关关单"
+
+
+def test_wechat_delete_with_gateway_already_paid_settles_from_verified_query(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """网关答 ORDERPAID（closed=False）→ 立即查单，验签通过的应答幂等入账。"""
+    from app import recharge_routes
+    from app.payment_provider import OrderCloseResult, OrderQueryResult
+
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(
+            conn,
+            code_id="code-native-close-paid",
+            batch_id="batch-native-close-paid",
+            plaintext=code,
+        )
+    activation = _activate_customer(client, code, "fp-native-close-paid", "key-native-close-paid")
+    user_id = str(activation["user_id"])
+    bearer = {"Authorization": f"Bearer {activation['session_token']}"}
+    order_no = _create_customer_order(client, str(activation["session_token"]))
+    _make_order_native(clean_state, order_no)
+    with psycopg.connect(clean_state) as conn:
+        wallet_before = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = %s", (user_id,)
+        ).fetchone()
+    assert wallet_before is not None, "激活即建钱包（含注册赠送），作为精确增量断言的基线"
+    stub = _GatewayCloseStub(
+        close_result=OrderCloseResult(closed=False),
+        query_result=OrderQueryResult(
+            paid=True,
+            merchant_order_no=order_no,
+            provider_trade_no="wx-trade-close-paid",
+            amount_fen=10000,
+            channel="wxpay",
+            response_digest="digest-close-paid",
+        ),
+    )
+    monkeypatch.setattr(recharge_routes, "get_payment_provider", lambda name: stub)
+
+    response = client.delete(f"/api/customer/recharge-orders/{order_no}", headers=bearer)
+
+    assert response.status_code == 204, response.text
+    assert stub.close_calls == [order_no] and stub.query_calls == [order_no]
+    with psycopg.connect(clean_state) as conn:
+        order = conn.execute(
+            "SELECT status, transaction_id FROM recharge_orders WHERE merchant_order_no = %s",
+            (order_no,),
+        ).fetchone()
+        wallet = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = %s", (user_id,)
+        ).fetchone()
+        charges = conn.execute(
+            # 注册赠送也是一条 CHARGE 流水；按订单归属精确计数，避开赠送行。
+            "SELECT count(*) FROM wallet_transactions WHERE user_id = %s "
+            "AND type = 'CHARGE' AND recharge_order_id = "
+            "(SELECT id FROM recharge_orders WHERE merchant_order_no = %s)",
+            (user_id, order_no),
+        ).fetchone()
+    assert order is not None and order[0] == "PAID" and order[1] == "wx-trade-close-paid"
+    assert wallet is not None and int(wallet[0]) == int(wallet_before[0]) + 10, (
+        "在激活基线（含注册赠送）上精确入账 10 分"
+    )
+    assert charges is not None and int(charges[0]) == 1, "本单入账恰好一次"
+
+
+def test_wechat_delete_with_unknown_close_outcome_degrades_gracefully(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关单结果未知（超时/未建模错误码）：告警后立即查单核实，204 照常。
+
+    查单答「未付」→ 原样留在 CLOSED（钱没到就不动账）；查单本身失败则由
+    sweep/人工兜底（评审 P1：未知结果必须走验签查单路径，不能只告警了事）。
+    """
+    from app import recharge_routes
+    from app.payment_provider import OrderCloseError, OrderQueryResult
+
+    session_token = _activated_session(client, clean_state, "native-close-unknown")
+    order_no = _create_customer_order(client, session_token)
+    _make_order_native(clean_state, order_no)
+    stub = _GatewayCloseStub(
+        close_exc=OrderCloseError("outcome unknown", status_code=504),
+        # 未知结果必须立即查单核实（评审 P1）：查单说没付就原样留在 CLOSED。
+        query_result=OrderQueryResult(
+            paid=False,
+            merchant_order_no=order_no,
+            provider_trade_no=None,
+            amount_fen=None,
+            channel="wxpay",
+            response_digest="digest-unknown-unpaid",
+        ),
+    )
+    monkeypatch.setattr(recharge_routes, "get_payment_provider", lambda name: stub)
+
+    response = client.delete(
+        f"/api/customer/recharge-orders/{order_no}",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+    assert response.status_code == 204, response.text
+    assert stub.close_calls == [order_no]
+    assert stub.query_calls == [order_no], "未知结果必须走验签查单路径核实"
+    with psycopg.connect(clean_state) as conn:
+        row = conn.execute(
+            "SELECT status FROM recharge_orders WHERE merchant_order_no = %s",
+            (order_no,),
+        ).fetchone()
+    assert row is not None and row[0] == "CLOSED"
+
+
+def test_zpay_delete_never_touches_the_gateway_close_branch(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """zpay 无网关关单 API：删除流程不得对它发起任何 provider 调用。"""
+    from app import recharge_routes
+
+    session_token = _activated_session(client, clean_state, "zpay-close-untouched")
+    order_no = _create_customer_order(client, session_token)
+    requested: list[str] = []
+
+    def _spy(name: str) -> object:
+        requested.append(name)
+        raise AssertionError(f"zpay delete must not resolve providers, saw {name}")
+
+    monkeypatch.setattr(recharge_routes, "get_payment_provider", _spy)
+    response = client.delete(
+        f"/api/customer/recharge-orders/{order_no}",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+    assert response.status_code == 204, response.text
+    assert requested == [], "zpay 删除不得触碰网关关单分支"

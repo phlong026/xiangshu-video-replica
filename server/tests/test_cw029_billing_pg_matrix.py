@@ -19,8 +19,9 @@ migration rewrites, client-side display amounts as evidence.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 os.environ.setdefault(
     "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY",
@@ -37,6 +38,9 @@ from pg_test_kit import require_pg_or_explicit_skip
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.zpay import sign_zpay_params
+
+if TYPE_CHECKING:
+    from app.payment_provider import OrderQueryResult
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 
@@ -375,6 +379,274 @@ def test_order_price_snapshot_survives_runtime_price_change(
             "SELECT available_credits FROM wallets WHERE user_id = 'user_1'"
         ).fetchone()
     assert row is not None and int(row[0]) == 110, "credited per the historical snapshot"
+
+
+# ---------------------------------------------------------------------------
+# 人工查单补单（2026-11-16 漏账缺口修复 F1）：CLOSED 可查、FAILED 拒绝、
+# 结算资金防线原样、外呼窗口竞态不误报。走 legacy 代理令牌车道（确定性最强）。
+# ---------------------------------------------------------------------------
+
+_F1_PROXY_TOKEN = "cw29-f1-proxy-token"
+
+
+def _close_order(dsn: str, order_no: str) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE recharge_orders SET status = 'CLOSED' WHERE merchant_order_no = %s",
+            (order_no,),
+        )
+
+
+def _f1_sync_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Legacy 代理令牌车道的 env + 请求头；幂等键每用例唯一（重放用例自持）。"""
+    import hashlib
+    from uuid import uuid4
+
+    monkeypatch.setenv(
+        "CONTROL_PROXY_TOKEN_DIGEST",
+        hashlib.sha256(_F1_PROXY_TOKEN.encode()).hexdigest(),
+    )
+    monkeypatch.setenv("CONTROL_ADMIN_USER_ID", "admin_z")
+    return {
+        "X-Control-Proxy-Token": _F1_PROXY_TOKEN,
+        "Idempotency-Key": f"cw29-f1-{uuid4().hex[:8]}",
+    }
+
+
+class _SyncGateway:
+    """查单桩：商户/部署配置照答，query_order 应答与副作用由用例注入."""
+
+    def __init__(
+        self, query_result: OrderQueryResult, *, on_query: Callable[[], None] | None = None
+    ) -> None:
+        self._query_result = query_result
+        self._on_query = on_query
+
+    def load_merchant_config(self, conn):  # noqa: ANN001, ARG002
+        from app.payment_provider import MerchantConfig
+
+        return MerchantConfig("zpay", {}, ("alipay",))
+
+    def load_deployment_config(self):  # noqa: ANN201
+        from app.payment_provider import DeploymentConfig
+
+        return DeploymentConfig("", "")
+
+    def query_order(self, **kwargs):  # noqa: ANN003, ARG002
+        if self._on_query is not None:
+            self._on_query()
+        return self._query_result
+
+
+def _paid_answer(order_no: str, *, amount_fen: int = 10000) -> OrderQueryResult:
+    from app.payment_provider import OrderQueryResult
+
+    return OrderQueryResult(True, order_no, "cw29-f1-trade", amount_fen, "alipay", "digest-f1")
+
+
+def _unpaid_answer(order_no: str) -> OrderQueryResult:
+    from app.payment_provider import OrderQueryResult
+
+    return OrderQueryResult(False, order_no, None, None, None, "digest-unpaid")
+
+
+def test_manual_sync_settles_closed_order_paid_at_gateway(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route_state: str,
+) -> None:
+    """F1 主路径：关单后网关已付且回调丢失的订单，人工查单当场补账。"""
+    from app import payment_routes
+
+    _close_order(route_state, ORDER_NO)
+    monkeypatch.setattr(
+        payment_routes, "get_payment_provider", lambda name: _SyncGateway(_paid_answer(ORDER_NO))
+    )
+    headers = _f1_sync_env(monkeypatch)
+    before = four_ledger_snapshot(route_state, "user_1")
+
+    response = client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers=headers,
+        json={"confirm": True, "reason": "漏账补单验收"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "PAID"
+    after = four_ledger_snapshot(route_state, "user_1")
+    assert after[0] == before[0] + 10 and after[2] == before[2] + 1, "入账恰好一次"
+
+    # 同一幂等键重放不得二次入账（write_with_idempotency 契约）。
+    replay = client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers=headers,
+        json={"confirm": True, "reason": "漏账补单验收"},
+    )
+    assert replay.status_code == 200 and replay.json()["status"] == "PAID"
+    assert four_ledger_snapshot(route_state, "user_1") == after
+
+    # 发起意图落了审计行。
+    with psycopg.connect(route_state) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action = 'payment.sync' AND entity_id = %s",
+            (ORDER_NO,),
+        ).fetchone()
+    assert row is not None and int(row[0]) >= 1
+
+
+def test_manual_sync_closed_order_gateway_unpaid_returns_fresh_state(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route_state: str,
+) -> None:
+    """网关确认未付：CLOSED 原样保留、零资金副作用。"""
+    from app import payment_routes
+
+    _close_order(route_state, ORDER_NO)
+    monkeypatch.setattr(
+        payment_routes,
+        "get_payment_provider",
+        lambda name: _SyncGateway(_unpaid_answer(ORDER_NO)),
+    )
+    before = four_ledger_snapshot(route_state, "user_1")
+    response = client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers=_f1_sync_env(monkeypatch),
+        json={"confirm": True, "reason": "关单复核"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "CLOSED", "网关未付时保留本地关单态"
+    assert four_ledger_snapshot(route_state, "user_1") == before
+    assert order_status(route_state, ORDER_NO) == "CLOSED"
+
+
+def test_manual_sync_unpaid_answer_reflects_settlement_that_landed_during_query(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route_state: str,
+) -> None:
+    """外呼窗口竞态：网关应答「没付」但窗口内晚到回调已入账——响应必须
+
+    是重读后的 PAID，而不是预读时的 PENDING 快照（2026-11-16 评审 P2）。
+    """
+    from app import payment_routes
+
+    def _late_callback() -> None:
+        # 模拟晚到回调在 query_order 外呼期间完成幂等结算（真实回调同款路径）。
+        from app.db_pg import pg_transaction
+        from app.db_portable import BusinessConnection
+        from app.zpay_payments import ZPAY_SETTLEMENT_SPEC, confirm_recharge_payment
+
+        with pg_transaction() as pg_conn:
+            confirm_recharge_payment(
+                BusinessConnection.postgres(pg_conn),
+                merchant_order_no=ORDER_NO,
+                provider_trade_no="cw29-f1-trade",
+                amount_fen=10000,
+                channel="alipay",
+                source_digest="digest-late-callback",
+                allowed_channels=("alipay",),
+                provider_spec=ZPAY_SETTLEMENT_SPEC,
+            )
+
+    gateway = _SyncGateway(_unpaid_answer(ORDER_NO), on_query=_late_callback)
+    monkeypatch.setattr(payment_routes, "get_payment_provider", lambda name: gateway)
+    before = four_ledger_snapshot(route_state, "user_1")
+    response = client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers=_f1_sync_env(monkeypatch),
+        json={"confirm": True, "reason": "窗口竞态回归"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "PAID", "重读拿到窗口内落定的结算"
+    after = four_ledger_snapshot(route_state, "user_1")
+    assert after[0] == before[0] + 10 and after[2] == before[2] + 1, "只有回调入账这一次"
+
+
+def test_manual_sync_failed_order_stays_refused(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route_state: str,
+) -> None:
+    """FAILED 不在放行集合里（Q1：无写入入口、语义存疑，维持拒绝）。"""
+    from app import payment_routes
+
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE recharge_orders SET status = 'FAILED' WHERE merchant_order_no = %s",
+            (ORDER_NO,),
+        )
+    monkeypatch.setattr(
+        payment_routes,
+        "get_payment_provider",
+        lambda name: _SyncGateway(_paid_answer(ORDER_NO)),
+    )
+    before = four_ledger_snapshot(route_state, "user_1")
+    response = client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers=_f1_sync_env(monkeypatch),
+        json={"confirm": True, "reason": "FAILED 口径验证"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "RECHARGE_ORDER_NOT_SYNCABLE"
+    assert four_ledger_snapshot(route_state, "user_1") == before
+
+
+def test_manual_sync_settlement_guards_reject_bad_gateway_answer(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route_state: str,
+) -> None:
+    """网关应答金额与订单不符：结算防线原样拒绝，订单与钱包零变化。"""
+    from app import payment_routes
+
+    _close_order(route_state, ORDER_NO)
+    monkeypatch.setattr(
+        payment_routes,
+        "get_payment_provider",
+        lambda name: _SyncGateway(_paid_answer(ORDER_NO, amount_fen=999)),
+    )
+    before = four_ledger_snapshot(route_state, "user_1")
+    response = client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers=_f1_sync_env(monkeypatch),
+        json={"confirm": True, "reason": "金额不符回归"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "ZPAY_AMOUNT_MISMATCH"
+    assert order_status(route_state, ORDER_NO) == "CLOSED"
+    assert four_ledger_snapshot(route_state, "user_1") == before
+
+
+def test_manual_sync_refuses_trade_no_bound_to_another_order(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route_state: str,
+) -> None:
+    """同一网关交易号已绑定别单：拒绝，防止一钱两单。"""
+    from app import payment_routes
+
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE recharge_orders SET status = 'PAID', provider_trade_no = 'cw29-f1-trade', "
+            "paid_at = CURRENT_TIMESTAMP WHERE merchant_order_no = %s",
+            (SECOND_ORDER_NO,),
+        )
+    _close_order(route_state, ORDER_NO)
+    monkeypatch.setattr(
+        payment_routes,
+        "get_payment_provider",
+        lambda name: _SyncGateway(_paid_answer(ORDER_NO)),
+    )
+    before = four_ledger_snapshot(route_state, "user_1")
+    response = client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers=_f1_sync_env(monkeypatch),
+        json={"confirm": True, "reason": "交易号绑定回归"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "ZPAY_TRADE_ALREADY_BOUND"
+    assert order_status(route_state, ORDER_NO) == "CLOSED"
+    assert four_ledger_snapshot(route_state, "user_1") == before
 
 
 # ---------------------------------------------------------------------------

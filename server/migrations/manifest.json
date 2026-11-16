@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261115T1000_display_settings"
+      "20261116T1000_recharge_orders_closed_at"
     ],
     "parents": {
       "001_core": null,
@@ -210,9 +210,10 @@
       ],
       "20261113T1000_replica_pipeline_submit_intents": "20261112T1200_merge_training_pan123_pipeline",
       "20261115T1000_display_settings": "20261115T1900_billing_reconciliation_active_dedupe",
-      "20261115T1900_billing_reconciliation_active_dedupe": "20261113T1000_replica_pipeline_submit_intents"
+      "20261115T1900_billing_reconciliation_active_dedupe": "20261113T1000_replica_pipeline_submit_intents",
+      "20261116T1000_recharge_orders_closed_at": "20261115T1000_display_settings"
     },
-    "revision_count": 188
+    "revision_count": 189
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -978,6 +979,10 @@
     "20261115T1900_billing_reconciliation_active_dedupe": {
       "file": "versions/20261115T1900_billing_reconciliation_active_dedupe.py",
       "sha256": "3534ed24ac31d6beb05156a34e9c28cbf469b2ff8d071832ee331e875abe7512"
+    },
+    "20261116T1000_recharge_orders_closed_at": {
+      "file": "versions/20261116T1000_recharge_orders_closed_at.py",
+      "sha256": "2338ecb66afba35a997cf3264593888719ec2b8c8e568883fc8ce007412f164d"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

@@ -12852,6 +12852,13 @@ export interface components {
       created_at: string;
       /** Paid At */
       paid_at: string | null;
+      /**
+       * Gateway Paid
+       *
+       * 只有管理端「查单补单」端点会填：本地状态与本次网关查询结果是两个
+       * 维度。其余端点缺省 null（未发起网关查询）。
+       */
+      gateway_paid?: boolean | null;
     };
     /** RechargePackageListResponse */
     RechargePackageListResponse: {
@@ -15640,6 +15647,14 @@ export interface components {
       key?: string | null;
       /** Enabled Channels */
       enabled_channels: ("alipay" | "wxpay")[];
+      /**
+       * Rotation Acknowledged
+       *
+       * F4：pid 变更/渠道收窄且在途单>0 时，后端要求显式确认换绑影响面；
+       * 确认记录与未决单清单写入审计。
+       * @default false
+       */
+      rotation_acknowledged?: boolean;
     };
   };
   responses: never;

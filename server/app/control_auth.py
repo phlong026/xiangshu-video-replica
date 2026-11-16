@@ -135,6 +135,54 @@ def get_control_route_user_short_tx(
 ControlUserShortTx = Annotated[CurrentUser, Depends(get_control_route_user_short_tx)]
 
 
+def get_control_funds_writer_short_tx(
+    request: Request,
+    proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+) -> CurrentUser:
+    """funds.write 权限点的短事务变体：资金查单入口（sync_recharge_order）专用.
+
+    连接占用纪律与 :func:`get_control_route_user_short_tx` 逐字一致——路由体
+    内带支付网关查单外呼，依赖若隐式携带请求级事务，外呼期间连接停在
+    idle-in-transaction 被 60s 护栏击杀（2026-11-02 生产池饿死事故路径）。
+    差异仅一处：人工查单可向钱包入账资金（2026-11-16 评审 P1——此前入口只
+    查 role==admin，auditor 之外的普通 admin 也能触发资金结算），客户生产
+    线在写级角色之上追加 funds.write 权限点，与 repair-ledger 的
+    FundsWriter 同一把关。内部 P0 线沿用代理令牌身份（它本来只认 admin，
+    没有「模板」概念）。
+    """
+    if not is_customer_production():
+        from app.db_pg import pg_transaction
+        from app.db_portable import BusinessConnection
+
+        with pg_transaction() as pg_conn:
+            return get_control_user(BusinessConnection.postgres(pg_conn), proxy_token)
+
+    from app.admin_auth_routes import get_admin_actor, get_admin_writer
+    from app.admin_permissions import FUNDS_WRITE, POINT_LABELS
+
+    admin_actor = get_admin_actor(request)
+    get_admin_writer(admin_actor)
+    if not admin_actor.can(FUNDS_WRITE):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PERMISSION_DENIED",
+                "message": (
+                    f"当前角色没有「{POINT_LABELS[FUNDS_WRITE]}」权限，请联系超级管理员调整角色。"
+                ),
+            },
+        )
+    return CurrentUser(
+        id=admin_actor.user_id,
+        username=admin_actor.username,
+        display_name=admin_actor.display_name,
+        role=cast(Role, admin_actor.role),
+    )
+
+
+ControlFundsWriterShortTx = Annotated[CurrentUser, Depends(get_control_funds_writer_short_tx)]
+
+
 def get_control_writer(
     request: Request,
     conn: Database,
