@@ -91,6 +91,7 @@ def _require_client_enabled() -> None:
             detail={"code": "VIRAL_FEATURE_RETIRED", "message": "爆款数据功能已下线。"},
         )
 
+
 SORT_HOT = "hot"
 SORT_LATEST = "latest"
 _VALID_SORTS = (SORT_HOT, SORT_LATEST)
