@@ -63,8 +63,8 @@ try {
   $versionSources = @(
     @{ name = 'package.json'; value = (Get-Content 'package.json' -Raw | ConvertFrom-Json).version },
     @{ name = 'client/package.json'; value = (Get-Content 'client/package.json' -Raw | ConvertFrom-Json).version },
-    @{ name = 'package-lock.json'; value = (Get-Content 'package-lock.json' -Raw | ConvertFrom-Json).version },
-    @{ name = 'package-lock.json packages.client'; value = ((Get-Content 'package-lock.json' -Raw | ConvertFrom-Json).packages.client).version }
+    @{ name = 'package-lock.json'; value = (Get-Content 'package-lock.json' -Raw | ConvertFrom-Json -AsHashtable).version },
+    @{ name = 'package-lock.json packages.client'; value = ((Get-Content 'package-lock.json' -Raw | ConvertFrom-Json -AsHashtable).packages.client).version }
   )
   $cargoToml = Get-Content 'client/src-tauri/Cargo.toml' -Raw
   if ($cargoToml -notmatch '(?ms)\[package\][^\[]*?version\s*=\s*"([^"]+)"') {

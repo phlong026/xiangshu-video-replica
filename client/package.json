@@ -1,6 +1,6 @@
 {
   "name": "@video-replica/client",
-  "version": "2.6.5",
+  "version": "2.6.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,7 @@
     "verify:customer-bundle": "node ../scripts/verify_customer_bundle.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/api": "2.12.0",
     "@tauri-apps/plugin-updater": "^2.13.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
