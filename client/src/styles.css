@@ -4245,12 +4245,16 @@ button.activation-generator__submit {
   margin: 0;
   padding: 0;
   list-style: none;
+  /* 网格轨道随行内容收缩：待办行的最小宽度不得超过面板，否则窄面板下
+     整页横向溢出（2026-11-16 实测待办行最小内容宽 441px > 面板 315px）。 */
+  min-width: 0;
 }
 
 .dashboard-todos li {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
   border: 1px solid var(--admin-line-soft, #242321);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.02);
@@ -4272,6 +4276,11 @@ button.activation-generator__submit {
 .dashboard-todos li small {
   color: var(--admin-muted, #a49e95);
   font-size: 12px;
+  /* max-width 百分比在网格最小内容尺寸计算里按 none 处理：nowrap 长提示
+     会把整行最小宽度撑爆面板（2026-11-16 实测 441px > 315px）。小屏下
+     改由 flex 收缩 + min-width:0 让省略号真正生效。 */
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4279,6 +4288,8 @@ button.activation-generator__submit {
 }
 
 .dashboard-todos li button {
+  flex: none;
+  white-space: nowrap;
   border: 1px solid var(--admin-line, #2e2c29);
   border-radius: 8px;
   background: transparent;
