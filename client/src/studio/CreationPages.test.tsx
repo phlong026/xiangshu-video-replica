@@ -4490,6 +4490,125 @@ describe("视频复刻（模块①）", () => {
     );
   });
 
+  it("768P 长档启用时 20 秒素材按 20 秒编译，不误触压缩门禁", async () => {
+    // 回归：终稿编译入口（finalInput）曾漏带时长上限参数，
+    // normalizeCustomerDuration 按默认 15 钳制——768P 长档启用后 20 秒素材
+    // 会被按 15 秒编译，并误报「源视频长于目标时长」的压缩确认。
+    // 终稿编译必须与草稿对齐同源使用 capabilities 推导的上限。
+    const value = replicaStudio();
+    value.videoCapabilitiesStatus = "ready";
+    value.videoCapabilities = {
+      ...(value.videoCapabilities ?? {}),
+      max_output_duration_seconds: 30,
+    };
+    const longShot = { ...shot, end_time: 20 };
+    value.state = {
+      ...value.state,
+      draft: { ...value.state.draft, duration: 20 },
+    };
+    replicaApi.startVideoAnalysis.mockResolvedValue({
+      id: "task-1",
+      status: "RUNNING",
+    });
+    replicaApi.waitForAnalysisTask.mockResolvedValue({
+      id: "task-1",
+      status: "SUCCEEDED",
+    });
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-1",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 20,
+        shots: [longShot],
+      },
+    });
+    replicaApi.getLatestProjectAnalysis.mockResolvedValue({
+      id: "av-1",
+      payload: {
+        analysis: {
+          summary: "庭院复刻",
+          duration_seconds: 20,
+          original_script: "这栋房子的采光设计非常好",
+          shots: [longShot],
+        },
+      },
+    });
+    replicaApi.saveShotCards.mockResolvedValue({
+      id: "scv-1",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 20,
+        shots: [longShot],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText(/已拆解/);
+    await prepareFinalReplica();
+
+    expect(replicaApi.compileGenerationPrompt).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ output_duration_seconds: 20 }),
+    );
+    // 源 20 秒 ≤ 目标 20 秒：压缩确认不应出现。
+    expect(screen.queryByLabelText(/内容压缩到/)).toBeNull();
+  });
+
+  it("2K 恒 15：20 秒源仍按 15 秒编译并要求压缩确认", async () => {
+    // 2K 的 15 秒上限是上游契约，价目启用也不放开；对齐 effect 会把草稿
+    // 钳回 15，终稿编译同口径，压缩确认照常出现——这条钉住「2K 不受长档影响」。
+    const value = replicaStudio();
+    const longShot = { ...shot, end_time: 20 };
+    value.state = {
+      ...value.state,
+      draft: { ...value.state.draft, duration: 20, resolution: "2K" },
+    };
+    replicaApi.startVideoAnalysis.mockResolvedValue({
+      id: "task-1",
+      status: "RUNNING",
+    });
+    replicaApi.waitForAnalysisTask.mockResolvedValue({
+      id: "task-1",
+      status: "SUCCEEDED",
+    });
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-1",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 20,
+        shots: [longShot],
+      },
+    });
+    replicaApi.getLatestProjectAnalysis.mockResolvedValue({
+      id: "av-1",
+      payload: {
+        analysis: {
+          summary: "庭院复刻",
+          duration_seconds: 20,
+          original_script: "这栋房子的采光设计非常好",
+          shots: [longShot],
+        },
+      },
+    });
+    replicaApi.saveShotCards.mockResolvedValue({
+      id: "scv-1",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 20,
+        shots: [longShot],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText(/已拆解/);
+    await prepareFinalReplica();
+
+    expect(replicaApi.compileGenerationPrompt).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ output_duration_seconds: 15 }),
+    );
+  });
+
   it("离开内容配置后迟到拆解回执不写入当前草稿", async () => {
     const value = replicaStudio();
     mockAnalysisSuccess();
