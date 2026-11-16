@@ -4498,7 +4498,15 @@ describe("视频复刻（模块①）", () => {
     const value = replicaStudio();
     value.videoCapabilitiesStatus = "ready";
     value.videoCapabilities = {
-      ...(value.videoCapabilities ?? {}),
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 8,
+      max_reference_videos: 3,
+      max_reference_audios: 3,
+      max_quantity: 4,
       max_output_duration_seconds: 30,
     };
     const longShot = { ...shot, end_time: 20 };
