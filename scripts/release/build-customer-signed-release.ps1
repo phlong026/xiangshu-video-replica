@@ -99,14 +99,18 @@ try {
   $overlayPath = Join-Path ([System.IO.Path]::GetTempPath()) (
     'cw24-release-overlay-' + [guid]::NewGuid().ToString('N') + '.json'
   )
+  # 时间戳可选：`-TimestampUrl ''` 表示签名时不带 RFC3161 时间戳（仅供
+  # 时间戳服务不可达时的应急出包；正式发版应保留默认 digicert 时间戳，
+  # 否则证书过期后签名失效时间点无法延展）。键缺省即 tauri 不传 /tr。
+  $windowsBundle = @{
+    certificateThumbprint = $env:VIDEO_REPLICA_RELEASE_SIGN_THUMBPRINT
+    digestAlgorithm = 'sha256'
+  }
+  if ($TimestampUrl) { $windowsBundle.timestampUrl = $TimestampUrl }
   $overlay = @{
     bundle = @{
       createUpdaterArtifacts = $true
-      windows = @{
-        certificateThumbprint = $env:VIDEO_REPLICA_RELEASE_SIGN_THUMBPRINT
-        digestAlgorithm = 'sha256'
-        timestampUrl = $TimestampUrl
-      }
+      windows = $windowsBundle
     }
     plugins = @{
       updater = @{
