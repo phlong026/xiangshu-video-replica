@@ -111,6 +111,8 @@ export type StudioPerson = {
   name: string;
   role: string;
   portrait?: string;
+  /** 封面加载失败时只为该视角重新读取签名，不重载整个人物库。 */
+  portraitAssetId?: string;
   version: number;
   scope: string;
   audience: string;

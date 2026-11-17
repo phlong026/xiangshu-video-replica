@@ -569,6 +569,9 @@ function basePerson(
     name: entry.display_name,
     role: entry.role,
     portrait,
+    portraitAssetId:
+      entry.views.find((view) => view.view_type === "FRONT_FACE")?.asset_id ??
+      entry.views[0]?.asset_id,
     version: entry.version_number ?? 0,
     scope: entry.service_scope,
     audience: entry.target_audience,

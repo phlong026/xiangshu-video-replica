@@ -198,7 +198,56 @@ describe("loadPeopleEntries 并发加载（FIX-16）", () => {
     }
     const result = await loading;
     expect(result.people.map((person) => person.id)).toEqual(["a", "b", "c"]);
+    expect(result.people.map((person) => person.portraitAssetId)).toEqual([
+      "face-a",
+      "face-b",
+      "face-c",
+    ]);
     expect(result.errors).toEqual([]);
+  });
+
+  it("保留实际封面资产以便局部恢复，正脸优先且签名失败也不丢资产号", async () => {
+    vi.resetAllMocks();
+    api.listOralAvatars.mockResolvedValue([]);
+    api.listOralVoices.mockResolvedValue([]);
+    api.getCachedCharacterAssetUrl.mockImplementation(async (id: string) => {
+      if (id === "front") throw new Error("签名暂不可读");
+      return { url: `/signed/${id}` };
+    });
+    const entry = (id: string, views: SimpleLibraryEntry["views"]) =>
+      ({
+        identity_id: id,
+        display_name: id,
+        role: "",
+        views,
+        contact_sheet_asset_id: null,
+        status: "PUBLISHED",
+        scene_look_count: 0,
+      }) as unknown as SimpleLibraryEntry;
+    const result = await loadPeopleEntries(
+      [
+        entry("front-person", [
+          { asset_id: "side", view_type: "LEFT_SIDE" },
+          { asset_id: "front", view_type: "FRONT_FACE" },
+        ]),
+        entry("side-person", [
+          { asset_id: "side-fallback", view_type: "LEFT_SIDE" },
+        ]),
+        entry("no-photo", []),
+      ],
+      null,
+      3,
+    );
+    expect(result.people.map((person) => person.portraitAssetId)).toEqual([
+      "front",
+      "side-fallback",
+      undefined,
+    ]);
+    expect(result.people[0].portrait).toBeUndefined();
+    expect(result.people[1].portrait).toBe("/signed/side-fallback");
+    expect(api.getCachedCharacterAssetUrl.mock.calls.map(([id]) => id)).toEqual(
+      ["front", "side-fallback"],
+    );
   });
 });
 
