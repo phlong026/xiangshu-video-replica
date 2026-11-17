@@ -458,7 +458,8 @@ def test_desktop_installer_workflow_builds_three_internal_test_targets() -> None
     expected = {
         "windows-x86_64": ("windows-2025", "x86_64-pc-windows-msvc", "nsis"),
         "macos-arm64": ("macos-15", "aarch64-apple-darwin", "app"),
-        "macos-x86_64": ("macos-15-intel", "x86_64-apple-darwin", "app"),
+        # x86_64 在 Apple Silicon 上交叉编译：Intel runner 实测破坏配置到编译层传递。
+        "macos-x86_64": ("macos-15", "x86_64-apple-darwin", "app"),
     }
     for platform, (runner, target, bundles) in expected.items():
         entry = _matrix_entry(workflow, platform)

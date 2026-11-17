@@ -73,7 +73,7 @@ jobs:
             config: src-tauri/tauri.macos.conf.json
             binary_arch: arm64
           - platform: macos-x86_64
-            runner: macos-15-intel
+            runner: macos-15
             target: x86_64-apple-darwin
             bundles: app
             bundle_dir: dmg
