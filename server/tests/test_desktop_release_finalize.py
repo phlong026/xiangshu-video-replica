@@ -492,6 +492,9 @@ def test_workflow_and_signing_driver_keep_private_material_local() -> None:
     workflow = (REPO / ".github/workflows/desktop-build.yml").read_text(encoding="utf-8")
     driver = (REPO / "scripts/release/finalize-customer-release.ps1").read_text(encoding="utf-8")
     assert "macos-overlay" in workflow
+    # x86_64 在 Apple Silicon 上交叉编译：Intel runner 实测破坏配置到编译层的
+    # 传递（四次构建二进制字节级不变），交叉编译走同一 universal SDK 与配置链路。
+    assert "runner: macos-15-intel" not in workflow
     # macOS 配置通过覆写检出内平台文件进入构建（绕开 CLI 参数传递），不再用 --config。
     cp_line = 'cp "$RUNNER_TEMP/customer-macos-release.json" client/src-tauri/tauri.macos.conf.json'
     assert cp_line in workflow
