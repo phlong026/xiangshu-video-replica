@@ -13,6 +13,7 @@ import { PeoplePage, PersonPage } from "./PeoplePages";
 import type { StudioData } from "./types";
 
 const api = vi.hoisted(() => ({
+  capturePromptSession: vi.fn<() => () => boolean>(() => () => true),
   customerVisibleErrorMessage: vi.fn(
     (_cause: unknown, fallback: string) => fallback,
   ),
@@ -75,6 +76,7 @@ let selectedPersonId: string | undefined = "p1";
 let returnTo: string | undefined;
 let review = true;
 let currentRole: "customer" | "employee" | "auditor" = "customer";
+let currentUserId = "current-user";
 let draft: Record<string, string | undefined> = {};
 let pagination: Record<string, unknown> | undefined;
 let studioDataOverride: StudioData | undefined;
@@ -85,6 +87,34 @@ function VoiceStateHarness({ initialData }: { initialData: StudioData }) {
   studioDataOverride = data;
   updateData.mockImplementation(setData);
   return <PersonPage />;
+}
+
+function PeopleStateHarness({ initialData }: { initialData: StudioData }) {
+  const [data, setData] = useState(initialData);
+  studioDataOverride = data;
+  updateData.mockImplementation(setData);
+  return <PeoplePage />;
+}
+
+function portraitData() {
+  const data = createReviewData();
+  data.people = [
+    {
+      ...data.people[0],
+      id: "p1",
+      name: "测试人物",
+      portrait: "/expired.png",
+      portraitAssetId: "face1",
+    },
+    {
+      ...data.people[1],
+      id: "p2",
+      name: "其他人物",
+      portrait: "/other.png",
+      portraitAssetId: "face2",
+    },
+  ];
+  return data;
 }
 
 function voicePollingData() {
@@ -295,7 +325,7 @@ vi.mock("./context", () => ({
     },
     review,
     user: {
-      id: "current-user",
+      id: currentUserId,
       username: "current-user",
       display_name: "Current User",
       role: currentRole,
@@ -324,6 +354,8 @@ describe("PeoplePages", () => {
     returnTo = undefined;
     review = true;
     currentRole = "customer";
+    currentUserId = "current-user";
+    api.capturePromptSession.mockImplementation(() => () => true);
     draft = {};
     voiceSourceUses = ["voice_clone"];
     pagination = undefined;
@@ -336,6 +368,9 @@ describe("PeoplePages", () => {
     openPicker.mockClear();
     openLive.mockClear();
     vi.clearAllMocks();
+    api.getCachedCharacterAssetUrl
+      .mockReset()
+      .mockResolvedValue({ url: "/scene.png" });
     oralLive.readAudioDuration.mockResolvedValue(30);
     oralLive.validateOralAudioFile.mockImplementation((file: File) =>
       file.name.toLowerCase().endsWith(".mp3")
@@ -359,6 +394,181 @@ describe("PeoplePages", () => {
       },
     );
   });
+
+  it("封面失效只自动重签本人物一次，新图片再次失败后改为手动重试", async () => {
+    review = false;
+    api.getCachedCharacterAssetUrl.mockReset();
+    api.getCachedCharacterAssetUrl
+      .mockResolvedValueOnce({ url: "/renewed.png" })
+      .mockResolvedValueOnce({ url: "/manual-retry.png" });
+    render(<PeopleStateHarness initialData={portraitData()} />);
+    fireEvent.error(screen.getByAltText("测试人物形象"));
+    await waitFor(() =>
+      expect(screen.getByAltText("测试人物形象")).toHaveAttribute(
+        "src",
+        "/renewed.png",
+      ),
+    );
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledExactlyOnceWith(
+      "face1",
+    );
+    expect(screen.getByAltText("其他人物形象")).toHaveAttribute(
+      "src",
+      "/other.png",
+    );
+    fireEvent.error(screen.getByAltText("测试人物形象"));
+    const retry = await screen.findByRole("button", {
+      name: "重试测试人物图片",
+    });
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledTimes(1);
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(screen.getByAltText("测试人物形象")).toHaveAttribute(
+        "src",
+        "/manual-retry.png",
+      ),
+    );
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledTimes(2);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("有封面资产但未取到URL时提供手动恢复，无资产号保持空态", async () => {
+    review = false;
+    const data = portraitData();
+    data.people[0].portrait = undefined;
+    data.people[1].portrait = undefined;
+    data.people[1].portraitAssetId = undefined;
+    api.getCachedCharacterAssetUrl.mockResolvedValue({ url: "/available.png" });
+    render(<PeopleStateHarness initialData={data} />);
+    expect(api.getCachedCharacterAssetUrl).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "重试其他人物图片" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试测试人物图片" }));
+    await waitFor(() =>
+      expect(screen.getByAltText("测试人物形象")).toHaveAttribute(
+        "src",
+        "/available.png",
+      ),
+    );
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledExactlyOnceWith(
+      "face1",
+    );
+  });
+
+  it("局部重签失败保留手动重试，不自动循环或弹全局错误", async () => {
+    review = false;
+    api.getCachedCharacterAssetUrl.mockReset();
+    api.getCachedCharacterAssetUrl
+      .mockRejectedValueOnce(new Error("签名暂不可读"))
+      .mockResolvedValueOnce({ url: "/recovered.png" });
+    render(<PeopleStateHarness initialData={portraitData()} />);
+    fireEvent.error(screen.getByAltText("测试人物形象"));
+    const retry = await screen.findByRole("button", {
+      name: "重试测试人物图片",
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("图片暂时无法加载");
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledTimes(1);
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(screen.getByAltText("测试人物形象")).toHaveAttribute(
+        "src",
+        "/recovered.png",
+      ),
+    );
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("重签返回相同URL也重新加载预览，自动重试预算保持一次", async () => {
+    review = false;
+    api.getCachedCharacterAssetUrl.mockReset();
+    api.getCachedCharacterAssetUrl.mockResolvedValue({ url: "/expired.png" });
+    render(<PeopleStateHarness initialData={portraitData()} />);
+    const firstImage = screen.getByAltText("测试人物形象");
+    fireEvent.error(firstImage);
+    await waitFor(() =>
+      expect(screen.getByAltText("测试人物形象")).not.toBe(firstImage),
+    );
+    expect(screen.getByAltText("测试人物形象")).toHaveAttribute(
+      "src",
+      "/expired.png",
+    );
+    fireEvent.error(screen.getByAltText("测试人物形象"));
+    await screen.findByRole("button", { name: "重试测试人物图片" });
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledExactlyOnceWith(
+      "face1",
+    );
+  });
+
+  it.each(["account", "asset", "url", "session"])(
+    "封面重签迟到时忽略已变化的%s，不污染新状态",
+    async (changedScope) => {
+      review = false;
+      let resolve!: (value: { url: string }) => void;
+      api.getCachedCharacterAssetUrl.mockReset();
+      api.getCachedCharacterAssetUrl.mockReturnValue(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      let sessionActive = true;
+      api.capturePromptSession.mockImplementation(() => () => sessionActive);
+      const mounted = render(
+        <PeopleStateHarness initialData={portraitData()} />,
+      );
+      fireEvent.error(screen.getByAltText("测试人物形象"));
+      expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledExactlyOnceWith(
+        "face1",
+      );
+      if (changedScope === "account") {
+        currentUserId = "other-user";
+        mounted.rerender(<PeopleStateHarness initialData={portraitData()} />);
+      } else if (changedScope === "session") {
+        sessionActive = false;
+      } else {
+        act(() =>
+          updateData((current: StudioData) => ({
+            ...current,
+            people: current.people.map((person) =>
+              person.id === "p1"
+                ? {
+                    ...person,
+                    portrait: "/replacement.png",
+                    portraitAssetId:
+                      changedScope === "asset"
+                        ? "new-face"
+                        : person.portraitAssetId,
+                  }
+                : person,
+            ),
+          })),
+        );
+      }
+      if (changedScope === "url")
+        fireEvent.error(screen.getByAltText("测试人物形象"));
+      updateData.mockClear();
+      await act(async () => resolve({ url: "/late-old-session.png" }));
+      if (changedScope === "session" || changedScope === "url")
+        expect(
+          screen.getByRole("button", { name: "重试测试人物图片" }),
+        ).toBeEnabled();
+      expect(updateData).not.toHaveBeenCalled();
+      expect(
+        studioDataOverride?.people.find((person) => person.id === "p1")
+          ?.portrait,
+      ).toBe(
+        changedScope === "asset" || changedScope === "url"
+          ? "/replacement.png"
+          : "/expired.png",
+      );
+      expect(refresh).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+    },
+  );
 
   it("人物场景照片尚未读取时显示未知而不是零张", () => {
     review = false;

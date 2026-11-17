@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  capturePromptSession,
   confirmOralVoice,
   createMaterialUploadIntent,
   createOralAvatarClone,
@@ -16,6 +17,7 @@ import {
   deleteOralVoice,
   deleteSimpleCharacterIdentity,
   deleteSimpleSceneLook,
+  getCachedCharacterAssetUrl,
   listOralAvatars,
   listOralVoices,
   type OralVoiceLanguage,
@@ -298,8 +300,92 @@ function PersonCard({
   person: StudioPerson;
   onOpen(): void;
 }) {
-  const { navigate, review, notify, refresh, updateData } = useStudio();
+  const { navigate, review, notify, refresh, updateData, user } = useStudio();
   const portrait = person.portrait;
+  const portraitScopeKey = `${review}/${user.id}/${person.id}/${person.portraitAssetId ?? ""}`;
+  const portraitScopeRef = useRef<{
+    key: string;
+    attempted: boolean;
+    pending: boolean;
+  } | null>(null);
+  const currentPortraitRef = useRef(portrait);
+  currentPortraitRef.current = portrait;
+  const [portraitLoading, setPortraitLoading] = useState(false);
+  const [portraitError, setPortraitError] = useState("");
+  const [portraitAttempt, setPortraitAttempt] = useState(0);
+  useLayoutEffect(() => {
+    const scope = { key: portraitScopeKey, attempted: false, pending: false };
+    portraitScopeRef.current = scope;
+    setPortraitLoading(false);
+    setPortraitError("");
+    setPortraitAttempt(0);
+    return () => {
+      if (portraitScopeRef.current === scope) portraitScopeRef.current = null;
+    };
+  }, [portraitScopeKey]);
+
+  async function restorePortrait(failedUrl = portrait, manual = false) {
+    const scope = portraitScopeRef.current;
+    const assetId = person.portraitAssetId;
+    if (
+      review ||
+      !assetId ||
+      !scope ||
+      scope.key !== portraitScopeKey ||
+      failedUrl !== currentPortraitRef.current
+    )
+      return;
+    if (scope.pending) {
+      setPortraitError("图片暂时无法显示");
+      return;
+    }
+    if (!manual && scope.attempted) {
+      setPortraitError("图片暂时无法显示");
+      return;
+    }
+    scope.attempted = true;
+    scope.pending = true;
+    setPortraitLoading(true);
+    setPortraitError("");
+    const sameSession = capturePromptSession();
+    const sameScope = () => portraitScopeRef.current === scope;
+    const active = () =>
+      sameScope() && sameSession() && currentPortraitRef.current === failedUrl;
+    try {
+      // 缓存端点复用图片文件，每次调用都会重新签名，不读取前端的旧 URL 缓存。
+      const download = await getCachedCharacterAssetUrl(assetId);
+      if (!active()) return;
+      if (!download.url) throw new Error("图片地址暂不可用。");
+      setPortraitError("");
+      updateData((current) => {
+        if (!active()) return current;
+        const matches = (entry: StudioPerson) =>
+          entry.id === person.id &&
+          entry.portraitAssetId === assetId &&
+          entry.portrait === failedUrl;
+        if (!current.people.some(matches)) return current;
+        return {
+          ...current,
+          people: current.people.map((entry) =>
+            matches(entry) ? { ...entry, portrait: download.url } : entry,
+          ),
+        };
+      });
+      // 同秒重签可能得到相同 URL，仍需重建本卡预览；自动预算不会随 URL 变化重置。
+      setPortraitAttempt((value) => value + 1);
+    } catch {
+      if (active()) setPortraitError("图片暂时无法加载");
+    } finally {
+      if (sameScope()) {
+        scope.pending = false;
+        setPortraitLoading(false);
+        // 凭据变化会丢弃旧回执，但当前失败卡仍须保留手动恢复入口。
+        if (!sameSession() && currentPortraitRef.current === failedUrl)
+          setPortraitError("图片暂时无法加载");
+      }
+    }
+  }
+
   const voices = person.voices.filter((voice) => voice.confirmed).length;
   const avatars = person.avatars.filter((avatar) => avatar.ready).length;
   const photoCount =
@@ -355,6 +441,7 @@ function PersonCard({
           裁切保头见 people.css）。 */}
       <div className="person-card__portrait">
         <Media
+          key={`${portraitScopeKey}/${portraitAttempt}`}
           asset={
             portrait
               ? {
@@ -371,7 +458,29 @@ function PersonCard({
           alt={`${person.name}形象`}
           className="person-card__portrait-media"
           fitContainer
+          onError={(failedUrl) => void restorePortrait(failedUrl)}
         />
+        {portraitLoading ||
+        portraitError ||
+        (!portrait && person.portraitAssetId && !review) ? (
+          <div className="person-card__portrait-status">
+            {portraitLoading ? (
+              <span role="status">正在恢复图片…</span>
+            ) : (
+              <>
+                {portraitError ? (
+                  <span role="status">{portraitError}</span>
+                ) : null}
+                <Button
+                  aria-label={`重试${person.name}图片`}
+                  onClick={() => void restorePortrait(portrait, true)}
+                >
+                  重试图片
+                </Button>
+              </>
+            )}
+          </div>
+        ) : null}
       </div>
       <div className="person-card__body">
         <h2>{person.name}</h2>
