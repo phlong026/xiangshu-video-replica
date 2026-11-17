@@ -1025,7 +1025,7 @@ def test_homepage_selection_repairs_missing_cover_without_recollecting_video(
 
 
 @pytest.mark.pg
-def test_manual_feature_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
+def test_manual_push_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
     client: TestClient, route_state: str
 ) -> None:
     from datetime import UTC, datetime
@@ -1046,22 +1046,60 @@ def test_manual_feature_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
             "'SUCCEEDED','fake://test/video.mp4')"
         )
     path = "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/curation"
-    for action in ("feature", "unfeature"):
-        response = client.patch(
-            path,
-            headers={**headers, "Idempotency-Key": f"catalog-{action}"},
-            json={"action": action, "reason": "验收普通列表及首页独立展示", "confirm": True},
-        )
-        assert response.status_code == 200, response.text
-        with psycopg.connect(route_state) as conn:
-            bus = BusinessConnection.postgres(conn)
-            page = list_viral_video_page(bus, platform="douyin", sort="hot", limit=12)
-            assert page.total == 1
-            assert [item.video_id for item in page.items] == ["admin-video/opaque=id"]
-            featured = list_viral_video_page(
+    # 展示到首页只是首页标记，不授予公共展示授权；推送才进客户目录。
+    featured = client.patch(
+        path,
+        headers={**headers, "Idempotency-Key": "catalog-feature"},
+        json={"action": "feature", "reason": "验收首页标记不发布", "confirm": True},
+    )
+    assert featured.status_code == 200, featured.text
+    with psycopg.connect(route_state) as conn:
+        bus = BusinessConnection.postgres(conn)
+        assert list_viral_video_page(bus, platform="douyin", sort="hot", limit=12).total == 0
+        assert (
+            list_viral_video_page(
                 bus, platform="douyin", sort="hot", limit=12, featured_only=True
-            )
-            assert featured.total == int(action == "feature")
+            ).total
+            == 0
+        )
+    pushed = client.post(
+        "/api/control/viral/videos/curation:batch",
+        headers={**headers, "Idempotency-Key": "catalog-push"},
+        json={
+            "confirm": True,
+            "action": "push",
+            "reason": "验收推送进目录",
+            "items": [{"platform": "douyin", "video_id": "admin-video/opaque=id"}],
+        },
+    )
+    assert pushed.status_code == 200, pushed.text
+    with psycopg.connect(route_state) as conn:
+        bus = BusinessConnection.postgres(conn)
+        page = list_viral_video_page(bus, platform="douyin", sort="hot", limit=12)
+        assert page.total == 1
+        assert [item.video_id for item in page.items] == ["admin-video/opaque=id"]
+        assert (
+            list_viral_video_page(
+                bus, platform="douyin", sort="hot", limit=12, featured_only=True
+            ).total
+            == 1
+        )
+    unfeatured = client.patch(
+        path,
+        headers={**headers, "Idempotency-Key": "catalog-unfeature"},
+        json={"action": "unfeature", "reason": "撤出首页", "confirm": True},
+    )
+    assert unfeatured.status_code == 200, unfeatured.text
+    with psycopg.connect(route_state) as conn:
+        bus = BusinessConnection.postgres(conn)
+        # 推送授权不随撤出首页回收：目录保留，首页清零。
+        assert list_viral_video_page(bus, platform="douyin", sort="hot", limit=12).total == 1
+        assert (
+            list_viral_video_page(
+                bus, platform="douyin", sort="hot", limit=12, featured_only=True
+            ).total
+            == 0
+        )
 
 
 @pytest.mark.pg
@@ -5367,7 +5405,9 @@ def test_enabled_keyword_limit_and_zero_result_run_are_consumed_by_worker(
         "/api/control/viral/discoveries", headers=headers, params={"date": search_day}
     ).json()["keywords"][0]
     assert after["configured"] is True
-    assert after["inventory"] == (0 if zero_results else 2)
+    # 采集只完成归档，不自动上架（可见口径要 pushed_at）：库存仍为 0，
+    # 运营推送后才计入需求库存（见 test_weekly_collection_failure_* 的收尾）。
+    assert after["inventory"] == 0
     from app.viral_refresh import complete_viral_refresh_task
 
     with psycopg.connect(route_state) as raw:
