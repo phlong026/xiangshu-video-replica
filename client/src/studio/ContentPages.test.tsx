@@ -3760,8 +3760,6 @@ describe("V1.4 内容与运营页面", () => {
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     expect(manual.getByText(/手动上传并确认发布/)).toBeInTheDocument();
     expect(manual.getByRole("button", { name: "下载所选成片" })).toBeDisabled();
-    fireEvent.click(manual.getByRole("button", { name: "选择发布成片" }));
-    expect(value.openLive).toHaveBeenCalledWith("tasks");
     await screen.findByText("云端草稿暂不可用");
     expect(link).not.toHaveAttribute("aria-disabled", "true");
     expect(createPublishRecord).not.toHaveBeenCalled();

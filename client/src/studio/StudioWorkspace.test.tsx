@@ -1141,6 +1141,112 @@ describe("V1.4 workspace integration", () => {
     expect(api.getSettings).toHaveBeenCalledTimes(1);
     expect(window.location.hash).toBe("#studio/settings");
   });
+  it.each([
+    { entry: "选择发布成片", hasSelection: false },
+    { entry: "更换发布成片", hasSelection: true },
+    { entry: "去任务中心选择成片", hasSelection: false },
+  ])(
+    "发布页 $entry 通过任务详情交接新成片并更新发布预览",
+    ({ entry, hasSelection }) => {
+      const reviewData = createReviewData();
+      reviewData.assets = [
+        {
+          id: "publish-old-result",
+          name: "原发布成片.mp4",
+          kind: "video",
+          poster: "/studio/old-result.png",
+          group: "成片",
+          source: "任务中心",
+          saved: true,
+        },
+        {
+          id: "publish-new-result",
+          name: "新选择成片.mp4",
+          kind: "video",
+          poster: "/studio/new-result.png",
+          group: "成片",
+          source: "任务中心",
+          saved: true,
+        },
+      ];
+      reviewData.tasks = [
+        {
+          id: "publish-batch-old",
+          backendKind: "generation_batch",
+          backendId: "publish-batch-old",
+          title: "原发布成片",
+          type: "视频生成",
+          status: "completed",
+          submitted: "今天 09:25",
+          resultId: "publish-old-result",
+        },
+        {
+          id: "publish-batch-new",
+          backendKind: "generation_batch",
+          backendId: "publish-batch-new",
+          title: "新选择成片",
+          type: "视频生成",
+          status: "completed",
+          submitted: "今天 09:26",
+          resultId: "publish-new-result",
+        },
+      ];
+      const initialState = createState("publishing");
+      initialState.selectedAssetId = hasSelection
+        ? "publish-old-result"
+        : undefined;
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          reviewData={reviewData}
+          initialState={initialState}
+        />,
+      );
+      const manual = within(
+        screen.getByRole("region", { name: "快手手动发布" }),
+      );
+      expect(
+        manual.getByText(
+          hasSelection ? "已选择：原发布成片.mp4" : "尚未选择成片",
+        ),
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: entry }));
+      expect(window.location.hash).toBe("#studio/tasks");
+      expect(
+        screen.getByRole("heading", { name: "任务列表" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("region", { name: "模拟已有功能工作区" }),
+      ).toBeNull();
+      const selectedTask = within(
+        screen.getByRole("row", { name: /新选择成片/ }),
+      );
+      fireEvent.click(selectedTask.getByRole("button", { name: "查看结果" }));
+      expect(window.location.hash).toBe(
+        "#studio/task-detail/generation_batch/publish-batch-new?returnTo=tasks",
+      );
+      const handoff = screen.getByRole("button", { name: "去发布管理" });
+      expect(handoff).toBeEnabled();
+      fireEvent.click(handoff);
+
+      expect(window.location.hash).toBe("#studio/publishing");
+      expect(currentExtractionContext().state.selectedAssetId).toBe(
+        "publish-new-result",
+      );
+      expect(
+        within(screen.getByRole("region", { name: "快手手动发布" })).getByText(
+          "已选择：新选择成片.mp4",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByAltText("新选择成片.mp4 视频预览"),
+      ).toBeInTheDocument();
+      expect(screen.queryByAltText("原发布成片.mp4 视频预览")).toBeNull();
+      expect(screen.getByLabelText("发布标题")).toHaveValue("新选择成片.mp4");
+    },
+  );
+
   it("普通导航清除旧详情返回位置且每个详情入口写入当前来源", () => {
     const reviewData = createReviewData();
     reviewData.tasks = [

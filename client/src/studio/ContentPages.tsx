@@ -3274,7 +3274,6 @@ export function PublishPage() {
     data,
     navigate,
     notify,
-    openLive,
     patchState,
     review,
     state,
@@ -3740,7 +3739,7 @@ export function PublishPage() {
           </span>
         </div>
         <div className="content-publish-manual-actions">
-          <Button onClick={() => openLive("tasks")}>
+          <Button onClick={() => navigate("tasks")}>
             {selectedAsset ? "更换发布成片" : "选择发布成片"}
           </Button>
           <Button
@@ -3864,7 +3863,7 @@ export function PublishPage() {
               ) : (
                 <Empty
                   action={
-                    <Button variant="primary" onClick={() => openLive("tasks")}>
+                    <Button variant="primary" onClick={() => navigate("tasks")}>
                       去任务中心选择成片
                     </Button>
                   }
