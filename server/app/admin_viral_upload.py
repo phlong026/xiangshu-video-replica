@@ -151,6 +151,8 @@ def upload_viral_video(
     def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
         # 对象上传期间保留幂等锁，局部放宽池连接的 60 秒空闲护栏，事务结束自动还原。
         raw.execute("SET LOCAL idle_in_transaction_session_timeout = '300s'")
+        # 与下架/策展统一先取编排锁再写视频行，重复上传不能反向等待造成死锁。
+        raw.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
         conn = BusinessConnection.postgres(raw)
         storage = get_media_storage(conn)
 

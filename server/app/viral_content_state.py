@@ -62,10 +62,8 @@ def content_state_sql(alias: str = "v") -> str:
 
 
 def customer_visible_sql(alias: str = "v", *, at: str = "now()") -> str:
-    # 与客户列表同样使用数据库时钟；旧采集快照不延长内容可见期。
-    # 人工「推送到前端」的条目（pushed_at 非空）豁免 7 天发布窗口：
-    # 展示多久由运营控制（下架走 visibility），不随源站发布时间自然滚出。
-    end = "floor(extract(epoch FROM now()))"
+    # 只有管理员上传或手工推送授予公共展示权限；历史采集的首页标记不能代替推送。
+    # 发布期由运营排期和下架控制，与源站发布时间、采集快照无关。
     predicate = (
         f"({ready_sql(alias)} AND {alias}.deleted_at IS NULL AND NOT EXISTS "
         f"(SELECT 1 FROM viral_video_visibility cs_vis WHERE cs_vis.platform={alias}.platform "
@@ -74,9 +72,8 @@ def customer_visible_sql(alias: str = "v", *, at: str = "now()") -> str:
         r"!~* 'minecraft|我的世界|\mmc\M' "
         f"AND ({alias}.homepage_starts_at IS NULL OR {alias}.homepage_starts_at<=now()) "
         f"AND ({alias}.homepage_ends_at IS NULL OR {alias}.homepage_ends_at>now()) "
-        f"AND ({live_homepage_sql(alias)} OR ({alias}.collection_published=1 "
-        f"AND ({alias}.published_at BETWEEN ({end})-604800 AND ({end}) "
-        f"OR {alias}.pushed_at IS NOT NULL))))"
+        f"AND {alias}.platform IN ('douyin','wechat_channels','xiaohongshu') "
+        f"AND {alias}.collection_published=1 AND {alias}.pushed_at IS NOT NULL)"
     )
 
     # at 仅由内部 SQL 调用点提供，用同一公开规则计算排期边界两侧的状态。

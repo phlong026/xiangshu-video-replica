@@ -3,8 +3,8 @@
 人工采集模式下，内容上架由运营在管理端逐条/批量触发：先经既有
 ``archive_batch`` 任务完成媒体转存（下载/解密/上传 + 封面 + 统计补采），
 素材就绪后由本模块把条目标记为已上架（``collection_published=1`` +
-``pushed_at``）。``pushed_at`` 同时是客户可见口径豁免「发布时间 7 天窗口」
-的标记——人工上架的内容展示多久由运营控制，不随源站发布时间自然滚出。
+``pushed_at``）并置顶首页。``pushed_at`` 是公共展示的必要授权标记；
+历史采集的首页标记不能授予客户读取权限，展示期由运营排期与下架控制。
 
 推送成功时还会把视频元数据（含统计与已回填文案）写一份 JSON 快照进主存储，
 与媒体对象同命名空间，供追溯与排查（数据库仍是唯一真源）。
@@ -80,12 +80,20 @@ def mark_viral_push_published(
     actor_user_id: str = "",
     reason: str = "",
     request_id: str = "",
+    refeature: bool = False,
 ) -> bool:
-    """素材就绪前提下把条目标记为已上架；返回是否真的发生了状态变化.
+    """素材就绪前提下上架；只有明确的管理端重新上架意图能重置首页位置。
 
     守卫与客户可见口径（``ready_sql`` + visibility）同源：媒体已归档、封面
     就绪、未删除、未下架才允许置位。推送动作幂等——重复推送不覆盖首推时间。
     """
+    # 上传和手工推送共用编排锁，避免并发首推读到同一个最小rank或重复占用容量。
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
+    existing = conn.execute(
+        "SELECT pushed_at,homepage_featured FROM viral_videos "
+        "WHERE platform=%s AND video_id=%s FOR UPDATE",
+        (platform, video_id),
+    ).fetchone()
     now_iso = datetime.now(UTC).isoformat()
     applied = conn.execute(
         """
@@ -110,6 +118,8 @@ def mark_viral_push_published(
     ).fetchone()
     if applied is None:
         return False
+    if existing is not None and (existing[0] is None or refeature and not existing[1]):
+        _feature_homepage_top(conn, platform=platform, video_id=video_id)
     # actor_user_id 有外键：空串（历史配置缺操作人）必须落 NULL 而不是 ''。
     conn.execute(
         """INSERT INTO audit_logs(
@@ -146,12 +156,7 @@ def auto_publish_viral_video(
     容量的最旧条目自动撤出推荐位（仍在客户列表，不丢内容）。重复触发不
     重复置位：仅首推才动首页，幂等重放不会把老条目重新顶到最前。
     """
-    existing = conn.execute(
-        "SELECT pushed_at FROM viral_videos WHERE platform=%s AND video_id=%s",
-        (platform, video_id),
-    ).fetchone()
-    first_publish = existing is not None and existing[0] is None
-    published = mark_viral_push_published(
+    return mark_viral_push_published(
         conn,
         platform=platform,
         video_id=video_id,
@@ -159,11 +164,6 @@ def auto_publish_viral_video(
         reason=reason,
         request_id=request_id,
     )
-    if not published:
-        return False
-    if first_publish:
-        _feature_homepage_top(conn, platform=platform, video_id=video_id)
-    return True
 
 
 def _feature_homepage_top(conn: BusinessConnection, *, platform: str, video_id: str) -> None:
@@ -182,9 +182,9 @@ def _feature_homepage_top(conn: BusinessConnection, *, platform: str, video_id: 
             homepage_rank = COALESCE((
                 SELECT MIN(v2.homepage_rank) FROM viral_videos v2
                 WHERE v2.platform = v.platform AND v2.homepage_featured = 1
+                    AND v2.pushed_at IS NOT NULL AND v2.deleted_at IS NULL
             ), 0) - 1,
-            homepage_featured_at = now(),
-            homepage_starts_at = NULL, homepage_ends_at = NULL
+            homepage_featured_at = now()
         WHERE v.platform = %s AND v.video_id = %s
         """,
         (platform, video_id),
@@ -198,7 +198,8 @@ def _feature_homepage_top(conn: BusinessConnection, *, platform: str, video_id: 
                 AND (platform, video_id) NOT IN (
                     SELECT platform, video_id FROM viral_videos
                     WHERE platform = %s AND homepage_featured = 1
-                    ORDER BY homepage_rank ASC NULLS LAST, pushed_at DESC NULLS LAST
+                        AND pushed_at IS NOT NULL AND deleted_at IS NULL
+                    ORDER BY homepage_rank ASC NULLS LAST, pushed_at DESC NULLS LAST, video_id
                     LIMIT %s
                 )
             """,

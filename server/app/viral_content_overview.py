@@ -113,7 +113,7 @@ def content_overview(
     sources_by_kind = conn.execute(
         "SELECT s.source_kind,count(DISTINCT (s.platform,s.video_id)) AS videos "
         "FROM viral_content_sources s WHERE s.collected_at>=%s AND s.collected_at<%s "
-        "AND s.platform IN ('douyin','wechat_channels')"
+        "AND s.platform IN ('douyin','wechat_channels','xiaohongshu')"
         + kind_platform_filter
         + " GROUP BY s.source_kind ORDER BY videos DESC,s.source_kind",
         tuple(kind_params),

@@ -25,7 +25,11 @@ from app.storage import (
 )
 from app.viral_media import ViralMediaPipeline
 from app.viral_media_preparation import ViralMediaBusy
-from app.viral_store import get_viral_video, viral_video_availability
+from app.viral_store import (
+    get_viral_video,
+    is_customer_visible_viral_video,
+    viral_video_availability,
+)
 from app.viral_tikhub import ViralVideo
 
 logger = logging.getLogger(__name__)
@@ -121,6 +125,23 @@ def require_viral_import_enabled(conn: BusinessConnection) -> None:
         raise _error(503, "VIRAL_IMPORT_DISABLED", "爆款视频导入已暂停，请稍后重试。")
 
 
+def _require_import_video(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_id: str
+) -> ViralVideo:
+    video = get_viral_video(conn, platform=platform, video_id=video_id)
+    if video is None:
+        raise _error(404, "VIRAL_VIDEO_NOT_FOUND", "爆款视频不存在或已下架。", retryable=False)
+    if viral_video_availability(conn, platform=platform, video_id=video_id) != "available":
+        raise _error(
+            409, "VIRAL_VIDEO_UNAVAILABLE", "该爆款视频当前不可用于创作。", retryable=False
+        )
+    if not is_customer_visible_viral_video(
+        conn, platform=platform, video_id=video_id, user_id=user_id
+    ):
+        raise _error(404, "VIRAL_VIDEO_NOT_FOUND", "爆款视频不存在或已下架。", retryable=False)
+    return video
+
+
 def enqueue_viral_import_task(
     conn: BusinessConnection,
     *,
@@ -136,14 +157,9 @@ def enqueue_viral_import_task(
         entity_type="viral_video",
         entity_id=f"{request.platform}:{request.video_id}",
     )
-    video = get_viral_video(conn, platform=request.platform, video_id=request.video_id)
-    if video is None:
-        raise _error(404, "VIRAL_VIDEO_NOT_FOUND", "爆款视频不存在或已下架。")
-    if (
-        viral_video_availability(conn, platform=request.platform, video_id=request.video_id)
-        != "available"
-    ):
-        raise _error(409, "VIRAL_VIDEO_UNAVAILABLE", "该爆款视频当前不可用于创作。")
+    video = _require_import_video(
+        conn, user_id=actor.id, platform=request.platform, video_id=request.video_id
+    )
     if request.purpose == "replica" and not 4_000 <= video.duration_ms <= 30_000:
         raise _error(
             422,
@@ -553,24 +569,9 @@ def prepare_viral_import_task(
     _require_lease(conn, lease)
     require_viral_import_enabled(conn)
     _require_project_owner(conn, lease)
-    video = get_viral_video(conn, platform=lease.platform, video_id=lease.video_id)
-    if video is None:
-        raise _error(
-            404,
-            "VIRAL_VIDEO_NOT_FOUND",
-            "爆款视频不存在或已下架。",
-            retryable=False,
-        )
-    if (
-        viral_video_availability(conn, platform=lease.platform, video_id=lease.video_id)
-        != "available"
-    ):
-        raise _error(
-            409,
-            "VIRAL_VIDEO_UNAVAILABLE",
-            "该爆款视频当前不可用于创作。",
-            retryable=False,
-        )
+    video = _require_import_video(
+        conn, user_id=lease.owner_user_id, platform=lease.platform, video_id=lease.video_id
+    )
     # 文案导入直接消费解析返回的音频（2026-09-30 拍板），复刻仍以完整视频为准；
     # 只归档过视频的同一视频由 perform 的回落兜底（见 perform_viral_import_task）。
     prefer: Literal["audio", "video"] = "audio" if lease.purpose == "copy" else "video"
@@ -631,6 +632,10 @@ def complete_viral_import_task(
 ) -> None:
     _require_lease(conn, lease)
     _require_project_owner(conn, lease)
+    # 归档读取期间也可能下架或到达排期终点，写入项目资产前再次核对授权。
+    _require_import_video(
+        conn, user_id=lease.owner_user_id, platform=lease.platform, video_id=lease.video_id
+    )
     # Register the shared bytes before pointing an asset at them. `pinned=True`
     # records that the media cache owns this object, not the asset graph: no
     # number of project deletions may force a re-download of a collected video.

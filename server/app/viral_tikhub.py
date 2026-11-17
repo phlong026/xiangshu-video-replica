@@ -225,6 +225,8 @@ class ViralVideo:
     homepage_rank: int | None = None
     homepage_starts_at: str | None = None
     homepage_ends_at: str | None = None
+    # 管理员上传/手工推送的发布标记（非空 = 已推送到客户前端）。
+    pushed_at: str | None = None
 
     def to_client_dict(self) -> dict[str, Any]:
         return {
@@ -232,6 +234,7 @@ class ViralVideo:
             "videoId": self.video_id,
             "homepageFeatured": self.homepage_featured,
             "homepageRank": self.homepage_rank,
+            "pushedAt": self.pushed_at,
             "homepageStartsAt": self.homepage_starts_at,
             "homepageEndsAt": self.homepage_ends_at,
             "category": self.category,

@@ -510,6 +510,132 @@ def test_push_rejects_link_imported_video(client: TestClient, route_state: str) 
         assert raw.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("window", ["future", "expired"])
+def test_first_manual_push_preserves_existing_schedule(client, route_state, window):
+    from app.viral_store import list_viral_video_page
+
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as raw:
+        _reset_video(raw)
+        _seed_ready_media(raw)
+        start = "now()+interval '1 day'" if window == "future" else "now()-interval '2 days'"
+        end = "now()+interval '2 days'" if window == "future" else "now()-interval '1 day'"
+        raw.execute(
+            f"UPDATE viral_videos SET homepage_featured=1,homepage_starts_at={start},"
+            f"homepage_ends_at={end} WHERE video_id=%s",
+            (VIDEO_ID,),
+        )
+        before = raw.execute(
+            "SELECT homepage_starts_at,homepage_ends_at FROM viral_videos WHERE video_id=%s",
+            (VIDEO_ID,),
+        ).fetchone()
+    assert _push(client, headers)["items"][0]["published"] is True
+    with psycopg.connect(route_state) as raw:
+        after = raw.execute(
+            "SELECT homepage_starts_at,homepage_ends_at,pushed_at IS NOT NULL "
+            "FROM viral_videos WHERE video_id=%s",
+            (VIDEO_ID,),
+        ).fetchone()
+        assert tuple(after[:2]) == tuple(before) and after[2] is True
+        conn = BusinessConnection.postgres(raw)
+        for featured in (False, True):
+            assert (
+                list_viral_video_page(
+                    conn, platform="douyin", sort="hot", limit=10, featured_only=featured
+                ).total
+                == 0
+            )
+
+
+def test_background_republish_cannot_restore_evicted_homepage_item(route_state):
+    from app.viral_push import auto_publish_viral_video
+
+    with psycopg.connect(route_state) as raw:
+        _reset_video(raw)
+        _seed_ready_media(raw)
+        raw.execute("UPDATE viral_runtime_controls SET homepage_capacity=1 WHERE id=1")
+        raw.execute(
+            "INSERT INTO viral_videos(platform,video_id,title) "
+            "VALUES('douyin','newer-push','新视频')"
+        )
+        _seed_ready_media(raw, video_id="newer-push")
+        conn = BusinessConnection.postgres(raw)
+        assert auto_publish_viral_video(conn, platform="douyin", video_id=VIDEO_ID)
+        assert auto_publish_viral_video(conn, platform="douyin", video_id="newer-push")
+        before = raw.execute(
+            "SELECT video_id,homepage_featured,homepage_rank,pushed_at "
+            "FROM viral_videos ORDER BY video_id"
+        ).fetchall()
+        # single_archive和archive_batch都可能重放publish_after，不能把旧条目挤回首页。
+        assert auto_publish_viral_video(conn, platform="douyin", video_id=VIDEO_ID)
+        assert mark_viral_push_published(conn, platform="douyin", video_id=VIDEO_ID)
+        after = raw.execute(
+            "SELECT video_id,homepage_featured,homepage_rank,pushed_at "
+            "FROM viral_videos ORDER BY video_id"
+        ).fetchall()
+        assert [tuple(r) for r in after] == [tuple(r) for r in before]
+        # 明确的重新上架意图才能把已撤出条目放回推荐位。
+        assert mark_viral_push_published(conn, platform="douyin", video_id=VIDEO_ID, refeature=True)
+        featured = raw.execute(
+            "SELECT video_id FROM viral_videos WHERE homepage_featured=1"
+        ).fetchall()
+        assert [row[0] for row in featured] == [VIDEO_ID]
+
+
+def test_homepage_observations_require_customer_visible_push(route_state):
+    from app.viral_content_observations import (
+        observe_due_homepages,
+        record_content_source,
+        record_content_stage,
+    )
+
+    with psycopg.connect(route_state) as raw:
+        _reset_video(raw)
+        _seed_ready_media(raw)
+        raw.execute("UPDATE viral_videos SET homepage_featured=1 WHERE video_id=%s", (VIDEO_ID,))
+        conn = BusinessConnection.postgres(raw)
+        record_content_source(
+            conn,
+            batch_id="unpublished-source",
+            source_kind="collection",
+            platform="douyin",
+            video_id=VIDEO_ID,
+            keyword="庭院",
+        )
+        record_content_stage(conn, platform="douyin", video_id=VIDEO_ID, stage="homepage")
+        assert observe_due_homepages(conn) == 0
+        assert raw.execute("SELECT homepage_at FROM viral_content_sources").fetchone()[0] is None
+        assert mark_viral_push_published(conn, platform="douyin", video_id=VIDEO_ID)
+        record_content_source(
+            conn,
+            batch_id="published-source",
+            source_kind="admin_upload",
+            platform="douyin",
+            video_id=VIDEO_ID,
+            keyword="",
+        )
+        assert (
+            raw.execute(
+                "SELECT homepage_at FROM viral_content_sources WHERE batch_id='published-source'"
+            ).fetchone()[0]
+            is not None
+        )
+        assert observe_due_homepages(conn) == 1
+        record_content_stage(conn, platform="douyin", video_id=VIDEO_ID, stage="homepage")
+        recorded = raw.execute(
+            "SELECT batch_id,homepage_at FROM viral_content_sources ORDER BY batch_id"
+        ).fetchall()
+        raw.execute("UPDATE viral_videos SET pushed_at=NULL WHERE video_id=%s", (VIDEO_ID,))
+        assert observe_due_homepages(conn) == 0
+        record_content_stage(conn, platform="douyin", video_id=VIDEO_ID, stage="homepage")
+        assert [
+            tuple(r)
+            for r in raw.execute(
+                "SELECT batch_id,homepage_at FROM viral_content_sources ORDER BY batch_id"
+            ).fetchall()
+        ] == [tuple(r) for r in recorded]
+
+
 def test_metadata_snapshot_writes_json_sidecar() -> None:
     storage = FakeStorageAdapter(provider="fake", bucket="test")
     video = ViralVideo(

@@ -193,7 +193,7 @@ class ViralAvailabilityUpdateRequest(AdminWriteContract):
 class ViralAvailabilityResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["douyin", "wechat_channels"]
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"]
     video_id: str
     status: Literal["AVAILABLE", "HIDDEN", "UNAVAILABLE"]
 
@@ -677,7 +677,7 @@ def update_viral_runtime(
     response_model=ViralAvailabilityResponse,
 )
 def update_viral_video_availability(
-    platform: Literal["douyin", "wechat_channels"],
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
     video_id: str,
     payload: ViralAvailabilityUpdateRequest,
     request: Request,
@@ -1008,7 +1008,7 @@ _SORT_EXPRESSIONS = {
 @router.get("/viral/videos")
 def read_collected_viral_videos(
     _actor: AdminReader,
-    platform: Literal["douyin", "wechat_channels"] | None = None,
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"] | None = None,
     status: Literal["ready", "pending", "failed", "featured"] | None = None,
     content_state: Literal[
         "pending_prepare", "prepare_failed", "ready", "featured", "removed", "blocked"
@@ -1030,7 +1030,7 @@ def read_collected_viral_videos(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=50)] = 25,
 ) -> dict[str, object]:
-    filters = "v.platform IN ('douyin','wechat_channels')"
+    filters = "v.platform IN ('douyin','wechat_channels','xiaohongshu')"
     filters += (
         ""
         if cohort_stage
@@ -1125,7 +1125,7 @@ def read_collected_viral_videos(
         categories = conn.execute(
             "SELECT DISTINCT category FROM ("
             "SELECT btrim(category) AS category FROM viral_videos "
-            "WHERE platform IN ('douyin','wechat_channels') UNION "
+            "WHERE platform IN ('douyin','wechat_channels','xiaohongshu') UNION "
             "SELECT btrim(item->>'category') FROM viral_runtime_controls, "
             "jsonb_array_elements(keywords_json::jsonb) item WHERE id=1) catalog "
             "WHERE COALESCE(category,'')!='' ORDER BY category"
@@ -2214,7 +2214,7 @@ def refresh_collected_wechat_statistics(
 
 @router.get("/viral/videos/{platform}/{video_id:path}/details")
 def read_viral_video_business_details(
-    platform: Literal["douyin", "wechat_channels"],
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
     video_id: str,
     _actor: AdminReader,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -2329,7 +2329,7 @@ def read_viral_video_business_details(
 
 @router.get("/viral/covers/{platform}/{video_id:path}")
 def read_admin_viral_cover(
-    platform: Literal["douyin", "wechat_channels"],
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
     video_id: Annotated[str, Path(min_length=1, max_length=256)],
     _actor: AdminReader,
 ) -> Response:
@@ -2370,7 +2370,9 @@ def read_admin_viral_cover(
 
 @router.get("/viral/videos/{platform}/{video_id:path}/preview")
 def preview_collected_viral_video(
-    platform: Literal["douyin", "wechat_channels"], video_id: str, _actor: AdminReader
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
+    video_id: str,
+    _actor: AdminReader,
 ) -> dict[str, str]:
     from app.media_routes import get_media_storage
     from app.viral_media import ViralMediaPipeline
@@ -2428,7 +2430,7 @@ def _prepare_feature_cover(platform: str, video_id: str) -> tuple[str, str] | No
 
 @router.patch("/viral/videos/{platform}/{video_id:path}/curation")
 def curate_collected_viral_video(
-    platform: Literal["douyin", "wechat_channels"],
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
     video_id: str,
     payload: ViralCurationRequest,
     request: Request,
@@ -2641,7 +2643,7 @@ def curate_collected_viral_video(
 class ViralBatchTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["douyin", "wechat_channels"]
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"]
     video_id: str = Field(min_length=1, max_length=512)
 
 
@@ -2816,6 +2818,7 @@ def curate_collected_viral_videos_batch(
                         actor_user_id=actor.user_id,
                         reason=payload.reason.strip(),
                         request_id=request_id,
+                        refeature=True,
                     )
                     if not published:
                         raise http_error(
@@ -3051,7 +3054,7 @@ def curate_collected_viral_videos_batch(
 
 class ViralHomepageOrderRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
-    platform: Literal["douyin", "wechat_channels"]
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"]
     video_ids: list[str]
     expected_video_ids: list[str]
     reason: str = "调整首页顺序"
@@ -3077,7 +3080,7 @@ class ViralHomepageScheduleRequest(AdminWriteContract):
 
 @router.get("/viral/homepage")
 def read_viral_homepage(
-    _actor: AdminReader, platform: Literal["douyin", "wechat_channels"] = "douyin"
+    _actor: AdminReader, platform: Literal["douyin", "wechat_channels", "xiaohongshu"] = "douyin"
 ) -> dict[str, object]:
     # 共用业务连接的列映射，避免 psycopg 默认 tuple 行与页面字段发生偏移。
     with pg_transaction() as raw:
@@ -3130,6 +3133,7 @@ def read_viral_homepage(
             if not is_irrelevant_viral_video(str(item["title"]))
             and (not item.get("cover_required") or item.get("cover_key"))
             and item.get("homepage_live")
+            and item.get("customer_visible")
             and item.get("availability") == "AVAILABLE"
             and item.get("media_status") == "SUCCEEDED"
             and item.get("storage_uri")
@@ -3214,7 +3218,7 @@ def reorder_viral_homepage(
 
 @router.patch("/viral/homepage/{platform}/{video_id:path}/schedule")
 def schedule_viral_homepage(
-    platform: Literal["douyin", "wechat_channels"],
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
     video_id: str,
     payload: ViralHomepageScheduleRequest,
     request: Request,
@@ -3299,7 +3303,7 @@ def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
             "SELECT collection_enabled, keywords_json, next_collection_at, "
             "collection_interval_days FROM viral_runtime_controls WHERE id = 1"
         ).fetchone()
-        base = "v.deleted_at IS NULL AND v.platform IN ('douyin','wechat_channels')"
+        base = "v.deleted_at IS NULL AND v.platform IN ('douyin','wechat_channels','xiaohongshu')"
         ready = (
             "EXISTS (SELECT 1 FROM viral_media_preparations m2"
             " WHERE m2.platform=v.platform AND m2.video_id=v.video_id"
@@ -3324,7 +3328,7 @@ def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
         ).fetchone()
         last_fetched = conn.execute(
             "SELECT max(fetched_at) FROM viral_fetch_state"
-            " WHERE platform IN ('douyin','wechat_channels')"
+            " WHERE platform IN ('douyin','wechat_channels','xiaohongshu')"
         ).fetchone()
     keywords = json.loads(str(controls[1])) if controls is not None else []
     by_platform: dict[str, int] = {"douyin": 0, "wechat_channels": 0}
@@ -3364,7 +3368,7 @@ def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
 def read_viral_content_overview(
     request: Request,
     _actor: AdminReader,
-    platform: Literal["douyin", "wechat_channels"] | None = None,
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"] | None = None,
 ) -> dict[str, object]:
     from app.viral_content_overview import content_overview
 
@@ -3492,13 +3496,14 @@ def read_viral_recycle_bin(
                 "v.deleted_at+interval '30 days' AS restore_before,"
                 "v.deleted_at>=now()-interval '30 days' AS restorable,v.platform,",
             )
-            + " WHERE v.deleted_at IS NOT NULL AND v.platform IN ('douyin','wechat_channels') "
+            + " WHERE v.deleted_at IS NOT NULL "
+            "AND v.platform IN ('douyin','wechat_channels','xiaohongshu') "
             "ORDER BY v.deleted_at DESC,v.platform,v.video_id LIMIT %s OFFSET %s",
             (limit, offset),
         ).fetchall()
         count = conn.execute(
             "SELECT count(*) FROM viral_videos WHERE deleted_at IS NOT NULL "
-            "AND platform IN ('douyin','wechat_channels')"
+            "AND platform IN ('douyin','wechat_channels','xiaohongshu')"
         ).fetchone()[0]
         items = []
         for row in rows:
@@ -3523,7 +3528,7 @@ def read_viral_recycle_bin(
 
 @router.post("/viral/videos/{platform}/{video_id:path}/restore")
 def restore_viral_video(
-    platform: Literal["douyin", "wechat_channels"],
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
     video_id: str,
     payload: AdminWriteContract,
     request: Request,
@@ -3609,7 +3614,7 @@ def _homepage_order_revision(rows: Sequence[Mapping[str, object]]) -> str:
 
 class ViralHomepageMoveRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
-    platform: Literal["douyin", "wechat_channels"]
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"]
     video_id: str = Field(min_length=1, max_length=512)
     position: int = Field(ge=1)
     expected_revision: str = Field(min_length=64, max_length=64)
