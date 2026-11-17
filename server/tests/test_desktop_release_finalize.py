@@ -416,6 +416,10 @@ const updater = config.plugins.updater,
   file = process.argv[2];
 await writeFile(file, updater.pubkey + "\0" + updater.endpoints[0]);
 await core.verifyMacosApp(file, "https://video.zszhj.cn");
+// x86_64-apple-darwin 链接器实测会把端点以 JSON 转义斜杠形态编入，运行时
+// 读取内嵌配置 JSON 不受影响，校验必须同时接受两种形态。
+await writeFile(file, updater.pubkey + "\0" + updater.endpoints[0].replaceAll("/", "\\/"));
+await core.verifyMacosApp(file, "https://video.zszhj.cn");
 await writeFile(
   file,
   updater.pubkey + "\0" + updater.endpoints[0] + "\0staging.example.invalid",
