@@ -24,7 +24,8 @@ function clockOffset(
 }
 
 export function ViralRecommendations() {
-  const { review, user } = useStudio();
+  const { review, user, requireLogin } = useStudio();
+  if (requireLogin) return null;
   // 换账号立即丢弃已确认集合与收藏覆盖，旧请求只能触及已卸载的组件。
   return <HomepageRecommendations key={`${review}:${user.id}`} />;
 }
