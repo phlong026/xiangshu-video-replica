@@ -384,11 +384,11 @@ class VideoCallBudget:
 
 @dataclass
 class _BudgetTracker:
-    """一次视频任务尝试的调用预算状态；生命周期与单次 ``_complete_video`` 相同。
+    """一次视频任务尝试的调用预算状态；与工厂为本次任务创建的 provider 同寿命。
 
     截止时间继承工厂定格的绝对线（``budget.attempt_deadline``），此后只减不
     增；token 回退触发的第二次 ``_complete`` 共享同一 tracker，总次数与截止
-    时间因此不会被回退绕过。
+    时间因此不会被回退或格式修复绕过。
     """
 
     budget: VideoCallBudget
@@ -423,6 +423,8 @@ def _is_auto_retryable(failure: AnalysisProviderFailed) -> bool:
 ANALYSIS_MIN_MAX_TOKENS = 16000
 ANALYSIS_MAX_TOKENS_CAP = 32000
 ANALYSIS_MAX_TOKENS_PER_SECOND = 800
+# 修复只接收完整原文；超出边界明确拒绝，不能截掉后半段让模型猜。
+ANALYSIS_REPAIR_MAX_CHARS = 128_000
 
 
 def _analysis_max_tokens(duration_seconds: float) -> int:
@@ -611,6 +613,10 @@ class ApilioGemini:
         # 仅视频任务工厂启用（方案 T14）：截止预算/有界重试/token 回退都不属于
         # 文本入口（优化器显式传 None，行为与历史一致）。
         self.video_call_budget = video_call_budget
+        # 工厂每次任务创建独立 provider，格式修复也必须消耗这次任务的同一预算。
+        self._video_call_tracker = (
+            _BudgetTracker(budget=video_call_budget) if video_call_budget is not None else None
+        )
 
     def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
         if not is_https_video_url(video_uri):
@@ -750,7 +756,7 @@ class ApilioGemini:
 
         修复格式不需要重看视频——只要求模型按原内容重排出合法 JSON。走
         ``_complete``（主→备选链与换道语义照常），成本为一次文本调用；
-        调用与否由 analyze_video 决定（每任务至多一次），本方法不做门禁。
+        调用与否由 analyze_video 决定（每任务至多一次），共享原视频任务预算。
         """
         payload = {
             "model": self.model,
@@ -771,7 +777,7 @@ class ApilioGemini:
                 }
             ],
         }
-        text, raw = self._complete(payload)
+        text, raw = self._complete(payload, tracker=self._video_call_tracker)
         return ProviderResponse(text=text, raw=raw)
 
     def _complete_video(
@@ -787,7 +793,7 @@ class ApilioGemini:
         if self.video_call_budget is None:
             # 无预算（历史行为/文本入口兜底）：仍然带动态预算，但不做回退。
             return self._complete(payload)
-        tracker = _BudgetTracker(budget=self.video_call_budget)
+        tracker = self._video_call_tracker
         try:
             return self._complete(payload, tracker=tracker)
         except AnalysisProviderFailed as exc:
@@ -1355,9 +1361,13 @@ def analyze_video(
         repaired_text: str | None = None
         reask_error: Exception | None = None
         if hasattr(provider, "repair_json"):
+            if len(response.text) > ANALYSIS_REPAIR_MAX_CHARS:
+                raise AnalysisProviderFailed(
+                    "拆解结果格式无效且内容过长，未发起自动修复；请重新拆解。"
+                ) from exc
             try:
                 repaired_response = provider.repair_json(
-                    broken_text=response.text[:8000],
+                    broken_text=response.text,
                     error_message=_validation_diagnostic(exc),
                     max_tokens=_analysis_max_tokens(video_duration_seconds),
                 )

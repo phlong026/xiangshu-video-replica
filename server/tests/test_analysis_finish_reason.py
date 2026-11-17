@@ -676,3 +676,88 @@ def test_long_video_timeout_preserves_default_and_lower_bound(
 
     monkeypatch.setenv(replica_prompt.REPLICA_PROMPT_TIMEOUT_ENV, raw)
     assert replica_prompt.provider_timeout_seconds() == expected
+
+
+def test_format_repair_shares_video_request_cap() -> None:
+    from app.analysis import analyze_video
+
+    provider, transport = _provider(
+        [_completion_body(content='{"broken":')],
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf"), max_provider_calls=1),
+    )
+    with pytest.raises(AnalysisProviderFailed):
+        analyze_video(
+            video_uri="https://example.com/v.mp4", video_duration_seconds=20, provider=provider
+        )
+    assert len(transport.requested_payloads) == 1
+
+
+def test_format_repair_shares_video_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.analysis import analyze_video
+
+    now = [0.0]
+    monkeypatch.setattr("app.analysis.time.monotonic", lambda: now[0])
+    provider, transport = _provider(
+        [_completion_body(content='{"broken":')],
+        video_call_budget=VideoCallBudget(attempt_deadline=510),
+    )
+    transport.timeout_seconds = 240
+    with pytest.raises(AnalysisProviderFailed):
+        analyze_video(
+            video_uri="https://example.com/v.mp4",
+            video_duration_seconds=20,
+            provider=provider,
+            on_provider_result=lambda: now.__setitem__(0, 400),
+        )
+    assert len(transport.requested_payloads) == 1
+
+
+def test_format_repair_preserves_long_response_tail() -> None:
+    from app.analysis import _default_analysis_payload, analyze_video
+
+    payload = _default_analysis_payload(20)
+    payload["original_script"] = "正文" * 5000 + "尾部不可丢失"
+    original = json.dumps(payload, ensure_ascii=False)
+    # 非空、无法靠本地宽容解析恢复，必须交给格式修复。
+    broken = original[:-1] + " !"
+    provider, transport = _provider(
+        [_completion_body(content=broken), _completion_body(content=original)],
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
+    )
+    result = analyze_video(
+        video_uri="https://example.com/v.mp4",
+        video_duration_seconds=20,
+        provider=provider,
+    )
+    assert result.analysis.original_script == payload["original_script"]
+    assert broken in transport.requested_payloads[1]["messages"][0]["content"]
+
+
+def test_format_repair_rejects_oversize_without_calling_provider() -> None:
+    from app.analysis import analyze_video
+
+    provider, transport = _provider(
+        [_completion_body(content='{"broken":' + "x" * 128001)],
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
+    )
+    with pytest.raises(AnalysisProviderFailed, match="过长"):
+        analyze_video(
+            video_uri="https://example.com/v.mp4", video_duration_seconds=20, provider=provider
+        )
+    assert len(transport.requested_payloads) == 1
+
+
+def test_format_repair_retries_stay_inside_shared_call_cap() -> None:
+    from app.analysis import analyze_video
+
+    provider, transport = _provider(
+        [_completion_body(content='{"broken":'), _rate_limited()],
+        video_call_budget=VideoCallBudget(attempt_deadline=float("inf"), max_provider_calls=2),
+    )
+    with pytest.raises(AnalysisProviderFailed):
+        analyze_video(
+            video_uri="https://example.com/v.mp4",
+            video_duration_seconds=20,
+            provider=provider,
+        )
+    assert len(transport.requested_payloads) == 2
