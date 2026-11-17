@@ -488,7 +488,7 @@ def test_workflow_and_signing_driver_keep_private_material_local() -> None:
     workflow = (REPO / ".github/workflows/desktop-build.yml").read_text(encoding="utf-8")
     driver = (REPO / "scripts/release/finalize-customer-release.ps1").read_text(encoding="utf-8")
     assert "macos-overlay" in workflow
-    assert 'config_args+=(--config "$RUNNER_TEMP/customer-macos-release.json")' in workflow
+    assert 'config_args=(--config "$RUNNER_TEMP/customer-macos-release.json")' in workflow
     assert "verify-macos-app" in workflow
     assert "TAURI_SIGNING_" not in workflow
     assert "Get-AuthenticodeSignature -LiteralPath $plan.windowsInstaller" in driver

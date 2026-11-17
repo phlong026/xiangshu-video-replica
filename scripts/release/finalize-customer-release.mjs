@@ -210,8 +210,15 @@ export function verifyMinisign(payload, signature, publicKey) {
 
 export async function macosOverlay(origin, publicKey) {
   publicKey ??= await productionPublicKey();
+  // 2026-11-18 事故：Intel runner 上 CLI 多 --config 叠加未生效到构建层，
+  // 二进制仍含静态 staging 端点。改为输出完整发行配置（含静态 bundle 段），
+  // 构建只传单个 --config，合并交给 tauri-build 在 Rust 侧完成，与架构无关。
+  const staticConfig = await jsonFile(
+    join(repoRoot, "client/src-tauri/tauri.macos.conf.json"),
+  );
   return {
-    bundle: { createUpdaterArtifacts: false },
+    $schema: staticConfig.$schema,
+    bundle: { ...staticConfig.bundle, createUpdaterArtifacts: false },
     plugins: {
       updater: {
         pubkey: publicKey,
