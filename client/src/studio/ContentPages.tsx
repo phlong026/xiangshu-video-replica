@@ -427,7 +427,7 @@ function ViralCover({
             </h3>
             {video.tags?.length ? (
               <div className="viral-card-tags">
-                {video.tags.slice(0, 3).map((tag) => (
+                {video.tags.slice(0, 6).map((tag) => (
                   <span key={tag} title={`#${tag}`}>
                     #{tag}
                   </span>
