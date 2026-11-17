@@ -171,7 +171,8 @@ export function CustomerCenterPage({
   // 首访引导（方案 G / P2#14）：按账号记「看过」，换账号会重新引导一次。
   const { tour } = useOnboarding(account.profile?.user_id ?? "anonymous");
   const [help, setHelp] = useState(false);
-  // 手动「检查更新」仅桌面客户端显示；浏览器 lane 下 supported=false 直接隐藏入口。
+  // 订阅会话壳共用的更新状态；手动入口可查看自动下载进度，不会并发检查或安装。
+  // 浏览器 lane 下 supported=false，直接隐藏入口。
   const appUpdate = useAppUpdate();
   const [tab, setTab] = useState<Tab>("tokens");
   const [summary, setSummary] = useState<CustomerCenterSummary | null>(null);

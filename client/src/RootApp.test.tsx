@@ -1,4 +1,5 @@
 import { webcrypto } from "node:crypto";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
   act,
   fireEvent,
@@ -6,7 +7,10 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
 
 import { CUSTOMER_SESSION_REPLACED_EVENT } from "./api";
 import { RootApp } from "./RootApp";
@@ -130,8 +134,10 @@ describe("RootApp", () => {
   beforeEach(() => {
     resetBrowserIdentity();
     vi.stubGlobal("crypto", webcrypto);
+    vi.mocked(check).mockReset().mockResolvedValue(null);
   });
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
     resetBrowserIdentity();
@@ -596,5 +602,103 @@ describe("RootApp", () => {
     ).toBeInTheDocument();
     // 地址栏跟着视图走：刷新 /forgot 仍落在找回屏。
     expect(window.location.pathname).toBe("/forgot");
+  });
+
+  it("未登录也延迟自动安装重启，StrictMode、门禁视图及登录退出不重复启动更新", async () => {
+    const pending = {
+      version: "2.7.0",
+      body: "启动更新",
+      downloadAndInstall: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+    } as unknown as Update;
+    vi.mocked(check).mockResolvedValue(pending);
+    let stored: { device_token: string; session_token: string | null } | null =
+      null;
+    const nativeInvoke = vi.fn(
+      async (command: string, args?: Record<string, string>) => {
+        if (command === "customer_load_credentials") return stored;
+        if (command === "customer_device_instance_id")
+          return "update-test-device";
+        if (command === "customer_save_credentials" && args) {
+          stored = {
+            device_token: args.deviceToken,
+            session_token: args.sessionToken,
+          };
+        }
+        if (command === "customer_clear_session_token" && stored)
+          stored.session_token = null;
+        if (command === "customer_clear_all_credentials") stored = null;
+        return undefined;
+      },
+    );
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: { invoke: nativeInvoke },
+    });
+    const workspaceFetch = stubCustomerWorkspaceFetch();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("/api/customer/sessions/logout"))
+          return jsonResponse(undefined, 204);
+        return workspaceFetch(url);
+      }),
+    );
+    window.localStorage.setItem("uc:update-auto-check-day", "2026-11-17");
+    vi.useFakeTimers();
+    await act(async () => {
+      render(
+        <StrictMode>
+          <RootApp />
+        </StrictMode>,
+      );
+    });
+    expect(screen.getByRole("heading", { name: "工作台" })).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+      fireEvent.click(screen.getByRole("button", { name: "用户档案" }));
+    });
+    expect(screen.getByRole("heading", { name: "登录账号" })).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3999);
+    });
+    expect(check).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(
+      nativeInvoke.mock.calls.filter(([command]) => command === "restart_app"),
+    ).toHaveLength(1);
+    expect(screen.queryByRole("dialog", { name: "软件更新" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "登录账号" })).toBeVisible();
+    vi.useRealTimers();
+
+    fireEvent.change(screen.getByLabelText("用户名"), {
+      target: { value: "user-1" },
+    });
+    fireEvent.change(screen.getByLabelText("密码"), {
+      target: { value: "test-6" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    await screen.findByRole("button", { name: "用户档案，user-1" });
+    fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
+    await screen.findByRole("heading", { name: "用户中心" });
+    fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
+    expect(await screen.findByText("新版本已就绪")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "稍后重启" }));
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    await screen.findByRole("heading", { name: "工作台" });
+    await loginThroughAccountForm();
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30000);
+    });
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(
+      nativeInvoke.mock.calls.filter(([command]) => command === "restart_app"),
+    ).toHaveLength(1);
   });
 });

@@ -19,7 +19,6 @@ import {
 } from "../api";
 import { clearAccountResidue } from "../studio/draftResidue";
 import { StudioWorkspace } from "../studio/StudioWorkspace";
-import { useAppUpdate } from "./appUpdate";
 import { CustomerAnnouncementCenter } from "./CustomerAnnouncementCenter";
 import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { customerToCurrentUser } from "./customerToCurrentUser";
@@ -61,11 +60,6 @@ export function CustomerWorkspace({
   const [deviceError, setDeviceError] = useState("");
   const [deviceLoadError, setDeviceLoadError] = useState("");
   const { confirm, dialog: confirmDialog } = useCustomerConfirm();
-  // 桌面端自动更新挂在客户会话壳上：启动静默检查（每天最多一次），发现新版本
-  // 免确认自动下载安装并重启（2026-10-16 口径：打开软件即自动更新，用户不再去
-  // 个人中心手动升级；个人中心的手动检查保留作兜底）。浏览器 lane 里
-  // supported=false 自动失效。
-  const appUpdate = useAppUpdate({ autoCheck: true, autoInstall: true });
   // CW-062：个人中心身份徽章/子账号入口的身份来源。会话用户自带首次登录
   // 时的身份；重启恢复阶段 user 可能未知（null），此时从凭据库补读缓存。
   const [storedIdentity, setStoredIdentity] =
@@ -364,7 +358,6 @@ export function CustomerWorkspace({
   return (
     <div className="customer-workspace">
       {confirmDialog}
-      {appUpdate.dialog}
       {currentCredential ? (
         <CustomerAnnouncementCenter
           credential={{ kind: "session", token: currentCredential.token }}
