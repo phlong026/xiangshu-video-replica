@@ -866,10 +866,14 @@ class ApilioGemini:
                 except AnalysisProviderFailed as exc:
                     # json_schema 结构化输出仅在主模型上做过生产探测（2026-11-17）；
                     # 换道到的备选模型若不识别该参数（HTTP 400），退回 json_object
-                    # 立即重发——只降格式约束，不放弃这次任务。
+                    # 立即重发——只降格式约束，不放弃这次任务。输出上限类 400
+                    # 不在此列：那是 max_tokens 预算问题，降格式救不了，交给
+                    # _complete_video 的预算回退通道。
+                    reason_text = str((exc.upstream_diagnostic or {}).get("reason") or "")
                     if (
                         exc.failure_phase == HTTP_FAILURE_PHASE
                         and exc.http_status == 400
+                        and not _OUTPUT_LIMIT_PATTERN.search(reason_text)
                         and (payload.get("response_format") or {}).get("type") == "json_schema"
                     ):
                         logger.warning(

@@ -2811,7 +2811,9 @@ def test_analysis_factory_does_not_require_unused_text_ai_configuration(monkeypa
     provider = analysis_routes.get_video_analysis_provider(Mock())
     assert isinstance(provider, ApilioGemini)
     assert provider.api_key == "vision-test-key"
-    assert not hasattr(provider, "repair_json")
+    # P2 格式自愈内建于 ApilioGemini（同模型文本重问）；deepseek 付费修复
+    # 通道是另一个 provider（curl_cffi），与本工厂无关。
+    assert hasattr(provider, "repair_json")
 
 
 def test_rewrite_instructions_persist_and_conflicting_retry_is_rejected(pg_state, monkeypatch):
