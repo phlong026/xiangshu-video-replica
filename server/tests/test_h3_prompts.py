@@ -634,6 +634,33 @@ def test_bad_json_never_triggers_paid_repair() -> None:
     assert not hasattr(provider, "repair_json")
 
 
+def test_raw_newline_injection_still_parses() -> None:
+    # EB1CA38A：gemini-3.8 经网关会把原始换行注进 JSON 键名与数字字面量中间
+    # （生产实测 20s 源片："schema_version\n"、"1080x192\n0"、"20\n27年"）。
+    # 与 replica_prompt 链路同款剥离：剔除原始换行后照常解析，不再误报
+    # 「拆解结果格式无效，未自动调用付费修复」。
+    import json as _json
+
+    from app.analysis import FakeGemini, _default_analysis_payload, analyze_video
+
+    payload = _default_analysis_payload(20.689002)
+    raw = _json.dumps(payload, ensure_ascii=False)
+    injected = (
+        raw.replace('"summary"', '"\nsummary\n"')
+        .replace('"resolution"', '"resolu\ntion"')
+        .replace('"1080x1920"', '"1080x192\n0"')
+    )
+    assert "\n" in injected and "\\n" not in injected.replace("\\n", "")  # 注入的是裸换行
+    result = analyze_video(
+        video_uri="fake",
+        video_duration_seconds=20.689002,
+        provider=FakeGemini(analysis_json=injected),
+    )
+    assert result.analysis.shots
+    assert result.analysis.resolution == "1080x1920"
+    assert result.analysis.summary == "FakeGemini 演示拆解（未配置真实分析服务）"
+
+
 def test_rule_fields_match_parser_enums() -> None:
     from app.analysis import ShotMotion
 

@@ -1244,7 +1244,12 @@ def analyze_video(
     if on_provider_result is not None:
         on_provider_result()
     try:
-        payload = json.loads(response.text)
+        # gemini-3.8/4 系经网关会把原始换行注进 JSON 键名与数字字面量中间
+        # （T15 同源缺陷，replica_prompt 链路已做同款剥离；实测 20s 源片
+        # 分析命中 "schema_version\n"、"1080x192\n0"）。剔除全部原始换行后
+        # 解析：pretty-print 缩进换行与注入换行一并移除，JSON 语义不变；
+        # 字符串值内部由 \n 转义承载的换行不受影响。
+        payload = json.loads(response.text.replace("\r", "").replace("\n", ""))
         candidate = None
         if isinstance(payload, dict) and payload.get("schema_version") == "analysis-h3.v1":
             candidate = payload.get("generation_prompt")
