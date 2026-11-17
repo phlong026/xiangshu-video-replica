@@ -496,6 +496,8 @@ class ViralMediaPipeline:
         shared: bool = False,
         cached_only: bool = False,
         refresh_video: Callable[[ViralVideo], ViralVideo] | None = None,
+        recover_video: Callable[[ViralVideo], ViralVideo | None] | None = None,
+        failed_wait_seconds: float = 0,
         cancellation_check: Callable[[], None] | None = None,
         wechat_link_client: WechatLinkClient | None = None,
     ) -> None:
@@ -506,6 +508,8 @@ class ViralMediaPipeline:
         self._shared = shared
         self._cached_only = cached_only
         self._refresh_video = refresh_video
+        self._recover_video = recover_video
+        self._failed_wait_seconds = failed_wait_seconds
         self._cancellation_check = cancellation_check or (lambda: None)
         self._wechat_link_client = wechat_link_client
         self.detail: WechatVideoDetail | None = None
@@ -532,9 +536,24 @@ class ViralMediaPipeline:
                 combined_check()
                 current = self._refresh_video(video) if self._refresh_video is not None else video
                 combined_check()
-                result = self._download_to_storage(
-                    current, kind, destination, content_type, combined_check
-                )
+                try:
+                    result = self._download_to_storage(
+                        current, kind, destination, content_type, combined_check
+                    )
+                except ViralMediaDNSUnavailable:
+                    raise
+                except ViralMediaError:
+                    if kind != "video" or self._recover_video is None:
+                        raise
+                    combined_check()
+                    recovered = self._recover_video(current)
+                    combined_check()
+                    if recovered is None:
+                        raise
+                    # 在同一媒体租约内重试，避免失败冷却与并发准备重复解析。
+                    result = self._download_to_storage(
+                        recovered, kind, destination, content_type, combined_check
+                    )
             except BaseException:
                 measurement.quantity = max(0, round((time.monotonic() - started) * 1000))
                 measurement.finish("FAILED")
@@ -556,7 +575,12 @@ class ViralMediaPipeline:
                 cache_hit = True
             else:
                 stored, cache_hit = coordinator.fetch(
-                    platform=video.platform, video_id=video.video_id, kind=kind, prepare=prepare
+                    platform=video.platform,
+                    video_id=video.video_id,
+                    kind=kind,
+                    prepare=prepare,
+                    failed_wait_seconds=self._failed_wait_seconds,
+                    cancellation_check=self._cancellation_check,
                 )
             if cache_hit:
                 self._validate_cached(stored.key, kind, stored.content_type)
@@ -669,7 +693,7 @@ class ViralMediaPipeline:
     def _resolve_kind(self, video: ViralVideo, prefer: str | None = None) -> tuple[str, str]:
         if video.platform in (PLATFORM_DOUYIN, PLATFORM_XIAOHONGSHU):
             if prefer == "video":
-                if video.play_url or self._cached_only:
+                if video.play_url or self._cached_only or self._recover_video is not None:
                     return "video", "video/mp4"
                 raise ViralMediaError("该视频暂无可用的媒体地址")
             if video.audio_url:
