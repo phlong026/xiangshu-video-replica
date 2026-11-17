@@ -495,6 +495,7 @@ def test_workflow_and_signing_driver_keep_private_material_local() -> None:
     # macOS 配置通过覆写检出内平台文件进入构建（绕开 CLI 参数传递），不再用 --config。
     cp_line = 'cp "$RUNNER_TEMP/customer-macos-release.json" client/src-tauri/tauri.macos.conf.json'
     assert cp_line in workflow
+    assert "TAURI_CONFIG<<TAURI_CONFIG_EOF" in workflow
     assert 'config_args=(--config "$RUNNER_TEMP/customer-macos-release.json")' not in workflow
     assert "verify-macos-app" in workflow
     assert "TAURI_SIGNING_" not in workflow
