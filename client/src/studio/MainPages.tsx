@@ -49,6 +49,7 @@ import {
   StudioDialog,
   Tabs,
 } from "./ui";
+import { ViralRecommendations } from "./ViralRecommendations";
 import { extractLocalVideoAudio } from "./viralCache";
 import {
   clearViralImportIdempotencyKey,
@@ -1008,6 +1009,7 @@ export function WorkbenchPage() {
           </button>
         ))}
       </div>
+      <ViralRecommendations />
       <div className="studio-home-grid">
         <div className="studio-home-cell" data-area="running">
           <Panel className="studio-running-list">

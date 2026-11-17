@@ -413,9 +413,8 @@ export function createReviewData(): StudioData {
         description: "主体之外，门窗、水电、防水和庭院，也要列进预算清单。",
         platformKey: isWechat ? "wechat_channels" : "douyin",
         nativeId: `${platform}-native-${i + 1}`,
-        // 审核样例代表「已上首页」的策展结果：网格只收带这个标记的条目，
-        // 链接导入/搜索结果注入的条目不带标记、不进网格。
         homepageFeatured: true,
+        pushedAt: "2026-09-06T00:00:00Z",
         authorAvatar: null,
         verified: !isWechat && i % 3 === 0,
         comments: isWechat ? null : 210 + i * 7,
@@ -483,6 +482,7 @@ export function createReviewData(): StudioData {
     assets,
     materials: [],
     videos,
+    homepageVideos: videos,
     tasks,
     projects: [],
     errors: [],

@@ -89,6 +89,7 @@ import type {
   StudioStats,
   StudioTask,
   StudioVideo,
+  StudioViralTiming,
   StudioVoice,
 } from "./types";
 import { readAppliedOptimization } from "./usePromptOptimization";
@@ -1301,33 +1302,49 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     homepageRank: item.homepageRank ?? null,
     homepageStartsAt: item.homepageStartsAt ?? null,
     homepageEndsAt: item.homepageEndsAt ?? null,
+    pushedAt: item.pushedAt ?? null,
+    availability: item.availability,
+    isFavorite: item.isFavorite,
     hasPlayableAudio: item.hasPlayableAudio,
     detailCharged: item.detailCharged === true,
     playUrl: item.playUrl,
   };
 }
 
-/** 爆款视频（C4 重启）：两个平台各自聚合；数据源未配置或失败时保持
- * 空态，不打断工作台其余数据的加载（与统计指标同一容错口径）。 */
+/** 首页推荐只读取管理员已推送的精选内容；某个平台失败不阻塞其余工作区。 */
 export async function loadViralVideos(): Promise<{
   videos: StudioVideo[];
   errors: string[];
+  timing?: StudioViralTiming[];
 }> {
-  const results = await Promise.allSettled([
-    listViralVideos("douyin", "hot"),
-    listViralVideos("wechat_channels", "hot"),
-  ]);
-  const labels = ["抖音", "视频号"];
+  const platforms = ["douyin", "wechat_channels", "xiaohongshu"] as const;
+  const results = await Promise.allSettled(
+    platforms.map(async (platformKey) => {
+      const result = await listViralVideos(platformKey, "hot", {
+        featuredOnly: true,
+      });
+      // 独立记录每个平台的响应时刻，后续等待其他平台不能重置其服务端时钟。
+      return { ...result, receivedAt: Date.now() };
+    }),
+  );
+  const labels = ["抖音", "视频号", "小红书"];
   const videos: StudioVideo[] = [];
   const errors: string[] = [];
+  const timing: StudioViralTiming[] = [];
   results.forEach((result, index) => {
     if (result.status === "fulfilled") {
       videos.push(...result.value.items.map(studioVideoFromViral));
+      timing.push({
+        platformKey: platforms[index],
+        serverTime: result.value.serverTime ?? null,
+        nextChangeAt: result.value.nextChangeAt ?? null,
+        receivedAt: result.value.receivedAt,
+      });
     } else {
       errors.push(`读取${labels[index]}爆款失败：${errorText(result.reason)}`);
     }
   });
-  return { videos, errors };
+  return { videos, errors, timing };
 }
 
 /** MATERIAL-PERF-C（P0-6）：失败切片重试一次（400ms 退避）——启动 allSettled
@@ -1417,7 +1434,7 @@ export async function loadStudioData(
     people: peopleData.people,
     assets: [...projectData.assets, ...peopleData.assets],
     materials,
-    videos: viralResult.status === "fulfilled" ? viralResult.value.videos : [],
+    videos: [],
     homepageVideos:
       viralResult.status === "fulfilled" ? viralResult.value.videos : [],
     tasks,

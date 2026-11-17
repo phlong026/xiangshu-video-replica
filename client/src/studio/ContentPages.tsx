@@ -18,8 +18,6 @@ import {
   fetchCoverStyles,
   fetchReplicaPipeline,
   fetchViralVideoMedia,
-  fetchViralVideoSource,
-  fetchViralVideoStatistics,
   findActiveReplicaPipeline,
   generateCoverFromTemplate,
   getAssetDownloadUrl,
@@ -30,14 +28,11 @@ import {
   listTrainingMaterials,
   listViralFavorites,
   listViralVideos,
-  newViralSearchKey,
   openViralVideoDetail,
   putMaterial,
   quoteReplicaPipeline,
   type ReplicaPipelineQuote,
   type ReplicaPipelineStatus,
-  refreshViralVideoResource,
-  refreshViralVideoStatistics,
   removeViralFavorite,
   replicaPipelineIdempotencyKey,
   resolveMaterials,
@@ -45,10 +40,7 @@ import {
   saveViralFavorite,
   trainingMaterialDownloadUrl,
 } from "../api";
-import {
-  isInsufficientCredits,
-  openWalletIfInsufficientCredits,
-} from "../insufficientCredits";
+import { openWalletIfInsufficientCredits } from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
 import { useStudio } from "./context";
 import { studioAssetFromMaterial, studioVideoFromViral } from "./live";
@@ -64,12 +56,7 @@ import {
 import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
 import { PublishRecordsPanel } from "./PublishRecordsPanel";
 import { taskHasDeliverable } from "./taskResults";
-import type {
-  StudioAsset,
-  StudioContextValue,
-  StudioPublishDraft,
-  StudioVideo,
-} from "./types";
+import type { StudioAsset, StudioPublishDraft, StudioVideo } from "./types";
 import {
   Button,
   Empty,
@@ -106,6 +93,7 @@ import {
   ViralImportPollingTimeoutError,
   viralImportIdempotencyKey,
 } from "./viralImport";
+import { isPublishedViralVideo } from "./viralVisibility";
 import "./content.css";
 
 /** MATERIAL-PERF-A（P0-1）：分页按钮窗口化——始终含首末页与当前页 ±1，
@@ -181,12 +169,12 @@ function persistViralDetailUrl(video: StudioVideo) {
 
 function viralLikesLabel(video: StudioVideo) {
   return video.likes == null
-    ? "待核验"
+    ? "—"
     : (video.likeDisplay ?? formatCount(video.likes));
 }
 
 function viralMetricLabel(value: number | null | undefined) {
-  return value == null ? "待核验" : formatCount(value);
+  return value == null ? "—" : formatCount(value);
 }
 
 function ViralStatisticsNote({ video }: { video: StudioVideo }) {
@@ -248,173 +236,6 @@ type ViralPlayback =
   | { status: "loading" }
   | { status: "playing"; src: string }
   | { status: "error"; message: string };
-
-function updateViralStatistics(
-  updateData: StudioContextValue["updateData"],
-  items: ViralVideoItem[],
-) {
-  if (!items.length) return;
-  const byId = new Map(items.map((item) => [item.videoId, item]));
-  updateData((data) => ({
-    ...data,
-    videos: data.videos.map((video) => {
-      const item = video.nativeId ? byId.get(video.nativeId) : undefined;
-      return item && video.platformKey === item.platform
-        ? {
-            ...video,
-            likes: item.likes ?? video.likes,
-            comments: item.comments ?? video.comments,
-            shares: item.shares ?? video.shares,
-            collections: item.collects ?? video.collections,
-            likeDisplay:
-              item.likes == null ? video.likeDisplay : item.likeDisplay,
-            statisticsUpdatedAt:
-              item.statisticsUpdatedAt ?? video.statisticsUpdatedAt,
-            statisticsCheckedAt: item.statisticsCheckedAt,
-            statisticsStatus: item.statisticsStatus,
-            statisticsSource: item.statisticsSource,
-          }
-        : video;
-    }),
-  }));
-}
-
-/** 缺互动统计的视频号条目：评论 / 转发 / 收藏三项补采字段全空（与服务端的完整性判据同口径）。 */
-function viralStatisticsMissing(video: StudioVideo) {
-  return (
-    video.platformKey === "wechat_channels" &&
-    video.category !== "管理员上传" &&
-    Boolean(video.nativeId) &&
-    video.comments == null &&
-    video.shares == null &&
-    video.collections == null
-  );
-}
-
-type ViralStatisticsHealing = {
-  /** 本轮要补全的条数（点「补全统计」那一刻的缺口）。 */
-  total: number;
-  /** 已处理（回填成功或失败）的条数。 */
-  done: number;
-};
-
-type ViralStatisticsState = {
-  error?: string;
-  /** 当前这一页里缺互动统计的视频号条数；为 0 时自愈入口不出现。 */
-  missingCount: number;
-  /** 补全进行中的进度；未在补全时为 undefined。 */
-  healing?: ViralStatisticsHealing;
-  /** 用户已忽略当前这批缺口（缺口集合一变就重新出现）。 */
-  dismissed: boolean;
-  heal: () => void;
-  cancel: () => void;
-  dismiss: () => void;
-};
-
-function useViralStatistics(
-  videos: StudioVideo[],
-  enabled: boolean,
-): ViralStatisticsState {
-  const { updateData, openLive } = useStudio();
-  const attemptedIds = useRef(new Set<string>());
-  const [error, setError] = useState<string>();
-  const [healing, setHealing] = useState<ViralStatisticsHealing>();
-  // 忽略按「缺哪几条」记账：翻页 / 新条目让缺口集合一变，自愈入口就该重新出现。
-  const [dismissedKey, setDismissedKey] = useState("");
-  // 补全轮次序号：取消、卸载、重新发起都靠它让上一轮在下一个检查点自行退出。
-  const healRunRef = useRef(0);
-  const pendingIds = videos
-    .filter(
-      (video) =>
-        video.platformKey === "wechat_channels" &&
-        video.category !== "管理员上传" &&
-        video.nativeId &&
-        !attemptedIds.current.has(video.nativeId),
-    )
-    .map((video) => video.nativeId as string)
-    .slice(0, 12);
-  const pendingKey = pendingIds.join(",");
-
-  useEffect(() => {
-    if (!enabled || !pendingKey) return;
-    const ids = pendingKey.split(",");
-    ids.forEach((id) => {
-      attemptedIds.current.add(id);
-    });
-    setError(undefined);
-    void fetchViralVideoStatistics(ids)
-      .then((result) => updateViralStatistics(updateData, result.items))
-      .catch(() => setError("部分视频统计暂时无法更新"));
-  }, [enabled, pendingKey, updateData]);
-
-  const missingIds = videos
-    .filter(viralStatisticsMissing)
-    .map((video) => video.nativeId as string);
-  const missingKey = missingIds.join(",");
-  const missingIdsRef = useRef(missingIds);
-  missingIdsRef.current = missingIds;
-
-  useEffect(() => {
-    return () => {
-      // 卸载后旧轮次可能还在飞：序号作废，它回来时不再写状态。
-      healRunRef.current += 1;
-    };
-  }, []);
-
-  const cancelHeal = () => {
-    healRunRef.current += 1;
-    setHealing(undefined);
-  };
-
-  const heal = () => {
-    const ids = missingIdsRef.current;
-    if (!ids.length) return;
-    const run = ++healRunRef.current;
-    setError(undefined);
-    setDismissedKey("");
-    setHealing({ total: ids.length, done: 0 });
-    void (async () => {
-      let done = 0;
-      for (const id of ids) {
-        if (healRunRef.current !== run) return;
-        try {
-          // 逐条补采：服务端按「实际外呼条数」结算，逐条请求让进度与回填都是增量的
-          // （哪条先返回就先填哪条），「取消」也停在真实的计费边界上——已发出的
-          // 那一条照常结算，后面没发出去的一条不花钱。
-          const result = await refreshViralVideoStatistics(
-            [id],
-            newViralSearchKey(),
-          );
-          if (healRunRef.current !== run) return;
-          updateViralStatistics(updateData, result.items);
-          attemptedIds.current.add(id);
-        } catch (cause) {
-          if (healRunRef.current !== run) return;
-          if (isInsufficientCredits(cause)) {
-            setError("余额不足，无法补全互动统计");
-            openLive("wallet");
-          } else {
-            setError("互动统计补全中断，请稍后重试");
-          }
-          break;
-        }
-        done += 1;
-        setHealing({ total: ids.length, done });
-      }
-      if (healRunRef.current === run) setHealing(undefined);
-    })();
-  };
-
-  return {
-    error,
-    missingCount: missingIds.length,
-    healing,
-    dismissed: dismissedKey !== "" && dismissedKey === missingKey,
-    heal,
-    cancel: cancelHeal,
-    dismiss: () => setDismissedKey(missingKey),
-  };
-}
 
 /** 点击播放：真实平台视频先走媒体管线，测试夹具可直接使用 playUrl。 */
 function useViralPlayback(
@@ -1130,7 +951,7 @@ function ViralCacheBadge({ progress }: { progress: ViralCacheProgress }) {
   );
 }
 
-function ViralCard({
+export function ViralCard({
   video,
   active,
   onActivate,
@@ -1143,7 +964,7 @@ function ViralCard({
   active: boolean;
   onActivate: () => void;
   savedFromServer?: boolean;
-  onFavoriteChange: (saved: boolean) => void;
+  onFavoriteChange?: (saved: boolean) => void;
   availability?: ViralVideoItem["availability"];
   cacheProgress?: ViralCacheProgress;
 }) {
@@ -1187,26 +1008,18 @@ function ViralCard({
     void (async () => {
       try {
         if (!cacheAvailable()) {
-          // Web 端没有本地缓存：抖音走一次计费直链在新窗口打开；视频号
-          // 归档后主存储里是解密后的明文 MP4，直接用自有签名链接下载，
-          // 未归档（转存中/已回收）才引导桌面端。
-          if (platformKey === "douyin" && video.category !== "管理员上传") {
-            const source = await fetchViralVideoSource(platformKey, nativeId);
-            window.open(source.fullUrl, "_blank", "noopener");
+          const media = await fetchViralVideoMedia(
+            platformKey,
+            nativeId,
+            "video",
+          );
+          const result = await downloadVideoToFile(
+            async () => media.url,
+            `${(video.title || nativeId).slice(0, 40)}.mp4`,
+          );
+          if (result.status === "saved") notify("视频已保存到所选位置");
+          else if (result.status === "started")
             notify("已开始下载，请在新窗口完成保存");
-          } else {
-            try {
-              const media = await fetchViralVideoMedia(
-                platformKey,
-                nativeId,
-                "video",
-              );
-              window.open(media.url, "_blank", "noopener");
-              notify("已开始下载，请在新窗口完成保存");
-            } catch {
-              notify("视频素材尚未准备完成，请使用桌面客户端下载或稍后重试");
-            }
-          }
           return;
         }
         await ensureViralCacheForVideo({ platformKey, nativeId });
@@ -1339,6 +1152,8 @@ export function ViralPage() {
   const [listReloadRevision, setListReloadRevision] = useState(0);
   const [homepageNow, setHomepageNow] = useState(Date.now);
   const [homepageClockOffset, setHomepageClockOffset] = useState(0);
+  const homepageClockOffsetRef = useRef(homepageClockOffset);
+  homepageClockOffsetRef.current = homepageClockOffset;
   const [nextHomepageChange, setNextHomepageChange] = useState<string | null>(
     null,
   );
@@ -1381,32 +1196,24 @@ export function ViralPage() {
   );
   paginationContextKeyRef.current = paginationContextKey;
 
-  // 公共列表回执决定客户发布可见性；共享状态还含私有导入，不能直接全部展示。
-  // 首次回执前保留已有首页缓存；非首页发布条目凭本页接口回执进入同一网格。
+  // 首页缓存与公共列表共用推送标记；私有导入和历史抓取不进入客户目录。
   const curated = useMemo(
     () =>
       data.videos.filter(
         (item) =>
-          (item.homepageFeatured === true ||
-            availabilityByKey.get(`${item.platformKey}:${item.nativeId}`) ===
-              "available") &&
-          (!item.homepageStartsAt ||
-            Date.parse(item.homepageStartsAt) <= homepageNow) &&
-          (!item.homepageEndsAt ||
-            Date.parse(item.homepageEndsAt) > homepageNow),
+          isPublishedViralVideo(item, homepageNow) &&
+          (availabilityByKey.get(viralIdentity(item)) ?? "available") ===
+            "available",
       ),
     [data.videos, homepageNow, availabilityByKey],
   );
   useEffect(() => {
-    if (review || scope !== "all") return;
+    if (review) return;
     const now = Math.max(homepageNow, Date.now() - homepageClockOffset);
     const boundaries = [
       nextHomepageChange,
       ...data.videos.flatMap((item) =>
-        item.platformKey === platformKey &&
-        (item.homepageFeatured ||
-          availabilityByKey.get(`${item.platformKey}:${item.nativeId}`) ===
-            "available")
+        item.platformKey === platformKey && item.pushedAt
           ? [item.homepageStartsAt, item.homepageEndsAt]
           : [],
       ),
@@ -1437,16 +1244,14 @@ export function ViralPage() {
     };
   }, [
     data.videos,
-    availabilityByKey,
     homepageClockOffset,
     homepageNow,
     nextHomepageChange,
     platformKey,
     review,
-    scope,
   ]);
   const shown = useMemo(() => {
-    const source = scope === "favorites" ? data.videos : curated;
+    const source = curated;
     return source
       .filter(
         (item) =>
@@ -1468,7 +1273,7 @@ export function ViralPage() {
         }
         return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
       });
-  }, [curated, data.videos, favoriteKeys, platform, scope, sort, review]);
+  }, [curated, favoriteKeys, platform, scope, sort, review]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/排序变化时重置滚动加载计数。
   useEffect(() => {
@@ -1476,7 +1281,6 @@ export function ViralPage() {
   }, [platform, scope, sort]);
 
   const current = review ? shown.slice(0, visibleCount) : shown;
-  const statistics = useViralStatistics(current, !review);
 
   // 浏览列表直接展示 current；缓存 hook 喂实际展示的列表（§6.2 翻页即缓存）。
   const gridVideos = current;
@@ -1702,6 +1506,7 @@ export function ViralPage() {
         )
           return;
         const incoming = result.items.map(studioVideoFromViral);
+        setHomepageNow(Date.now() - homepageClockOffsetRef.current);
         setFavoriteKeys(
           new Set(
             result.items.map((item) => `${item.platform}:${item.videoId}`),
@@ -1820,6 +1625,7 @@ export function ViralPage() {
             });
       if (!isCurrent()) return;
       const incoming = result.items.map(studioVideoFromViral);
+      setHomepageNow(Date.now() - homepageClockOffsetRef.current);
       const confirmedNextCursor = result.nextCursor ?? undefined;
       const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
       paginationSnapshotsRef.current.set(paginationContextKey, {
@@ -1983,58 +1789,11 @@ export function ViralPage() {
         </label>
       </div>
       {!review && <ViralCacheUsage revision={cachedOnPage} />}
-      {(listError || statistics.error) && (
+      {listError && (
         <p className="viral-media-status is-error" role="status">
-          {listError ?? statistics.error}
+          {listError}
         </p>
       )}
-      {!review &&
-      !statistics.healing &&
-      statistics.missingCount > 0 &&
-      !statistics.dismissed ? (
-        <div className="viral-statistics-heal">
-          <span className="viral-statistics-heal__icon" aria-hidden="true">
-            ↻
-          </span>
-          <div className="viral-statistics-heal__body" role="status">
-            <b>{statistics.missingCount} 条视频号的互动统计还没补全</b>
-            <small>
-              {
-                "视频号的点赞 / 评论 / 转发 / 收藏需要单独补采。补全只对缺失的条目外呼，已取到的数据 24 小时内不再重复外呼，因此不会重复计费。"
-              }
-            </small>
-          </div>
-          <div className="viral-statistics-heal__actions">
-            <Button variant="quiet" onClick={statistics.dismiss}>
-              忽略
-            </Button>
-            <Button onClick={statistics.heal}>补全统计</Button>
-          </div>
-        </div>
-      ) : null}
-      {!review && statistics.healing ? (
-        <div className="viral-statistics-heal is-healing">
-          <span className="viral-statistics-heal__icon" aria-hidden="true">
-            ↻
-          </span>
-          <span className="viral-statistics-heal__progress" role="status">
-            正在补全 {statistics.healing.total} 条视频号的互动统计…（
-            {statistics.healing.done} / {statistics.healing.total}）
-          </span>
-          <span className="viral-statistics-heal__bar" aria-hidden="true">
-            <i
-              style={{
-                width: `${Math.round(
-                  (statistics.healing.done / statistics.healing.total) * 100,
-                )}%`,
-              }}
-            />
-          </span>
-          <Button variant="quiet" onClick={statistics.cancel}>
-            取消
-          </Button>
-        </div>
-      ) : null}
       {refreshStatus && (
         <p className="viral-media-status" role="status">
           {refreshStatus}
@@ -2225,7 +1984,6 @@ export function ViralDetailPage() {
     review,
     navigate,
     notify,
-    openLive,
     patchDraft,
     patchState,
     updateData,
@@ -2239,8 +1997,9 @@ export function ViralDetailPage() {
   const [detailStatus, setDetailStatus] = useState<
     "idle" | "loading" | "error"
   >("idle");
-  const [detailAvailability, setDetailAvailability] =
-    useState<ViralVideoItem["availability"]>("available");
+  const [detailAvailability, setDetailAvailability] = useState<
+    ViralVideoItem["availability"]
+  >(review ? "available" : "unavailable");
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
   // 查看详情免费（2026-10-13 拍板）：进入详情读一次服务端权威数据（含互动统计），
   // 不再展示计费回执；失败时只透传原因。
@@ -2249,26 +2008,18 @@ export function ViralDetailPage() {
   const detailRequestRef = useRef(0);
   detailAccountRef.current = accountId;
   const detailParams = useMemo(viralDetailParams, []);
+  const targetPlatform = selectedVideo?.platformKey ?? detailParams?.platform;
+  const targetVideoId = selectedVideo?.nativeId ?? detailParams?.videoId;
   const video = remoteVideo ?? selectedVideo;
   const { importState, start } = useViralImport(video?.id, accountId);
 
   useEffect(() => {
-    void accountId;
     setRemoteVideo(undefined);
     setDetailFavorite(undefined);
-    setDetailAvailability("available");
-    setDetailStatus("idle");
+    setDetailAvailability(review ? "available" : "unavailable");
     setDetailError(undefined);
-  }, [accountId]);
-
-  useEffect(() => {
-    void accountId;
-    if (remoteVideo || review || !detailParams) return;
-    if (
-      selectedVideo &&
-      (selectedVideo.platformKey !== detailParams.platform ||
-        selectedVideo.nativeId !== detailParams.videoId)
-    ) {
+    if (review || !targetPlatform || !targetVideoId) {
+      setDetailStatus("idle");
       return;
     }
     const requestAccountId = accountId;
@@ -2277,13 +2028,12 @@ export function ViralDetailPage() {
       detailAccountRef.current === requestAccountId &&
       detailRequestRef.current === requestId;
     setDetailStatus("loading");
-    void openViralVideoDetail(detailParams.platform, detailParams.videoId)
+    void openViralVideoDetail(targetPlatform, targetVideoId)
       .then(({ item }) => {
         if (!isCurrent()) return;
         const restored = studioVideoFromViral(item);
         setDetailAvailability(item.availability ?? "available");
         setDetailFavorite(Boolean(item.isFavorite));
-        setDetailError(undefined);
         setRemoteVideo(restored);
         setDetailStatus("idle");
         updateData((current) => ({
@@ -2299,32 +2049,34 @@ export function ViralDetailPage() {
       .catch((cause) => {
         if (!isCurrent()) return;
         setDetailStatus("error");
-        // 详情免费后这里的失败只剩网络/下架：把原因显式告诉用户，本地已有
-        // 条目仍可阅读（这些字段浏览列表本就免费可见）。
-        const message =
-          cause instanceof Error ? cause.message : "查看详情失败，请重试。";
-        setDetailError(message);
+        setDetailAvailability("unavailable");
+        setDetailError(
+          cause instanceof Error ? cause.message : "查看详情失败，请重试。",
+        );
       });
     return () => {
-      if (detailRequestRef.current === requestId) {
-        detailRequestRef.current += 1;
-      }
+      if (detailRequestRef.current === requestId) detailRequestRef.current += 1;
     };
-  }, [detailParams, remoteVideo, review, selectedVideo, updateData, accountId]);
+  }, [targetPlatform, targetVideoId, review, updateData, accountId]);
 
   useEffect(() => {
     if (video) persistViralDetailUrl(video);
   }, [video]);
 
-  // 互动统计随「查看详情」同一响应下发（一次计费覆盖详情与统计），
-  // 详情页不再单独发起统计请求。
+  // 互动数据随免费详情响应下发，客户页面不触发源站补采。
   const { playback, play, retry, markFailed } = useViralPlayback(video);
   const beginReplicateRef = useRef<() => void>(() => {});
   const requestExtractRef = useRef<() => void>(() => {});
   // ADM-17 卡片「去复刻」直达：意图即焚；handler 经 ref 晚绑定，保持 hook
   // 顺序稳定（beginReplicate 的定义在组件 early return 之后）。
   useEffect(() => {
-    if (!state.viralReplicateIntent || !video) return;
+    if (
+      !state.viralReplicateIntent ||
+      !video ||
+      detailStatus !== "idle" ||
+      detailAvailability !== "available"
+    )
+      return;
     patchState({ viralReplicateIntent: false });
     // 卡片一键复刻对超限视频的降级提示：讲清替代方向而不是干巴巴的拒绝。
     // >30s 平台视频暂不能自动走长视频拆解（服务端 canAnalyze 门禁 4–30s），
@@ -2350,22 +2102,39 @@ export function ViralDetailPage() {
       return;
     }
     beginReplicateRef.current();
-  }, [state.viralReplicateIntent, video, notify, patchState]);
+  }, [
+    state.viralReplicateIntent,
+    video,
+    notify,
+    patchState,
+    detailStatus,
+    detailAvailability,
+  ]);
   // 卡片「提取文案」直达：与复刻意图同款即焚消费，复用下方 requestExtract
   // 的服务端导入 → 转写链路。
   useEffect(() => {
-    if (!state.viralExtractIntent || !video) return;
+    if (
+      !state.viralExtractIntent ||
+      !video ||
+      detailStatus !== "idle" ||
+      detailAvailability !== "available"
+    )
+      return;
     patchState({ viralExtractIntent: false });
     if (!video.platformKey || !video.nativeId) {
       notify("该视频缺少平台标识，无法提取文案");
       return;
     }
     requestExtractRef.current();
-  }, [state.viralExtractIntent, video, notify, patchState]);
+  }, [
+    state.viralExtractIntent,
+    video,
+    notify,
+    patchState,
+    detailStatus,
+    detailAvailability,
+  ]);
 
-  // hooks 必须在提前 return 之前声明完毕（刷新按钮渲染在下方详情分支里）。
-  const [refreshBusy, setRefreshBusy] = useState(false);
-  const [refreshNotice, setRefreshNotice] = useState<string>();
   if (!video && detailStatus === "loading") {
     return (
       <section className="content-page">
@@ -2461,37 +2230,6 @@ export function ViralDetailPage() {
     void start(video, "replica", goReplica);
   };
   beginReplicateRef.current = beginReplicate;
-  // 刷新资源（仅抖音，按次计费）：封面失效/直链过期时的自救入口。
-  const beginRefresh = () => {
-    if (review || refreshBusy) return;
-    if (video.platformKey !== "douyin" || !video.nativeId) {
-      notify("目前仅支持刷新抖音视频的资源");
-      return;
-    }
-    setRefreshBusy(true);
-    setRefreshNotice(undefined);
-    void refreshViralVideoResource(
-      video.platformKey,
-      video.nativeId,
-      newViralSearchKey(),
-    )
-      .then(() => {
-        setRefreshNotice("资源已刷新，正在更新详情…");
-        // 详情effect以 remoteVideo 为门槛：置空即重新拉取最新数据。
-        setRemoteVideo(undefined);
-      })
-      .catch((cause) => {
-        if (isInsufficientCredits(cause)) {
-          setRefreshNotice("余额不足，无法刷新。");
-          openLive("wallet");
-          return;
-        }
-        setRefreshNotice(
-          cause instanceof Error ? cause.message : "刷新失败，请重试。",
-        );
-      })
-      .finally(() => setRefreshBusy(false));
-  };
   return (
     <section className="content-page content-detail">
       <header className="content-detail-heading">
@@ -2583,11 +2321,6 @@ export function ViralDetailPage() {
               {detailError}
             </p>
           )}
-          {refreshNotice && (
-            <p className="viral-media-status" role="status">
-              {refreshNotice}
-            </p>
-          )}
           {detailAvailability !== "available" && (
             <p className="viral-media-status is-error" role="status">
               该视频已不可用，暂不能导入创作。
@@ -2631,25 +2364,15 @@ export function ViralDetailPage() {
                 </Button>
               </div>
             )}
-            {canReplicaAuto && !review && (
-              <div className="content-detail-action">
-                <ReplicaPipelineControl
-                  key={`${user.id}:${video.platformKey}:${video.nativeId}`}
-                  video={video}
-                />
-              </div>
-            )}
-            {!review &&
-              video.platformKey === "douyin" &&
-              video.category !== "管理员上传" && (
+            {canReplicaAuto &&
+              !review &&
+              detailStatus === "idle" &&
+              detailAvailability === "available" && (
                 <div className="content-detail-action">
-                  <Button
-                    variant="quiet"
-                    disabled={refreshBusy}
-                    onClick={beginRefresh}
-                  >
-                    {refreshBusy ? "刷新中…" : "刷新资源（按次计费）"}
-                  </Button>
+                  <ReplicaPipelineControl
+                    key={`${user.id}:${video.platformKey}:${video.nativeId}`}
+                    video={video}
+                  />
                 </div>
               )}
             <div className="content-detail-action">

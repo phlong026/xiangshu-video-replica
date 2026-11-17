@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ViralVideoItem } from "../api";
 import { createReviewData, createReviewState, reviewUser } from "./fixtures";
 import {
   constrainReferenceVideoPrompt,
@@ -17,7 +18,17 @@ import {
 } from "./referencePrompt";
 import { StudioWorkspace } from "./StudioWorkspace";
 import { createState } from "./state";
-import type { StudioContextValue } from "./types";
+import type { StudioContextValue, StudioData } from "./types";
+
+// 恢复爆款列表后会挂载滚动分页观察器，jsdom 需要提供浏览器边界替身。
+vi.stubGlobal(
+  "IntersectionObserver",
+  class {
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  },
+);
 
 const extractionProbe = vi.hoisted(() => ({
   current: null as StudioContextValue | null,
@@ -220,10 +231,10 @@ const api = vi.hoisted(() => ({
   uploadMaterial: vi.fn(),
   // 爆款列表：恢复/路由用例路过 ViralPage 时必须拿到数组，不能是 undefined。
   listViralVideos: vi.fn(async () => ({
-    items: [],
+    items: [] as ViralVideoItem[],
     total: 0,
     hasMore: false,
-    nextCursor: null,
+    nextCursor: null as string | null,
   })),
   getOralPrice: vi.fn(async () => ({
     unit_price_fen: 500,
@@ -770,6 +781,14 @@ describe("V1.4 workspace integration", () => {
     live.loadLatestScriptFromUpload.mockResolvedValue(null);
     live.loadProjectDraft.mockReset();
     api.createViralImportTask.mockReset();
+    api.listViralVideos
+      .mockReset()
+      .mockResolvedValue({
+        items: [],
+        total: 0,
+        hasMore: false,
+        nextCursor: null,
+      });
     live.loadViralVideos.mockResolvedValue({ videos: [], errors: [] });
     api.customerGetWallet.mockReset();
     api.getWallet.mockReset();
@@ -886,10 +905,13 @@ describe("V1.4 workspace integration", () => {
       />,
     );
     const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
-    // 爆款数据功能已下线（2026-11-16 定价决策）：入口下架后导航不再含爆款视频。
-    expect(nav.getAllByRole("button").map((node) => node.textContent)).toEqual(
-      expect.arrayContaining(["文案工坊", "视频拆解"]),
-    );
+    const creationGroup = nav.getByText("创作").parentElement;
+    if (!creationGroup) throw new Error("未找到创作导航分组");
+    expect(
+      within(creationGroup)
+        .getAllByRole("button")
+        .map((node) => node.textContent),
+    ).toEqual(["爆款视频", "文案工坊", "视频拆解"]);
     // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
     expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
     expect(nav.queryByRole("button", { name: "长视频拆解" })).toBeNull();
@@ -907,38 +929,174 @@ describe("V1.4 workspace integration", () => {
   });
 
   it.each(["viral", "viral-detail"] as const)(
-    "旧书签的 %s 路由显示下线说明，且不读取爆款数据",
+    "旧书签的 %s 深链恢复对应爆款页面",
     (page) => {
-      window.history.replaceState(null, "", `/#studio/${page}?video=抖音-1`);
+      const reviewData = createReviewData();
+      window.history.replaceState(
+        null,
+        "",
+        `/#studio/${page}?video=${encodeURIComponent(reviewData.videos[0].id)}`,
+      );
       render(
-        <StudioWorkspace
-          currentUser={reviewUser}
-          reviewData={createReviewData()}
-        />,
+        <StudioWorkspace currentUser={reviewUser} reviewData={reviewData} />,
       );
 
       expect(
-        screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+        screen.getByRole("heading", {
+          name: page === "viral" ? "爆款视频" : "爆款视频 / 视频详情",
+        }),
       ).toBeInTheDocument();
+      if (page === "viral-detail") {
+        expect(
+          screen.getByRole("heading", { name: reviewData.videos[0].title }),
+        ).toBeInTheDocument();
+      }
+      expect(screen.queryByText("爆款数据功能已下线")).toBeNull();
+      expect(live.loadStudioData).not.toHaveBeenCalled();
       expect(api.listViralVideos).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
-      expect(window.location.hash).toBe("#studio/workbench");
     },
   );
 
-  it("旧恢复状态不再渲染爆款页面", () => {
+  it("侧栏爆款入口恢复列表，正式工作区启用独立首页精选加载", async () => {
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("workbench")}
+      />,
+    );
+    await waitFor(() =>
+      expect(live.loadStudioData).toHaveBeenCalledWith(reviewUser, {
+        includeViral: true,
+      }),
+    );
+    const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
+    fireEvent.click(nav.getByRole("button", { name: "爆款视频" }));
+
+    expect(window.location.hash).toBe("#studio/viral");
+    expect(
+      screen.getByRole("heading", { name: "爆款视频" }),
+    ).toBeInTheDocument();
+    expect(nav.getByRole("button", { name: "爆款视频" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await waitFor(() =>
+      expect(api.listViralVideos).toHaveBeenCalledWith("douyin", "hot", {
+        limit: 12,
+      }),
+    );
+  });
+
+  it("爆款首屏先于启动数据返回时保留完整目录并从同一游标接续", async () => {
+    const item = (index: number): ViralVideoItem => ({
+      platform: "douyin",
+      videoId: `published-${index}`,
+      title: `完整目录 ${index}`,
+      author: "管理员发布",
+      category: "乡墅",
+      authorAvatar: null,
+      verified: false,
+      coverUrl: null,
+      durationMs: 20_000,
+      likes: index,
+      comments: null,
+      shares: null,
+      collects: null,
+      publishedAt: null,
+      publishedDisplay: null,
+      likeDisplay: null,
+      tags: [],
+      hasPlayableAudio: true,
+      playUrl: null,
+      homepageFeatured: false,
+      pushedAt: "2026-11-16T12:00:00Z",
+      availability: "available",
+    });
+    const firstPage = Array.from({ length: 12 }, (_, index) => item(index + 1));
+    let resolveBootstrap!: (value: StudioData) => void;
+    live.loadStudioData.mockReturnValueOnce(
+      new Promise<StudioData>((resolve) => {
+        resolveBootstrap = resolve;
+      }),
+    );
+    api.listViralVideos
+      .mockResolvedValueOnce({
+        items: firstPage,
+        total: 13,
+        hasMore: true,
+        nextCursor: "catalog-after-12",
+      })
+      .mockResolvedValueOnce({
+        items: [item(13)],
+        total: 13,
+        hasMore: false,
+        nextCursor: null,
+      });
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("viral")}
+      />,
+    );
+    await screen.findByText("完整目录 1");
+    expect(currentExtractionContext().data.videos).toHaveLength(12);
+
+    const featured = { ...createReviewData().videos[0], title: "独立首页种子" };
+    await act(async () => {
+      resolveBootstrap({
+        people: [],
+        assets: [],
+        materials: [],
+        videos: [],
+        homepageVideos: [featured],
+        tasks: [],
+        projects: [],
+        errors: [],
+        loading: false,
+        stats: null,
+        analytics7: null,
+        analytics30: null,
+      });
+    });
+    expect(currentExtractionContext().data.homepageVideos).toEqual([featured]);
+    expect(currentExtractionContext().data.videos).toHaveLength(12);
+    expect(screen.getByText("完整目录 1")).toBeInTheDocument();
+    expect(screen.queryByText("独立首页种子")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "加载更多视频" }));
+    await screen.findByText("完整目录 13");
+    expect(api.listViralVideos).toHaveBeenNthCalledWith(2, "douyin", "hot", {
+      limit: 12,
+      cursor: "catalog-after-12",
+    });
+    expect(currentExtractionContext().data.videos).toHaveLength(13);
+    for (let index = 1; index <= 13; index += 1)
+      expect(screen.getByText(`完整目录 ${index}`)).toBeInTheDocument();
+  });
+
+  it("工作区搜索提供爆款列表入口且排除详情页和源站视频搜索", () => {
     render(
       <StudioWorkspace
         currentUser={reviewUser}
         reviewData={createReviewData()}
-        initialState={createReviewState("viral-detail")}
+        initialState={createReviewState("workbench")}
       />,
     );
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索工作区" }), {
+      target: { value: "爆款" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    const dialog = within(screen.getByRole("dialog", { name: "搜索工作区" }));
 
     expect(
-      screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+      dialog.getByRole("button", { name: "爆款视频" }),
     ).toBeInTheDocument();
-    expect(api.listViralVideos).not.toHaveBeenCalled();
+    expect(dialog.queryByRole("button", { name: "爆款视频详情" })).toBeNull();
+    expect(dialog.queryByRole("button", { name: "视频" })).toBeNull();
+    fireEvent.click(dialog.getByRole("button", { name: "爆款视频" }));
+    expect(screen.queryByRole("dialog", { name: "搜索工作区" })).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "爆款视频" }),
+    ).toBeInTheDocument();
   });
 
   it("侧边栏恢复任务列表，显示进行中数量并直接进入任务页面", () => {

@@ -696,6 +696,22 @@ html:has(.studio-shell) {
   color: #e9a82d;
   font-weight: 600;
 }
+.studio-home-recommendations {
+  margin: 0 0 16px;
+  min-width: 0;
+}
+.studio-home-recommendations-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.studio-home-recommendations-heading h2 {
+  margin: 0;
+  font-size: var(--font-subtitle);
+  font-weight: 500;
+}
 .studio-home-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.74fr) minmax(360px, 1fr);

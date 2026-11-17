@@ -332,12 +332,14 @@ vi.stubGlobal("IntersectionObserver", IntersectionObserverStub);
 import {
   MaterialsPage,
   PublishPage,
+  ViralCard,
   ViralDetailPage,
   ViralFavoriteButton,
   ViralPage,
   visiblePageButtons,
 } from "./ContentPages";
 import { readAudioDuration } from "./live";
+import { navigateStudioState } from "./state";
 
 describe("素材分页窗口化", () => {
   it("页数不超过 7 时完整展示页码", () => {
@@ -413,6 +415,8 @@ function studio(
           platformKey: "douyin",
           nativeId: "native-dy-1",
           homepageFeatured: true,
+          pushedAt: "2026-09-30T00:00:00Z",
+          availability: "available",
           verified: true,
           tags: ["农村自建房", "建房预算"],
           hasPlayableAudio: true,
@@ -432,6 +436,8 @@ function studio(
           platformKey: "wechat_channels",
           nativeId: "native-wx-1",
           homepageFeatured: true,
+          pushedAt: "2026-09-30T00:00:00Z",
+          availability: "available",
           publishedDisplay: "3天前",
           likeDisplay: "1.2万",
           tags: ["庭院案例", "别墅设计"],
@@ -559,8 +565,9 @@ function viralItem(index: number, overrides: Partial<ViralVideoItem> = {}) {
   return {
     platform: "douyin" as const,
     videoId: `native-dy-${index}`,
-    // 列表接口的条目默认带首页展示标记：网格只收策展条目，未策展的另有用例覆盖。
     homepageFeatured: true,
+    // 夹具代表管理员已发布的内容，私有导入与历史未发布条目需显式清空推送标记。
+    pushedAt: "2026-09-30T00:00:00Z",
     category: "建房预算",
     title: `乡墅参考 ${index}`,
     author: "乡墅建房笔记",
@@ -584,7 +591,7 @@ function viralItem(index: number, overrides: Partial<ViralVideoItem> = {}) {
   };
 }
 
-/** 视频号缺互动统计的卡片：三个补采字段全空，点赞也退成未知（不显示 0）。 */
+/** 未提供互动统计的卡片保留缺值，不能伪装成真实的 0。 */
 function missingWechatVideo(): StudioVideo {
   const base = studio();
   return {
@@ -594,35 +601,6 @@ function missingWechatVideo(): StudioVideo {
     comments: null,
     shares: null,
     collections: null,
-  };
-}
-
-/** 补采接口返回的完整统计（按 nativeId 认领回原卡片）。 */
-function wechatStatisticsPayload() {
-  return {
-    items: [
-      {
-        platform: "wechat_channels" as const,
-        videoId: "native-wx-1",
-        category: "庭院案例",
-        title: "新中式庭院的三个细节",
-        author: "庭院设计老周",
-        authorAvatar: null,
-        verified: false,
-        coverUrl: "/studio/demo-2.jpg",
-        durationMs: 72_000,
-        likes: 9_800,
-        comments: 44,
-        shares: 55,
-        collects: 66,
-        publishedAt: null,
-        publishedDisplay: "3天前",
-        likeDisplay: "1.2万",
-        tags: [],
-        hasPlayableAudio: false,
-        playUrl: null,
-      },
-    ],
   };
 }
 
@@ -796,6 +774,10 @@ describe("V1.4 内容与运营页面", () => {
     }));
     createViralImportTask.mockReset();
     getViralImportTask.mockReset();
+    initiateReplicaPipeline.mockReset();
+    findActiveReplicaPipeline
+      .mockReset()
+      .mockResolvedValue({ pipelineId: null });
     listViralFavorites.mockReset();
     listViralVideos.mockReset();
     // mockReset 会清掉实现，幂等键生成器要补回默认值。
@@ -966,6 +948,7 @@ describe("V1.4 内容与运营页面", () => {
         {
           platform: "douyin",
           videoId: "favorite-native-1",
+          pushedAt: "2026-09-30T00:00:00Z",
           category: "庭院案例",
           title: "已收藏的庭院视频",
           author: "乡墅作者",
@@ -1030,6 +1013,197 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
+  it("收藏列表跨过服务端到期边界立即移出，刷新失败也不恢复过期内容", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+    try {
+      const base = studio();
+      listViralVideos.mockResolvedValue({
+        items: [],
+        serverTime: "2026-10-01T11:00:00Z",
+        nextChangeAt: null,
+      });
+      listViralFavorites
+        .mockResolvedValueOnce({
+          items: [
+            viralItem(51, {
+              title: "即将到期的收藏",
+              homepageFeatured: false,
+              isFavorite: true,
+              homepageEndsAt: "2026-10-01T11:00:02Z",
+            }),
+          ],
+          hasMore: false,
+          total: 1,
+          serverTime: "2026-10-01T11:00:00Z",
+          nextChangeAt: "2026-10-01T11:00:02Z",
+        })
+        .mockRejectedValue(new Error("刷新暂时离线"));
+      render(
+        <StatefulViralPage
+          value={studio({ review: false, data: { ...base.data, videos: [] } })}
+        />,
+      );
+      await act(async () => Promise.resolve());
+      fireEvent.click(screen.getByRole("tab", { name: "我的收藏" }));
+      await screen.findByText("即将到期的收藏");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(screen.getByText("即将到期的收藏")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_050);
+      });
+      expect(screen.queryByText("即将到期的收藏")).toBeNull();
+      expect(listViralFavorites).toHaveBeenCalledTimes(2);
+      expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["首屏", "下一页"])(
+    "收藏%s回执晚于到期时间到达时不会重新展示过期视频",
+    async (page) => {
+      const startedAt = Date.parse("2026-10-01T12:00:00Z");
+      vi.useFakeTimers({ now: startedAt, toFake: ["Date"] });
+      try {
+        const base = studio();
+        const expired = viralItem(61, {
+          title: "迟到的过期收藏",
+          isFavorite: true,
+          homepageEndsAt: "2026-10-01T12:00:02Z",
+        });
+        const stable = viralItem(62, {
+          title: "仍有效的收藏",
+          isFavorite: true,
+        });
+        let resolveReply!: (value: {
+          items: ViralVideoItem[];
+          hasMore: boolean;
+          nextCursor: null;
+          total: number;
+        }) => void;
+        const pending = new Promise<{
+          items: ViralVideoItem[];
+          hasMore: boolean;
+          nextCursor: null;
+          total: number;
+        }>((resolve) => {
+          resolveReply = resolve;
+        });
+        listViralVideos.mockResolvedValue({
+          items: [],
+          serverTime: "2026-10-01T12:00:00Z",
+          nextChangeAt: null,
+        });
+        if (page === "下一页")
+          listViralFavorites.mockResolvedValueOnce({
+            items: [stable],
+            hasMore: true,
+            nextCursor: "late-favorite-page-2",
+            total: 2,
+          });
+        listViralFavorites.mockReturnValueOnce(pending);
+        render(
+          <StatefulViralPage
+            value={studio({
+              review: false,
+              data: { ...base.data, videos: [] },
+            })}
+          />,
+        );
+        await act(async () => Promise.resolve());
+        fireEvent.click(screen.getByRole("tab", { name: "我的收藏" }));
+        if (page === "下一页") {
+          await screen.findByText(stable.title);
+          fireEvent.click(screen.getByRole("button", { name: "加载更多视频" }));
+        }
+        vi.setSystemTime(startedAt + 3_000);
+        await act(async () => {
+          resolveReply({
+            items: [expired],
+            hasMore: false,
+            nextCursor: null,
+            total: 1,
+          });
+        });
+
+        expect(screen.queryByText(expired.title)).toBeNull();
+        expect(listViralFavorites).toHaveBeenCalledTimes(
+          page === "下一页" ? 2 : 1,
+        );
+        if (page === "下一页")
+          expect(screen.getByText(stable.title)).toBeInTheDocument();
+        else expect(screen.getByText("暂无收藏视频")).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("收藏列表同样排除未推送、下架和排期外的视频，保留非首页发布内容", async () => {
+    const base = studio();
+    const published = viralItem(51, {
+      title: "可见的普通发布收藏",
+      homepageFeatured: false,
+      isFavorite: true,
+    });
+    const excluded = [
+      viralItem(52, {
+        title: "私有导入收藏",
+        pushedAt: null,
+        isFavorite: true,
+      }),
+      viralItem(53, {
+        title: "历史首页收藏",
+        pushedAt: undefined,
+        homepageFeatured: true,
+        isFavorite: true,
+      }),
+      viralItem(54, {
+        title: "下架收藏",
+        availability: "hidden",
+        isFavorite: true,
+      }),
+      viralItem(55, {
+        title: "不可用收藏",
+        availability: "unavailable",
+        isFavorite: true,
+      }),
+      viralItem(56, {
+        title: "未来上线收藏",
+        homepageStartsAt: new Date(Date.now() + 60_000).toISOString(),
+        isFavorite: true,
+      }),
+      viralItem(57, {
+        title: "已到期收藏",
+        homepageEndsAt: new Date(Date.now() - 60_000).toISOString(),
+        isFavorite: true,
+      }),
+    ];
+    listViralFavorites.mockResolvedValue({
+      items: [published, ...excluded],
+      total: 7,
+      hasMore: false,
+    });
+    render(
+      <StatefulViralPage
+        value={studio({ review: false, data: { ...base.data, videos: [] } })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "我的收藏" }));
+
+    await screen.findByText(published.title);
+    for (const item of excluded)
+      expect(screen.queryByText(item.title)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: `收藏 ${published.title}` }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
+    expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
+  });
+
   it("收藏视频在详情页发起提取文案时走服务端导入链路", async () => {
     const base = studio();
     const value = studio({
@@ -1087,7 +1261,9 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<ViralDetailPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "提取文案" }));
+    const extract = await screen.findByRole("button", { name: "提取文案" });
+    await waitFor(() => expect(extract).toBeEnabled());
+    fireEvent.click(extract);
 
     await waitFor(() =>
       expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
@@ -1413,6 +1589,14 @@ describe("V1.4 内容与运营页面", () => {
       canAnalyze: true,
     });
     const base = studio();
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(
+        viralItem(1, {
+          title: base.data.videos[0].title,
+          durationMs: 4_000,
+        }),
+      ),
+    );
     const value = studio({
       review: false,
       data: {
@@ -1431,7 +1615,9 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<ViralDetailPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "去复刻" }));
+    const replicate = await screen.findByRole("button", { name: "去复刻" });
+    await waitFor(() => expect(replicate).toBeEnabled());
+    fireEvent.click(replicate);
     await waitFor(() =>
       expect(createViralImportTask).toHaveBeenCalledWith(
         "douyin",
@@ -1525,6 +1711,54 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.navigate).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["douyin", "抖音"],
+    ["wechat_channels", "视频号"],
+    ["xiaohongshu", "小红书"],
+  ] as const)(
+    "Web 下载 %s 使用归档签名地址并交给下载工具保存",
+    async (platformKey, platform) => {
+      const base = studio();
+      const video: StudioVideo = {
+        ...base.data.videos[0],
+        platformKey,
+        platform,
+        playUrl: "https://source.test/expiring-direct.mp4",
+      };
+      const value = studio({ review: false });
+      useStudio.mockReturnValue(value);
+      const openWindow = vi.spyOn(window, "open").mockReturnValue(null);
+      fetchViralVideoMedia.mockResolvedValue({
+        kind: "video",
+        url: "https://media.test/archived-signed.mp4",
+        contentType: "video/mp4",
+        cacheHit: true,
+      });
+      downloadVideoToFile.mockResolvedValue({ status: "saved" });
+      render(<ViralCard video={video} active={false} onActivate={vi.fn()} />);
+
+      fireEvent.click(
+        screen.getByRole("button", { name: `下载视频 ${video.title}` }),
+      );
+
+      await waitFor(() => expect(downloadVideoToFile).toHaveBeenCalledOnce());
+      expect(fetchViralVideoMedia).toHaveBeenCalledExactlyOnceWith(
+        platformKey,
+        video.nativeId,
+        "video",
+      );
+      const [resolveUrl, filename] = downloadVideoToFile.mock.calls[0];
+      await expect(resolveUrl()).resolves.toBe(
+        "https://media.test/archived-signed.mp4",
+      );
+      expect(filename).toBe(`${video.title}.mp4`);
+      expect(fetchViralVideoSource).not.toHaveBeenCalled();
+      expect(openWindow).not.toHaveBeenCalled();
+      expect(createViralImportTask).not.toHaveBeenCalled();
+      openWindow.mockRestore();
+    },
+  );
+
   it("下载遇余额不足时打开钱包侧栏并透传服务端文案", async () => {
     viralCacheBridge.cacheAvailable.mockReturnValue(true);
     viralCacheBridge.ensureViralCacheForVideo.mockRejectedValueOnce(
@@ -1546,29 +1780,37 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.notify).toHaveBeenCalledWith("积分不足，本次需要 6 积分。");
   });
 
-  it("爆款详情提取文案直连服务端导入：桌面与 Web 同一动作", () => {
-    viralCacheBridge.cacheAvailable.mockReturnValue(true);
-    const value = studio({
-      review: false,
-      state: {
-        ...studio().state,
-        page: "viral-detail",
-        selectedVideoId: "dy-1",
-      },
-    });
-    useStudio.mockReturnValue(value);
-    render(<ViralDetailPage />);
+  it.each([true, false])(
+    "爆款详情确认后直接导入提取文案（桌面：%s）",
+    async (desktop) => {
+      viralCacheBridge.cacheAvailable.mockReturnValue(desktop);
+      openViralVideoDetail.mockResolvedValue(
+        viralDetailView(viralItem(1, { title: studio().data.videos[0].title })),
+      );
+      const value = studio({
+        review: false,
+        state: {
+          ...studio().state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ViralDetailPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      const extract = screen.getByRole("button", { name: "提取文案" });
+      await waitFor(() => expect(extract).toBeEnabled());
+      fireEvent.click(extract);
 
-    // 共享文案缓存退役：不再前置查缓存，直接走服务端导入 → 转写。
-    expect(createViralImportTask).toHaveBeenCalledWith(
-      "douyin",
-      "native-dy-1",
-      "copy",
-      expect.any(String),
-    );
-  });
+      // 共享文案缓存退役：不再前置查缓存，直接走服务端导入 → 转写。
+      expect(createViralImportTask).toHaveBeenCalledWith(
+        "douyin",
+        "native-dy-1",
+        "copy",
+        expect.any(String),
+      );
+    },
+  );
 
   it("查看详情免费：卡片不再报价，也不再有已查看角标（2026-10-06 拍板）", async () => {
     listViralVideos.mockResolvedValue({
@@ -1599,41 +1841,42 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.queryByText(/积分/)).not.toBeInTheDocument();
   });
 
-  it("详情页刷新资源仅抖音展示并按次调用计费接口", async () => {
-    const value = studio({
-      review: false,
-      state: {
-        ...studio().state,
-        page: "viral-detail",
-        selectedVideoId: "dy-1",
-      },
-    });
-    useStudio.mockReturnValue(value);
-    refreshViralVideoResource.mockResolvedValue({
-      video: {
-        platform: "douyin",
-        videoId: "native-dy-1",
-        title: "农村建房预算，别只盯着主体",
-        author: "乡墅老张",
-        coverUrl: null,
-      },
-      billing: { charged: 1, unit: "call" },
-    });
-    render(<ViralDetailPage />);
+  it.each(["douyin", "wechat_channels", "xiaohongshu"] as const)(
+    "%s 详情只读取免费详情，不提供付费资源刷新或统计补采",
+    async (platform) => {
+      const base = studio();
+      const item = viralItem(1, { platform, title: "管理员发布的视频" });
+      openViralVideoDetail.mockResolvedValue(viralDetailView(item));
+      useStudio.mockReturnValue(
+        studio({
+          review: false,
+          data: { ...base.data, videos: [] },
+          state: { ...base.state, page: "viral-detail" },
+        }),
+      );
+      window.history.replaceState(
+        null,
+        "",
+        `/?viralPlatform=${platform}&viralVideoId=${item.videoId}#studio/viral-detail`,
+      );
+      render(<ViralDetailPage />);
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "刷新资源（按次计费）" }),
-    );
-
-    expect(refreshViralVideoResource).toHaveBeenCalledWith(
-      "douyin",
-      "native-dy-1",
-      "viral-search-key",
-    );
-    await waitFor(() =>
-      expect(screen.getByText("资源已刷新，正在更新详情…")).toBeInTheDocument(),
-    );
-  });
+      expect(
+        await screen.findByRole("heading", { name: item.title }),
+      ).toBeInTheDocument();
+      expect(openViralVideoDetail).toHaveBeenCalledExactlyOnceWith(
+        platform,
+        item.videoId,
+      );
+      expect(
+        screen.queryByRole("button", { name: /刷新资源|补全统计/ }),
+      ).toBeNull();
+      expect(refreshViralVideoResource).not.toHaveBeenCalled();
+      expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
+      expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
+      expect(fetchViralVideoSource).not.toHaveBeenCalled();
+    },
+  );
 
   it("正式爆款卡片缺少平台原生 ID 时明确报错且不进入伪项目", () => {
     const base = studio();
@@ -2133,7 +2376,7 @@ describe("V1.4 内容与运营页面", () => {
       "native-dy-1",
       "video",
     );
-    // 播放不走会过期的「源站直链」（那条路按次计费，只留给 Web 端下载）。
+    // 播放使用归档签名地址，不触发已经关闭的源站直链抓取。
     expect(fetchViralVideoSource).not.toHaveBeenCalled();
     // 缓存同时踢起来：二次播放/离线场景直接命中本地。
     await waitFor(() =>
@@ -2146,32 +2389,69 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("链接导入等未策展条目不出现在爆款网格里", () => {
-    const base = studio();
-    const imported = {
-      ...base.data.videos[0],
-      id: "douyin-imported-1",
-      nativeId: "imported-native-1",
-      title: "刚从链接导入的参考视频",
-      category: "链接导入",
-      // 链接导入/搜索结果注入的条目没有首页展示标记。
-      homepageFeatured: false,
-      playUrl: "https://source.test/imported.mp4",
-    };
-    useStudio.mockReturnValue(
-      studio({
-        review: false,
-        data: { ...base.data, videos: [...base.data.videos, imported] },
-      }),
-    );
-    render(<ViralPage />);
+  it.each([true, false])(
+    "只有已推送、可用且排期生效的条目进入公共网格（审核：%s）",
+    (review) => {
+      const base = studio();
+      const published = {
+        ...base.data.videos[0],
+        homepageFeatured: false,
+      };
+      const excluded = (
+        [
+          {
+            ...published,
+            title: "私有链接导入",
+            category: "链接导入",
+            pushedAt: null,
+          },
+          {
+            ...published,
+            title: "历史首页标记无推送",
+            homepageFeatured: true,
+            pushedAt: undefined,
+          },
+          {
+            ...published,
+            title: "历史首页标记空推送",
+            homepageFeatured: true,
+            pushedAt: null,
+          },
+          { ...published, title: "已下架的推送", availability: "hidden" },
+          { ...published, title: "不可用的推送", availability: "unavailable" },
+          {
+            ...published,
+            title: "未来排期",
+            homepageStartsAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+          {
+            ...published,
+            title: "已过期排期",
+            homepageEndsAt: new Date(Date.now() - 60_000).toISOString(),
+          },
+        ] satisfies StudioVideo[]
+      ).map((video, index) => ({
+        ...video,
+        id: `excluded-${index}`,
+        nativeId: `excluded-${index}`,
+      }));
+      listViralVideos.mockReturnValue(new Promise(() => {}));
+      useStudio.mockReturnValue(
+        studio({
+          review,
+          data: { ...base.data, videos: [published, ...excluded] },
+        }),
+      );
+      render(<ViralPage />);
 
-    expect(screen.getByText("农村建房预算，别只盯着主体")).toBeInTheDocument();
-    expect(screen.queryByText("刚从链接导入的参考视频")).toBeNull();
-    // 平台计数与分类同样只算策展集合：否则会出现点进去什么都没有的分类。
-    expect(screen.getByRole("tab", { name: "抖音 1" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "链接导入" })).toBeNull();
-  });
+      expect(screen.getByText(published.title)).toBeInTheDocument();
+      for (const video of excluded)
+        expect(screen.queryByText(video.title)).toBeNull();
+      expect(screen.queryByRole("button", { name: "链接导入" })).toBeNull();
+      if (!review)
+        expect(screen.getByRole("tab", { name: "抖音 1" })).toBeInTheDocument();
+    },
+  );
 
   it("每次列表刷新后把本地多余的缓存交给服务端回收（删除与下架连带清缓存）", async () => {
     const base = studio();
@@ -2183,6 +2463,7 @@ describe("V1.4 内容与运营页面", () => {
       title: "刚从链接导入的参考视频",
       category: "链接导入",
       homepageFeatured: false,
+      pushedAt: null,
     };
     useStudio.mockReturnValue(
       studio({ review: false, data: { ...base.data, videos: [imported] } }),
@@ -2314,7 +2595,7 @@ describe("V1.4 内容与运营页面", () => {
     });
   });
 
-  it("未知爆款统计逐项显示待核验", () => {
+  it("未提供的爆款统计逐项显示破折号", () => {
     const base = studio();
     useStudio.mockReturnValue(
       studio({
@@ -2333,9 +2614,9 @@ describe("V1.4 内容与运营页面", () => {
     );
     render(<ViralPage />);
 
-    expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
-    expect(screen.getByTitle("转发")).toHaveTextContent("待核验");
-    expect(screen.getByTitle("收藏")).toHaveTextContent("待核验");
+    expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);
+    expect(screen.getByTitle("转发")).toHaveTextContent(/^—$/);
+    expect(screen.getByTitle("收藏")).toHaveTextContent(/^—$/);
   });
 
   it.each([0, 1])(
@@ -2363,9 +2644,9 @@ describe("V1.4 内容与运营页面", () => {
       // 卡片取消统计来源元数据行（用户拍板 2026-11-15）：详情页仍保留。
       expect(screen.queryByText(/统计来源：/)).not.toBeInTheDocument();
       expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
-      expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
+      expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);
       expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
-      expect(screen.getByTitle("收藏")).toHaveTextContent("待核验");
+      expect(screen.getByTitle("收藏")).toHaveTextContent(/^—$/);
       view.unmount();
       useStudio.mockReturnValue({
         ...value,
@@ -2377,7 +2658,7 @@ describe("V1.4 内容与运营页面", () => {
       });
       render(<ViralDetailPage />);
       expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
-      expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
+      expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);
       expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
       expect(
         screen.getByText(/最近核验：2026-10-12T09:00:00Z/),
@@ -2385,7 +2666,7 @@ describe("V1.4 内容与运营页面", () => {
     },
   );
 
-  it("缺字段刷新保留1200赞并提示本次未完整更新", async () => {
+  it("已有点赞与缺失评论保持响应原值，不自动读取统计缓存", async () => {
     listViralVideos.mockReturnValue(new Promise(() => {}));
     const base = studio();
     const video = {
@@ -2393,22 +2674,6 @@ describe("V1.4 内容与运营页面", () => {
       likes: 1200,
       statisticsUpdatedAt: "2026-10-12T08:00:00Z",
     };
-    fetchViralVideoStatistics.mockResolvedValue({
-      items: [
-        viralItem(1, {
-          platform: "wechat_channels",
-          videoId: video.nativeId,
-          likes: null,
-          comments: null,
-          shares: null,
-          collects: null,
-          likeDisplay: null,
-          statisticsUpdatedAt: null,
-          statisticsCheckedAt: "2026-10-12T09:00:00Z",
-          statisticsStatus: "partial",
-        }),
-      ],
-    });
     render(
       <StatefulViralPage
         value={studio({
@@ -2422,10 +2687,13 @@ describe("V1.4 内容与运营页面", () => {
     // 页同款组件承载，卡片只保留四项指标本身。
     expect(screen.queryByText(/本次部分指标未更新/)).not.toBeInTheDocument();
     expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
-    expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
+    expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);
     expect(
       screen.queryByText(/统计时间：2026-10-12T08:00:00Z/),
     ).not.toBeInTheDocument();
+    await act(async () => Promise.resolve());
+    expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
+    expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
   });
 
   it("非首页发布条目在客户列表首屏和下一页可见，私有导入不混入", async () => {
@@ -2441,6 +2709,7 @@ describe("V1.4 内容与运营页面", () => {
     const privateVideo = {
       ...base.data.videos[0],
       homepageFeatured: false,
+      pushedAt: null,
       id: "private",
       nativeId: "private",
       title: "私有链接导入",
@@ -2490,219 +2759,88 @@ describe("V1.4 内容与运营页面", () => {
     });
   });
 
-  it("非审核列表为当前可见的视频号完整统计查询缓存且每页仅一次", async () => {
-    listViralVideos.mockReturnValue(new Promise(() => {}));
-    const base = studio();
-    const sourceVideo = {
-      ...base.data.videos[1],
-      comments: 10,
-      shares: 20,
-      collections: 30,
-    };
-    fetchViralVideoStatistics.mockResolvedValue({
-      items: [
-        {
-          platform: "wechat_channels",
-          videoId: "native-wx-1",
-          category: "庭院案例",
-          title: sourceVideo.title,
-          author: sourceVideo.author,
-          authorAvatar: null,
-          verified: false,
-          coverUrl: sourceVideo.poster,
-          durationMs: 72_000,
-          likes: 9_800,
-          comments: 44,
-          shares: 55,
-          collects: 66,
-          publishedAt: null,
-          publishedDisplay: "3天前",
-          likeDisplay: "1.2万",
-          tags: [],
-          hasPlayableAudio: false,
-          playUrl: null,
-        },
-      ],
-    });
-    const value = studio({
-      review: false,
-      data: { ...base.data, videos: [sourceVideo] },
-    });
-    useStudio.mockReturnValue(value);
-    const view = render(<ViralPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "视频号 1" }));
+  it.each([true, false])(
+    "缺统计时保留缺值且没有补全入口或上游请求（审核：%s）",
+    async (review) => {
+      listViralVideos.mockReturnValue(new Promise(() => {}));
+      const base = studio();
+      const value = studio({
+        review,
+        data: { ...base.data, videos: [missingWechatVideo()] },
+      });
+      useStudio.mockReturnValue(value);
+      const view = render(<ViralPage />);
+      fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+      await act(async () => Promise.resolve());
+      view.rerender(<ViralPage />);
 
-    await waitFor(() =>
-      expect(fetchViralVideoStatistics).toHaveBeenCalledWith(["native-wx-1"]),
-    );
-    view.rerender(<ViralPage />);
-    expect(fetchViralVideoStatistics).toHaveBeenCalledOnce();
-    const update = vi.mocked(value.updateData).mock.calls[0][0];
-    expect(update(value.data).videos[0]).toMatchObject({
+      for (const label of ["点赞", "评论", "转发", "收藏"]) {
+        expect(screen.getByTitle(label)).toHaveTextContent(/^—$/);
+      }
+      expect(
+        screen.queryByRole("button", { name: /补全统计|刷新资源|忽略/ }),
+      ).toBeNull();
+      expect(screen.queryByText(/还没补全|补全只对|正在补全/)).toBeNull();
+      expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
+      expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
+      expect(refreshViralVideoResource).not.toHaveBeenCalled();
+      expect(getWorkspacePricing).not.toHaveBeenCalled();
+      expect(value.openLive).not.toHaveBeenCalled();
+    },
+  );
+
+  it("列表直接使用响应附带的统计，翻页与重渲染不另行补采", async () => {
+    const base = studio();
+    const first = viralItem(1, {
+      platform: "wechat_channels",
+      title: "响应内统计一",
+      likes: 1200,
+      likeDisplay: null,
       comments: 44,
-      shares: 55,
-      collections: 66,
+      shares: 0,
+      collects: null,
     });
-  });
-
-  it("视频号缺互动统计时给出自愈入口，补全后逐条回填并自动收起", async () => {
-    listViralVideos.mockReturnValue(new Promise(() => {}));
-    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
-    let release: ((payload: { items: ViralVideoItem[] }) => void) | undefined;
-    refreshViralVideoStatistics.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
+    const second = viralItem(2, {
+      platform: "wechat_channels",
+      title: "响应内统计二",
+      comments: 99,
+    });
+    listViralVideos
+      .mockResolvedValueOnce({ items: [], hasMore: false })
+      .mockResolvedValueOnce({
+        items: [first],
+        hasMore: true,
+        nextCursor: "statistics-page-2",
+      })
+      .mockResolvedValueOnce({ items: [second], hasMore: false });
+    const view = render(
+      <StatefulViralPage
+        value={studio({ review: false, data: { ...base.data, videos: [] } })}
+      />,
     );
-    const base = studio();
-    const value = studio({
-      review: false,
-      data: { ...base.data, videos: [missingWechatVideo()] },
-    });
-    render(<StatefulViralPage value={value} />);
+    await waitFor(() => expect(listViralVideos).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-
-    // 缺统计的卡片四项都是「—」：点赞也不显示 0（0 会被读成已到手的真实数据）。
-    expect(screen.getByTitle("点赞")).toHaveTextContent("待核验");
-    expect(
-      await screen.findByText("1 条视频号的互动统计还没补全"),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/补全只对缺失的条目外呼/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "补全统计" }));
-    // 逐条补采：入口换成进度，报价口径由服务端按实际外呼条数结算。
-    expect(
-      await screen.findByText(/正在补全 1 条视频号的互动统计…（0 \/ 1）/),
-    ).toBeInTheDocument();
-    await waitFor(() =>
-      expect(refreshViralVideoStatistics).toHaveBeenCalledWith(
-        ["native-wx-1"],
-        "viral-search-key",
-      ),
+    await screen.findByText(first.title);
+    expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
+    expect(screen.getByTitle("评论")).toHaveTextContent("44");
+    expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
+    expect(screen.getByTitle("收藏")).toHaveTextContent(/^—$/);
+    fireEvent.click(screen.getByRole("button", { name: "加载更多视频" }));
+    await screen.findByText(second.title);
+    view.rerender(
+      <StatefulViralPage
+        value={studio({ review: false, data: { ...base.data, videos: [] } })}
+      />,
     );
-
-    await act(async () => {
-      release?.(wechatStatisticsPayload());
-    });
-    await waitFor(() =>
-      expect(screen.getByTitle("评论")).toHaveTextContent("44"),
-    );
-    expect(screen.getByTitle("点赞")).toHaveTextContent("1.2万");
-    // 补齐后自愈入口自动消失。
-    expect(screen.queryByText(/还没补全/)).toBeNull();
-    expect(screen.queryByText(/正在补全/)).toBeNull();
-  });
-
-  it("取消补全后丢弃迟到的回填，缺口重新出现在入口上", async () => {
-    listViralVideos.mockReturnValue(new Promise(() => {}));
-    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
-    let release: ((payload: { items: ViralVideoItem[] }) => void) | undefined;
-    refreshViralVideoStatistics.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    );
-    const base = studio();
-    const value = studio({
-      review: false,
-      data: { ...base.data, videos: [missingWechatVideo()] },
-    });
-    render(<StatefulViralPage value={value} />);
-    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "补全统计" }));
-    expect(await screen.findByText(/正在补全/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    expect(screen.queryByText(/正在补全/)).toBeNull();
     expect(
-      screen.getByText("1 条视频号的互动统计还没补全"),
-    ).toBeInTheDocument();
-
-    // 取消后那一条仍会返回：迟到的结果不得再写进列表（否则会白扣一次还改了界面）。
-    await act(async () => {
-      release?.(wechatStatisticsPayload());
-    });
-    expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
-    expect(
-      screen.getByText("1 条视频号的互动统计还没补全"),
-    ).toBeInTheDocument();
-  });
-
-  it("忽略后收起自愈入口", async () => {
-    listViralVideos.mockReturnValue(new Promise(() => {}));
-    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
-    const base = studio();
-    const value = studio({
-      review: false,
-      data: { ...base.data, videos: [missingWechatVideo()] },
-    });
-    render(<StatefulViralPage value={value} />);
-    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "忽略" }));
-    expect(screen.queryByText(/还没补全/)).toBeNull();
-  });
-
-  it("补全失败时保留入口并给出重试提示", async () => {
-    listViralVideos.mockReturnValue(new Promise(() => {}));
-    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
-    refreshViralVideoStatistics.mockRejectedValue(new Error("upstream down"));
-    const base = studio();
-    const value = studio({
-      review: false,
-      data: { ...base.data, videos: [missingWechatVideo()] },
-    });
-    render(<StatefulViralPage value={value} />);
-    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "补全统计" }));
-    expect(
-      await screen.findByText("互动统计补全中断，请稍后重试"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("1 条视频号的互动统计还没补全"),
-    ).toBeInTheDocument();
-  });
-
-  it("补全遇到余额不足时引导充值并保留入口", async () => {
-    listViralVideos.mockReturnValue(new Promise(() => {}));
-    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
-    refreshViralVideoStatistics.mockRejectedValue(
-      Object.assign(new Error("积分不足"), { code: "INSUFFICIENT_CREDITS" }),
-    );
-    const base = studio();
-    const value = studio({
-      review: false,
-      data: { ...base.data, videos: [missingWechatVideo()] },
-    });
-    render(<StatefulViralPage value={value} />);
-    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "补全统计" }));
-    expect(
-      await screen.findByText("余额不足，无法补全互动统计"),
-    ).toBeInTheDocument();
-    expect(value.openLive).toHaveBeenCalledWith("wallet");
-  });
-
-  it("审核演示不出现自愈入口，也不发起补采", async () => {
-    listViralVideos.mockReturnValue(new Promise(() => {}));
-    const base = studio();
-    useStudio.mockReturnValue(
-      studio({ data: { ...base.data, videos: [missingWechatVideo()] } }),
-    );
-    render(<ViralPage />);
-    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-
-    expect(screen.getByTitle("点赞")).toHaveTextContent("待核验");
-    expect(screen.queryByText(/还没补全/)).toBeNull();
+      screen.getAllByTitle("评论").map((node) => node.textContent),
+    ).toEqual(["44", "99"]);
     expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
     expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
+    expect(refreshViralVideoResource).not.toHaveBeenCalled();
   });
 
-  it("视频号详情不再单独请求统计（统计随「查看详情」同批返回）", async () => {
+  it("视频号详情使用免费详情响应附带统计，不单独读取或补采", async () => {
     const base = studio();
     const value = studio({
       review: false,
@@ -2712,15 +2850,36 @@ describe("V1.4 内容与运营页面", () => {
         selectedVideoId: "wx-1",
       },
     });
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(
+        viralItem(1, {
+          platform: "wechat_channels",
+          videoId: "native-wx-1",
+          title: "服务端确认的庭院详情",
+          likes: 1200,
+          likeDisplay: null,
+          comments: 44,
+          shares: 0,
+          collects: null,
+        }),
+      ),
+    );
     useStudio.mockReturnValue(value);
     render(<ViralDetailPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "新中式庭院的三个细节" }),
+      await screen.findByRole("heading", { name: "服务端确认的庭院详情" }),
     ).toBeInTheDocument();
-    // 统计字段与详情在同一个响应里返回：详情页只调一次计费接口，
-    // 不再单独打统计缓存端点（一次计费覆盖详情与统计）。
+    expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
+    expect(screen.getByTitle("评论")).toHaveTextContent("44");
+    expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
+    expect(screen.getByTitle("收藏")).toHaveTextContent(/^—$/);
+    expect(openViralVideoDetail).toHaveBeenCalledExactlyOnceWith(
+      "wechat_channels",
+      "native-wx-1",
+    );
     expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
+    expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
   });
 
   it("爆款列表默认渲染前十二条并保留平台筛选", () => {
@@ -3549,6 +3708,204 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.queryByText(/积分/)).not.toBeInTheDocument();
   });
 
+  it.each(["viralExtractIntent", "viralReplicateIntent"] as const)(
+    "服务端详情未决时不消费 %s，确认可用后才自动导入",
+    async (intent) => {
+      const base = studio();
+      let resolveDetail!: (value: ViralDetailViewResponse) => void;
+      openViralVideoDetail.mockReturnValue(
+        new Promise((resolve) => {
+          resolveDetail = resolve;
+        }),
+      );
+      const value = studio({
+        review: false,
+        data: {
+          ...base.data,
+          videos: [{ ...base.data.videos[0], durationMs: 10_000 }],
+        },
+        state: {
+          ...base.state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+          [intent]: true,
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ViralDetailPage />);
+
+      expect(openViralVideoDetail).toHaveBeenCalledExactlyOnceWith(
+        "douyin",
+        "native-dy-1",
+      );
+      for (const name of ["提取文案", "去复刻"]) {
+        const button = screen.getByRole("button", { name });
+        expect(button).toBeDisabled();
+        fireEvent.click(button);
+      }
+      await act(async () => Promise.resolve());
+      expect(createViralImportTask).not.toHaveBeenCalled();
+      expect(value.patchState).not.toHaveBeenCalledWith({ [intent]: false });
+      expect(value.patchDraft).not.toHaveBeenCalled();
+      expect(value.navigate).not.toHaveBeenCalled();
+
+      await act(async () => {
+        resolveDetail(
+          viralDetailView(
+            viralItem(1, {
+              title: "服务端确认可用",
+              durationMs: 10_000,
+            }),
+          ),
+        );
+      });
+      await waitFor(() =>
+        expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
+          "douyin",
+          "native-dy-1",
+          intent === "viralExtractIntent" ? "copy" : "replica",
+          expect.any(String),
+        ),
+      );
+      expect(value.patchState).toHaveBeenCalledWith({ [intent]: false });
+    },
+  );
+
+  it.each(["pending", "hidden", "unavailable", "error"] as const)(
+    "8秒缓存视频详情为 %s 时禁止导入、自动意图和全自动复刻",
+    async (result) => {
+      const base = studio();
+      const value = studio({
+        review: false,
+        data: {
+          ...base.data,
+          videos: [{ ...base.data.videos[0], durationMs: 8_000 }],
+        },
+        state: {
+          ...base.state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+          viralExtractIntent: true,
+          viralReplicateIntent: true,
+        },
+      });
+      if (result === "pending") {
+        openViralVideoDetail.mockReturnValue(new Promise(() => {}));
+      } else if (result === "error") {
+        openViralVideoDetail.mockRejectedValue(new Error("详情网络断开"));
+      } else {
+        openViralVideoDetail.mockResolvedValue(
+          viralDetailView(
+            viralItem(1, {
+              title: "服务端已撤回的视频",
+              durationMs: 8_000,
+              availability: result,
+            }),
+          ),
+        );
+      }
+      useStudio.mockReturnValue(value);
+      render(<ViralDetailPage />);
+
+      if (result === "error") await screen.findByText("详情网络断开");
+      else if (result === "pending") await act(async () => Promise.resolve());
+      else await screen.findByRole("heading", { name: "服务端已撤回的视频" });
+      expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+      expect(findActiveReplicaPipeline).not.toHaveBeenCalled();
+      expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+      for (const name of ["提取文案", "去复刻"]) {
+        const button = screen.getByRole("button", { name });
+        expect(button).toBeDisabled();
+        fireEvent.click(button);
+      }
+      expect(createViralImportTask).not.toHaveBeenCalled();
+      expect(value.extractScriptFromUpload).not.toHaveBeenCalled();
+      expect(value.patchDraft).not.toHaveBeenCalled();
+      expect(value.navigate).not.toHaveBeenCalled();
+      expect(value.patchState).not.toHaveBeenCalledWith({
+        viralExtractIntent: false,
+      });
+      expect(value.patchState).not.toHaveBeenCalledWith({
+        viralReplicateIntent: false,
+      });
+    },
+  );
+
+  it.each(["viralExtractIntent", "viralReplicateIntent"] as const)(
+    "视频A详情失败后离开再查看B不会沿用 %s，显式新动作才导入B",
+    async (intent) => {
+      const base = studio();
+      const second = {
+        ...base.data.videos[0],
+        id: "dy-2",
+        nativeId: "native-dy-2",
+        title: "仅查看的视频B",
+        durationMs: 20_000,
+      };
+      let current = studio({
+        review: false,
+        data: { ...base.data, videos: [base.data.videos[0], second] },
+        state: {
+          ...base.state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+          [intent]: true,
+        },
+      });
+      openViralVideoDetail
+        .mockRejectedValueOnce(new Error("视频A详情读取失败"))
+        .mockResolvedValueOnce(
+          viralDetailView(
+            viralItem(2, { title: second.title, durationMs: 20_000 }),
+          ),
+        );
+      useStudio.mockImplementation(() => current);
+      const view = render(<ViralDetailPage />);
+      await screen.findByText("视频A详情读取失败");
+      expect(createViralImportTask).not.toHaveBeenCalled();
+
+      current = {
+        ...current,
+        state: navigateStudioState(current.state, "viral"),
+      };
+      view.rerender(<ViralPage />);
+      current = {
+        ...current,
+        state: navigateStudioState(current.state, "viral-detail", {
+          selectedVideoId: second.id,
+        }),
+      };
+      view.rerender(<ViralDetailPage />);
+      await waitFor(() =>
+        expect(openViralVideoDetail).toHaveBeenCalledTimes(2),
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "提取文案" })).toBeEnabled(),
+      );
+      expect(current.state.viralExtractIntent).toBe(false);
+      expect(current.state.viralReplicateIntent).toBe(false);
+      expect(createViralImportTask).not.toHaveBeenCalled();
+      expect(current.navigate).not.toHaveBeenCalled();
+
+      current = {
+        ...current,
+        state: navigateStudioState(current.state, "viral-detail", {
+          selectedVideoId: second.id,
+          [intent]: true,
+        }),
+      };
+      view.rerender(<ViralDetailPage />);
+      await waitFor(() =>
+        expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
+          "douyin",
+          "native-dy-2",
+          intent === "viralExtractIntent" ? "copy" : "replica",
+          expect.any(String),
+        ),
+      );
+    },
+  );
+
   it("已下架视频仍可查看详情，页面不出现任何计费回执", async () => {
     window.history.replaceState(
       null,
@@ -4362,15 +4719,9 @@ describe("全自动复刻入口（M8 v1）", () => {
       const view = render(<ViralDetailPage />);
       const entry = await screen.findByRole("button", { name: "全自动复刻" });
       await waitFor(() => expect(entry).toBeEnabled());
-      if (category === "管理员上传") {
-        expect(
-          screen.queryByRole("button", { name: "刷新资源（按次计费）" }),
-        ).not.toBeInTheDocument();
-      } else {
-        expect(
-          screen.getByRole("button", { name: "刷新资源（按次计费）" }),
-        ).toBeInTheDocument();
-      }
+      expect(
+        screen.queryByRole("button", { name: "刷新资源（按次计费）" }),
+      ).not.toBeInTheDocument();
       fireEvent.click(entry);
       expect(confirmSpy).toHaveBeenCalledOnce();
       confirmSpy.mockRestore();

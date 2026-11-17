@@ -2518,14 +2518,21 @@ export async function openVideoDownloadFolder(
 }
 
 /**
- * 通用「选位置 → blob 传输 → 等完成」的桌面下载管线；爆款本地缓存下载
- * （viralCache.downloadViralVideoFile）复用同一条管线，Url 可以是任何
- * WebView 可取到字节的地址（含 asset 协议的本地缓存文件）。
+ * 网页使用浏览器下载；桌面走「选位置 → blob 传输 → 等完成」。
+ * 爆款本地缓存复用同一管线，地址可为 WebView 能读取的本地缓存文件。
  */
 export async function downloadVideoToFile(
   getUrl: () => Promise<string>,
   filename: string,
 ): Promise<VideoDownloadResult> {
+  if (!isTauri()) {
+    const blob = await fetchGenerationResultBlob(
+      await getUrl(),
+      "下载视频失败",
+    );
+    downloadBlob(blob, filename);
+    return { status: "started" };
+  }
   let destination: NativeVideoDownload | null;
   try {
     destination = await invoke<NativeVideoDownload | null>(
@@ -8448,6 +8455,8 @@ export type ViralVideoItem = {
   homepageRank?: number | null;
   homepageStartsAt?: string | null;
   homepageEndsAt?: string | null;
+  /** 已推送到客户前端的发布标记（管理员上传/手工推送后非空）。 */
+  pushedAt?: string | null;
   platform: ViralPlatform;
   videoId: string;
   category: string;
@@ -8576,7 +8585,7 @@ export type ViralImportTask = {
   retryable?: boolean;
 };
 
-/** 最近 7 天爆款列表（服务端按分类关键词聚合，带计费护栏缓存）。 */
+/** 管理员已推送且归档就绪的爆款目录；可单独读取首页推荐位。 */
 export function listViralVideos(
   platform: ViralPlatform,
   sort: ViralSort = "hot",

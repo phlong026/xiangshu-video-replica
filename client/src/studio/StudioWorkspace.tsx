@@ -38,7 +38,12 @@ import {
 import { SettingsPanel } from "../SettingsPanel";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { AnalyticsPage } from "./AnalyticsPage";
-import { MaterialsPage, PublishPage } from "./ContentPages";
+import {
+  MaterialsPage,
+  PublishPage,
+  ViralDetailPage,
+  ViralPage,
+} from "./ContentPages";
 import {
   CopyPage,
   customerDurationMax,
@@ -266,8 +271,9 @@ export const navGroups: {
   {
     label: "创作",
     pages: [
-      // 爆款数据功能已下线（2026-11-16 定价决策）：入口下架；服务端 /api/viral/*
-      // 同步返回 410。历史项目数据保留，恢复功能 revert 即可。
+      // 爆款视频（2026-11-17 恢复）：只展示管理员后台上传/推送的内容；
+      // 客户列表接口已放开，抓取类接口（source/search/统计补采）仍保持 410。
+      { id: "viral", title: "爆款视频", icon: "fire" },
       { id: "copy", title: "文案工坊", icon: "pen" },
       { id: "replica", title: "视频拆解", icon: "video" },
     ],
@@ -1439,14 +1445,15 @@ export function StudioWorkspace({
       ...(sameAccount ? previous : emptyData),
       loading: true,
     }));
-    const coreLoad = loadStudioData(workspaceUser, { includeViral: false });
+    const coreLoad = loadStudioData(workspaceUser, { includeViral: true });
     void coreLoad
       .then((result) => {
         if (active)
-          setData({
+          setData((previous) => ({
             ...result,
+            videos: previous.videos,
             assets: mergeStudioAssets(result.assets, restoredAssetsRef.current),
-          });
+          }));
       })
       .catch((cause: unknown) => {
         if (active)
@@ -1458,7 +1465,6 @@ export function StudioWorkspace({
             ],
           });
       });
-    // 爆款数据功能已下线（2026-11-16 定价决策）：不再请求爆款列表。
     return () => {
       active = false;
     };
@@ -2701,8 +2707,9 @@ function StudioPageContent({
     case "workbench":
       return <WorkbenchPage />;
     case "viral":
+      return <ViralPage />;
     case "viral-detail":
-      return <ViralFeatureRetiredPage />;
+      return <ViralDetailPage />;
     case "copy":
       return <CopyPage />;
     case "replica":
@@ -2751,17 +2758,6 @@ function StudioPageContent({
         <ProfilePage accountSummary={accountSummary} />
       );
   }
-}
-
-function ViralFeatureRetiredPage() {
-  const { navigate } = useStudio();
-  return (
-    <Empty
-      title="爆款数据功能已下线"
-      description="此页面已停止提供服务，请返回工作台继续创作。"
-      action={<Button onClick={() => navigate("workbench")}>返回工作台</Button>}
-    />
-  );
 }
 
 function StudioSettingsPage() {

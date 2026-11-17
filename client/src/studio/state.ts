@@ -146,6 +146,8 @@ export function navigateStudioState(
   const keepPersonContext = page.startsWith("person-");
   return {
     ...state,
+    viralReplicateIntent: false,
+    viralExtractIntent: false,
     selectedVideoId: undefined,
     selectedTaskId: keepTaskContext ? state.selectedTaskId : undefined,
     selectedTaskKind: keepTaskContext ? state.selectedTaskKind : undefined,

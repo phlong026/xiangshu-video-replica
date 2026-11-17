@@ -134,6 +134,11 @@ export type StudioVideo = {
   homepageFeatured?: boolean;
   homepageStartsAt?: string | null;
   homepageEndsAt?: string | null;
+  /** 已推送到客户前端的发布标记（管理员上传/手工推送后非空）。 */
+  pushedAt?: string | null;
+  availability?: "available" | "hidden" | "unavailable";
+  /** 当前账号的收藏状态；旧响应和审核样例可缺省。 */
+  isFavorite?: boolean;
   /** 首页精选置顶顺序；数值越小越靠前，空值表示未置顶。 */
   homepageRank?: number | null;
   id: string;
@@ -168,6 +173,13 @@ export type StudioVideo = {
   /** 爆款源视频时长（毫秒）：详情页按时长分流复刻入口（≤15s 才可复刻）。 */
   durationMs?: number;
   playUrl?: string | null;
+};
+export type StudioViralTiming = {
+  platformKey: NonNullable<StudioVideo["platformKey"]>;
+  serverTime?: string | null;
+  nextChangeAt?: string | null;
+  /** 该平台响应抵达客户端的时间（毫秒）；分别记录，避免聚合等待延后排期。 */
+  receivedAt: number;
 };
 export type StudioTask = {
   draftSnapshot?: StudioDraft;
