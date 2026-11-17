@@ -194,10 +194,14 @@ describe("场景生成恢复与受理边界", () => {
           if (owner) return owner;
           if (String(url).includes("/api/task-references/"))
             return Response.json({ short_ref: "A1B2C3D4" });
-          if (String(url).endsWith("/active-or-latest"))
+          if (
+            String(url).endsWith("/active-or-latest") ||
+            String(url).endsWith("/task-status/stale-task")
+          )
             return Response.json({
               ...sceneTask("stale-task"),
               status,
+              result: status === "FAILED" ? null : sceneResult,
               error_message: status === "FAILED" ? "上次生成未完成。" : null,
             });
           if (init?.method === "POST")
@@ -209,8 +213,14 @@ describe("场景生成恢复与受理边界", () => {
       expect(latest?.status).toBe(status);
       if (status === "FAILED")
         expect(latest?.error_message).toContain("错误编号：A1B2C3D4");
+      expect(
+        JSON.parse(localStorage.getItem(operation.storageKey) ?? "null").key,
+      ).toBe(operation.key);
       await expect(
-        createCharacterSceneLook("identity-1", sceneInput),
+        createCharacterSceneLook("identity-1", sceneInput, undefined, {
+          id: "stale-task",
+          status: status === "FAILED" ? "FAILED" : "SUCCEEDED",
+        }),
       ).resolves.toEqual(sceneResult);
       expect(postKeys).toHaveLength(1);
       expect(postKeys[0]).not.toBe(operation.key);
@@ -220,37 +230,45 @@ describe("场景生成恢复与受理边界", () => {
     },
   );
 
-  it("恢复面板读到待核对状态时保留原任务，不开启新一轮", async () => {
-    const operation = await savedSceneOperation();
-    let posts = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init?: RequestInit) => {
-        const owner = ownerResponse(String(url));
-        if (owner) return owner;
-        if (String(url).includes("/api/task-references/"))
-          return Response.json({ short_ref: "A1B2C3D4" });
-        if (init?.method === "POST") posts += 1;
-        return Response.json({
-          ...sceneTask("stale-task"),
-          status: "SUBMISSION_UNCERTAIN",
-          result: null,
-          error_message: "提交结果待核对。",
-        });
-      }),
-    );
-    await getLatestSceneLookTask("identity-1");
-    await expect(
-      createCharacterSceneLook("identity-1", sceneInput),
-    ).rejects.toMatchObject({
-      status: "SUBMISSION_UNCERTAIN",
-      recoveryRequired: true,
-    });
-    expect(posts).toBe(0);
-    expect(
-      JSON.parse(localStorage.getItem(operation.storageKey) ?? "null").key,
-    ).toBe(operation.key);
-  });
+  it.each([false, true])(
+    "待核对状态保留原任务，即使尝试显式新一轮也不能绕过（%s）",
+    async (explicitNewRound) => {
+      const operation = await savedSceneOperation();
+      let posts = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: RequestInit) => {
+          const owner = ownerResponse(String(url));
+          if (owner) return owner;
+          if (String(url).includes("/api/task-references/"))
+            return Response.json({ short_ref: "A1B2C3D4" });
+          if (init?.method === "POST") posts += 1;
+          return Response.json({
+            ...sceneTask("stale-task"),
+            status: "SUBMISSION_UNCERTAIN",
+            result: null,
+            error_message: "提交结果待核对。",
+          });
+        }),
+      );
+      await getLatestSceneLookTask("identity-1");
+      await expect(
+        createCharacterSceneLook(
+          "identity-1",
+          sceneInput,
+          undefined,
+          explicitNewRound ? { id: "stale-task", status: "FAILED" } : undefined,
+        ),
+      ).rejects.toMatchObject({
+        status: "SUBMISSION_UNCERTAIN",
+        recoveryRequired: true,
+      });
+      expect(posts).toBe(0);
+      expect(
+        JSON.parse(localStorage.getItem(operation.storageKey) ?? "null").key,
+      ).toBe(operation.key);
+    },
+  );
 
   it("失效本地任务号只用原幂等键恢复一次并保存新任务号", async () => {
     const operation = await savedSceneOperation();

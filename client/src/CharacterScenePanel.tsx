@@ -78,6 +78,10 @@ export function CharacterScenePanel({
   const observedTaskRef = useRef<{ identityId: string; taskId: string } | null>(
     null,
   );
+  const uncertainSubmissionRef = useRef<{
+    identityId: string;
+    previousTaskId: string | null;
+  } | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const callbacks = useRef({ onChanged, onActiveTask, onRefresh });
   callbacks.current = { onChanged, onActiveTask, onRefresh };
@@ -121,6 +125,16 @@ export function CharacterScenePanel({
             `读取生成任务状态失败，请点击“刷新场景”重试。${sceneError(taskResult.reason)}`,
           );
         const latest = taskResult.value;
+        const uncertainSubmission = uncertainSubmissionRef.current;
+        if (
+          latest &&
+          uncertainSubmission?.identityId === identityId &&
+          latest.id !== uncertainSubmission.previousTaskId
+        ) {
+          // 回执丢失时尚无 taskId；刷新发现的新任务仍属于本次核对，失败不能折进历史。
+          observedTaskRef.current = { identityId, taskId: latest.id };
+          uncertainSubmissionRef.current = null;
+        }
         setTaskChecked(true);
         setTask(latest);
         setLoading(false);
@@ -253,6 +267,10 @@ export function CharacterScenePanel({
     const active = () => scope !== null && scopeRef.current === scope;
     // 同一事件批次的第二次提交可能早于 React 重绘，必须同步占住提交入口。
     submittingRef.current = true;
+    uncertainSubmissionRef.current = {
+      identityId,
+      previousTaskId: task?.id ?? null,
+    };
     setGenerating(true);
     setTask(null);
     setSubmittedName(input.scene_name);
@@ -267,11 +285,16 @@ export function CharacterScenePanel({
           observedTask = true;
           if (active()) {
             observedTaskRef.current = { identityId, taskId: next.id };
+            uncertainSubmissionRef.current = null;
             setTask(next);
           }
         },
+        task?.status === "FAILED" || task?.status === "SUCCEEDED"
+          ? { id: task.id, status: task.status }
+          : undefined,
       );
       if (!active()) return;
+      uncertainSubmissionRef.current = null;
       setLooks((current) => [
         created,
         ...current.filter((look) => look.persona_id !== created.persona_id),
@@ -288,6 +311,11 @@ export function CharacterScenePanel({
           cause instanceof CharacterSheetTaskError
             ? cause.recoveryRequired
             : !observedTask;
+        if (!recoveryRequired) uncertainSubmissionRef.current = null;
+        if (cause instanceof CharacterSheetTaskError && cause.taskId) {
+          observedTaskRef.current = { identityId, taskId: cause.taskId };
+          uncertainSubmissionRef.current = null;
+        }
         if (!observedTask && recoveryRequired) setTaskChecked(false);
         if (
           !(cause instanceof CharacterSheetTaskError) ||

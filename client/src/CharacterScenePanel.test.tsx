@@ -237,6 +237,56 @@ it("提交回执丢失后先核对后台任务，不直接重复生成", async (
   expect(api.createCharacterSceneLook).toHaveBeenCalledTimes(1);
 });
 
+it.each([false, true])(
+  "回执丢失后刷新查到的本次失败保持当前警示，不折成历史（有旧任务=%s）",
+  async (hasPreviousTask) => {
+    vi.mocked(api.getLatestSceneLookTask)
+      .mockResolvedValueOnce(
+        hasPreviousTask
+          ? {
+              ...task("FAILED"),
+              id: "historical-task",
+              error_message: "上次任务失败。 错误编号：B1C2D3E4",
+            }
+          : null,
+      )
+      .mockResolvedValueOnce({
+        ...task("FAILED"),
+        id: "new-submission-task",
+        error_message: "本次生成未完成。 错误编号：A1B2C3D4",
+      });
+    vi.mocked(api.createCharacterSceneLook).mockRejectedValue(
+      new api.CharacterSheetTaskError("提交回执丢失。", null, "UNKNOWN"),
+    );
+    render(
+      <CharacterScenePanel
+        identityId="p1"
+        displayName="人物"
+        canManage
+        createRequest={1}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "生成场景五视图" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fillScene();
+    fireEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "请先刷新场景核对提交状态",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "刷新场景" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "本次生成未完成。 错误编号：A1B2C3D4",
+      ),
+    );
+    expect(screen.queryByText("上次场景生成未完成")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "生成场景五视图" }),
+    ).toBeEnabled();
+    expect(api.createCharacterSceneLook).toHaveBeenCalledTimes(1);
+  },
+);
+
 it("历史失败单独标注并保留诊断号，不冒充新表单错误或自动提交", async () => {
   vi.mocked(api.getLatestSceneLookTask).mockResolvedValue({
     ...task("FAILED"),

@@ -427,6 +427,7 @@ describe("CharacterLibrary", () => {
           costume_description: "深灰色西装和浅色衬衫",
         },
         expect.any(Function),
+        undefined,
       ),
     );
     expect(await screen.findByText("商务讲解")).toBeInTheDocument();

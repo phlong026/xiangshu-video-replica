@@ -4,7 +4,6 @@ import { apiBaseUrl, resolveManagedMediaUrl } from "./apiBase";
 import {
   characterOperationDigest,
   finishCharacterOperation,
-  finishObservedCharacterTask,
   openCharacterOperation,
   saveCharacterOperation,
 } from "./characterTaskOperation";
@@ -4237,17 +4236,21 @@ export class CharacterSheetTaskError extends Error {
   }
 }
 
+type CharacterTaskTerminalReceipt = {
+  id: string;
+  status: "FAILED" | "SUCCEEDED";
+};
+
 async function runCharacterOperation(
   parameters: unknown,
   submit: (key: string) => Promise<CharacterSheetTask>,
   onTask?: (task: CharacterSheetTask) => void,
+  newRoundAfterTask?: CharacterTaskTerminalReceipt,
 ): Promise<CharacterSheetTask> {
   const epoch = workspaceCredentialEpoch;
   const owner = await getCurrentUser();
-  const operation = await openCharacterOperation(
-    `${apiBaseUrl()}/${owner.id}`,
-    parameters,
-  );
+  const operationScope = `${apiBaseUrl()}/${owner.id}`;
+  let operation = await openCharacterOperation(operationScope, parameters);
   if (epoch !== workspaceCredentialEpoch)
     throw new Error("登录状态已变化，请重新读取人物任务。");
   const submitSameOperation = async () => {
@@ -4260,6 +4263,18 @@ async function runCharacterOperation(
     return task.id;
   };
   try {
+    if (newRoundAfterTask && operation.taskId === newRoundAfterTask.id) {
+      const previous = await getCharacterSheetTask(newRoundAfterTask.id);
+      if (epoch !== workspaceCredentialEpoch)
+        throw new Error("登录状态已变化，请重新读取人物任务。");
+      // 只有明确的新一轮场景提交才能结束旧操作；只读核对必须为其他恢复入口保留原 key。
+      if (previous.status === newRoundAfterTask.status) {
+        finishCharacterOperation(operation);
+        operation = await openCharacterOperation(operationScope, parameters);
+      } else onTask?.(previous);
+    }
+    if (epoch !== workspaceCredentialEpoch)
+      throw new Error("登录状态已变化，请重新读取人物任务。");
     const taskId = operation.taskId ?? (await submitSameOperation());
     let completed: CharacterSheetTask;
     try {
@@ -4496,21 +4511,8 @@ export async function getCharacterSheetTask(
   );
 }
 
-async function readLatestCharacterSheetTask(
-  path: string,
-  errorPrefix: string,
-): Promise<CharacterSheetTask | null> {
-  const task = await requestApiJson<CharacterSheetTask | null>(
-    path,
-    errorPrefix,
-  );
-  if (task?.status === "FAILED" || task?.status === "SUCCEEDED")
-    finishObservedCharacterTask(task.id);
-  return task;
-}
-
 export async function getLatestCharacterSheetTask(): Promise<CharacterSheetTask | null> {
-  return readLatestCharacterSheetTask(
+  return requestApiJson<CharacterSheetTask | null>(
     "/api/simple-characters/tasks/active-or-latest",
     "读取人物生成任务失败",
   );
@@ -4519,7 +4521,7 @@ export async function getLatestCharacterSheetTask(): Promise<CharacterSheetTask 
 export async function getLatestSceneLookTask(
   identityId: string,
 ): Promise<CharacterSheetTask | null> {
-  return readLatestCharacterSheetTask(
+  return requestApiJson<CharacterSheetTask | null>(
     `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks/tasks/active-or-latest`,
     "读取场景造型生成任务失败",
   );
@@ -4672,6 +4674,7 @@ export async function createCharacterSceneLook(
     costume_description: string;
   },
   onTask?: (task: CharacterSheetTask) => void,
+  newRoundAfterTask?: CharacterTaskTerminalReceipt,
 ): Promise<SimpleSceneLook> {
   const completed = await runCharacterOperation(
     [
@@ -4694,6 +4697,7 @@ export async function createCharacterSceneLook(
         },
       ),
     onTask,
+    newRoundAfterTask,
   );
   if (!completed.result || !("scene_name" in completed.result)) {
     throw new Error("场景造型任务完成但结果不可用，请重新读取人物库。");

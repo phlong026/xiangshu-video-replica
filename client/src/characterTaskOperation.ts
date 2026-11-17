@@ -53,26 +53,3 @@ export function finishCharacterOperation(operation: CharacterOperation) {
   if (saved && (JSON.parse(saved) as CharacterOperation).key === operation.key)
     localStorage.removeItem(operation.storageKey);
 }
-
-export function finishObservedCharacterTask(taskId: string) {
-  // 恢复面板已经读到终态后，新生成不能再次重放旧结果；其他任务的 key 仍须保留。
-  // 清理失败不能阻止只读核对；新提交仍会执行上面的持久化检查，保持收费幂等。
-  try {
-    const keys = Array.from({ length: localStorage.length }, (_, index) =>
-      localStorage.key(index),
-    );
-    for (const storageKey of keys) {
-      if (!storageKey?.startsWith("video-replica:character-operation:v1:"))
-        continue;
-      let saved: Partial<CharacterOperation> | null;
-      try {
-        saved = JSON.parse(localStorage.getItem(storageKey) ?? "null");
-      } catch {
-        continue;
-      }
-      if (saved?.taskId === taskId) localStorage.removeItem(storageKey);
-    }
-  } catch {
-    // 浏览器禁用存储时仍允许查看已存在的任务，不把读取终态变成生成错误。
-  }
-}
