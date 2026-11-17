@@ -28,7 +28,13 @@ from fastapi import HTTPException
 from app import content_store
 from app.auth import CurrentUser
 from app.db_portable import BusinessConnection
-from app.hifly import HiflyClient, HiflyError, HiflySubmissionUncertain, validate_oral_subtitle
+from app.hifly import (
+    HiflyClient,
+    HiflyError,
+    HiflySubmissionUncertain,
+    normalize_legacy_subtitle,
+    validate_oral_subtitle,
+)
 from app.internal_billing import finalize_oral_billing, reserve_oral_billing
 from app.media_routes import get_media_storage, storage_for_asset
 from app.media_tools import inspect_media_bytes, normalize_generated_video
@@ -46,10 +52,13 @@ logger = logging.getLogger(__name__)
 
 ORAL_UNIT_PRICE_FEN_DEFAULT = 1000
 MAX_ORAL_SCRIPT_CHARS = 10_000
+# 飞影 V2 文档上限：视频分身(create_by_video)≤500MB、音频驱动(create_by_audio)≤100MB、
+# 图片分身按图片素材 10MB。2026-11-17 前创建层误设为 50MB，与上传层 200MB 冲突，
+# 导致大素材上传成功却在建任务时被拒；按文档分档后与上传层不再相悖。
 ORAL_SOURCE_MAX_BYTES = {
-    "audio": 50 * 1024 * 1024,
+    "audio": 100 * 1024 * 1024,
     "image": 10 * 1024 * 1024,
-    "video": 50 * 1024 * 1024,
+    "video": 500 * 1024 * 1024,
 }
 ORAL_CONSENT_TEXT_VERSION = "2026-09-06-v1"
 ORAL_CONSENT_PURPOSES = {"AVATAR_CLONE", "VOICE_CLONE"}
@@ -737,7 +746,7 @@ def create_oral_task(
     max_credits: int | None = None,
 ) -> OralTaskCreated:
     try:
-        subtitle = validate_oral_subtitle(subtitle)
+        subtitle = validate_oral_subtitle(normalize_legacy_subtitle(subtitle))
     except HiflyError as exc:
         raise OralDomainError(str(exc)) from exc
     require_not_auditor(

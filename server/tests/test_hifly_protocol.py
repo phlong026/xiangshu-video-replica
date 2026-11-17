@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.hifly import HiflyClient, HiflyError, HiflyHttpTransport
+from app.hifly import HiflyClient, HiflyError, HiflyHttpTransport, normalize_legacy_subtitle
 
 
 @pytest.mark.parametrize("kind", ["avatar_poll", "voice_poll", "task_poll"])
@@ -142,9 +142,29 @@ def test_flat_voice_and_video_completion_preserve_media_query() -> None:
 
 
 def test_flat_error_does_not_accept_success_fields() -> None:
-    vendor, _ = client({"code": 2016, "message": "image unavailable", "task_id": "not-valid"})
+    # 用未映射的码，确保断言命中原始 message 而非友好映射文案。
+    vendor, _ = client({"code": 9999, "message": "image unavailable", "task_id": "not-valid"})
     with pytest.raises(HiflyError, match="image unavailable"):
         vendor.create_voice(title="test", file_id="file-test")
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (2011, "文件大小"),
+        (2012, "文件类型"),
+        (2013, "音频资源"),
+        (2014, "视频资源"),
+        (2015, "克隆失败"),
+        (2016, "图片资源"),
+    ],
+)
+def test_documented_resource_error_codes_get_actionable_messages(code: int, expected: str) -> None:
+    """飞影 V2 文档错误码 2011–2016 映射到可操作的中文提示。"""
+    vendor, _ = client({"code": code, "message": "vendor raw error"})
+    with pytest.raises(HiflyError) as raised:
+        vendor.create_voice(title="test", file_id="file-test")
+    assert expected in str(raised.value)
 
 
 def test_text_video_creation_preserves_subtitles_and_integer_watermark_flag() -> None:
@@ -176,7 +196,12 @@ def test_text_video_creation_preserves_subtitles_and_integer_watermark_flag() ->
         {"st_show": "true"},
         {"st_font_size": True},
         {"st_font_size": 101},
-        {"st_primary_color": {"value": "0xFFFFFF"}},
+        {"st_primary_color": {"value": "#FFFFFF"}},
+        # 旧别名/旧颜色格式在校验器层被拒；历史数据在入库读取时先归一化。
+        {"st_x": 0},
+        {"st_y": 800},
+        {"st_primary_color": "0xFFFFFF"},
+        {"st_outline_color": "0x000000FF"},
     ],
 )
 def test_subtitle_invalid_fields_never_reach_provider(subtitle: dict[str, Any]) -> None:
@@ -199,12 +224,12 @@ def test_documented_subtitle_fields_preserve_client_values() -> None:
         "st_show": True,
         "st_font_name": "Arial",
         "st_font_size": 30,
-        "st_primary_color": "0xFFFFFF",
-        "st_outline_color": "0x000000FF",
+        "st_primary_color": "#FFFFFF",
+        "st_outline_color": "#000000FF",
         "st_width": 1080,
         "st_height": 200,
-        "st_x": 0,
-        "st_y": 800,
+        "st_pos_x": 0,
+        "st_pos_y": 800,
     }
     vendor.create_video_by_tts(
         voice="voice-test",
@@ -217,7 +242,47 @@ def test_documented_subtitle_fields_preserve_client_values() -> None:
     assert {key: transport.payload[key] for key in subtitle} == subtitle
     assert transport.payload["avatar"] == "avatar-test"
     assert transport.payload["text"] == "approved script"
-    assert transport.payload["aigc_flag"] == 1
+
+
+def test_legacy_subtitle_is_normalized_to_documented_fields() -> None:
+    """历史 subtitle_json（st_x/st_y + 0x 颜色）提交前归一化为 V2 文档格式。"""
+    normalized = normalize_legacy_subtitle(
+        {
+            "st_show": True,
+            "st_font_size": 30,
+            "st_primary_color": "0xFFFFFF",
+            "st_outline_color": "0x000000FF",
+            "st_x": 60,
+            "st_y": 900,
+        }
+    )
+    assert normalized == {
+        "st_show": True,
+        "st_font_size": 30,
+        "st_primary_color": "#FFFFFF",
+        "st_outline_color": "#000000FF",
+        "st_pos_x": 60,
+        "st_pos_y": 900,
+    }
+    # 归一化结果能通过校验并被逐字提交。
+    vendor, transport = client({"code": 0, "task_id": "tts-task"})
+    vendor.create_video_by_tts(
+        voice="voice-test",
+        text="approved script",
+        avatar="avatar-test",
+        title="test",
+        aigc_flag=True,
+        subtitle=normalized,
+    )
+    assert transport.payload["st_pos_x"] == 60
+    assert transport.payload["st_primary_color"] == "#FFFFFF"
+    assert "st_x" not in transport.payload
+
+
+def test_legacy_subtitle_normalization_leaves_documented_values_untouched() -> None:
+    """已在文档格式的 payload 逐字节透传，normalize 不改正常路径。"""
+    documented = {"st_show": 1, "st_font_size": 72, "st_primary_color": "#ff0000"}
+    assert normalize_legacy_subtitle(documented) == documented
 
 
 @pytest.mark.parametrize("mode", ["TTS", "AUDIO"])

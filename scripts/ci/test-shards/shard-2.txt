@@ -49,3 +49,4 @@ server/tests/test_wechat_native_callback_pg.py
 server/tests/test_wechat_native_callback_verify.py
 server/tests/test_wechat_native_client.py
 server/tests/test_wechat_native_provider.py
+server/tests/test_oral_doc_limits.py

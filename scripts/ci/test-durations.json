@@ -107,6 +107,7 @@
     "server/tests/test_operation_costs.py": 13.7,
     "server/tests/test_ops_alerts.py": 7.01,
     "server/tests/test_ops_metrics.py": 0.31,
+    "server/tests/test_oral_doc_limits.py": 0.1,
     "server/tests/test_oral_domain.py": 306.03,
     "server/tests/test_pg_test_kit.py": 42.48,
     "server/tests/test_postgres_migrations.py": 230.83,

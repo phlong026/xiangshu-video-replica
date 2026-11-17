@@ -2316,6 +2316,20 @@ describe("声音克隆输入格式", () => {
       live.validateOralAudioFile(new File([], "sample.wav"), "voice_clone"),
     ).toContain("不能为空");
   });
+
+  it("完整口播音频超过 100MB 时按文档上限拦截", () => {
+    const oversized = new File(["sample"], "sample.mp3");
+    Object.defineProperty(oversized, "size", { value: 100 * 1024 * 1024 + 1 });
+    expect(live.validateOralAudioFile(oversized, "oral_audio")).toContain(
+      "100 MB",
+    );
+
+    const withinLimit = new File(["sample"], "sample.mp3");
+    Object.defineProperty(withinLimit, "size", { value: 100 * 1024 * 1024 });
+    expect(
+      live.validateOralAudioFile(withinLimit, "oral_audio"),
+    ).toBeUndefined();
+  });
 });
 
 describe("音频元数据读取", () => {

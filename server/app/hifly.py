@@ -80,6 +80,36 @@ class HiflyTimeoutError(HiflyError):
     """A HiFly request exceeded the configured transport deadline."""
 
 
+# 飞影 V2 文档：坐标字段是 st_pos_x/st_pos_y，颜色是 #RRGGBB（可带 2 位 alpha）。
+# 2026-11-17 对齐文档；2026-11-17 之前落库的 subtitle_json 用的是旧别名
+# st_x/st_y 与 0xRRGGBB。历史数据在提交前经 normalize_legacy_subtitle 转换，
+# 校验器本身只接受文档字段，保证对外发出的请求逐字符合文档。
+_LEGACY_SUBTITLE_KEY_MAP = {"st_x": "st_pos_x", "st_y": "st_pos_y"}
+_COLOR_HEX_PATTERN = re.compile(r"#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?\Z")
+_LEGACY_COLOR_HEX_PATTERN = re.compile(r"0x[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?\Z")
+
+
+def normalize_legacy_subtitle(subtitle: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """把历史 subtitle_json 的旧字段名/旧颜色格式归一化成飞影 V2 文档格式。
+
+    历史任务用 st_x/st_y 与 0xRRGGBB 提交；这些 JSON 存库后会被归档重试复用。
+    在读库后、校验前调用本函数，已在文档格式的 payload 逐字节透传，normalize 只
+    处理旧别名，避免影响正常路径。
+    """
+    if subtitle is None:
+        return None
+    if not isinstance(subtitle, Mapping):
+        return subtitle  # type: ignore[return-value]
+    normalized: dict[str, Any] = {}
+    for key, value in subtitle.items():
+        new_key = _LEGACY_SUBTITLE_KEY_MAP.get(key, key)
+        if new_key in {"st_primary_color", "st_outline_color"} and isinstance(value, str):
+            if _LEGACY_COLOR_HEX_PATTERN.fullmatch(value):
+                value = "#" + value[2:]
+        normalized[new_key] = value
+    return normalized
+
+
 def validate_oral_subtitle(subtitle: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Validate the documented subtitle fields without accepting provider overrides."""
     if subtitle is None:
@@ -90,8 +120,8 @@ def validate_oral_subtitle(subtitle: Mapping[str, Any] | None) -> dict[str, Any]
         "st_font_size": (1, 100),
         "st_width": (0, 1920),
         "st_height": (0, 1080),
-        "st_x": (None, None),
-        "st_y": (None, None),
+        "st_pos_x": (None, None),
+        "st_pos_y": (None, None),
     }
     colors = {"st_primary_color", "st_outline_color"}
     supported = {"st_show", "st_font_name", *integer_fields, *colors}
@@ -104,10 +134,7 @@ def validate_oral_subtitle(subtitle: Mapping[str, Any] | None) -> dict[str, Any]
         elif key == "st_font_name":
             valid = isinstance(value, str) and bool(value.strip())
         elif key in colors:
-            valid = (
-                isinstance(value, str)
-                and re.fullmatch(r"0x[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?", value) is not None
-            )
+            valid = isinstance(value, str) and _COLOR_HEX_PATTERN.fullmatch(value) is not None
         elif key in integer_fields:
             lower, upper = integer_fields[key]
             valid = (
@@ -135,6 +162,13 @@ _VENDOR_CODE_MESSAGES: dict[int, str] = {
     1011: "该素材未通过数字人服务合规校验",
     1013: "声音克隆被限制，请稍后重试",
     1015: "数字人任务提交数已达上限，请稍后重试",
+    # 飞影 V2 文档错误码 2011–2016：文件/资源级失败，给出可操作的中文提示。
+    2011: "上传文件大小超过数字人服务限制，请压缩后重试",
+    2012: "上传文件类型不受数字人服务支持，请更换格式",
+    2013: "数字人服务获取音频资源失败，请重新上传音频",
+    2014: "数字人服务获取视频资源失败，请重新上传视频",
+    2015: "数字人克隆失败，请更换素材后重试",
+    2016: "数字人服务获取图片资源失败，请重新上传图片",
     2003: "数字人服务未正确配置，请联系管理员",
 }
 
