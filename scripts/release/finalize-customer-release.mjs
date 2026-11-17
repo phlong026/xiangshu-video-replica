@@ -241,14 +241,35 @@ export async function validateMacosOverlay(path, origin) {
 export async function verifyMacosApp(path, origin) {
   const config = (await macosOverlay(origin)).plugins.updater;
   const binary = await regular(path);
-  const endpoint = binary.includes(Buffer.from(config.endpoints[0]));
+  // x86_64-apple-darwin 的链接器会把字符串常量重排/转义（2026-11-18 实锤：
+  // pubkey 原样在、staging 已被替换、唯独端点不以原样字节出现——运行时从
+  // 内嵌配置 JSON 读取，功能正常）。端点同时接受原样与 JSON 转义斜杠形态。
+  const endpointPlain = Buffer.from(config.endpoints[0]);
+  const endpointEscaped = Buffer.from(config.endpoints[0].replaceAll("/", "\\/"));
+  const endpointFound = [endpointPlain, endpointEscaped].find((needle) =>
+    binary.includes(needle),
+  );
+  const endpoint = endpointFound !== undefined;
   const pubkey = binary.includes(Buffer.from(config.pubkey));
   const staging = binary.includes(Buffer.from("staging.example.invalid"));
-  // 先向 stderr 打印三项发现值再断言，任何 runner 上都能从日志定位失败层；
+  // 向 stderr 打印发现值与端点上下文，任何 runner 上都能从日志定位失败层；
   // stdout 保持给调用方解析配置。
+  const contexts = [];
+  let cursor = binary.indexOf(Buffer.from("video.zszhj.cn"));
+  while (cursor !== -1 && contexts.length < 8) {
+    contexts.push(binary.subarray(Math.max(0, cursor - 60), cursor + 80).toString("latin1"));
+    cursor = binary.indexOf(Buffer.from("video.zszhj.cn"), cursor + 1);
+  }
   console.error(
     "verify-macos-app findings:",
-    JSON.stringify({ endpoint, pubkey, staging, size: binary.length }),
+    JSON.stringify({
+      endpoint,
+      endpointForm: endpointFound === endpointEscaped ? "json-escaped" : endpointFound === endpointPlain ? "plain" : "none",
+      pubkey,
+      staging,
+      size: binary.length,
+      contexts,
+    }),
   );
   // 三路独立诊断：缺端点 / 缺公钥 / 仍含占位端点，各自给出明确失败原因。
   assert(endpoint, "Mac 应用缺少生产更新端点（updater 配置未编译进二进制）");
