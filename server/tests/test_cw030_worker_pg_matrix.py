@@ -2784,12 +2784,15 @@ def test_analysis_factory_does_not_repair_invalid_json_or_switch_visual_provider
     )
     text_request = Mock(side_effect=AssertionError("Unexpected paid JSON repair"))
     monkeypatch.setattr("curl_cffi.requests.post", text_request)
-    with pytest.raises(AnalysisProviderFailed, match="未自动调用付费修复"):
+    with pytest.raises(AnalysisProviderFailed, match="自动修复未成功"):
         analyze_video(
             video_uri="https://example.com/source.mp4", video_duration_seconds=10, provider=provider
         )
+    # 付费修复通道（deepseek curl_cffi）不触碰：格式修复走同模型文本重问。
     text_request.assert_not_called()
-    assert provider.transport.post.call_count == 1
+    assert provider.transport.post.call_count == 2
+    second_body = json.loads(provider.transport.post.call_args_list[1].kwargs["body"])
+    assert "修复" in second_body["messages"][0]["content"]
     assert (
         provider.transport.post.call_args.kwargs["headers"]["Authorization"]
         == "Bearer vision-test-key"

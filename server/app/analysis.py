@@ -31,6 +31,7 @@ from app.external_calls import (
     external_call_model,
     recorded_urlopen,
 )
+from app.llm_json import parse_llm_json
 
 ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
@@ -39,6 +40,27 @@ REPLICA_PROMPT_KIND = "replica_prompt"
 REPLICA_PROMPT_SCHEMA_VERSION = "replica-prompt.v1"
 SCHEMA_VERSION = "b3.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
+# ANALYSIS 链路的结构化输出约束（2026-11-17 生产探测确认网关透传
+# json_schema 且 schema 生效）：只约束顶层信封三键的存在与类型，字段级
+# 合同仍由 ProviderShotCard 严格解析承担——顶层引导消除「模型自由发挥
+# 信封结构」类失败，又不与 Pydantic 模型耦合（strict=false 不要求全字段
+# 列举，模型升级加字段不会 400）。传输层的裸换行注入（探测显示
+# json_schema 下依旧存在）由解析链兜底，与本约束正交。
+ANALYSIS_RESPONSE_JSON_SCHEMA = {
+    "name": "analysis_h3_v1",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "schema_version": {"type": "string"},
+            "analysis": {"type": "object"},
+            "generation_prompt": {"type": "object"},
+        },
+        "required": ["analysis"],
+        "additionalProperties": True,
+    },
+}
+_JSON_SCHEMA_RESPONSE_FORMAT = {"type": "json_schema", "json_schema": ANALYSIS_RESPONSE_JSON_SCHEMA}
+_JSON_OBJECT_RESPONSE_FORMAT = {"type": "json_object"}
 # 图像语义检查（人物识别源图、首帧复核）2026-09-26 起与视频拆解统一用
 # gemini-3.8-flash：业务确认两链路同用正式版 flash。此前单独留在 preview 名
 # 上是因为 2026-09-20 故障无证据指向模型名；现在任何默认槽位都不再使用
@@ -603,7 +625,7 @@ class ApilioGemini:
         payload = {
             "model": self.model,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            "response_format": _JSON_SCHEMA_RESPONSE_FORMAT,
             "messages": [
                 {
                     "role": "user",
@@ -660,7 +682,7 @@ class ApilioGemini:
             {
                 "model": self.model,
                 "temperature": 0,
-                "response_format": {"type": "json_object"},
+                "response_format": _JSON_SCHEMA_RESPONSE_FORMAT,
                 "messages": [
                     {"role": "system", "content": instruction},
                     {
@@ -719,6 +741,37 @@ class ApilioGemini:
             },
             duration_seconds=duration_seconds,
         )
+        return ProviderResponse(text=text, raw=raw)
+
+    def repair_json(
+        self, *, broken_text: str, error_message: str, max_tokens: int
+    ) -> ProviderResponse:
+        """格式失败后的定向修复（P2 re-ask）：把坏输出与解析错误喂回同模型。
+
+        修复格式不需要重看视频——只要求模型按原内容重排出合法 JSON。走
+        ``_complete``（主→备选链与换道语义照常），成本为一次文本调用；
+        调用与否由 analyze_video 决定（每任务至多一次），本方法不做门禁。
+        """
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "response_format": _JSON_OBJECT_RESPONSE_FORMAT,
+            "max_tokens": max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "你上一次输出的 JSON 无法被解析。请把下面的原始输出修复为"
+                        "严格合法的 JSON 后重新输出：只输出 JSON 本体，不要任何"
+                        "解释、不要 markdown 代码围栏、不要把原始换行写进字符串"
+                        "字面量或键名中间。保持内容与字段完全不变，只修格式。\n\n"
+                        f"解析错误：{error_message}\n\n"
+                        f"原始输出：\n{broken_text}"
+                    ),
+                }
+            ],
+        }
+        text, raw = self._complete(payload)
         return ProviderResponse(text=text, raw=raw)
 
     def _complete_video(
@@ -811,6 +864,25 @@ class ApilioGemini:
                     with external_call_model(model):
                         return self._complete_once(payload)
                 except AnalysisProviderFailed as exc:
+                    # json_schema 结构化输出仅在主模型上做过生产探测（2026-11-17）；
+                    # 换道到的备选模型若不识别该参数（HTTP 400），退回 json_object
+                    # 立即重发——只降格式约束，不放弃这次任务。
+                    if (
+                        exc.failure_phase == HTTP_FAILURE_PHASE
+                        and exc.http_status == 400
+                        and (payload.get("response_format") or {}).get("type")
+                        == "json_schema"
+                    ):
+                        logger.warning(
+                            "%s 模型 %s 不支持 json_schema（HTTP 400），降级 json_object 重发",
+                            analysis_log_ref(),
+                            model,
+                        )
+                        payload = {
+                            **payload,
+                            "response_format": _JSON_OBJECT_RESPONSE_FORMAT,
+                        }
+                        continue
                     last_failure = exc
                     if (
                         tracker is not None
@@ -1074,9 +1146,9 @@ def parse_replica_prompt_payload(
     try:
         # gemini-4-carbon 经网关的产出会把原始换行注进 JSON 键名与数字字面量
         # 中间（T15 同源缺陷，实测次次命中，"replica_prompt" 键名亦会被切断）。
-        # 剔除全部原始换行后解析：pretty-print 缩进换行与注入换行一并移除，
-        # JSON 语义不变；字符串值内部由 \n 转义承载的换行不受影响。
-        payload = json.loads(text.replace("\r", "").replace("\n", ""))
+        # 原剥离逻辑（剔原始换行）已并入 llm_json 宽容解析链：这里额外获得
+        # 围栏/杂文本/尾逗号等形态的恢复能力，行为对既有形态完全兼容。
+        payload, _parse_strategy = parse_llm_json(text)
     except (json.JSONDecodeError, ValueError) as exc:
         raise AnalysisProviderFailed(
             "长视频拆解结果格式无效，请重新拆解。",
@@ -1243,13 +1315,16 @@ def analyze_video(
         response = provider.analyze(video_uri=video_uri, duration_seconds=video_duration_seconds)
     if on_provider_result is not None:
         on_provider_result()
-    try:
-        # gemini-3.8/4 系经网关会把原始换行注进 JSON 键名与数字字面量中间
-        # （T15 同源缺陷，replica_prompt 链路已做同款剥离；实测 20s 源片
-        # 分析命中 "schema_version\n"、"1080x192\n0"）。剔除全部原始换行后
-        # 解析：pretty-print 缩进换行与注入换行一并移除，JSON 语义不变；
-        # 字符串值内部由 \n 转义承载的换行不受影响。
-        payload = json.loads(response.text.replace("\r", "").replace("\n", ""))
+    def _unwrap_analysis_payload(payload_text: str) -> tuple[VideoAnalysis, Any]:
+        # 宽容解析链（llm_json）：裸换行剥离只是其中一级，另覆盖 markdown
+        # 围栏、前后杂文本、尾随逗号等已知形态；strategy 供运维统计注入率。
+        payload, parse_strategy = parse_llm_json(payload_text)
+        if parse_strategy != "raw":
+            logger.warning(
+                "%s 拆解响应走了宽容解析恢复（strategy=%s），原始解析未通过",
+                analysis_log_ref(),
+                parse_strategy,
+            )
         candidate = None
         if isinstance(payload, dict) and payload.get("schema_version") == "analysis-h3.v1":
             candidate = payload.get("generation_prompt")
@@ -1263,11 +1338,59 @@ def analyze_video(
         analysis = parse_analysis_response(
             json.dumps(payload), duration_seconds=video_duration_seconds
         )
+        return analysis, candidate
+
+    try:
+        analysis, candidate = _unwrap_analysis_payload(response.text)
     except (json.JSONDecodeError, ValidationError, ValueError) as exc:
         logger.warning("Video analysis validation failed: %s", _validation_diagnostic(exc))
-        raise AnalysisProviderFailed(
-            "拆解结果格式无效，未自动调用付费修复；请检查后主动重试。"
-        ) from exc
+        # P2 re-ask：把坏输出与解析错误喂回同模型定向修复一次（纯文本调用，
+        # 不重看视频；每任务至多一次）。修复成功则任务照常完成，仍失败才
+        # 按格式无效拒绝——「未自动调用付费修复」的保守语义升级为「已自动
+        # 尝试一次格式修复」。
+        repaired_text: str | None = None
+        reask_error: Exception | None = None
+        if hasattr(provider, "repair_json"):
+            try:
+                repaired_response = provider.repair_json(
+                    broken_text=response.text[:8000],
+                    error_message=_validation_diagnostic(exc),
+                    max_tokens=_analysis_max_tokens(video_duration_seconds),
+                )
+                repaired_text = repaired_response.text
+            except Exception as reask_exc:  # noqa: BLE001 — 修复失败按原样拒绝
+                reask_error = reask_exc
+                logger.warning(
+                    "%s 格式修复重问失败：%s",
+                    analysis_log_ref(),
+                    type(reask_exc).__name__,
+                )
+        if repaired_text is not None:
+            try:
+                analysis, candidate = _unwrap_analysis_payload(repaired_text)
+                logger.warning(
+                    "%s 格式修复重问成功，拆解结果已恢复",
+                    analysis_log_ref(),
+                )
+            except (json.JSONDecodeError, ValidationError, ValueError) as revalidated:
+                logger.warning(
+                    "Video analysis validation failed after re-ask: %s",
+                    _validation_diagnostic(revalidated),
+                )
+                raise AnalysisProviderFailed(
+                    "拆解结果格式无效，自动修复未成功；请重新拆解。"
+                ) from revalidated
+        else:
+            detail = (
+                f"（格式修复重问失败：{type(reask_error).__name__}）"
+                if reask_error is not None
+                else "（已自动尝试一次格式修复，未成功）"
+                if hasattr(provider, "repair_json")
+                else ""
+            )
+            raise AnalysisProviderFailed(
+                f"拆解结果格式无效{detail}；请重新拆解。"
+            ) from exc
     generation_prompt = None
     if generation_context is not None:
         try:

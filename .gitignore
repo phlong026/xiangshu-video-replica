@@ -104,3 +104,4 @@ archive/
 .zcode/
 .test-postgres-data/
 .workbuddy-ai/
+server/pytest-of-Administrator/

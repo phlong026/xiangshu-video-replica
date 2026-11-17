@@ -15,6 +15,7 @@ from app.account_admin_routes import router as account_admin_router
 from app.account_migration_routes import router as account_migration_router
 from app.activation_code_routes import router as customer_activation_router
 from app.admin_activation_routes import router as admin_activation_router
+from app.admin_analysis_parse_stats_routes import router as analysis_parse_stats_router
 from app.admin_audit_routes import router as admin_audit_router
 from app.admin_auth_routes import router as admin_auth_router
 from app.admin_billing_reconciliation_routes import router as admin_billing_reconciliation_router
@@ -420,6 +421,7 @@ app.include_router(announcement_router)
 app.include_router(training_material_router)
 app.include_router(display_settings_router)
 app.include_router(worker_observation_router)
+app.include_router(analysis_parse_stats_router)
 app.include_router(publish_stats_router)
 app.include_router(admin_publish_reconcile_router)
 app.include_router(support_ticket_router)
