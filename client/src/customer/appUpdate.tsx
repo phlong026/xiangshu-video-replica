@@ -1,12 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useEffect, useSyncExternalStore } from "react";
 import { UpdateDialog } from "./UpdateDialog";
 import { isTauriRuntime } from "./useCustomerSession";
 
@@ -18,10 +12,9 @@ import { isTauriRuntime } from "./useCustomerSession";
  * 签名，插件下载后会先验签再安装，前端不自己拼升级逻辑。
  *
  * 两条路径：
- * - 自动路径（autoInstall，默认会话壳开启）：启动后每天最多检查一次、延迟
- *   避开登录期接口高峰；发现新版本**免确认**——自动下载、验签安装并重启，
- *   全程不弹窗不打扰（2026-10-16 产品口径：打开软件即自动更新，用户不再去
- *   个人中心手动升级）。下载/安装失败静默，清掉当日节流标记，下次启动重试。
+ * - 自动路径（autoInstall，由会话壳开启）：每次启动延迟 8 秒检查一次，
+ *   未登录也生效；发现新版本免确认自动下载、验签安装并重启，全程静默。
+ *   检查/安装失败不阻塞使用，下次启动重试，不在跨启动存储里记节流标记。
  * - 手动路径（用户中心「检查更新」）：弹 UpdateDialog，确认→下载→重启，
  *   全程有界面反馈，作为自动路径失败时的兜底入口。
  */
@@ -58,30 +51,57 @@ export interface AppUpdateController {
 /** UpdateDialog 只消费状态与动作，不消费 dialog 自身（避免自引用）。 */
 export type AppUpdateView = Omit<AppUpdateController, "dialog">;
 
-const AUTO_CHECK_DAY_KEY = "uc:update-auto-check-day";
 const AUTO_CHECK_DELAY_MS = 8000;
+// 原生请求负责真正停止超时网络流；仅在前端结束等待会让后台安装继续占用更新对象。
+const CHECK_TIMEOUT_MS = 20_000;
+// 安装包远大于更新清单，给慢速网络保留分钟级下载窗口，同时避免永久占用互斥锁。
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 
-function localDayStamp(): string {
-  const now = new Date();
-  const month = `${now.getMonth() + 1}`.padStart(2, "0");
-  const day = `${now.getDate()}`.padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
+type AppUpdateState = Pick<
+  AppUpdateController,
+  "phase" | "update" | "progress" | "error"
+> & { dialogOpen: boolean };
+
+// 更新属于客户端生命周期，不属于账号或页面。模块内共享状态和锁可跨过
+// StrictMode 的 effect 重放、登录切换及个人中心卸载，避免争用原生 Update。
+let state: AppUpdateState = {
+  phase: "idle",
+  update: null,
+  progress: null,
+  error: "",
+  dialogOpen: false,
+};
+const listeners = new Set<() => void>();
+let pendingUpdate: Update | null = null;
+let operationBusy = false;
+let hasChecked = false;
+let installed = false;
+let autoCheckStarted = false;
+let autoInstallRequested = false;
+let autoCheckTimer: number | null = null;
+let autoCheckSubscribers = 0;
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
-function autoCheckAlreadyRanToday(): boolean {
-  try {
-    return window.localStorage.getItem(AUTO_CHECK_DAY_KEY) === localDayStamp();
-  } catch {
-    // 读不到（隐私模式等）就当作今天已经检查过：少打扰比多打扰好。
-    return true;
-  }
+function getSnapshot(): AppUpdateState {
+  return state;
 }
 
-function markAutoCheckDone(): void {
+function setState(next: Partial<AppUpdateState>): void {
+  state = { ...state, ...next };
+  for (const listener of listeners) listener();
+}
+
+async function releasePendingUpdate(): Promise<void> {
+  const pending = pendingUpdate;
+  pendingUpdate = null;
   try {
-    window.localStorage.setItem(AUTO_CHECK_DAY_KEY, localDayStamp());
+    await pending?.close();
   } catch {
-    // 记不住就明天再说，不影响其它功能。
+    // 原生资源清理失败不改变更新结果，也不能卡住后续手动重试。
   }
 }
 
@@ -93,20 +113,165 @@ function downloadPendingWithProgress(
 ): Promise<void> {
   let receivedBytes = 0;
   let total: number | null = null;
-  return pending.downloadAndInstall((event) => {
-    switch (event.event) {
-      case "Started":
-        total = event.data.contentLength ?? null;
-        onProgress({ received: 0, total });
-        break;
-      case "Progress":
-        receivedBytes += event.data.chunkLength;
-        onProgress({ received: receivedBytes, total });
-        break;
-      default:
-        break;
-    }
+  return pending.downloadAndInstall(
+    (event) => {
+      switch (event.event) {
+        case "Started":
+          total = event.data.contentLength ?? null;
+          onProgress({ received: 0, total });
+          break;
+        case "Progress":
+          receivedBytes += event.data.chunkLength;
+          onProgress({ received: receivedBytes, total });
+          break;
+        default:
+          break;
+      }
+    },
+    { timeout: DOWNLOAD_TIMEOUT_MS },
+  );
+}
+
+async function restartInstalled(): Promise<void> {
+  setState({ phase: "installed", error: "" });
+  try {
+    await invoke("restart_app");
+  } catch {
+    setState({
+      phase: "failed",
+      error: "自动重启失败，请手动退出客户端后重新打开完成升级。",
+    });
+  }
+}
+
+// 调用方持有同一把锁，检查转下载之间也不释放，避免手动请求覆盖原生对象。
+async function installPending(): Promise<void> {
+  const pending = pendingUpdate;
+  if (!pending) return;
+  setState({
+    phase: "downloading",
+    progress: { received: 0, total: null },
+    error: "",
   });
+  try {
+    await downloadPendingWithProgress(pending, (progress) =>
+      setState({ progress }),
+    );
+    installed = true;
+    setState({ phase: "installed" });
+  } catch {
+    setState({
+      phase: "failed",
+      error: "下载或安装更新失败，请检查网络后重试。",
+    });
+  } finally {
+    await releasePendingUpdate();
+  }
+  if (installed && autoInstallRequested) {
+    // Windows NSIS 启动安装器时插件会退出进程；macOS 等返回后仍需主动重启。
+    await restartInstalled();
+  }
+}
+
+async function runCheck(
+  autoInstall = false,
+  showAvailable = false,
+): Promise<void> {
+  if (operationBusy || installed) return;
+  operationBusy = true;
+  hasChecked = true;
+  autoInstallRequested = autoInstall;
+  setState({ phase: "checking", update: null, progress: null, error: "" });
+  try {
+    await releasePendingUpdate();
+    const found = await check({ timeout: CHECK_TIMEOUT_MS });
+    pendingUpdate = found;
+    if (!found) {
+      setState({ phase: "up-to-date" });
+      return;
+    }
+    setState({
+      phase: "available",
+      update: { version: found.version, notes: (found.body ?? "").trim() },
+    });
+    if (autoInstallRequested) {
+      await installPending();
+    } else if (showAvailable) {
+      setState({ dialogOpen: true });
+    }
+  } catch {
+    setState({ phase: "failed", error: "检查更新失败，请稍后重试。" });
+  } finally {
+    autoInstallRequested = false;
+    operationBusy = false;
+  }
+}
+
+async function runDownload(autoInstall = false): Promise<void> {
+  if (operationBusy || installed || state.phase !== "available") return;
+  operationBusy = true;
+  autoInstallRequested = autoInstall;
+  try {
+    await installPending();
+  } finally {
+    autoInstallRequested = false;
+    operationBusy = false;
+  }
+}
+
+function startAutomaticCheck(autoInstall: boolean): void {
+  if (autoCheckStarted) return;
+  autoCheckStarted = true;
+  if (installed) return;
+  if (operationBusy) {
+    // 手动检查或下载已在途时接续同一流程，不另建 Update，也不漏掉自动重启。
+    autoInstallRequested = autoInstall;
+    return;
+  }
+  if (hasChecked) {
+    // 延迟窗口内的手动检查已覆盖本次启动，复用结果即可。
+    if (state.phase === "available") {
+      if (autoInstall) void runDownload(true);
+      else setState({ dialogOpen: true });
+    }
+    return;
+  }
+  void runCheck(autoInstall, !autoInstall);
+}
+
+function openManualCheck(): void {
+  if (!isTauriRuntime()) return;
+  setState({ dialogOpen: true });
+  if (state.phase !== "available") void runCheck();
+}
+
+function beginDownload(): void {
+  if (isTauriRuntime()) void runDownload();
+}
+
+async function runRestart(): Promise<void> {
+  if (!isTauriRuntime() || operationBusy || !installed) return;
+  operationBusy = true;
+  try {
+    await restartInstalled();
+  } finally {
+    operationBusy = false;
+  }
+}
+
+function restart(): void {
+  void runRestart();
+}
+
+function retry(): void {
+  if (!isTauriRuntime()) return;
+  setState({ dialogOpen: true });
+  if (installed) restart();
+  else void runCheck();
+}
+
+function close(): void {
+  if (state.phase !== "downloading") setState({ dialogOpen: false });
 }
 
 export function useAppUpdate({
@@ -117,169 +282,33 @@ export function useAppUpdate({
   autoInstall?: boolean;
 } = {}): AppUpdateController {
   const supported = isTauriRuntime();
-  const [phase, setPhase] = useState<AppUpdatePhase>("idle");
-  const [update, setUpdate] = useState<AvailableAppUpdate | null>(null);
-  const [progress, setProgress] = useState<{
-    received: number;
-    total: number | null;
-  } | null>(null);
-  const [error, setError] = useState("");
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const pendingRef = useRef<Update | null>(null);
-  const mountedRef = useRef(true);
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot);
 
   useEffect(() => {
-    mountedRef.current = true;
+    if (!autoCheck || !supported || autoCheckStarted) return;
+    autoCheckSubscribers += 1;
+    if (autoCheckTimer === null) {
+      autoCheckTimer = window.setTimeout(() => {
+        autoCheckTimer = null;
+        startAutomaticCheck(autoInstall);
+      }, AUTO_CHECK_DELAY_MS);
+    }
     return () => {
-      mountedRef.current = false;
+      autoCheckSubscribers -= 1;
+      if (autoCheckSubscribers === 0 && autoCheckTimer !== null) {
+        window.clearTimeout(autoCheckTimer);
+        autoCheckTimer = null;
+      }
     };
-  }, []);
+  }, [autoCheck, autoInstall, supported]);
 
-  const runCheck = useCallback(async (): Promise<
-    "available" | "up-to-date" | "failed"
-  > => {
-    setPhase("checking");
-    setUpdate(null);
-    setError("");
-    pendingRef.current = null;
-    try {
-      const found = await check();
-      if (!mountedRef.current) {
-        return "failed";
-      }
-      markAutoCheckDone();
-      if (!found) {
-        setPhase("up-to-date");
-        return "up-to-date";
-      }
-      pendingRef.current = found;
-      setUpdate({
-        version: found.version,
-        notes: (found.body ?? "").trim(),
-      });
-      setPhase("available");
-      return "available";
-    } catch {
-      if (mountedRef.current) {
-        setPhase("failed");
-        setError("检查更新失败，请稍后重试。");
-      }
-      return "failed";
-    }
-  }, []);
-
-  // 自动路径的下载安装：不弹窗、装完自动重启；失败清当日节流，下次启动重试。
-  const downloadAndAutoRestart = useCallback((pending: Update) => {
-    setPhase("downloading");
-    setProgress({ received: 0, total: null });
-    setError("");
-    void downloadPendingWithProgress(pending, setProgress)
-      .then(() => {
-        if (!mountedRef.current) {
-          return;
-        }
-        setPhase("installed");
-        // 新包已装好；重启失败不弹窗，下次启动自然运行新版本。
-        void invoke("restart_app").catch(() => {});
-      })
-      .catch(() => {
-        if (!mountedRef.current) {
-          return;
-        }
-        setPhase("failed");
-        try {
-          window.localStorage.removeItem(AUTO_CHECK_DAY_KEY);
-        } catch {
-          // 记不住节流就算了，不影响其它功能。
-        }
-      });
-  }, []);
-
-  useEffect(() => {
-    if (!autoCheck || !supported || autoCheckAlreadyRanToday()) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void runCheck().then((outcome) => {
-        if (!mountedRef.current || outcome !== "available") {
-          // 已是最新/检查失败都不出声。
-          return;
-        }
-        const pending = pendingRef.current;
-        if (autoInstall && pending) {
-          // 免确认自动升级：下载→验签安装→自动重启，全程无界面。
-          downloadAndAutoRestart(pending);
-          return;
-        }
-        setDialogOpen(true);
-      });
-    }, AUTO_CHECK_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [autoCheck, autoInstall, supported, runCheck, downloadAndAutoRestart]);
-
-  const openManualCheck = useCallback(() => {
-    if (!supported) {
-      return;
-    }
-    setDialogOpen(true);
-    void runCheck();
-  }, [supported, runCheck]);
-
-  const beginDownload = useCallback(() => {
-    const pending = pendingRef.current;
-    if (!pending) {
-      setPhase("failed");
-      setError("更新信息已失效，请重新检查更新。");
-      return;
-    }
-    setPhase("downloading");
-    setProgress({ received: 0, total: null });
-    setError("");
-    void downloadPendingWithProgress(pending, setProgress)
-      .then(() => {
-        // 走到这里安装包已验签并安装完成，重启后即运行新版本。
-        if (mountedRef.current) {
-          setPhase("installed");
-        }
-      })
-      .catch(() => {
-        if (mountedRef.current) {
-          setPhase("failed");
-          setError("下载或安装更新失败，请检查网络后重试。");
-        }
-      });
-  }, []);
-
-  const restart = useCallback(() => {
-    void invoke("restart_app").catch(() => {
-      if (mountedRef.current) {
-        setPhase("failed");
-        setError("自动重启失败，请手动退出客户端后重新打开完成升级。");
-      }
-    });
-  }, []);
-
-  const retry = useCallback(() => {
-    setDialogOpen(true);
-    void runCheck();
-  }, [runCheck]);
-
-  const close = useCallback(() => {
-    // 下载中不允许关：半途关掉最容易留下「我以为已经更新了」的错觉。
-    if (phase === "downloading") {
-      return;
-    }
-    setDialogOpen(false);
-    setPhase("idle");
-  }, [phase]);
-
-  const controller: Omit<AppUpdateController, "dialog"> = {
+  const controller: AppUpdateView = {
     supported,
-    phase,
+    phase: snapshot.phase,
     currentVersion: __APP_VERSION__,
-    update,
-    progress,
-    error,
+    update: snapshot.update,
+    progress: snapshot.progress,
+    error: snapshot.error,
     openManualCheck,
     beginDownload,
     restart,
@@ -290,6 +319,8 @@ export function useAppUpdate({
   return {
     ...controller,
     dialog:
-      dialogOpen && supported ? <UpdateDialog update={controller} /> : null,
+      snapshot.dialogOpen && supported ? (
+        <UpdateDialog update={controller} />
+      ) : null,
   };
 }

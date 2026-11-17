@@ -56,6 +56,32 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $overlayPath = ''
 Push-Location $repoRoot
 try {
+  $sourceSha = (git rev-parse --verify HEAD).Trim()
+  if ($LASTEXITCODE -ne 0 -or $sourceSha -notmatch '^[0-9a-f]{40}$') {
+    throw 'cannot determine the committed release source'
+  }
+  $trackedChanges = git status --porcelain --untracked-files=no
+  if ($LASTEXITCODE -ne 0 -or $trackedChanges) {
+    throw 'signed release requires committed source without tracked changes'
+  }
+  $untrackedBuildInputs = @(git ls-files --others --exclude-standard -- client/src client/src-tauri scripts/release .cargo client/vite.config.ts client/vite.admin.config.ts)
+  if ($LASTEXITCODE -ne 0 -or $untrackedBuildInputs.Count -gt 0) {
+    throw 'signed release requires committed build inputs'
+  }
+  # 平台配置会被 Tauri 自动合并；即便被 gitignore 忽略，也不能绕过源码出处检查。
+  foreach ($platformConfig in @(
+    'client/src-tauri/tauri.windows.conf.json',
+    'client/src-tauri/tauri.windows.conf.json5',
+    'client/src-tauri/Tauri.windows.toml'
+  )) {
+    if (Test-Path -LiteralPath $platformConfig) {
+      git ls-files --error-unmatch -- $platformConfig > $null 2> $null
+      if ($LASTEXITCODE -ne 0) {
+        throw 'automatically loaded platform configuration must belong to the release commit'
+      }
+    }
+  }
+
   # One frozen version across every manifest is a CW-011/CW-021 contract; the
   # release flow re-verifies it at build time instead of trusting the tree.
   $version = (Get-Content 'client/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
@@ -217,6 +243,7 @@ try {
   $manifest = [ordered]@{
     'channel' = 'signed-release'
     'version' = $version
+    'source_sha' = $sourceSha
     'platform' = 'windows-x86_64'
     'artifact' = $installer.Name
     'sha256' = $sha256

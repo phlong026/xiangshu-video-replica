@@ -3,6 +3,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 // 全局 reset、:root 令牌与激活/登录/配对等屏样式必须随本入口加载。
 import "./customer/customer-access.css";
 import { AccountAccessPage } from "./customer/AccountAccessPage";
+import { useAppUpdate } from "./customer/appUpdate";
 import { CustomerWelcomePage } from "./customer/CustomerWelcomePage";
 import { ForgotPasswordPage } from "./customer/ForgotPasswordPage";
 
@@ -84,6 +85,8 @@ function CustomerShell() {
 }
 
 function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
+  // 更新独立于登录状态：欢迎页、登录页及会话终屏也共用这一个启动入口。
+  useAppUpdate({ autoCheck: true, autoInstall: true });
   const session = useCustomerSession(store);
   const [accessOpen, setAccessOpen] = useState(
     () =>
