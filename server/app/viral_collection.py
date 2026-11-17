@@ -205,12 +205,15 @@ def enqueue_due_viral_collections(
     else:
         # Two retries per scheduled batch. Completed keywords and media remain
         # checkpointed, so retries only resume missing work, never restart a batch.
+        # 人工单条转存（single_archive）同样纳入：新发抖音视频的搜索索引收录
+        # 有滞后，fresh-video 的 douyin_refresh 首轮必然 miss（2026-11-17 Codex
+        # 视频实锤：导入 1 分钟后转存失败、retryable=1 却永不自动重试），15
+        # 分钟冷却后的自动重试让收录后的重取通道接管。
         conn.execute(
             """UPDATE viral_refresh_tasks SET status='PENDING', retry_count=retry_count+1,
                 locked_by=NULL, locked_until=NULL, updated_at=CURRENT_TIMESTAMP
             WHERE status='FAILED' AND retryable=1 AND retry_count < 2
                 AND collection_config_json != '{}'
-                AND COALESCE(collection_config_json::jsonb->>'kind','') != 'single_archive'
                 AND updated_at::timestamptz <=
                     CURRENT_TIMESTAMP - interval '15 minutes'"""
         )
