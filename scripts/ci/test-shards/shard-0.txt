@@ -26,6 +26,7 @@ server/tests/test_cw075_discount_model.py
 server/tests/test_failure_rate_alerts.py
 server/tests/test_h3_ratio_mode_contract.py
 server/tests/test_h3_submission_rejection.py
+server/tests/test_llm_json.py
 server/tests/test_local_integrate.py
 server/tests/test_material_complete_http_sql_failure_cleanup.py
 server/tests/test_material_trash.py
