@@ -23,7 +23,8 @@ def collection_budget(conn: BusinessConnection, *, now: datetime | None = None) 
           count(*) FILTER(WHERE a.effective_cost_fen IS NULL AND a.state<>'PENDING') AS unknown,
           count(*) FILTER(WHERE a.state='PENDING') AS pending
         FROM billing_effective_attempts a JOIN billing_operations o ON o.id=a.operation_id
-        WHERE o.user_id IS NULL AND (o.service='viral_data' OR o.collection_batch_id IS NOT NULL)
+        WHERE o.user_id IS NULL AND (o.service='viral_data' OR o.collection_batch_id IS NOT NULL
+          OR (o.service='link_resolution' AND o.api_metadata->>'api_type'='viral_media_refresh'))
           AND COALESCE({completed},{created}) >= %s
           AND COALESCE({completed},{created}) < %s""",
         (lower.astimezone(UTC), upper.astimezone(UTC)),

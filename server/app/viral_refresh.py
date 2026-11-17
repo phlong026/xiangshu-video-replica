@@ -13,10 +13,19 @@ from fastapi import HTTPException
 
 from app.db_portable import BusinessConnection
 from app.viral_collection_failures import FAILURES, classify_collection_failure
+from app.viral_link import ViralLinkError
 from app.viral_push import MANUAL_TASK_KINDS
 
 logger = logging.getLogger(__name__)
 VIRAL_REFRESH_LEASE_MINUTES = 10
+
+
+class ViralBatchPartialError(Exception):
+    """批量中有可重试失败，同时保留其他条目的待核对状态。"""
+
+    def __init__(self, *, uncertain: bool) -> None:
+        super().__init__("部分素材准备失败，请核对后处理。")
+        self.uncertain = uncertain
 
 
 @dataclass(frozen=True)
@@ -213,17 +222,23 @@ def fail_viral_refresh_task(
 ) -> None:
     logger.warning("viral refresh task %s failed: %s", lease.id, type(cause).__name__)
     code = classify_collection_failure(cause)
+    retryable = not isinstance(cause, ViralLinkError) or (cause.retryable and not cause.uncertain)
+    needs_review = isinstance(cause, (ViralLinkError, ViralBatchPartialError)) and cause.uncertain
+    message = (
+        "视频地址解析结果待核对，请确认后再操作。"
+        if needs_review
+        else "爆款视频刷新失败，请稍后重试。"
+    )
     now = _time_text(datetime.now(UTC))
     updated = conn.execute(
         """
         UPDATE viral_refresh_tasks SET status = 'FAILED', locked_by = NULL,
             locked_until = NULL, error_code = 'VIRAL_REFRESH_FAILED',
-            error_message_redacted = '爆款视频刷新失败，请稍后重试。',
-            retryable = 1, completed_at = %s, updated_at = %s
+            error_message_redacted = %s, retryable = %s, completed_at = %s, updated_at = %s
         WHERE id = %s AND status = 'RUNNING' AND locked_by = %s
             AND attempt = %s AND locked_until IS NOT NULL AND locked_until > %s
         """,
-        (now, now, lease.id, lease.worker_id, lease.attempt, now),
+        (message, int(retryable), now, now, lease.id, lease.worker_id, lease.attempt, now),
     )
     if updated.rowcount != 1:
         raise _lease_lost()

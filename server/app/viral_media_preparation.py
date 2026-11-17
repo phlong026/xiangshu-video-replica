@@ -175,9 +175,14 @@ class ViralMediaPreparation:
         video_id: str,
         kind: str,
         prepare: Callable[[str, Callable[[], None]], StoredObject],
+        failed_wait_seconds: float = 0,
+        cancellation_check: Callable[[], None] | None = None,
     ) -> tuple[StoredObject, bool]:
         deadline = time.monotonic() + self.wait_seconds
+        failed_deadline: float | None = None
         while True:
+            if cancellation_check is not None:
+                cancellation_check()
             with _connection() as conn:
                 conn.execute(
                     """INSERT INTO viral_media_preparations(id,platform,video_id,media_kind)
@@ -228,7 +233,14 @@ class ViralMediaPreparation:
                 )
                 return self._perform(lease, prepare), False
             if row["status"] == "FAILED":
-                raise ViralMediaBusy("素材准备暂未完成，请稍后重试。")
+                if failed_deadline is None:
+                    failed_deadline = time.monotonic() + max(0, failed_wait_seconds)
+                remaining = failed_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ViralMediaBusy("素材准备暂未完成，请稍后重试。")
+                # 保留失败冷却和原有 CAS，人工转存可以短暂等到下一次可领取。
+                time.sleep(min(self.poll_seconds, remaining))
+                continue
             if time.monotonic() >= deadline:
                 raise ViralMediaBusy("该视频素材正在准备中，请稍后重试。")
             time.sleep(self.poll_seconds)
