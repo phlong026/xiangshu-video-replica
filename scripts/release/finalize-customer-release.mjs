@@ -234,12 +234,13 @@ export async function validateMacosOverlay(path, origin) {
 export async function verifyMacosApp(path, origin) {
   const config = (await macosOverlay(origin)).plugins.updater;
   const binary = await regular(path);
-  assert(
-    binary.includes(Buffer.from(config.endpoints[0])) &&
-      binary.includes(Buffer.from(config.pubkey)) &&
-      !binary.includes(Buffer.from("staging.example.invalid")),
-    "Mac 应用缺少生产 updater 配置或仍包含 staging endpoint",
-  );
+  const endpoint = binary.includes(Buffer.from(config.endpoints[0]));
+  const pubkey = binary.includes(Buffer.from(config.pubkey));
+  const staging = binary.includes(Buffer.from("staging.example.invalid"));
+  // 三路独立诊断：缺端点 / 缺公钥 / 仍含占位端点，各自给出明确失败原因。
+  assert(endpoint, "Mac 应用缺少生产更新端点（updater 配置未编译进二进制）");
+  assert(pubkey, "Mac 应用缺少生产更新公钥");
+  assert(!staging, "Mac 应用仍包含 staging 占位更新端点");
 }
 
 function downloadUrl(origin, version, name) {
