@@ -118,22 +118,28 @@ jobs:
       - name: Generate public macOS release configuration
         if: runner.os == 'macOS'
         # 静态 overlay 保留开发占位端点；只有本流程生成含静态 bundle 段的完整
-        # 公开发行配置（生产端点 + Windows 生产公钥），并直接覆写检出内的平台
-        # 配置文件——tauri-build 从磁盘读取平台配置，不经过 CLI 参数传递
-        # （Intel runner 曾出现 CLI 配置传递未生效到构建层）。打印内容便于核对。
+        # 公开发行配置（生产端点 + Windows 生产公钥）。三重注入互为保险：
+        # 1) 覆写检出内平台配置文件（tauri-build 按平台约定从磁盘读取）；
+        # 2) TAURI_CONFIG 环境变量（tauri-build 显式 json_patch 合并，绕开 CLI 参数传递
+        #    ——2026-11-18 实锤 Intel runner 上 CLI 配置传递未生效到编译层）；
+        # 3) 打印内容便于跨 runner 核对。CI 仅产出配置正确的归档，updater 签名留在本机。
         run: |
           node scripts/release/finalize-customer-release.mjs macos-overlay --output "$RUNNER_TEMP/customer-macos-release.json"
           cp "$RUNNER_TEMP/customer-macos-release.json" client/src-tauri/tauri.macos.conf.json
+          {
+            echo "TAURI_CONFIG<<TAURI_CONFIG_EOF"
+            cat "$RUNNER_TEMP/customer-macos-release.json"
+            echo "TAURI_CONFIG_EOF"
+          } >> "$GITHUB_ENV"
           cat client/src-tauri/tauri.macos.conf.json
       - name: Build desktop installer
         run: |
           sign_args=()
-          config_args=()
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             sign_args=(--no-sign)
             config_args=(--config "$BUNDLE_CONFIG")
           else
-            # macOS：平台配置已在生成步骤覆写为完整发行配置，无需 CLI --config。
+            # macOS：配置经平台文件与 TAURI_CONFIG 双通道进入构建，不再传 CLI --config。
             :
           fi
           npm run tauri --workspace client -- build \
