@@ -115,14 +115,22 @@ jobs:
         with:
           name: ffmpeg-windows-lgpl
           path: client/src-tauri/resources/ffmpeg
+      - name: Generate public macOS release configuration
+        if: runner.os == 'macOS'
+        # 静态 overlay 保留开发占位端点；只有本流程注入已校验 origin 和 Windows 生产公钥。
+        # CI 仅产出配置正确的归档，updater 签名留在本机 finalizer。
+        run: node scripts/release/finalize-customer-release.mjs macos-overlay --output "$RUNNER_TEMP/customer-macos-release.json"
       - name: Build desktop installer
         run: |
           sign_args=()
+          config_args=(--config "$BUNDLE_CONFIG")
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             sign_args=(--no-sign)
+          else
+            config_args+=(--config "$RUNNER_TEMP/customer-macos-release.json")
           fi
           npm run tauri --workspace client -- build \
-            --config "$BUNDLE_CONFIG" --bundles "$BUNDLE_TYPES" \
+            "${config_args[@]}" --bundles "$BUNDLE_TYPES" \
             --target "$RUST_TARGET" --ci "${sign_args[@]}" \
             -- --locked --no-default-features
       - name: Create macOS disk image
@@ -157,12 +165,18 @@ jobs:
           [[ ${#images[@]} -eq 1 && -f "${images[0]}" ]]
           codesign --verify --deep --strict "${apps[0]}"
           lipo "${apps[0]}/Contents/MacOS/video-replica-desktop" -verify_arch "$BINARY_ARCH"
+          node scripts/release/finalize-customer-release.mjs verify-macos-app \
+            --app-binary "${apps[0]}/Contents/MacOS/video-replica-desktop"
           hdiutil verify "${images[0]}"
       - name: Collect installer and provenance
         run: |
+          provenance_args=()
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            provenance_args=("$RUNNER_TEMP/customer-macos-release.json")
+          fi
           node scripts/release/collect-desktop-artifacts.mjs "$PLATFORM" \
             ".cargo-target/$RUST_TARGET/release/bundle/$BUNDLE_DIR" \
-            "output/desktop/$PLATFORM"
+            "output/desktop/$PLATFORM" "${provenance_args[@]}"
           # Keep provenance beside the installer; never upload the whole workspace.
           test -f "output/desktop/$PLATFORM/manifest.json"
           test -f "output/desktop/$PLATFORM/SHA256SUMS.txt"

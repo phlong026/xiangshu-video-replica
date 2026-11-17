@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   copyFile,
   mkdir,
+  lstat,
   readdir,
   readFile,
   stat,
@@ -10,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { macPlatforms, validateMacosOverlay } from "./finalize-customer-release.mjs";
 
 const platforms = {
   "windows-x86_64": { extension: ".exe", signature: "unsigned" },
@@ -43,10 +45,11 @@ async function requireEmptyOutput(outputDir) {
 }
 
 async function main() {
-  const [platform, bundleDir, outputDir, ...extra] = process.argv.slice(2);
+  const [platform, bundleDir, outputDir, releaseConfigPath, ...extra] =
+    process.argv.slice(2);
   if (!platform || !bundleDir || !outputDir || extra.length > 0) {
     throw new Error(
-      "usage: collect-desktop-artifacts.mjs <platform> <bundle-dir> <output-dir>",
+      "usage: collect-desktop-artifacts.mjs <platform> <bundle-dir> <output-dir> [macos-release-config]",
     );
   }
   if (!Object.hasOwn(platforms, platform)) {
@@ -62,8 +65,7 @@ async function main() {
   }
   const installers = bundleEntries.filter(
     (entry) =>
-      entry.isFile() &&
-      entry.name.toLowerCase().endsWith(platformConfig.extension),
+      entry.isFile() && entry.name.toLowerCase().endsWith(platformConfig.extension),
   );
   if (installers.length !== 1) {
     throw new Error(
@@ -79,37 +81,54 @@ async function main() {
   }
   await requireEmptyOutput(outputDir);
 
-  run(
-    process.execPath,
-    [join(repoRoot, "scripts/require_customer_api_base.mjs")],
-    {
-      env: process.env,
-    },
-  );
-  const packageJson = JSON.parse(
-    await readFile(join(repoRoot, "package.json"), "utf8"),
-  );
+  run(process.execPath, [join(repoRoot, "scripts/require_customer_api_base.mjs")], {
+    env: process.env,
+  });
+  const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
   const sourceSha = run("git", ["rev-parse", "HEAD"]);
   const payload = await readFile(installerPath);
   const sha256 = createHash("sha256").update(payload).digest("hex");
 
-  await mkdir(outputDir, { recursive: true });
-  await copyFile(installerPath, join(outputDir, installer.name));
   const checksumLines = [`${sha256}  ${installer.name}`];
-  // macOS 自动更新制品：与安装包同名的 .app.tar.gz（updater 解包替换用），
-  // 存在才收集，缺失时仅 DMG 也允许出包（首装通道不依赖它）。
+  const provenance = {};
+  let updaterName;
+  if (releaseConfigPath) {
+    if (!Object.hasOwn(macPlatforms, platform))
+      throw new Error("release config requires a Mac platform");
+    const updater = await validateMacosOverlay(
+      releaseConfigPath,
+      process.env.VITE_API_BASE_URL,
+    );
+    Object.assign(provenance, {
+      target: macPlatforms[platform].target,
+      architecture: macPlatforms[platform].architecture,
+      updater_endpoint: updater.endpoints[0],
+      updater_pubkey: updater.pubkey,
+      api_base_url: new URL(updater.endpoints[0]).origin,
+    });
+  }
+  // 旧内部预览允许仅 DMG；明确提供发行配置时必须有可独立签名的更新归档。
   if (platform.startsWith("macos")) {
-    const updaterName = installer.name.replace(/\.dmg$/, ".app.tar.gz");
+    const name = installer.name.replace(/\.dmg$/i, ".app.tar.gz");
     try {
-      const updaterPath = join(bundleDir, updaterName);
-      const updaterPayload = await readFile(updaterPath);
-      const updaterSha = createHash("sha256").update(updaterPayload).digest("hex");
-      await copyFile(updaterPath, join(outputDir, updaterName));
-      checksumLines.push(`${updaterSha}  ${updaterName}`);
+      const updaterPath = join(bundleDir, name);
+      const info = await lstat(updaterPath);
+      if (!info.isFile() || info.isSymbolicLink() || !info.size)
+        throw new Error("updater archive must be a non-empty regular file");
+      const updaterSha = createHash("sha256")
+        .update(await readFile(updaterPath))
+        .digest("hex");
+      updaterName = name;
+      checksumLines.push(`${updaterSha}  ${name}`);
+      Object.assign(provenance, { updater_artifact: name, updater_sha256: updaterSha });
     } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
+      if (error?.code !== "ENOENT" || releaseConfigPath) throw error;
     }
   }
+  await mkdir(outputDir, { recursive: true });
+  await copyFile(installerPath, join(outputDir, installer.name));
+  if (updaterName)
+    await copyFile(join(bundleDir, updaterName), join(outputDir, updaterName));
   await writeFile(
     join(outputDir, "SHA256SUMS.txt"),
     checksumLines.map((line) => `${line}\n`).join(""),
@@ -131,6 +150,7 @@ async function main() {
         signature: platformConfig.signature,
         artifact: installer.name,
         sha256,
+        ...provenance,
       },
       null,
       2,

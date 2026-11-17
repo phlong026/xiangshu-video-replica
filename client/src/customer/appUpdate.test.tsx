@@ -1,17 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { type AppUpdateController, useAppUpdate } from "./appUpdate";
+import type { AppUpdateController } from "./appUpdate";
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 const checkMock = vi.mocked(check);
+const OLD_AUTO_CHECK_DAY_KEY = "uc:update-auto-check-day";
 
-/** 与 appUpdate 内部的每日节流同一个键与本地日期戳，验证节流行为。 */
-const AUTO_CHECK_DAY_KEY = "uc:update-auto-check-day";
 function localDayStamp(): string {
   const now = new Date();
   const month = `${now.getMonth() + 1}`.padStart(2, "0");
@@ -26,12 +32,29 @@ function fakeUpdate(overrides: Partial<Update> = {}): Update {
     date: null,
     currentVersion: "2.4.0",
     downloadAndInstall: vi.fn(() => Promise.resolve()),
-    close: vi.fn(),
+    close: vi.fn(() => Promise.resolve()),
     ...overrides,
   } as unknown as Update;
 }
 
-let controller: AppUpdateController | null = null;
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+let useAppUpdate: typeof import("./appUpdate")["useAppUpdate"];
+let controller: AppUpdateController;
+let manualController: AppUpdateController;
+
+// 模块随 WebView 的新启动重新加载；组件卸载/重挂本身不代表软件重启。
+async function freshStartup(): Promise<void> {
+  vi.resetModules();
+  ({ useAppUpdate } = await import("./appUpdate"));
+}
+
 function Harness({
   autoCheck = false,
   autoInstall = false,
@@ -50,178 +73,467 @@ function Harness({
   );
 }
 
-function mountTauriRuntime(): void {
-  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+function AutomaticShell() {
+  controller = useAppUpdate({ autoCheck: true, autoInstall: true });
+  return null;
 }
 
-beforeEach(() => {
+function ManualPage() {
+  manualController = useAppUpdate();
+  return <>{manualController.dialog}</>;
+}
+
+async function advance(ms = 8000): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
+beforeEach(async () => {
   vi.resetAllMocks();
+  vi.useFakeTimers();
   invokeMock.mockResolvedValue(undefined);
+  checkMock.mockResolvedValue(null);
   window.localStorage.clear();
-  mountTauriRuntime();
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+  await freshStartup();
 });
 
 afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
 });
 
-test("浏览器 lane 不支持更新：手动检查不发起请求也不弹窗", () => {
+test("浏览器禁用自动和手动更新，不发请求、不弹窗或重启", async () => {
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
-  render(<Harness />);
-  expect(controller?.supported).toBe(false);
-  fireEvent.click(screen.getByRole("button", { name: "手动检查" }));
+  render(<Harness autoCheck autoInstall />);
+  expect(controller.supported).toBe(false);
+  await act(async () => {
+    controller.openManualCheck();
+    controller.retry();
+    controller.beginDownload();
+    controller.restart();
+  });
+  await advance(30000);
   expect(checkMock).not.toHaveBeenCalled();
-  expect(controller?.dialog).toBeNull();
+  expect(invokeMock).not.toHaveBeenCalled();
+  expect(controller.dialog).toBeNull();
 });
 
 test("手动检查发现新版本：确认后下载安装，最后可一键重启", async () => {
-  checkMock.mockResolvedValue(fakeUpdate());
+  const pending = fakeUpdate();
+  checkMock.mockResolvedValue(pending);
   render(<Harness />);
 
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "手动检查" }));
   });
-  expect(await screen.findByText("发现新版本 V2.5.0")).toBeVisible();
+  expect(screen.getByText("发现新版本 V2.5.0")).toBeVisible();
   expect(screen.getByText("更新日志内容")).toBeVisible();
+  expect(pending.downloadAndInstall).not.toHaveBeenCalled();
 
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "立即更新" }));
+    controller.beginDownload();
   });
-  expect(await screen.findByText("新版本已就绪")).toBeVisible();
+  expect(screen.getByText("新版本已就绪")).toBeVisible();
+  expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+  expect(pending.close).toHaveBeenCalledTimes(1);
+  expect(invokeMock).not.toHaveBeenCalled();
 
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "立即重启" }));
+    controller.restart();
   });
-  expect(invokeMock).toHaveBeenCalledWith("restart_app");
+  expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
 });
 
-test("手动检查已是最新：提示当前版本并记录当日已检查", async () => {
-  checkMock.mockResolvedValue(null);
+test("手动检查已是最新：提示当前版本，不再写每日节流标记", async () => {
   render(<Harness />);
-
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "手动检查" }));
+    controller.openManualCheck();
   });
-  expect(await screen.findByText("已是最新版本")).toBeVisible();
-  expect(window.localStorage.getItem(AUTO_CHECK_DAY_KEY)).toBe(localDayStamp());
+  expect(screen.getByText("已是最新版本")).toBeVisible();
+  expect(window.localStorage.getItem(OLD_AUTO_CHECK_DAY_KEY)).toBeNull();
 });
 
-test("手动检查失败：给出可重试的错误提示", async () => {
+test("手动检查失败后释放互斥锁，重试可重新检查", async () => {
   checkMock.mockRejectedValueOnce(new Error("network"));
   render(<Harness />);
-
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "手动检查" }));
+    controller.openManualCheck();
   });
-  expect(await screen.findByText("更新失败")).toBeVisible();
   expect(screen.getByText("检查更新失败，请稍后重试。")).toBeVisible();
-
-  checkMock.mockResolvedValue(null);
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
   });
-  expect(await screen.findByText("已是最新版本")).toBeVisible();
+  expect(screen.getByText("已是最新版本")).toBeVisible();
+  expect(checkMock).toHaveBeenCalledTimes(2);
 });
 
-test("启动自动检查：静默；已是最新不弹窗；一天只查一次", async () => {
-  vi.useFakeTimers();
-  try {
-    checkMock.mockResolvedValue(null);
-    const view = render(<Harness autoCheck />);
-
-    // 延迟窗口内不发起检查。
-    expect(checkMock).not.toHaveBeenCalled();
-    await act(async () => {
-      vi.advanceTimersByTime(8000);
+test.each(["自动检查", "手动检查", "自动下载", "手动下载"])(
+  "%s 使用原生有限超时，失败后释放互斥并允许手动重新检查安装",
+  async (path) => {
+    const automatic = path.startsWith("自动");
+    const downloading = path.endsWith("下载");
+    const timeout = downloading ? 600_000 : 20_000;
+    const failed = fakeUpdate({
+      downloadAndInstall: vi.fn<Update["downloadAndInstall"]>(
+        (_onEvent, options) =>
+          new Promise<void>((_resolve, reject) => {
+            window.setTimeout(
+              () => reject(new Error("native download timed out")),
+              options?.timeout,
+            );
+          }),
+      ),
     });
-    expect(checkMock).toHaveBeenCalledTimes(1);
-    // 已是最新：静默，不弹任何弹窗。
-    expect(controller?.dialog).toBeNull();
-    expect(controller?.phase).toBe("up-to-date");
-    expect(screen.queryByText(/最新版本|新版本/)).toBeNull();
-    expect(window.localStorage.getItem(AUTO_CHECK_DAY_KEY)).toBe(
-      localDayStamp(),
+    const next = fakeUpdate();
+    if (downloading) {
+      checkMock.mockResolvedValueOnce(failed);
+    } else {
+      checkMock.mockImplementationOnce(
+        (options) =>
+          new Promise<Update | null>((_resolve, reject) => {
+            window.setTimeout(
+              () => reject(new Error("native check timed out")),
+              options?.timeout,
+            );
+          }),
+      );
+    }
+    checkMock.mockResolvedValue(next);
+    render(<Harness autoCheck={automatic} autoInstall />);
+    if (automatic) {
+      await advance();
+    } else {
+      await act(async () => {
+        controller.openManualCheck();
+      });
+      if (downloading) {
+        await act(async () => {
+          controller.beginDownload();
+        });
+      }
+    }
+    expect(checkMock).toHaveBeenNthCalledWith(1, { timeout: 20_000 });
+    if (downloading) {
+      expect(failed.downloadAndInstall).toHaveBeenCalledExactlyOnceWith(
+        expect.any(Function),
+        { timeout: 600_000 },
+      );
+    }
+    await advance(timeout - 1);
+    expect(controller.phase).toBe(downloading ? "downloading" : "checking");
+    expect(invokeMock).not.toHaveBeenCalled();
+    await advance(1);
+    expect(controller.phase).toBe("failed");
+    if (automatic) expect(controller.dialog).toBeNull();
+    if (downloading) expect(failed.close).toHaveBeenCalledTimes(1);
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      controller.retry();
+    });
+    expect(checkMock).toHaveBeenNthCalledWith(2, { timeout: 20_000 });
+    expect(controller.phase).toBe("available");
+    expect(next.downloadAndInstall).not.toHaveBeenCalled();
+    await act(async () => {
+      controller.beginDownload();
+    });
+    expect(next.downloadAndInstall).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Function),
+      { timeout: 600_000 },
     );
+    expect(controller.phase).toBe("installed");
+    expect(invokeMock).not.toHaveBeenCalled();
+  },
+);
 
-    // 同一天内再挂载（模拟重启）不再自动检查。
-    view.unmount();
-    checkMock.mockClear();
-    render(<Harness autoCheck />);
-    await act(async () => {
-      vi.advanceTimersByTime(30000);
-    });
-    expect(checkMock).not.toHaveBeenCalled();
-  } finally {
-    vi.useRealTimers();
-  }
+test("取消手动检查仅关闭弹窗，再次打开复用在途检查", async () => {
+  const result = deferred<Update | null>();
+  checkMock.mockReturnValue(result.promise);
+  render(<Harness />);
+  await act(async () => {
+    controller.openManualCheck();
+    controller.close();
+    controller.openManualCheck();
+    controller.retry();
+  });
+  expect(checkMock).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    result.resolve(null);
+  });
+  expect(screen.getByText("已是最新版本")).toBeVisible();
 });
 
-test("启动自动检查发现新版本：延迟后弹窗展示更新日志", async () => {
-  vi.useFakeTimers();
-  try {
-    checkMock.mockResolvedValue(fakeUpdate());
-    render(<Harness autoCheck />);
+test("保留 8 秒异步延迟，旧的当日 localStorage 标记不影响同一天两次新启动", async () => {
+  window.localStorage.setItem(OLD_AUTO_CHECK_DAY_KEY, localDayStamp());
+  const first = render(<Harness autoCheck autoInstall />);
+  await advance(7999);
+  expect(checkMock).not.toHaveBeenCalled();
+  await advance(1);
+  expect(checkMock).toHaveBeenCalledTimes(1);
+  expect(controller.phase).toBe("up-to-date");
+  expect(controller.dialog).toBeNull();
+  first.unmount();
 
-    expect(checkMock).not.toHaveBeenCalled();
-    await act(async () => {
-      vi.advanceTimersByTime(8000);
-    });
-    expect(screen.getByText("发现新版本 V2.5.0")).toBeVisible();
-    expect(screen.getByText("更新日志内容")).toBeVisible();
-  } finally {
-    vi.useRealTimers();
-  }
+  await freshStartup();
+  render(<Harness autoCheck autoInstall />);
+  await advance();
+  expect(checkMock).toHaveBeenCalledTimes(2);
+  expect(window.localStorage.getItem(OLD_AUTO_CHECK_DAY_KEY)).toBe(
+    localDayStamp(),
+  );
 });
 
-test("autoInstall 开启：发现新版本免确认自动下载安装并重启，全程无弹窗", async () => {
-  vi.useFakeTimers();
-  try {
+test("StrictMode、重渲染与组件重挂在同一生命周期内只检查一次", async () => {
+  const view = render(
+    <StrictMode>
+      <Harness autoCheck autoInstall />
+    </StrictMode>,
+  );
+  await advance(4000);
+  view.rerender(
+    <StrictMode>
+      <Harness autoCheck autoInstall />
+    </StrictMode>,
+  );
+  await advance(4000);
+  expect(checkMock).toHaveBeenCalledTimes(1);
+  view.unmount();
+  render(
+    <StrictMode>
+      <Harness autoCheck autoInstall />
+    </StrictMode>,
+  );
+  await advance(30000);
+  expect(checkMock).toHaveBeenCalledTimes(1);
+});
+
+test("纯自动检查发现新版本时仍可展示更新日志", async () => {
+  checkMock.mockResolvedValue(fakeUpdate());
+  render(<Harness autoCheck />);
+  await advance();
+  expect(screen.getByText("发现新版本 V2.5.0")).toBeVisible();
+  expect(screen.getByText("更新日志内容")).toBeVisible();
+});
+
+test("自动更新免确认下载安装，沿用累计进度，安装成功后自动重启", async () => {
+  const pending = fakeUpdate({
+    downloadAndInstall: vi.fn(async (onEvent) => {
+      onEvent?.({ event: "Started", data: { contentLength: 100 } });
+      onEvent?.({ event: "Progress", data: { chunkLength: 30 } });
+      onEvent?.({ event: "Progress", data: { chunkLength: 70 } });
+      onEvent?.({ event: "Finished" });
+    }),
+  });
+  checkMock.mockResolvedValue(pending);
+  render(<Harness autoCheck autoInstall />);
+  await advance();
+  expect(controller.dialog).toBeNull();
+  expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+  expect(controller.progress).toEqual({ received: 100, total: 100 });
+  expect(controller.phase).toBe("installed");
+  expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
+});
+
+test.each(["检查", "下载安装"])(
+  "自动%s失败静默，同生命周期重挂不重试，新启动可重试并安装",
+  async (failure) => {
     const pending = fakeUpdate();
+    if (failure === "检查") {
+      checkMock.mockRejectedValueOnce(new Error("network"));
+    } else {
+      checkMock.mockResolvedValueOnce(
+        fakeUpdate({
+          downloadAndInstall: vi.fn(async () => {
+            throw new Error("signature or download");
+          }),
+        }),
+      );
+    }
     checkMock.mockResolvedValue(pending);
-    render(<Harness autoCheck autoInstall />);
+    const first = render(<Harness autoCheck autoInstall />);
+    await advance();
+    expect(controller.phase).toBe("failed");
+    expect(controller.dialog).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalled();
+    first.unmount();
 
-    await act(async () => {
-      vi.advanceTimersByTime(8000);
-      // runCheck / downloadAndInstall 的微任务链清完。
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    // 免确认：不弹窗，直接开下并完成安装，随后自动重启。
-    expect(controller?.dialog).toBeNull();
+    const remount = render(<Harness autoCheck autoInstall />);
+    await advance(30000);
+    expect(checkMock).toHaveBeenCalledTimes(1);
+    remount.unmount();
+
+    await freshStartup();
+    render(<Harness autoCheck autoInstall />);
+    await advance();
+    expect(checkMock).toHaveBeenCalledTimes(2);
     expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
-    expect(controller?.phase).toBe("installed");
-    expect(invokeMock).toHaveBeenCalledWith("restart_app");
-  } finally {
-    vi.useRealTimers();
-  }
+    expect(controller.phase).toBe("installed");
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
+  },
+);
+
+test("自动检查在途时切页和手动重试复用检查，下载中手动操作不创建另一个 Update", async () => {
+  const result = deferred<Update | null>();
+  const download = deferred<void>();
+  const pending = fakeUpdate({
+    downloadAndInstall: vi.fn(() => download.promise),
+  });
+  checkMock.mockReturnValue(result.promise);
+  const view = render(<AutomaticShell />);
+  await advance();
+  expect(checkMock).toHaveBeenCalledTimes(1);
+  view.rerender(
+    <>
+      <AutomaticShell />
+      <ManualPage />
+    </>,
+  );
+  await act(async () => {
+    manualController.openManualCheck();
+    manualController.retry();
+    manualController.beginDownload();
+  });
+  expect(manualController.phase).toBe("checking");
+  await act(async () => {
+    result.resolve(pending);
+  });
+  expect(manualController.phase).toBe("downloading");
+  expect(screen.getByText("正在下载新版本 V2.5.0")).toBeVisible();
+  await act(async () => {
+    manualController.openManualCheck();
+    manualController.retry();
+    manualController.beginDownload();
+    manualController.restart();
+  });
+  view.rerender(<AutomaticShell />);
+  view.rerender(
+    <>
+      <AutomaticShell />
+      <ManualPage />
+    </>,
+  );
+  expect(manualController.phase).toBe("downloading");
+  await act(async () => {
+    download.resolve();
+  });
+  expect(checkMock).toHaveBeenCalledTimes(1);
+  expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+  expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
 });
 
-test("autoInstall 下载安装失败：静默并清当日节流，下次启动重试", async () => {
-  vi.useFakeTimers();
-  try {
+test.each(["checking", "available", "downloading", "up-to-date"])(
+  "8 秒到期时手动流程处于 %s：复用请求或结果，自动更新不并发",
+  async (phase) => {
+    const result = deferred<Update | null>();
+    const download = deferred<void>();
     const pending = fakeUpdate({
-      downloadAndInstall: vi.fn(() => Promise.reject(new Error("download"))),
+      downloadAndInstall: vi.fn(() => download.promise),
     });
-    checkMock.mockResolvedValue(pending);
-    const view = render(<Harness autoCheck autoInstall />);
-
+    checkMock.mockReturnValue(result.promise);
+    render(
+      <>
+        <AutomaticShell />
+        <ManualPage />
+      </>,
+    );
     await act(async () => {
-      vi.advanceTimersByTime(8000);
-      await Promise.resolve();
-      await Promise.resolve();
+      manualController.openManualCheck();
     });
-    expect(controller?.dialog).toBeNull();
-    expect(controller?.phase).toBe("failed");
-    // 当日节流被清掉：再次挂载（下次启动）会重新检查。
-    expect(window.localStorage.getItem(AUTO_CHECK_DAY_KEY)).toBeNull();
-    view.unmount();
-    checkMock.mockClear();
-    render(<Harness autoCheck autoInstall />);
-    await act(async () => {
-      vi.advanceTimersByTime(8000);
-    });
+    if (phase !== "checking") {
+      await act(async () => {
+        result.resolve(phase === "up-to-date" ? null : pending);
+      });
+    }
+    if (phase === "downloading") {
+      await act(async () => {
+        manualController.beginDownload();
+      });
+    }
+    await advance();
     expect(checkMock).toHaveBeenCalledTimes(1);
-  } finally {
-    vi.useRealTimers();
-  }
+    if (phase === "checking") {
+      await act(async () => {
+        result.resolve(pending);
+      });
+    }
+    await act(async () => {
+      download.resolve();
+    });
+    if (phase === "up-to-date") {
+      expect(pending.downloadAndInstall).not.toHaveBeenCalled();
+      expect(invokeMock).not.toHaveBeenCalled();
+    } else {
+      expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+      expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
+    }
+  },
+);
+
+test("检查中所有视图卸载再重挂也会完成原自动流程并只安装一次", async () => {
+  const result = deferred<Update | null>();
+  const pending = fakeUpdate();
+  checkMock.mockReturnValue(result.promise);
+  const first = render(<Harness autoCheck autoInstall />);
+  await advance();
+  first.unmount();
+  await act(async () => {
+    result.resolve(pending);
+  });
+  render(<Harness autoCheck autoInstall />);
+  await advance(30000);
+  expect(controller.phase).toBe("installed");
+  expect(checkMock).toHaveBeenCalledTimes(1);
+  expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+  expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
+});
+
+test("自动下载安装失败后，手动兜底重新检查使用新对象，仍需确认安装", async () => {
+  const failed = fakeUpdate({
+    downloadAndInstall: vi.fn(async () => {
+      throw new Error("signature");
+    }),
+  });
+  const next = fakeUpdate();
+  checkMock.mockResolvedValueOnce(failed).mockResolvedValueOnce(next);
+  render(<Harness autoCheck autoInstall />);
+  await advance();
+  expect(failed.close).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    controller.openManualCheck();
+  });
+  expect(controller.phase).toBe("available");
+  expect(next.downloadAndInstall).not.toHaveBeenCalled();
+  await act(async () => {
+    controller.beginDownload();
+  });
+  expect(next.downloadAndInstall).toHaveBeenCalledTimes(1);
+  expect(invokeMock).not.toHaveBeenCalled();
+});
+
+test("自动重启失败时静默，手动重试只重启，不重复检查或安装", async () => {
+  const pending = fakeUpdate();
+  checkMock.mockResolvedValue(pending);
+  invokeMock.mockRejectedValueOnce(new Error("restart"));
+  render(<Harness autoCheck autoInstall />);
+  await advance();
+  expect(controller.phase).toBe("failed");
+  expect(controller.dialog).toBeNull();
+  await act(async () => {
+    controller.openManualCheck();
+    controller.beginDownload();
+  });
+  expect(
+    screen.getByText("自动重启失败，请手动退出客户端后重新打开完成升级。"),
+  ).toBeVisible();
+  await act(async () => {
+    controller.retry();
+  });
+  expect(checkMock).toHaveBeenCalledTimes(1);
+  expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+  expect(invokeMock).toHaveBeenCalledTimes(2);
 });
