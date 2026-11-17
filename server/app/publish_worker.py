@@ -44,6 +44,7 @@ from app.publish_browser import (
     BrowserProbeLease,
     BrowserProbeLeaseLostError,
     claim_browser_probe_work,
+    defer_browser_probe_work,
     finalize_browser_probe,
 )
 from app.publish_records import (
@@ -62,18 +63,33 @@ logger = logging.getLogger(__name__)
 
 
 def _dispatch_probe(
-    platform: str, cookie: str, security_sdk: str | dict[str, Any] | None
-) -> tuple[bool, str | None]:
-    # security_sdk 只抖音用得上：账号巡检传入解密后的 JSON 字符串，
-    # 浏览器登录态探测传入 credentials_for_platform 解出的 dict；两者
-    # douyin_adapter.probe_douyin(SecuritySdk = str | dict | None) 都接受。
+    platform: str,
+    cookie: str | dict[str, Any],
+    security_sdk: str | dict[str, Any] | None,
+    *,
+    expected_platform_user_id: str | None = None,
+) -> tuple[bool | None, str | None]:
+    # 快手必须用完整浏览器登录态并核对绑定账号；不能套用视频号协议探测。
+    if platform == "kuaishou":
+        from app.publishers import kuaishou_adapter
+
+        if not isinstance(cookie, dict):
+            return False, "快手登录态材料无法读取，请重新扫码连接账号"
+        return kuaishou_adapter.probe_kuaishou(
+            cookie, expected_platform_user_id=expected_platform_user_id
+        )
+    if not isinstance(cookie, str):
+        return False, "登录态材料无法读取，请重新连接账号"
+    # security_sdk 只抖音用得上；协议账号和扫码账号分别传字符串与 dict。
     if platform == "douyin":
         from app.publishers import douyin_adapter
 
         return douyin_adapter.probe_douyin(cookie, security_sdk)
-    from app.publishers import channels_adapter
+    if platform == "wechat_channels":
+        from app.publishers import channels_adapter
 
-    return channels_adapter.probe_channels(cookie)
+        return channels_adapter.probe_channels(cookie)
+    return None, "该平台暂不支持自动探测"
 
 
 def _perform_publish(
@@ -120,6 +136,7 @@ def _perform_publish(
     tags = [str(tag) for tag in tags_value] if isinstance(tags_value, list) else []
     options_value = row.get("options")
     options = dict(options_value) if isinstance(options_value, dict) else {}
+    outcome: publish_delivery.DeliveryOutcome | None = None
     try:
         with publish_delivery.materialized_media(
             storage,
@@ -138,8 +155,15 @@ def _perform_publish(
                 tags=tags,
                 options=options,
                 submission_key=(str(row["submission_key"]) if row.get("submission_key") else None),
+                expected_platform_user_id=(
+                    str(row["platform_user_id"]) if row.get("platform_user_id") else None
+                ),
             )
     except Exception as exc:  # noqa: BLE001 - delivery boundary
+        if outcome is not None:
+            # 临时素材清理失败不能推翻已取得的成功或 unknown，否则 worker 会重复发表。
+            logger.warning("publish media cleanup failed: %s", type(exc).__name__)
+            return outcome.result, outcome.mode
         logger.warning("publish delivery preparation failed: %s", type(exc).__name__)
         return (
             PublishResult(platform=platform, status="failed", message="发布准备失败，稍后自动重试"),
@@ -148,8 +172,8 @@ def _perform_publish(
     return outcome.result, outcome.mode
 
 
-def _perform_browser_probe(lease: BrowserProbeLease, key: Any) -> tuple[bool, str | None]:
-    """Decrypt a QR-login account's state and probe its cookie; never raises."""
+def _perform_browser_probe(lease: BrowserProbeLease, key: Any) -> tuple[bool | None, str | None]:
+    """解密并探测扫码账号；None 表示尚不能确认，不能据此使账号失效。"""
     import json
 
     from app.publish_credentials import credentials_for_platform
@@ -161,7 +185,17 @@ def _perform_browser_probe(lease: BrowserProbeLease, key: Any) -> tuple[bool, st
     except Exception as exc:  # noqa: BLE001 - credential boundary
         logger.warning("browser probe credential decode failed: %s", type(exc).__name__)
         return False, "登录态材料无法读取，请重新扫码连接账号"
-    credentials = credentials_for_platform(lease.platform, storage)
+    if lease.platform == "kuaishou":
+        return _dispatch_probe(
+            lease.platform,
+            storage,
+            None,
+            expected_platform_user_id=lease.platform_user_id,
+        )
+    try:
+        credentials = credentials_for_platform(lease.platform, storage)
+    except ValueError:
+        return False, "登录态材料无法读取，请重新扫码连接账号"
     if not credentials.cookie:
         return False, "登录态材料无法读取，请重新扫码连接账号"
     return _dispatch_probe(lease.platform, credentials.cookie, credentials.security_sdk)
@@ -203,22 +237,32 @@ def run_publish_round(
         except Exception as exc:  # noqa: BLE001 - probe boundary
             logger.warning("account verify preparation failed: %s", type(exc).__name__)
             ok, message = False, "登录态材料无法读取，请重新连接账号"
-        try:
-            with open_txn() as conn:
-                finalize_account_verify(conn, lease=lease, ok=ok, message=message)
-        except PublishLeaseLostError:
-            logger.warning("account verify finalize lost lease: %s", lease.record_id)
+        if ok is not None:
+            try:
+                with open_txn() as conn:
+                    finalize_account_verify(conn, lease=lease, ok=ok, message=message)
+            except PublishLeaseLostError:
+                logger.warning("account verify finalize lost lease: %s", lease.record_id)
 
     with open_txn() as conn:
         probe_lease = claim_browser_probe_work(conn, worker_id=worker_id)
     if probe_lease is not None:
         processed += 1
         ok, message = _perform_browser_probe(probe_lease, key)
-        try:
+        # 未知结果推进到期时间后释放租约；只等旧租约过期会让慢账号反复占队首。
+        if ok is None:
             with open_txn() as conn:
-                finalize_browser_probe(conn, lease=probe_lease, ok=ok, message=message)
-        except BrowserProbeLeaseLostError:
-            logger.warning("browser probe finalize lost lease: %s", probe_lease.record_id)
+                deferred = defer_browser_probe_work(conn, lease=probe_lease)
+            if deferred:
+                logger.info("browser probe deferred: %s", probe_lease.record_id)
+            else:
+                logger.warning("browser probe defer lost lease: %s", probe_lease.record_id)
+        else:
+            try:
+                with open_txn() as conn:
+                    finalize_browser_probe(conn, lease=probe_lease, ok=ok, message=message)
+            except BrowserProbeLeaseLostError:
+                logger.warning("browser probe finalize lost lease: %s", probe_lease.record_id)
 
     with open_txn() as conn:
         work = claim_publish_work(conn, worker_id=worker_id)

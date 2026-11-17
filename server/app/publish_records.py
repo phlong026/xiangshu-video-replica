@@ -30,9 +30,9 @@ from app.permissions import require_asset_access, require_not_auditor, write_aud
 from app.publish import PublishLeaseLostError
 from app.publishers.base import PublishResult
 
-PLATFORMS: tuple[str, ...] = ("douyin", "wechat_channels", "xiaohongshu")
+PLATFORMS: tuple[str, ...] = ("douyin", "wechat_channels", "xiaohongshu", "kuaishou")
 # 小红书没有协议发布器，本期只能扫码登录；记录表预留 platform 值。
-DELIVERABLE_PLATFORMS: frozenset[str] = frozenset({"douyin", "wechat_channels"})
+DELIVERABLE_PLATFORMS: frozenset[str] = frozenset({"douyin", "wechat_channels", "kuaishou"})
 
 RecordStatus = Literal[
     "queued", "publishing", "submission_unknown", "published", "failed", "cancelled"
@@ -49,6 +49,7 @@ STATUSES: tuple[str, ...] = (
 MAX_TITLE_LENGTH = 300
 MAX_DESCRIPTION_LENGTH = 5000
 MAX_TAGS = 20
+MAX_KUAISHOU_TAGS = 3
 MAX_TAG_LENGTH = 40
 MAX_LIST_LIMIT = 100
 SCHEDULE_MIN_LEAD = timedelta(minutes=2)
@@ -336,6 +337,10 @@ def create_record(
         )
     if str(account["status"]) != "connected":
         raise _error(409, "PUBLISH_ACCOUNT_INVALID", "发布账号登录态已失效，请重新扫码。")
+    title = request.title.strip()
+    # 快手发布器要求标题非空，建任务前拒绝以免无效任务进入自动重试。
+    if platform == "kuaishou" and not title:
+        raise _error(422, "PUBLISH_TITLE_REQUIRED", "请填写快手发布标题。")
 
     video_asset_id = _resolve_stored_asset(
         conn, actor=actor, material_id=request.video_material_id, expected_media="video"
@@ -349,6 +354,9 @@ def create_record(
     )
     scheduled_at = _normalize_schedule(request.scheduled_at, now=moment)
     tags = _normalize_tags(request.tags)
+    # 开源快手发布器只使用前三个标签，入口拒绝超限以免静默丢弃客户选择。
+    if platform == "kuaishou" and len(tags) > MAX_KUAISHOU_TAGS:
+        raise _error(422, "PUBLISH_TAGS_TOO_MANY", f"快手发布最多支持 {MAX_KUAISHOU_TAGS} 个标签。")
 
     duplicate = conn.execute(
         """
@@ -376,7 +384,7 @@ def create_record(
             platform,
             video_asset_id,
             cover_asset_id,
-            request.title.strip(),
+            title,
             request.description.strip(),
             json.dumps(tags, ensure_ascii=False),
             json.dumps(request.options, ensure_ascii=False),

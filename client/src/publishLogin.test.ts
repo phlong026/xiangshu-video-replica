@@ -37,6 +37,7 @@ function environment(url: string, html: string, child = false) {
     win,
     top,
     listeners,
+    location,
     tick: async () => {
       await timers.shift()?.();
       await Promise.resolve();
@@ -200,4 +201,178 @@ it("非官方域名不注入，SVG 和远程地址不作为二维码回传", asy
     '<div id="animate_qrcode_container"><img src="data:image/svg+xml;base64,PHN2Zz4="></div>',
   );
   expect(await svg.tick()).not.toMatchObject({ phase: "qr_ready" });
+});
+
+const kuaishouLogin = "https://passport.kuaishou.com/pc/account/login/";
+const kuaishouQr = `<main id="login-form"><div class="qr-login"><img alt="qrcode" src="${qr}"></div></main>`;
+
+it("快手从精确官方 passport 登录路径读取固定上游二维码", async () => {
+  const env = environment(
+    `${kuaishouLogin}?sid=kuaishou.web.cp.api`,
+    kuaishouQr,
+  );
+  expect(await env.tick()).toMatchObject({ phase: "qr_ready", image: qr });
+  expect(env.win.__xiangshuPublishIdentity).toBeUndefined();
+  const updated = "data:image/png;base64,bmV3";
+  env.doc.querySelector("img")?.setAttribute("src", updated);
+  expect((env.win.__xiangshuReadPublishLogin as () => unknown)()).toMatchObject(
+    {
+      phase: "qr_ready",
+      image: updated,
+    },
+  );
+});
+
+it("快手只点击可见 PC 切换按钮一次，避免切回密码模式", async () => {
+  const env = environment(
+    kuaishouLogin,
+    '<main id="login-form"><div class="platform-switch platform-switch-mobile"></div><div class="platform-switch platform-switch-pc"></div></main>',
+  );
+  const mobile = vi.spyOn(
+    env.doc.querySelector(".platform-switch-mobile") as HTMLElement,
+    "click",
+  );
+  const pc = vi.spyOn(
+    env.doc.querySelector(".platform-switch-pc") as HTMLElement,
+    "click",
+  );
+  await env.tick();
+  await env.tick();
+  expect(pc).toHaveBeenCalledTimes(1);
+  expect(mobile).not.toHaveBeenCalled();
+});
+
+it("快手已有二维码时不点击切换按钮", async () => {
+  const env = environment(
+    kuaishouLogin,
+    kuaishouQr.replace(
+      "</main>",
+      '<div class="platform-switch platform-switch-pc"></div></main>',
+    ),
+  );
+  const click = vi.spyOn(
+    env.doc.querySelector(".platform-switch-pc") as HTMLElement,
+    "click",
+  );
+  expect(await env.tick()).toMatchObject({ phase: "qr_ready", image: qr });
+  expect(click).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["qrcode-status-timeout", "expired"],
+  ["qrcode-status-confirm", "confirming"],
+])("快手状态层 %s 隐藏旧码并上报 %s", async (status, phase) => {
+  const env = environment(
+    kuaishouLogin,
+    kuaishouQr.replace(
+      "</main>",
+      `<div class="qrcode-status ${status}"></div></main>`,
+    ),
+  );
+  expect(await env.tick()).toMatchObject({ phase, image: null });
+});
+
+it("快手隐藏的过期模板不会覆盖当前有效二维码", async () => {
+  const env = environment(
+    kuaishouLogin,
+    kuaishouQr.replace(
+      "</main>",
+      '<div class="qrcode-status qrcode-status-timeout"></div></main>',
+    ),
+  );
+  const expired = env.doc.querySelector(
+    ".qrcode-status-timeout",
+  ) as HTMLElement;
+  expired.getBoundingClientRect = () => ({ width: 0, height: 0 }) as DOMRect;
+  expect(await env.tick()).toMatchObject({ phase: "qr_ready", image: qr });
+});
+
+it.each([
+  "http://passport.kuaishou.com/pc/account/login/",
+  "https://passport.kuaishou.com.evil.test/pc/account/login/",
+  "https://sub.passport.kuaishou.com/pc/account/login/",
+  "https://passport.kuaishou.com/pc/account/login/other",
+  "https://passport.kuaishou.com/other/pc/account/login/",
+  "https://passport.kuaishou.com:8443/pc/account/login/",
+])("快手拒绝未经证实的登录来源：%s", async (url) => {
+  const env = environment(url, kuaishouQr);
+  expect(await env.tick()).toBeUndefined();
+  expect(env.win.__xiangshuReadPublishLogin).toBeUndefined();
+});
+
+it("快手创作者页仅接受当前官方 passport iframe 的二维码消息", async () => {
+  const env = environment(
+    "https://cp.kuaishou.com/article/publish/video",
+    `<iframe src="${kuaishouLogin}"></iframe><iframe src="https://evil.test/pc/account/login/"></iframe>`,
+  );
+  const frames = env.doc.querySelectorAll("iframe");
+  const receive = env.listeners.get("message");
+  const data = { type: "xiangshu-publish-qr", phase: "qr_ready", image: qr };
+  receive?.({
+    origin: "https://evil.test",
+    source: frames[1].contentWindow,
+    data,
+  });
+  receive?.({ origin: "https://passport.kuaishou.com", source: {}, data });
+  expect(await env.tick()).not.toMatchObject({ image: qr });
+  receive?.({
+    origin: "https://passport.kuaishou.com",
+    source: frames[0].contentWindow,
+    data,
+  });
+  expect(await env.tick()).toMatchObject({ phase: "qr_ready", image: qr });
+  (env.win.__xiangshuReadPublishLogin as () => unknown)();
+  expect(frames[0].contentWindow?.postMessage).toHaveBeenCalledWith(
+    { type: "xiangshu-read-publish-qr" },
+    "https://passport.kuaishou.com",
+  );
+  expect(frames[1].contentWindow?.postMessage).not.toHaveBeenCalled();
+  frames[0].setAttribute("src", "https://passport.kuaishou.com/unrelated");
+  expect(await env.tick()).not.toMatchObject({ image: qr });
+});
+
+it("快手 passport 子页面只向 cp 回传二维码并只接受 cp 顶层刷新", async () => {
+  const env = environment(kuaishouLogin, kuaishouQr, true);
+  await env.tick();
+  expect(env.top.postMessage).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      type: "xiangshu-publish-qr",
+      phase: "qr_ready",
+      image: qr,
+    }),
+    "https://cp.kuaishou.com",
+  );
+  env.top.postMessage.mockClear();
+  const receive = env.listeners.get("message");
+  const data = { type: "xiangshu-read-publish-qr" };
+  receive?.({
+    origin: "https://channels.weixin.qq.com",
+    source: env.top,
+    data,
+  });
+  receive?.({ origin: "https://cp.kuaishou.com", source: {}, data });
+  expect(env.top.postMessage).not.toHaveBeenCalled();
+  receive?.({ origin: "https://cp.kuaishou.com", source: env.top, data });
+  expect(env.top.postMessage).toHaveBeenCalledTimes(1);
+});
+
+it("快手登录页变成其他路径时主动读取也不回传旧码", async () => {
+  const env = environment(kuaishouLogin, kuaishouQr);
+  expect(await env.tick()).toMatchObject({ phase: "qr_ready" });
+  env.location.pathname = "/unrelated";
+  expect((env.win.__xiangshuReadPublishLogin as () => unknown)()).toMatchObject(
+    {
+      phase: "action_required",
+      image: null,
+    },
+  );
+});
+
+it("快手上传按钮和创作者页面图片不产生登录身份或二维码", async () => {
+  const env = environment(
+    "https://cp.kuaishou.com/article/publish/video",
+    `<button>上传视频</button>${kuaishouQr}`,
+  );
+  expect(await env.tick()).toMatchObject({ phase: "loading", image: null });
+  expect(env.win.__xiangshuPublishIdentity).toBeUndefined();
 });

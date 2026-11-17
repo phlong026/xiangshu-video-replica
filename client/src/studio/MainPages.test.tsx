@@ -3101,6 +3101,7 @@ describe("发布账号官方扫码", () => {
     expect(screen.getByRole("button", { name: "抖音" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "视频号" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "小红书" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "快手" })).toBeInTheDocument();
   });
   it("扫码添加以平台响应为准，未完成前不显示已连接", async () => {
     nativeAccounts.startLocalPublishLogin.mockResolvedValue("login-1");
@@ -3261,6 +3262,7 @@ describe("发布账号官方扫码", () => {
     ["douyin", "抖音"],
     ["wechat_channels", "视频号"],
     ["xiaohongshu", "小红书"],
+    ["kuaishou", "快手"],
   ])(
     "点击 %s 直接内嵌二维码，确认后在同一标签显示账号",
     async (platform, name) => {

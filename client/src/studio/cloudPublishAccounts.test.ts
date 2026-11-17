@@ -1,6 +1,7 @@
 import { waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  type CloudPublishAccount,
   cancelLocalPublishLogin,
   canUseLocalPublishAccounts,
   checkLocalPublishLogin,
@@ -49,10 +50,21 @@ it("Mac 桌面使用云端账号列表与解绑，不调用 Windows 专用命令
   expect(native.invoke).not.toHaveBeenCalled();
 });
 
-it.each(["douyin", "wechat_channels", "xiaohongshu"] as const)(
-  "Mac 桌面通过云端 %s 扫码流接收二维码、账号与取消结果",
+it.each(["douyin", "wechat_channels", "xiaohongshu", "kuaishou"] as const)(
+  "Mac 桌面通过云端 %s 扫码流接收二维码、真实账号回执与取消结果",
   async (platform) => {
     desktop("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+    const account: CloudPublishAccount = {
+      id: `mac-cloud-${platform}`,
+      platform,
+      platform_user_id: `verified-${platform}-uid`,
+      username: "平台回执真实昵称",
+      avatar_url: "/api/studio/publish/browser/accounts/avatar/test-account",
+      verified_at: 1,
+      status: "connected",
+      error_message: null,
+      source: "cloud",
+    };
     const stream = new TransformStream<Uint8Array, Uint8Array>();
     const writer = stream.writable.getWriter();
     request.mockImplementation(async (_path, init) =>
@@ -70,18 +82,20 @@ it.each(["douyin", "wechat_channels", "xiaohongshu"] as const)(
       expect(await checkLocalPublishLogin("owner", id)).toMatchObject({
         phase: "qr_ready",
         image: "data:image/png;base64,cXI=",
+        account: null,
       }),
     );
     await writer.write(
       new TextEncoder().encode(
-        '{"phase":"connected","image":null,"account":{"id":"mac-cloud-account"}}\n',
+        `${JSON.stringify({ phase: "connected", image: null, account })}\n`,
       ),
     );
     await writer.close();
     await waitFor(async () =>
-      expect(await checkLocalPublishLogin("owner", id)).toMatchObject({
+      expect(await checkLocalPublishLogin("owner", id)).toEqual({
         phase: "connected",
-        account: { id: "mac-cloud-account" },
+        image: null,
+        account,
       }),
     );
     await cancelLocalPublishLogin("owner", id);

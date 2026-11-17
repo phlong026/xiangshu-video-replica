@@ -1,4 +1,3 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -54,7 +53,12 @@ import {
   onPublishAccountsChanged,
   openLocalPublishAccount,
 } from "./localPublishAccounts";
-import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
+import {
+  AccountAvatar,
+  PlatformLogo,
+  type PublishPlatform,
+  publishPlatformNames,
+} from "./PlatformLogo";
 import { PublishRecordsPanel } from "./PublishRecordsPanel";
 import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioPublishDraft, StudioVideo } from "./types";
@@ -219,14 +223,17 @@ function viralPublishLabel(video: StudioVideo) {
 function ViralPoster({
   video,
   className,
+  fitContainer = false,
 }: {
   video: StudioVideo;
   className?: string;
+  fitContainer?: boolean;
 }) {
   return (
     <VideoPreview
       poster={video.poster}
       className={className}
+      fitContainer={fitContainer}
       fallback={<Icon name="video" />}
     />
   );
@@ -382,6 +389,7 @@ function ViralCover({
           autoPlay
           controls
           playsInline
+          fitContainer
           src={src}
           poster={video.poster}
           title={video.title}
@@ -396,7 +404,7 @@ function ViralCover({
           aria-label={`${error ? "重试播放" : "播放"} ${video.title}`}
           disabled={loading}
         >
-          <ViralPoster video={video} />
+          <ViralPoster video={video} fitContainer />
           <span className="viral-card-scrim" aria-hidden="true" />
           <span className="viral-card-playbtn" aria-hidden="true">
             ▶
@@ -437,19 +445,14 @@ function ViralCover({
             ) : null}
           </div>
           <ViralStatsRow video={video} />
-          <div className="viral-card-overlay-author">
-            {video.authorAvatar ? (
-              <img alt="" loading="lazy" src={video.authorAvatar} />
-            ) : (
-              <i>{(video.author || "无").slice(0, 1)}</i>
-            )}
-            <span>{video.author}</span>
-            {video.verified && <em title="认证作者">✓</em>}
-            {publish && <time>{publish}</time>}
-            {video.category && (
-              <em className="viral-card-cat">{video.category}</em>
-            )}
-          </div>
+          {publish && (
+            <time
+              className="viral-card-published"
+              title={`发布时间：${publish}`}
+            >
+              {publish} 发布
+            </time>
+          )}
         </div>
       )}
     </div>
@@ -1075,10 +1078,7 @@ export function ViralCard({
         onSavedChange={onFavoriteChange}
       />
       <div className="viral-card-body">
-        {/* 布局重设计（用户拍板 2026-11-15）：标题/统计/标签全部浮层压在封面
-            上（见 ViralCover 的 overlay-text），卡片高度由封面 9:16 统一决定，
-            不再被下方文字撑出参差；统计来源元数据行整体取消。body 只留按钮
-            区，等宽两列。 */}
+        {/* 文字信息浮在封面上，按钮区高度不受标题与标签长度影响。 */}
         <div className="content-card-actions">
           {/* 一键复刻爆款=卡片主 CTA，常驻按时长分流：≤30s 直接 AI 视频复刻，
               >30s 直接数字人口播路线（详见详情页意图消费）。 */}
@@ -2894,11 +2894,7 @@ export function MaterialsPage() {
 }
 
 function publishPlatformLabel(platform: string) {
-  return platform === "douyin"
-    ? "抖音"
-    : platform === "wechat_channels"
-      ? "视频号"
-      : "小红书";
+  return publishPlatformNames[platform as PublishPlatform] ?? platform;
 }
 function formCoverId(
   drafts: StudioPublishDraft[] | undefined,
@@ -2918,7 +2914,7 @@ export function parsePublishDrafts(value: unknown): StudioPublishDraft[] {
       typeof item.title !== "string" ||
       typeof item.description !== "string" ||
       typeof item.account !== "string" ||
-      !["抖音", "视频号", "小红书"].includes(item.platform) ||
+      !["抖音", "视频号", "小红书", "快手"].includes(item.platform) ||
       !Array.isArray(item.tags) ||
       item.tags.some((tag: unknown) => typeof tag !== "string") ||
       (item.coverId !== undefined && typeof item.coverId !== "string") ||
@@ -3192,6 +3188,7 @@ export function PublishPage() {
     () => savedDraftForAsset ?? newPublishDraft(selectedAsset, review),
   );
   const [tagInput, setTagInput] = useState("");
+  const tagLimit = form.platform === "快手" ? 3 : 10;
   const [saveNotice, setSaveNotice] = useState(false);
   const draftCount = visibleDrafts.length;
   const selectedAccount = accounts.find(
@@ -3230,15 +3227,25 @@ export function PublishPage() {
   const addTag = () => {
     const tag = tagInput.trim();
     if (
+      tag &&
+      !form.tags.includes(tag) &&
+      form.platform === "快手" &&
+      form.tags.length >= tagLimit
+    ) {
+      setActionError("快手发布最多支持 3 个标签，请先移除多余标签。");
+      return;
+    }
+    if (
       !tag ||
       tag.length > 50 ||
-      form.tags.length >= 10 ||
+      form.tags.length >= tagLimit ||
       form.tags.includes(tag)
     ) {
       setTagInput("");
       return;
     }
     updateForm({ tags: [...form.tags, tag] });
+    if (form.platform === "快手") setActionError("");
     setTagInput("");
   };
 
@@ -3312,6 +3319,14 @@ export function PublishPage() {
     }
     if (!platformDeliverable) {
       setActionError("小红书自动发布正在开发中，请先前往官方页面发布。");
+      return;
+    }
+    if (form.platform === "快手" && !form.title.trim()) {
+      setActionError("请填写快手发布标题。");
+      return;
+    }
+    if (form.platform === "快手" && form.tags.length > tagLimit) {
+      setActionError(`快手发布最多支持 ${tagLimit} 个标签，请先移除多余标签。`);
       return;
     }
     await perform(async () => {
@@ -3445,62 +3460,12 @@ export function PublishPage() {
       <header className="content-title">
         <div>
           <h1>发布管理</h1>
-          <p>选择成片与账号发布，或前往快手创作者中心手动发布</p>
+          <p>选择成片、发布平台与账号，立即发布或设置定时发布</p>
         </div>
+        <Button onClick={() => navigate("tasks")}>
+          {selectedAsset ? "更换发布成片" : "选择发布成片"}
+        </Button>
       </header>
-      <section
-        aria-labelledby="kuaishou-manual-publish-title"
-        className="studio-panel content-publish-manual"
-      >
-        <div>
-          <h2 id="kuaishou-manual-publish-title">快手手动发布</h2>
-          <p>
-            下载所选成片、复制发布草稿的文案，再到快手创作者中心登录、手动上传并确认发布，结果以快手官方页面为准。
-          </p>
-          <span>
-            {selectedAsset ? `已选择：${selectedAsset.name}` : "尚未选择成片"}
-          </span>
-        </div>
-        <div className="content-publish-manual-actions">
-          <Button onClick={() => navigate("tasks")}>
-            {selectedAsset ? "更换发布成片" : "选择发布成片"}
-          </Button>
-          <Button
-            disabled={!selectedAsset || review || actionBusy}
-            onClick={() => void downloadSelectedVideo()}
-          >
-            下载所选成片
-          </Button>
-          <Button
-            disabled={!form.title.trim() || review || actionBusy}
-            onClick={() => void copyPublishText()}
-          >
-            复制快手发布文案
-          </Button>
-          <a
-            className="studio-button studio-button--primary"
-            href="https://cp.kuaishou.com/article/publish/video"
-            rel="noopener noreferrer"
-            target="_blank"
-            onClick={(event) => {
-              if (!isTauri()) return;
-              event.preventDefault();
-              setActionError("");
-              void invoke<void>("open_kuaishou_creator").catch((cause) => {
-                setActionError(
-                  cause instanceof Error
-                    ? cause.message
-                    : typeof cause === "string"
-                      ? cause
-                      : "无法打开快手创作者中心，请重试。",
-                );
-              });
-            }}
-          >
-            前往快手手动发布
-          </a>
-        </div>
-      </section>
       <section className="content-publish-layout">
         <Panel className="content-publish-drafts">
           <div className="content-publish-draft-tabs">
@@ -3792,27 +3757,31 @@ export function PublishPage() {
           <div className="content-publish-fields">
             <Field label="发布平台">
               <div className="content-platform-options">
-                {(["抖音", "视频号", "小红书"] as const).map((platform) => (
-                  <Button
-                    disabled={actionBusy || cloudRevision === null}
-                    aria-pressed={form.platform === platform}
-                    key={platform}
-                    onClick={() => {
-                      // 小红书协议发布器尚未开发（自动发布暂缓）：选择时只提示进度，
-                      // 不切换平台，避免用户停留在无法提交发布的状态。
-                      if (platform === "小红书") {
-                        notifyRef.current(
-                          "小红书自动发布正在开发中，敬请期待。",
-                        );
-                        return;
+                {(["抖音", "视频号", "小红书", "快手"] as const).map(
+                  (platform) => (
+                    <Button
+                      disabled={actionBusy || cloudRevision === null}
+                      aria-pressed={form.platform === platform}
+                      key={platform}
+                      onClick={() => {
+                        // 小红书协议发布器尚未开发（自动发布暂缓）：选择时只提示进度，
+                        // 不切换平台，避免用户停留在无法提交发布的状态。
+                        if (platform === "小红书") {
+                          notifyRef.current(
+                            "小红书自动发布正在开发中，敬请期待。",
+                          );
+                          return;
+                        }
+                        updateForm({ platform, account: "" });
+                      }}
+                      variant={
+                        form.platform === platform ? "primary" : "outline"
                       }
-                      updateForm({ platform, account: "" });
-                    }}
-                    variant={form.platform === platform ? "primary" : "outline"}
-                  >
-                    <PlatformLogo platform={platform} /> {platform}
-                  </Button>
-                ))}
+                    >
+                      <PlatformLogo platform={platform} /> {platform}
+                    </Button>
+                  ),
+                )}
               </div>
             </Field>
             <Field label="发布账号">
@@ -3933,7 +3902,9 @@ export function PublishPage() {
                 maxLength={5000}
               />
             </Field>
-            <Field label="标签">
+            <Field
+              label={form.platform === "快手" ? "标签（最多 3 个）" : "标签"}
+            >
               <div className="content-publish-tags">
                 {form.tags.map((tag) => (
                   <Button

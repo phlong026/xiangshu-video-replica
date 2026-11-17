@@ -1129,39 +1129,6 @@
 .content-material-manage input {
   width: 100%;
 }
-.content-publish-manual {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 16px 24px;
-  margin-top: 16px;
-  padding: 18px;
-}
-.content-publish-manual > div:first-child {
-  flex: 1 1 360px;
-  min-width: 0;
-}
-.content-publish-manual h2 {
-  font-size: var(--font-section);
-  margin: 0 0 8px;
-}
-.content-publish-manual p {
-  color: #b4b5af;
-  line-height: 1.6;
-  margin: 0 0 8px;
-}
-.content-publish-manual span {
-  color: #deded9;
-  overflow-wrap: anywhere;
-}
-.content-publish-manual-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.content-publish-manual-actions a {
-  text-decoration: none;
-}
 .content-publish-layout {
   display: grid;
   gap: 18px;
@@ -1676,14 +1643,30 @@
 }
 
 .viral-card-cover-trigger {
-  position: relative;
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  aspect-ratio: 9 / 16;
+  height: 100%;
   padding: 0;
   border: 0;
   background: #171817;
   cursor: pointer;
+}
+
+/* 卡片封面跟随外层视窗，避免通用预览的高度上限让浮层落在图片外。 */
+.viral-card-cover .video-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
+.viral-card-cover-trigger
+  .video-preview.video-preview--fit
+  > img.video-preview__foreground {
+  object-fit: cover;
 }
 
 .viral-card-cover-empty {
@@ -1711,6 +1694,7 @@
   background: #080909cc;
   color: #fff;
   font-size: var(--font-caption);
+  pointer-events: none;
 }
 
 .viral-card-duration {
@@ -1719,6 +1703,9 @@
 }
 
 .viral-card-platform {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   left: 8px;
   top: 8px;
   color: #e5aa36;
@@ -1909,17 +1896,18 @@
   z-index: 2;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 46px 10px 8px;
+  gap: 6px;
+  padding: 46px 12px 12px;
   background: linear-gradient(to top, #080909f2, #080909a6 62%, transparent);
+  text-shadow: 0 1px 3px #0009;
   pointer-events: none;
 }
 
-/* 布局重设计（用户拍板 2026-11-15）：标题/标签浮层压图。标题可点进详情；
-   pointer-events 在 overlay 关闭，单独给标题按钮与标签开回来。 */
+/* 浮层不拦截封面播放，只恢复标题按钮与标签的交互。 */
 .viral-card-overlay-text {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -1975,11 +1963,14 @@
 }
 
 .viral-card-overlay .viral-card-stats {
+  flex-wrap: wrap;
   border-top: 0;
   padding-top: 0;
   color: #fff;
   font-size: var(--font-caption);
-  gap: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  gap: 4px 9px;
 }
 
 .viral-card-overlay .viral-card-stats svg {
@@ -1996,57 +1987,11 @@
   white-space: nowrap;
 }
 
-.viral-card-overlay-author {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-caption);
+.viral-card-published {
+  align-self: flex-end;
   color: #d8d8d2;
-  min-width: 0;
-}
-
-.viral-card-overlay-author img,
-.viral-card-overlay-author i {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  flex: none;
-  object-fit: cover;
-  font-style: normal;
   font-size: var(--font-caption);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #23241f;
-  color: #e5aa36;
-}
-
-.viral-card-overlay-author span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.viral-card-overlay-author em {
-  color: #e5aa36;
-  font-style: normal;
-  flex: none;
-}
-
-.viral-card-overlay-author time {
-  color: #b3b5ae;
-  flex: none;
-}
-
-.viral-card-overlay-author .viral-card-cat {
-  margin-left: auto;
-  flex: none;
-  font-style: normal;
-  font-size: var(--font-caption);
-  padding: 2px 6px;
-  border-radius: 5px;
-  background: rgba(35, 36, 31, 0.85);
-  color: #c9cac4;
+  line-height: 1.5;
 }
 
 .viral-card-loading {

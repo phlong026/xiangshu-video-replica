@@ -1356,14 +1356,23 @@ describe("V1.4 workspace integration", () => {
           initialState={initialState}
         />,
       );
-      const manual = within(
-        screen.getByRole("region", { name: "快手手动发布" }),
-      );
       expect(
-        manual.getByText(
-          hasSelection ? "已选择：原发布成片.mp4" : "尚未选择成片",
-        ),
+        screen.getByRole("heading", { name: "发布管理" }),
       ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", {
+          name: hasSelection ? "更换发布成片" : "选择发布成片",
+        }),
+      ).toBeEnabled();
+      if (hasSelection) {
+        expect(
+          screen.getByAltText("原发布成片.mp4 视频预览"),
+        ).toBeInTheDocument();
+        expect(screen.getByLabelText("发布标题")).toHaveValue("原发布成片.mp4");
+      } else {
+        expect(screen.getByText("暂无可发布成片")).toBeInTheDocument();
+        expect(screen.queryByAltText("原发布成片.mp4 视频预览")).toBeNull();
+      }
 
       fireEvent.click(screen.getByRole("button", { name: entry }));
       expect(window.location.hash).toBe("#studio/tasks");
@@ -1389,10 +1398,12 @@ describe("V1.4 workspace integration", () => {
         "publish-new-result",
       );
       expect(
-        within(screen.getByRole("region", { name: "快手手动发布" })).getByText(
-          "已选择：新选择成片.mp4",
-        ),
+        screen.getByRole("heading", { name: "发布管理" }),
       ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "更换发布成片" }),
+      ).toBeEnabled();
+      expect(screen.queryByText("暂无可发布成片")).toBeNull();
       expect(
         screen.getByAltText("新选择成片.mp4 视频预览"),
       ).toBeInTheDocument();

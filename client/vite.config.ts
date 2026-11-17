@@ -71,6 +71,11 @@ export default defineConfig({
           resolve(output, "platforms"),
           { recursive: true },
         );
+        cpSync(
+          resolve(scriptDir, "public/licenses"),
+          resolve(output, "licenses"),
+          { recursive: true },
+        );
         // 品牌图形走 src/assets/brand/ 的模块导入（打包进 hashed assets），
         // 不再依赖 public/studio/ 公共目录——该目录从未入库，曾把整个
         // 客户/管理构建卡死在 ENOENT（原「logo 更换」改动的回退清理）。

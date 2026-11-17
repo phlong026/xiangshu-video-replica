@@ -9464,7 +9464,7 @@ export type PublishRecordStatus =
 
 export type PublishRecordItem = {
   id: string;
-  platform: "douyin" | "wechat_channels" | "xiaohongshu";
+  platform: "douyin" | "wechat_channels" | "xiaohongshu" | "kuaishou";
   account_id: string | null;
   account_username: string | null;
   video_asset_id: string;

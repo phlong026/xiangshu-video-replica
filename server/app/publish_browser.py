@@ -16,7 +16,7 @@ from app.db_portable import BusinessConnection
 from app.publish_avatars import rehost_avatar
 from app.storage import StorageAdapter
 
-Platform = Literal["douyin", "wechat_channels", "xiaohongshu"]
+Platform = Literal["douyin", "wechat_channels", "xiaohongshu", "kuaishou"]
 AccountSource = Literal["cloud", "desktop"]
 
 MAX_STORAGE_STATE_BYTES = 2_000_000
@@ -27,6 +27,7 @@ _ACCOUNT_COLUMNS = (
 # 扫码账号每 24 小时做一次登录态健康探测；探测租约 5 分钟，够一次平台探测往返。
 PROBE_INTERVAL_SECONDS = 86_400
 _PROBE_LEASE_SECONDS = 300
+_PROBE_DEFER_SECONDS = 300
 _PROBE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -309,6 +310,8 @@ class BrowserProbeLease:
     storage_state_enc: str
     lease_token: str
     attempt_count: int
+    # 核对官方登录态身份，避免有效但属于另一账号的登录态被当成健康。
+    platform_user_id: str | None = None
 
 
 def _probe_now() -> datetime:
@@ -336,7 +339,7 @@ def claim_browser_probe_work(
     with conn:
         row = conn.execute(
             """
-            SELECT id, platform, storage_state_enc
+            SELECT id, platform, platform_user_id, storage_state_enc
             FROM publish_browser_accounts
             WHERE status = 'connected'
               AND (next_probe_at IS NULL OR next_probe_at <= %s)
@@ -370,7 +373,38 @@ def claim_browser_probe_work(
             storage_state_enc=str(row["storage_state_enc"]),
             lease_token=lease_token,
             attempt_count=int(claimed["probe_attempt_count"]),
+            platform_user_id=str(row["platform_user_id"]),
         )
+
+
+def defer_browser_probe_work(
+    conn: BusinessConnection,
+    *,
+    lease: BrowserProbeLease,
+    now: datetime | None = None,
+) -> bool:
+    """未知探测结果仅延后重查，避免慢账号反复占据到期队列头部。"""
+    moment = now or _probe_now()
+    next_text = (moment + timedelta(seconds=_PROBE_DEFER_SECONDS)).isoformat()
+    with conn:
+        cursor = conn.execute(
+            """
+            UPDATE publish_browser_accounts
+            SET next_probe_at = %s,
+                probe_lease_owner = NULL,
+                probe_lease_expires_at = NULL
+            WHERE id = %s AND probe_lease_owner = %s AND probe_attempt_count = %s
+              AND probe_lease_expires_at > %s
+            """,
+            (
+                next_text,
+                lease.record_id,
+                lease.lease_token,
+                lease.attempt_count,
+                moment.isoformat(),
+            ),
+        )
+        return cursor.rowcount == 1
 
 
 def finalize_browser_probe(

@@ -8957,7 +8957,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels" | "xiaohongshu";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu" | "kuaishou";
       /** Platform User Id */
       platform_user_id: string;
       /** Username */
@@ -8990,7 +8990,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels" | "xiaohongshu";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu" | "kuaishou";
       identity: components["schemas"]["BrowserIdentity"];
       /** Storage State */
       storage_state: {
@@ -9012,7 +9012,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels" | "xiaohongshu";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu" | "kuaishou";
       /** Account Id */
       account_id?: string | null;
     };

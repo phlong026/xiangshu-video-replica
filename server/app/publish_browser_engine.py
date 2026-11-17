@@ -17,8 +17,10 @@ from urllib.parse import urlparse
 
 from playwright.async_api import (
     BrowserContext,
+    Frame,
     Locator,
     Page,
+    Request,
     Response,
     StorageState,
     async_playwright,
@@ -30,14 +32,21 @@ ORIGINS = {
     "douyin": "https://creator.douyin.com",
     "wechat_channels": "https://channels.weixin.qq.com",
     "xiaohongshu": "https://creator.xiaohongshu.com",
+    "kuaishou": "https://cp.kuaishou.com",
 }
 ENDPOINTS = {
     "douyin": "/web/api/media/user/info/",
     "wechat_channels": "/auth/auth_data",
     "xiaohongshu": "/api/galaxy/user/info",
+    "kuaishou": "/rest/v2/creator/pc/authority/account/current",
 }
 DOUYIN_IDENTITY_URL = "https://creator.douyin.com/web/api/media/user/info/?aid=1128"
 DOUYIN_PROBE_INTERVAL_SECONDS = 3.0
+KUAISHOU_LOGIN_ORIGIN = "https://passport.kuaishou.com"
+KUAISHOU_LOGIN_PATHS = frozenset({"/pc/account/login", "/pc/account/login/"})
+KUAISHOU_COOKIE_DOMAINS = frozenset({"kuaishou.com", "cp.kuaishou.com", "passport.kuaishou.com"})
+KUAISHOU_STORAGE_ORIGINS = frozenset({ORIGINS["kuaishou"], KUAISHOU_LOGIN_ORIGIN})
+KUAISHOU_PROBE_TIMEOUT_SECONDS = 25.0
 
 # 视频号登录二维码只在 /platform 控制台路径下直接渲染；根路径落地页需交互才出码，
 # 是网页版视频号取不到码的主因之一。抖音创作者后台根路径已能直接出码（测试通过），
@@ -46,6 +55,7 @@ LOGIN_PATHS = {
     "douyin": "",
     "wechat_channels": "/platform",
     "xiaohongshu": "",
+    "kuaishou": "/article/publish/video",
 }
 
 # 无头 Chromium 默认暴露 navigator.webdriver 等自动化特征，微信风控据此可能不渲染
@@ -102,15 +112,242 @@ def parse_identity(platform: Platform, body: Any) -> dict[str, str] | None:
         ):
             user = body.get("data", {})
             uid, name = user.get("userId"), user.get("userName")
+        elif platform == "kuaishou" and type(body.get("result")) is int and body["result"] == 1:
+            # 官方 bootstrap 将 data 原样写入 user；显示名取 userName，不能拿快手号代替 UID。
+            user = body.get("data", {})
+            if user.get("logined") is False:
+                return None
+            uid, name = user.get("userId"), user.get("userName")
+            if uid == 0 or (isinstance(uid, str) and uid.strip() == "0"):
+                return None
+            if isinstance(uid, int) and abs(uid) > 9_007_199_254_740_991:
+                return None
         else:
             return None
         if isinstance(uid, bool) or not isinstance(uid, str | int) or not isinstance(name, str):
             return None
         if not str(uid).strip() or not name.strip() or len(str(uid)) > 256 or len(name) > 256:
             return None
-        return {"platform_user_id": str(uid).strip(), "username": name.strip()}
+        identity = {"platform_user_id": str(uid).strip(), "username": name.strip()}
+        if platform == "kuaishou":
+            avatar = user.get("userAvatar")
+            if (
+                isinstance(avatar, str)
+                and len(avatar.strip()) <= 1024
+                and avatar.strip().startswith("https://")
+                and not any(char.isspace() for char in avatar.strip())
+            ):
+                identity["avatar_url"] = avatar.strip()
+        return identity
     except (AttributeError, TypeError, IndexError):
         return None
+
+
+class KuaishouIdentityUnavailableError(RuntimeError):
+    """身份暂不可核实；调用方必须保留原有登录状态，不能据此标记失效。"""
+
+
+def _origin(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+    except ValueError:
+        return ""
+
+
+def _is_kuaishou_login_page(url: str) -> bool:
+    return _origin(url) == KUAISHOU_LOGIN_ORIGIN and urlparse(url).path in KUAISHOU_LOGIN_PATHS
+
+
+def _is_kuaishou_identity_url(url: str) -> bool:
+    return _origin(url) == ORIGINS["kuaishou"] and urlparse(url).path == ENDPOINTS["kuaishou"]
+
+
+def filter_kuaishou_storage_state(storage: dict[str, Any]) -> dict[str, Any]:
+    """只导出两处官方登录源及共同父域；不保留浏览器途经的其他站点状态。"""
+    cookies, origins = storage.get("cookies", []), storage.get("origins", [])
+    if not isinstance(cookies, list) or not isinstance(origins, list):
+        raise ValueError("平台登录状态格式不正确")
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        domain = cookie.get("domain")
+        name, value, path = cookie.get("name"), cookie.get("value"), cookie.get("path", "/")
+        if (
+            not isinstance(domain, str)
+            or domain.removeprefix(".").lower() not in KUAISHOU_COOKIE_DOMAINS
+            or not isinstance(name, str)
+            or not isinstance(value, str)
+            or not isinstance(path, str)
+        ):
+            continue
+        key = (name, domain.lower(), path)
+        if key not in seen:
+            selected.append(dict(cookie))
+            seen.add(key)
+    return {
+        "cookies": selected,
+        "origins": [
+            dict(entry)
+            for entry in origins
+            if isinstance(entry, dict)
+            and isinstance(entry.get("origin"), str)
+            and entry["origin"] in KUAISHOU_STORAGE_ORIGINS
+        ],
+    }
+
+
+class _KuaishouIdentityCapture:
+    """只信任当前官方文档亲自发起的 bootstrap，导航即作废在途回执。"""
+
+    def __init__(self, page: Page) -> None:
+        self.page = page
+        self.generation = 0
+        self.navigation_generation = 0
+        self.identity: dict[str, str] | None = None
+        self._requests: dict[int, int] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._changed = asyncio.Event()
+        self._outcome: (
+            tuple[int, dict[str, str] | None | KuaishouIdentityUnavailableError] | None
+        ) = None
+        page.on("request", self._on_request)
+        page.on("response", self._on_response)
+        page.on("framenavigated", self._on_navigation)
+
+    def _current(self, generation: int) -> bool:
+        return (
+            generation == self.generation
+            and not self.page.is_closed()
+            and _origin(self.page.url) == ORIGINS["kuaishou"]
+        )
+
+    def _trusted_request(self, request: Request) -> bool:
+        try:
+            return (
+                request.method == "POST"
+                and _is_kuaishou_identity_url(request.url)
+                and request.redirected_from is None
+                and request.frame is self.page.main_frame
+                and _origin(request.frame.url) == ORIGINS["kuaishou"]
+                and self._current(self.generation)
+            )
+        except Exception:
+            return False
+
+    def _on_navigation(self, frame: Frame) -> None:
+        self.navigation_generation += 1
+        if frame is self.page.main_frame:
+            self.generation += 1
+            self.identity = None
+            self._requests.clear()
+            self._outcome = None
+            self._changed.clear()
+
+    def _on_request(self, request: Request) -> None:
+        if self._trusted_request(request):
+            self._requests[id(request)] = self.generation
+
+    def _on_response(self, response: Response) -> None:
+        generation = self._requests.pop(id(response.request), None)
+        if generation is None or not self._current(generation):
+            return
+        task = asyncio.create_task(self._capture(response, generation))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _capture(self, response: Response, generation: int) -> None:
+        if not self._trusted_request(response.request) or not _is_kuaishou_identity_url(
+            response.url
+        ):
+            return
+        outcome: dict[str, str] | None | KuaishouIdentityUnavailableError
+        try:
+            if not response.ok or not 200 <= response.status < 300:
+                raise KuaishouIdentityUnavailableError("平台身份暂时无法核实，请稍后重试")
+            body = await response.json()
+            identity = parse_identity("kuaishou", body)
+            if identity is not None:
+                outcome = identity
+            elif (
+                isinstance(body, dict)
+                and type(body.get("result")) is int
+                and (
+                    body["result"] == 109
+                    or (
+                        body["result"] == 1
+                        and isinstance(body.get("data"), dict)
+                        and body["data"].get("logined") is False
+                    )
+                )
+            ):
+                outcome = None
+            else:
+                raise KuaishouIdentityUnavailableError("平台身份响应暂时无法识别，请稍后重试")
+        except KuaishouIdentityUnavailableError as exc:
+            outcome = exc
+        except Exception:
+            outcome = KuaishouIdentityUnavailableError("平台身份暂时无法核实，请稍后重试")
+        if not self._current(generation):
+            return
+        if not isinstance(outcome, KuaishouIdentityUnavailableError):
+            self.identity = outcome
+        self._outcome = (generation, outcome)
+        self._changed.set()
+
+    async def result(self) -> dict[str, str] | None:
+        while True:
+            await self._changed.wait()
+            self._changed.clear()
+            if self._outcome is None or not self._current(self._outcome[0]):
+                continue
+            outcome = self._outcome[1]
+            if isinstance(outcome, KuaishouIdentityUnavailableError):
+                raise outcome
+            return outcome
+
+    async def close(self) -> None:
+        self.page.remove_listener("request", self._on_request)
+        self.page.remove_listener("response", self._on_response)
+        self.page.remove_listener("framenavigated", self._on_navigation)
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+async def probe_kuaishou_identity(context: BrowserContext) -> dict[str, str] | None:
+    """临时官方页核实身份；result=109 或 result=1 且 logined=false 返回 None。
+
+    请求含官方脚本签名和上下文，必须观察真实 bootstrap POST。网络、限流、重定向、
+    未知结构均抛 KuaishouIdentityUnavailableError；不会把临时故障误判为账号失效。
+    """
+    page: Page | None = None
+    capture: _KuaishouIdentityCapture | None = None
+    try:
+        async with asyncio.timeout(KUAISHOU_PROBE_TIMEOUT_SECONDS):
+            page = await context.new_page()
+            capture = _KuaishouIdentityCapture(page)
+            await page.goto(
+                ORIGINS["kuaishou"] + LOGIN_PATHS["kuaishou"],
+                wait_until="commit",
+                timeout=20000,
+            )
+            return await capture.result()
+    except KuaishouIdentityUnavailableError:
+        raise
+    except Exception:
+        raise KuaishouIdentityUnavailableError("平台身份暂时无法核实，请稍后重试") from None
+    finally:
+        if capture is not None:
+            await capture.close()
+        if page is not None:
+            try:
+                await page.close()
+            except Exception as exc:
+                logger.warning("平台身份探测页面清理失败：%s", type(exc).__name__)
 
 
 def _is_douyin_creator_page(url: str) -> bool:
@@ -175,6 +412,21 @@ async def qr_locator(page: Page, platform: Platform) -> Locator | None:
             .first,
             box.locator('img[src^="data:image"]').first,
         ]
+    elif platform == "kuaishou":
+        if _origin(page.url) != ORIGINS["kuaishou"] and not _is_kuaishou_login_page(page.url):
+            return None
+        for frame in page.frames:
+            if not _is_kuaishou_login_page(frame.url):
+                continue
+            # 固定上游只在此登录区域读码，二维码面板已可见时不反复切换。
+            region = frame.locator("main#login-form div.qr-login").first
+            if not await region.is_visible():
+                toggle = frame.locator(
+                    "main#login-form div.platform-switch.platform-switch-pc"
+                ).first
+                if await toggle.is_visible():
+                    await toggle.click(timeout=1500)
+            candidates.append(frame.locator('main#login-form div.qr-login img[alt="qrcode"]').first)
     else:
         # Both legacy and July-2026 qrconnect frames; screenshot resolves relative URLs.
         for frame in page.frames:
@@ -213,6 +465,9 @@ async def login_events(
     identity: dict[str, str] | None = None
     last_douyin_probe_at: float | None = None
     tasks: set[asyncio.Task[None]] = set()
+    kuaishou_capture: _KuaishouIdentityCapture | None = None
+    if platform == "kuaishou" and storage is not None:
+        storage = filter_kuaishou_storage_state(storage)
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, args=list(CHROMIUM_ARGS))
         try:
@@ -244,7 +499,10 @@ async def login_events(
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
 
-            page.on("response", on_response)
+            if platform == "kuaishou":
+                kuaishou_capture = _KuaishouIdentityCapture(page)
+            else:
+                page.on("response", on_response)
             # The login shell may keep loading optional scripts while its QR is ready.
             # Start observing after the response commits; each locator tolerates loading DOM.
             await page.goto(
@@ -268,44 +526,101 @@ async def login_events(
                     probed_identity = await _probe_douyin_identity(context)
                     if probed_identity is not None:
                         identity = probed_identity
-                current = urlparse(page.url)
+                if kuaishou_capture is not None:
+                    identity = kuaishou_capture.identity
+                current_origin = _origin(page.url)
                 on_douyin_creator_page = platform == "douyin" and _is_douyin_creator_page(page.url)
-                if (
-                    identity is not None
-                    and f"{current.scheme}://{current.netloc}" == ORIGINS[platform]
-                ):
+                if identity is not None and current_origin == ORIGINS[platform]:
+                    generation = kuaishou_capture.generation if kuaishou_capture else None
                     state = dict(await context.storage_state(indexed_db=True))
+                    if kuaishou_capture is not None:
+                        # 导出期间也可能跳转或切换账号，迟到的身份不能与另一份登录态配对。
+                        if (
+                            not kuaishou_capture._current(cast(int, generation))
+                            or kuaishou_capture.identity is not identity
+                        ):
+                            yield BrowserEvent("confirming")
+                            await asyncio.sleep(1.5)
+                            continue
+                        state = filter_kuaishou_storage_state(state)
+                        if not state["cookies"]:
+                            yield BrowserEvent("action_required")
+                            await asyncio.sleep(1.5)
+                            continue
                     yield BrowserEvent("connected", identity=identity, storage=state)
                     return
                 if on_douyin_creator_page:
                     yield BrowserEvent("confirming")
                     await asyncio.sleep(1.5)
                     continue
+                if platform == "kuaishou" and (
+                    current_origin != ORIGINS["kuaishou"] and not _is_kuaishou_login_page(page.url)
+                ):
+                    yield BrowserEvent("action_required")
+                    await asyncio.sleep(1.5)
+                    continue
                 try:
+                    qr_generation = (
+                        kuaishou_capture.navigation_generation if kuaishou_capture else None
+                    )
+                    confirming = False
                     for frame in page.frames:
                         parsed = urlparse(frame.url)
-                        if parsed.netloc not in {
-                            urlparse(ORIGINS[platform]).netloc,
-                            "open.weixin.qq.com",
-                        }:
-                            continue
-                        expired = (
-                            frame.get_by_text("二维码已过期", exact=False)
-                            .or_(frame.get_by_text("二维码已失效", exact=False))
-                            .first
-                        )
+                        if platform == "kuaishou":
+                            if not _is_kuaishou_login_page(frame.url):
+                                continue
+                            expired = frame.locator("div.qrcode-status.qrcode-status-timeout").first
+                        else:
+                            if parsed.netloc not in {
+                                urlparse(ORIGINS[platform]).netloc,
+                                "open.weixin.qq.com",
+                            }:
+                                continue
+                            expired = (
+                                frame.get_by_text("二维码已过期", exact=False)
+                                .or_(frame.get_by_text("二维码已失效", exact=False))
+                                .first
+                            )
                         if await expired.is_visible():
+                            if (
+                                kuaishou_capture is not None
+                                and qr_generation != kuaishou_capture.navigation_generation
+                            ):
+                                raise RuntimeError("登录页面已跳转")
                             yield BrowserEvent("expired")
                             return
+                        if (
+                            platform == "kuaishou"
+                            and await frame.locator(
+                                "div.qrcode-status.qrcode-status-confirm"
+                            ).first.is_visible()
+                        ):
+                            confirming = True
+                    if confirming:
+                        if (
+                            kuaishou_capture is not None
+                            and qr_generation != kuaishou_capture.navigation_generation
+                        ):
+                            raise RuntimeError("登录页面已跳转")
+                        yield BrowserEvent("confirming")
+                        await asyncio.sleep(1.5)
+                        continue
                     qr = await qr_locator(page, platform)
                     if qr is not None:
                         png = await qr.screenshot(type="png", timeout=3000)
+                        if (
+                            kuaishou_capture is not None
+                            and qr_generation != kuaishou_capture.navigation_generation
+                        ):
+                            raise RuntimeError("登录页面已跳转")
                         image = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
                         yield (
                             BrowserEvent("qr_ready", image=image)
                             if len(image) <= 600000
                             else BrowserEvent("action_required")
                         )
+                    elif platform == "kuaishou" and not _is_kuaishou_login_page(page.url):
+                        yield BrowserEvent("confirming")
                     else:
                         fallback_due = now - started_at >= FULLPAGE_FALLBACK_GRACE_SECONDS and (
                             last_fallback_at is None
@@ -314,6 +629,11 @@ async def login_events(
                         if fallback_due:
                             last_fallback_at = now
                             png = await page.screenshot(type="png", timeout=5000)
+                            if (
+                                kuaishou_capture is not None
+                                and qr_generation != kuaishou_capture.navigation_generation
+                            ):
+                                raise RuntimeError("登录页面已跳转")
                             image = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
                             yield (
                                 BrowserEvent("qr_ready", image=image)
@@ -333,6 +653,8 @@ async def login_events(
                 )
             yield BrowserEvent("expired")
         finally:
+            if kuaishou_capture is not None:
+                await kuaishou_capture.close()
             for task in tasks:
                 task.cancel()
             if tasks:

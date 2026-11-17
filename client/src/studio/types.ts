@@ -356,7 +356,7 @@ export type StudioPublishDraft = {
   id: string;
   assetId: string;
   coverId?: string;
-  platform: "抖音" | "视频号" | "小红书";
+  platform: "抖音" | "视频号" | "小红书" | "快手";
   /** Server-side publish account id (publish_browser_accounts); "" when unset. */
   account: string;
   title: string;

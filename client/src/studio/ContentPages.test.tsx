@@ -4,7 +4,6 @@ import {
   render,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
 import { useCallback, useLayoutEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -340,6 +339,7 @@ import {
   visiblePageButtons,
 } from "./ContentPages";
 import { readAudioDuration } from "./live";
+import type { CloudPublishAccount } from "./localPublishAccounts";
 import { navigateStudioState } from "./state";
 
 describe("素材分页窗口化", () => {
@@ -500,6 +500,70 @@ function material(
     allowed_actions: ["preview", "download", "rename", "hide"],
     ...overrides,
   };
+}
+
+function publishingStudio(
+  overrides: Partial<StudioContextValue> = {},
+): StudioContextValue {
+  const base = studio();
+  return studio({
+    review: false,
+    state: { ...base.state, selectedAssetId: "ready-video" },
+    data: {
+      ...base.data,
+      assets: [
+        {
+          id: "ready-video",
+          assetId: "ready-video",
+          materialId: "asset:ready-video",
+          name: "庭院成片.mp4",
+          kind: "video",
+          group: "成片",
+          source: "任务中心",
+          saved: true,
+        },
+      ],
+    },
+    ...overrides,
+  });
+}
+
+function cloudPublishAccount(
+  platform: CloudPublishAccount["platform"],
+  overrides: Partial<CloudPublishAccount> = {},
+): CloudPublishAccount {
+  return {
+    id: `cloud-${platform}`,
+    platform,
+    platform_user_id: `uid-${platform}`,
+    username: "平台真实昵称",
+    verified_at: 1,
+    status: "connected",
+    error_message: null,
+    source: "cloud",
+    ...overrides,
+  };
+}
+
+function StatefulPublishPage({ value }: { value: StudioContextValue }) {
+  const [state, setState] = useState(value.state);
+  const [data, setData] = useState(value.data);
+  const patchState = useCallback(
+    (patch: Partial<StudioState>) => {
+      value.patchState(patch);
+      setState((current) => ({ ...current, ...patch }));
+    },
+    [value.patchState],
+  );
+  const updateData = useCallback(
+    (update: (current: StudioData) => StudioData) => {
+      value.updateData(update);
+      setData((current) => update(current));
+    },
+    [value.updateData],
+  );
+  useStudio.mockReturnValue({ ...value, state, data, patchState, updateData });
+  return <PublishPage />;
 }
 
 function StatefulViralPage({ value }: { value: StudioContextValue }) {
@@ -903,6 +967,20 @@ describe("V1.4 内容与运营页面", () => {
     createGenerationTaskPreviewUrl.mockResolvedValue(
       "https://provider.test/direct-result.mp4",
     );
+    getStudioDraft.mockReset().mockResolvedValue({
+      revision: 1,
+      payload: { drafts: [] },
+    });
+    saveStudioDraft.mockReset();
+    resolveMaterials.mockReset().mockResolvedValue({ items: [] });
+    createPublishRecord.mockReset();
+    listPublishRecords.mockReset().mockResolvedValue([]);
+    publishAccounts.canUseLocalPublishAccounts
+      .mockReset()
+      .mockReturnValue(false);
+    publishAccounts.listCloudPublishAccounts.mockReset().mockResolvedValue([]);
+    publishAccounts.listLocalPublishAccounts.mockReset().mockResolvedValue([]);
+    publishAccounts.openLocalPublishAccount.mockReset();
   });
 
   it("爆款卡片主操作统一为详情和下载视频并保留收藏", () => {
@@ -4099,32 +4177,40 @@ describe("V1.4 内容与运营页面", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("快手手动入口无需绑定账号，草稿读取失败仍可打开官方页面", async () => {
-    createPublishRecord.mockClear();
-    getStudioDraft.mockRejectedValueOnce(new Error("云端草稿暂不可用"));
-    publishAccounts.listCloudPublishAccounts.mockResolvedValue([]);
-    const value = studio({ review: false });
+  it.each([
+    { review: false, mode: "正式无账号" },
+    { review: true, mode: "审核示例" },
+  ])("快手 $mode 禁止立即与定时创建发布记录", async ({ review }) => {
+    const value = publishingStudio({ review });
     useStudio.mockReturnValue(value);
     render(<PublishPage />);
+    const platform = screen.getByRole("button", { name: "快手" });
+    await waitFor(() => expect(platform).toBeEnabled());
+    fireEvent.click(platform);
 
-    const manual = within(screen.getByRole("region", { name: "快手手动发布" }));
-    const link = manual.getByRole("link", { name: "前往快手手动发布" });
-    expect(link).toHaveAttribute(
-      "href",
-      "https://cp.kuaishou.com/article/publish/video",
-    );
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link).toHaveAttribute("rel", "noopener noreferrer");
-    expect(manual.getByText(/手动上传并确认发布/)).toBeInTheDocument();
-    expect(manual.getByRole("button", { name: "下载所选成片" })).toBeDisabled();
-    await screen.findByText("云端草稿暂不可用");
-    expect(link).not.toHaveAttribute("aria-disabled", "true");
+    expect(platform).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByText("选择成片、发布平台与账号，立即发布或设置定时发布"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更换发布成片" })).toBeEnabled();
+    if (review) expect(screen.getByText("审核示例账号")).toBeInTheDocument();
+    else {
+      expect(publishAccounts.listCloudPublishAccounts).toHaveBeenCalled();
+      expect(
+        screen.getByText("尚未连接该平台账号，请先扫码连接"),
+      ).toBeInTheDocument();
+    }
+    const immediate = screen.getByRole("button", { name: "立即发布" });
+    expect(immediate).toBeDisabled();
+    fireEvent.click(immediate);
+    fireEvent.click(screen.getByRole("button", { name: "定时" }));
+    const scheduled = screen.getByRole("button", { name: "定时发布" });
+    expect(scheduled).toBeDisabled();
+    fireEvent.click(scheduled);
     expect(createPublishRecord).not.toHaveBeenCalled();
   });
 
-  it("快手手动发布复用所选成片下载和草稿文案，不创建自动发布记录", async () => {
-    createPublishRecord.mockClear();
-    publishAccounts.listCloudPublishAccounts.mockResolvedValue([]);
+  it("快手复用通用下载视频与复制发布文案，操作不创建发布记录", async () => {
     downloadMaterialAsset.mockResolvedValue(undefined);
     const writeText = vi.fn(async (_text: string) => {});
     const clipboardDescriptor = Object.getOwnPropertyDescriptor(
@@ -4135,65 +4221,42 @@ describe("V1.4 内容与运营页面", () => {
       configurable: true,
       value: { writeText },
     });
-    const base = studio();
-    const value = studio({
-      review: false,
-      state: { ...base.state, selectedAssetId: "ready-video" },
-      data: {
-        ...base.data,
-        tasks: [],
-        assets: [
-          {
-            id: "ready-video",
-            assetId: "ready-video",
-            materialId: "asset:ready-video",
-            name: "庭院成片",
-            kind: "video",
-            group: "成片",
-            source: "任务中心",
-            saved: true,
-          },
-        ],
-      },
-    });
+    const value = publishingStudio();
     useStudio.mockReturnValue(value);
     try {
       render(<PublishPage />);
       await waitFor(() =>
-        expect(screen.getByLabelText("发布标题")).toBeEnabled(),
+        expect(screen.getByRole("button", { name: "快手" })).toBeEnabled(),
       );
+      fireEvent.click(screen.getByRole("button", { name: "快手" }));
       fireEvent.change(screen.getByLabelText("发布标题"), {
         target: { value: "乡墅庭院设计" },
       });
       fireEvent.change(screen.getByLabelText("发布描述"), {
-        target: { value: "手动发布说明" },
+        target: { value: "统一发布说明" },
       });
       fireEvent.change(screen.getByLabelText("添加标签"), {
         target: { value: "庭院" },
       });
       fireEvent.keyDown(screen.getByLabelText("添加标签"), { key: "Enter" });
-      const manual = within(
-        screen.getByRole("region", { name: "快手手动发布" }),
-      );
-      expect(manual.getByText("已选择：庭院成片")).toBeInTheDocument();
-      fireEvent.click(manual.getByRole("button", { name: "下载所选成片" }));
+      fireEvent.click(screen.getByRole("button", { name: "下载视频" }));
       await waitFor(() =>
-        expect(downloadMaterialAsset).toHaveBeenCalledWith(
+        expect(downloadMaterialAsset).toHaveBeenCalledExactlyOnceWith(
           "asset:ready-video",
           "乡墅庭院设计.mp4",
         ),
       );
-      const copy = manual.getByRole("button", { name: "复制快手发布文案" });
+      const copy = screen.getByRole("button", { name: "复制发布文案" });
       await waitFor(() => expect(copy).toBeEnabled());
       fireEvent.click(copy);
       await waitFor(() =>
-        expect(writeText).toHaveBeenCalledWith(
-          "乡墅庭院设计\n手动发布说明\n#庭院",
+        expect(writeText).toHaveBeenCalledExactlyOnceWith(
+          "乡墅庭院设计\n统一发布说明\n#庭院",
         ),
       );
       expect(createPublishRecord).not.toHaveBeenCalled();
       expect(value.notify).not.toHaveBeenCalledWith(
-        expect.stringMatching(/已提交发布|已发布/),
+        expect.stringMatching(/已提交发布|已加入定时发布队列/),
       );
     } finally {
       if (clipboardDescriptor)
@@ -4202,34 +4265,281 @@ describe("V1.4 内容与运营页面", () => {
     }
   });
 
-  it("桌面快手链接调用固定官方页面命令且不自动发布", async () => {
-    createPublishRecord.mockClear();
-    tauriNative.isTauri.mockReturnValue(true);
-    tauriNative.invoke.mockClear();
-    useStudio.mockReturnValue(studio());
+  it("抖音和快手只列出本平台账号，切换平台必须重新选择账号", async () => {
+    publishAccounts.listCloudPublishAccounts.mockResolvedValue([
+      cloudPublishAccount("douyin", {
+        platform_user_id: "shared-uid",
+        username: "抖音账号",
+      }),
+      cloudPublishAccount("kuaishou", {
+        platform_user_id: "shared-uid",
+        username: "快手账号",
+      }),
+    ]);
+    useStudio.mockReturnValue(publishingStudio());
     render(<PublishPage />);
+    await screen.findByRole("option", { name: "抖音账号 · shared-uid" });
+    expect(
+      screen.queryByRole("option", { name: "快手账号 · shared-uid" }),
+    ).toBeNull();
+    fireEvent.change(screen.getByLabelText("选择发布账号"), {
+      target: { value: "cloud-douyin" },
+    });
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeEnabled();
 
-    fireEvent.click(screen.getByRole("link", { name: "前往快手手动发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "快手" }));
+    expect(screen.getByLabelText("选择发布账号")).toHaveValue("");
+    expect(
+      screen.getByRole("option", { name: "快手账号 · shared-uid" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "抖音账号 · shared-uid" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+    expect(createPublishRecord).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("选择发布账号"), {
+      target: { value: "cloud-kuaishou" },
+    });
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "抖音" }));
+    expect(screen.getByLabelText("选择发布账号")).toHaveValue("");
+    expect(
+      screen.getByRole("option", { name: "抖音账号 · shared-uid" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "快手账号 · shared-uid" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+    expect(createPublishRecord).not.toHaveBeenCalled();
+  });
+
+  it("快手第四个标签被拒绝并保留已有标签，移除后可重新添加", async () => {
+    useStudio.mockReturnValue(publishingStudio());
+    render(<PublishPage />);
     await waitFor(() =>
-      expect(tauriNative.invoke).toHaveBeenCalledWith("open_kuaishou_creator"),
+      expect(screen.getByRole("button", { name: "快手" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "快手" }));
+    expect(screen.getByText("标签（最多 3 个）")).toBeInTheDocument();
+    const input = screen.getByLabelText("添加标签");
+    const tags = ["庭院", "乡墅", "建房"];
+    for (const tag of tags) {
+      fireEvent.change(input, { target: { value: tag } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    }
+    fireEvent.change(input, { target: { value: "预算" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "快手发布最多支持 3 个标签，请先移除多余标签。",
+    );
+    for (const tag of tags) {
+      expect(
+        screen.getByRole("button", { name: `移除标签 ${tag}` }),
+      ).toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: "移除标签 预算" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /^移除标签 / })).toHaveLength(
+      3,
+    );
+    expect(input).toHaveValue("预算");
+
+    fireEvent.click(screen.getByRole("button", { name: "移除标签 建房" }));
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(
+      screen.getByRole("button", { name: "移除标签 预算" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("快手发布最多支持 3 个标签，请先移除多余标签。"),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: /^移除标签 / })).toHaveLength(
+      3,
     );
     expect(createPublishRecord).not.toHaveBeenCalled();
   });
 
-  it("桌面官方页面打开失败显示原因并允许再次打开", async () => {
-    tauriNative.isTauri.mockReturnValue(true);
-    tauriNative.invoke.mockClear();
-    tauriNative.invoke.mockRejectedValueOnce("无法打开快手创作者中心");
-    useStudio.mockReturnValue(studio());
+  it("抖音四个标签切到快手不截断，删除多余标签后才创建发布记录", async () => {
+    publishAccounts.listCloudPublishAccounts.mockResolvedValue([
+      cloudPublishAccount("kuaishou"),
+    ]);
+    createPublishRecord.mockResolvedValue({
+      id: "ks-tags-record",
+      platform: "kuaishou",
+      scheduled_at: null,
+      status: "queued",
+    });
+    const value = publishingStudio();
+    useStudio.mockReturnValue(value);
     render(<PublishPage />);
-
-    const link = screen.getByRole("link", { name: "前往快手手动发布" });
-    fireEvent.click(link);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "无法打开快手创作者中心",
+    await waitFor(() =>
+      expect(screen.getByLabelText("添加标签")).toBeEnabled(),
     );
-    fireEvent.click(link);
-    await waitFor(() => expect(tauriNative.invoke).toHaveBeenCalledTimes(2));
+    const tags = ["庭院", "乡墅", "建房", "预算"];
+    for (const tag of tags) {
+      fireEvent.change(screen.getByLabelText("添加标签"), {
+        target: { value: tag },
+      });
+      fireEvent.keyDown(screen.getByLabelText("添加标签"), { key: "Enter" });
+    }
+    fireEvent.click(screen.getByRole("button", { name: "快手" }));
+    for (const tag of tags) {
+      expect(
+        screen.getByRole("button", { name: `移除标签 ${tag}` }),
+      ).toBeInTheDocument();
+    }
+    expect(screen.getAllByRole("button", { name: /^移除标签 / })).toHaveLength(
+      4,
+    );
+    fireEvent.change(screen.getByLabelText("选择发布账号"), {
+      target: { value: "cloud-kuaishou" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "快手发布最多支持 3 个标签，请先移除多余标签。",
+    );
+    expect(createPublishRecord).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "移除标签 预算" }));
+    fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+    await waitFor(() =>
+      expect(createPublishRecord).toHaveBeenCalledExactlyOnceWith({
+        account_id: "cloud-kuaishou",
+        video_material_id: "asset:ready-video",
+        cover_material_id: null,
+        title: "庭院成片.mp4",
+        description: "",
+        tags: ["庭院", "乡墅", "建房"],
+        scheduled_at: null,
+      }),
+    );
+    expect(value.notify).toHaveBeenCalledWith("已提交发布 · 快手");
+  });
+
+  it.each(["", "   "])(
+    "快手标题为空或纯空白时前置拒绝发布（%j），填写后可创建记录",
+    async (title) => {
+      publishAccounts.listCloudPublishAccounts.mockResolvedValue([
+        cloudPublishAccount("kuaishou"),
+      ]);
+      createPublishRecord.mockResolvedValue({
+        id: "ks-title-record",
+        platform: "kuaishou",
+        scheduled_at: null,
+        status: "queued",
+      });
+      const value = publishingStudio();
+      useStudio.mockReturnValue(value);
+      render(<PublishPage />);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "快手" })).toBeEnabled(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "快手" }));
+      fireEvent.change(screen.getByLabelText("选择发布账号"), {
+        target: { value: "cloud-kuaishou" },
+      });
+      fireEvent.change(screen.getByLabelText("发布标题"), {
+        target: { value: title },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "请填写快手发布标题。",
+      );
+      expect(createPublishRecord).not.toHaveBeenCalled();
+
+      fireEvent.change(screen.getByLabelText("发布标题"), {
+        target: { value: "  修正后的快手标题  " },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+      await waitFor(() =>
+        expect(createPublishRecord).toHaveBeenCalledExactlyOnceWith({
+          account_id: "cloud-kuaishou",
+          video_material_id: "asset:ready-video",
+          cover_material_id: null,
+          title: "修正后的快手标题",
+          description: "",
+          tags: [],
+          scheduled_at: null,
+        }),
+      );
+      expect(value.notify).toHaveBeenCalledWith("已提交发布 · 快手");
+    },
+  );
+
+  it("快手云端草稿恢复平台账号、封面与定时信息，并按原版本保存", async () => {
+    const draft: StudioPublishDraft = {
+      id: "kuaishou-cloud-draft",
+      assetId: "ready-video",
+      coverId: "kuaishou-cover",
+      platform: "快手",
+      account: "cloud-kuaishou",
+      title: "快手庭院发布草稿",
+      description: "云端保存的庭院说明",
+      tags: ["庭院", "乡墅", "建房"],
+      scheduledAt: "2026-11-18T02:30:00.000Z",
+    };
+    getStudioDraft.mockResolvedValueOnce({
+      revision: 7,
+      payload: { drafts: [draft] },
+    });
+    resolveMaterials.mockResolvedValueOnce({
+      items: [
+        material("ready-video", {
+          title: "云端庭院成片.mp4",
+          media_type: "video",
+          content_type: "video/mp4",
+        }),
+        material("kuaishou-cover", { group: "发布封面" }),
+      ],
+    });
+    publishAccounts.listCloudPublishAccounts.mockResolvedValue([
+      cloudPublishAccount("douyin"),
+      cloudPublishAccount("kuaishou"),
+    ]);
+    saveStudioDraft.mockResolvedValueOnce({ revision: 8 });
+    const base = publishingStudio();
+    const value = publishingStudio({ data: { ...base.data, assets: [] } });
+    render(<StatefulPublishPage value={value} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("发布标题")).toHaveValue(draft.title),
+    );
+    expect(getStudioDraft).toHaveBeenCalledWith("publishing");
+    expect(resolveMaterials).toHaveBeenCalledWith([
+      "asset:ready-video",
+      "asset:kuaishou-cover",
+    ]);
+    expect(screen.getByRole("button", { name: "快手" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByLabelText("选择发布账号")).toHaveValue("cloud-kuaishou");
+    expect(screen.getByLabelText("发布描述")).toHaveValue(draft.description);
+    for (const tag of draft.tags) {
+      expect(
+        screen.getByRole("button", { name: `移除标签 ${tag}` }),
+      ).toBeInTheDocument();
+    }
+    expect(
+      new Date(
+        (screen.getByLabelText("定时发布时间") as HTMLInputElement).value,
+      ).toISOString(),
+    ).toBe(draft.scheduledAt);
+    expect(screen.getByRole("button", { name: "定时发布" })).toBeEnabled();
+    expect(value.patchState).toHaveBeenCalledWith({ publishDrafts: [draft] });
+
+    fireEvent.change(screen.getByLabelText("发布标题"), {
+      target: { value: "继续编辑的快手草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await screen.findByText("已保存到云端，可在刷新后继续编辑。");
+    expect(saveStudioDraft).toHaveBeenCalledExactlyOnceWith(
+      "publishing",
+      { drafts: [{ ...draft, title: "继续编辑的快手草稿" }] },
+      false,
+      7,
+    );
+    expect(createPublishRecord).not.toHaveBeenCalled();
   });
 
   it("审核示例发布草稿独立保存，不覆盖口播脚本", () => {
@@ -4538,7 +4848,7 @@ describe("V1.4 内容与运营页面", () => {
     render(<PublishPage />);
 
     expect(
-      screen.getByText("选择成片与账号发布，或前往快手创作者中心手动发布"),
+      screen.getByText("选择成片、发布平台与账号，立即发布或设置定时发布"),
     ).toBeInTheDocument();
     expect(screen.getByText("草稿保存在云端，可反复编辑")).toBeInTheDocument();
     expect(screen.queryByText(/待发布\s*0/)).not.toBeInTheDocument();
@@ -4552,113 +4862,94 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.navigate).toHaveBeenCalledWith("profile");
   });
 
-  it("选择服务端账号后可立即发布或按时区换算的定时发布", async () => {
-    createPublishRecord.mockReset();
-    const base = studio();
-    const value = studio({
-      review: false,
-      state: { ...base.state, selectedAssetId: "ready-video" },
-      data: {
-        ...base.data,
-        tasks: [],
-        assets: [
-          {
-            id: "ready-video",
-            assetId: "ready-video",
-            materialId: "asset:ready-video",
-            name: "成片",
-            kind: "video",
-            group: "成片",
-            source: "任务中心",
-            saved: true,
-          },
-        ],
-      },
-    });
-    publishAccounts.listCloudPublishAccounts.mockResolvedValue([
-      {
-        id: "cloud-douyin",
-        platform: "douyin",
-        platform_user_id: "uid-1",
-        username: "张工说乡墅",
-        verified_at: 1,
-        status: "connected",
-        error_message: null,
-        source: "cloud",
-      },
-      {
-        id: "cloud-dead",
-        platform: "douyin",
-        platform_user_id: "uid-2",
-        username: "失效账号",
-        verified_at: 1,
-        status: "invalid",
-        error_message: "登录过期",
-        source: "desktop",
-      },
-    ]);
-    getStudioDraft.mockResolvedValueOnce({
-      revision: 3,
-      payload: { drafts: [] },
-    });
-    createPublishRecord.mockResolvedValue({
-      id: "rec-1",
-      platform: "douyin",
-      scheduled_at: null,
-      status: "queued",
-    });
-    useStudio.mockReturnValue(value);
-    render(<PublishPage />);
-    const select = await screen.findByLabelText("选择发布账号");
-    fireEvent.change(select, { target: { value: "cloud-dead" } });
-    expect(
-      screen.getByText("该账号登录态已失效，请在用户档案中重新扫码后再发布。"),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
-    fireEvent.change(select, { target: { value: "cloud-douyin" } });
-    fireEvent.change(screen.getByLabelText("发布标题"), {
-      target: { value: "立即发的标题" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
-    await waitFor(() =>
-      expect(createPublishRecord).toHaveBeenCalledWith({
-        account_id: "cloud-douyin",
+  it.each([
+    ["douyin", "抖音"],
+    ["kuaishou", "快手"],
+  ] as const)(
+    "%s 选择服务端账号后可立即发布或按时区换算的定时发布",
+    async (platform, name) => {
+      const value = publishingStudio();
+      publishAccounts.listCloudPublishAccounts.mockResolvedValue([
+        cloudPublishAccount(platform),
+        cloudPublishAccount(platform, {
+          id: "cloud-dead",
+          platform_user_id: "uid-invalid",
+          username: "失效账号",
+          status: "invalid",
+          error_message: "登录过期",
+          source: "desktop",
+        }),
+      ]);
+      createPublishRecord.mockResolvedValue({
+        id: "rec-1",
+        platform,
+        scheduled_at: null,
+        status: "queued",
+      });
+      useStudio.mockReturnValue(value);
+      render(<PublishPage />);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name })).toBeEnabled(),
+      );
+      fireEvent.click(screen.getByRole("button", { name }));
+      const select = await screen.findByLabelText("选择发布账号");
+      fireEvent.change(select, { target: { value: "cloud-dead" } });
+      expect(
+        screen.getByText(
+          "该账号登录态已失效，请在用户档案中重新扫码后再发布。",
+        ),
+      ).toBeInTheDocument();
+      const immediate = screen.getByRole("button", { name: "立即发布" });
+      expect(immediate).toBeDisabled();
+      fireEvent.click(immediate);
+      expect(createPublishRecord).not.toHaveBeenCalled();
+      fireEvent.change(select, { target: { value: `cloud-${platform}` } });
+      fireEvent.change(screen.getByLabelText("发布标题"), {
+        target: { value: "立即发的标题" },
+      });
+      fireEvent.click(immediate);
+      const expected = {
+        account_id: `cloud-${platform}`,
         video_material_id: "asset:ready-video",
         cover_material_id: null,
         title: "立即发的标题",
         description: "",
         tags: [],
         scheduled_at: null,
-      }),
-    );
-    expect(value.notify).toHaveBeenCalledWith("已提交发布 · 抖音");
-    expect(listPublishRecords).toHaveBeenCalled();
+      };
+      await waitFor(() =>
+        expect(createPublishRecord).toHaveBeenCalledExactlyOnceWith(expected),
+      );
+      expect(value.notify).toHaveBeenCalledWith(`已提交发布 · ${name}`);
+      expect(listPublishRecords).toHaveBeenCalled();
 
-    // Scheduled: the datetime-local value is local wall-clock time → ISO instant.
-    fireEvent.click(screen.getByRole("button", { name: "定时" }));
-    const timeInput = screen.getByLabelText("定时发布时间");
-    fireEvent.change(timeInput, { target: { value: "2020-01-01T10:00" } });
-    fireEvent.click(screen.getByRole("button", { name: "定时发布" }));
-    await screen.findByText("定时发布至少需要提前 3 分钟。");
-    expect(createPublishRecord).toHaveBeenCalledTimes(1);
-    const future = new Date(Date.now() + 3 * 60 * 60 * 1000);
-    future.setSeconds(0, 0);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const local = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}T${pad(future.getHours())}:${pad(future.getMinutes())}`;
-    fireEvent.change(timeInput, { target: { value: local } });
-    createPublishRecord.mockResolvedValueOnce({
-      id: "rec-2",
-      platform: "douyin",
-      scheduled_at: future.toISOString(),
-      status: "queued",
-    });
-    fireEvent.click(screen.getByRole("button", { name: "定时发布" }));
-    await waitFor(() => expect(createPublishRecord).toHaveBeenCalledTimes(2));
-    expect(createPublishRecord.mock.calls[1][0].scheduled_at).toBe(
-      future.toISOString(),
-    );
-    expect(value.notify).toHaveBeenCalledWith("已加入定时发布队列 · 抖音");
-  });
+      // 定时输入按本地墙上时间填写，提交须换算成同一 ISO 时刻。
+      fireEvent.click(screen.getByRole("button", { name: "定时" }));
+      const timeInput = screen.getByLabelText("定时发布时间");
+      fireEvent.change(timeInput, { target: { value: "2020-01-01T10:00" } });
+      fireEvent.click(screen.getByRole("button", { name: "定时发布" }));
+      await screen.findByText("定时发布至少需要提前 3 分钟。");
+      expect(createPublishRecord).toHaveBeenCalledTimes(1);
+      const future = new Date(Date.now() + 3 * 60 * 60 * 1000);
+      future.setSeconds(0, 0);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const local = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}T${pad(future.getHours())}:${pad(future.getMinutes())}`;
+      fireEvent.change(timeInput, { target: { value: local } });
+      createPublishRecord.mockResolvedValueOnce({
+        id: "rec-2",
+        platform,
+        scheduled_at: future.toISOString(),
+        status: "queued",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "定时发布" }));
+      await waitFor(() => expect(createPublishRecord).toHaveBeenCalledTimes(2));
+      expect(createPublishRecord.mock.calls[1][0]).toEqual({
+        ...expected,
+        scheduled_at: future.toISOString(),
+      });
+      expect(value.notify).toHaveBeenCalledWith(`已加入定时发布队列 · ${name}`);
+    },
+  );
 
   it("小红书自动发布暂缓：选择时弹出正在开发中且不切换平台", async () => {
     createPublishRecord.mockReset();

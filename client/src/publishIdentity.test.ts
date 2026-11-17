@@ -9,19 +9,50 @@ function environment(
   origin: string,
   path: string,
   body: unknown,
-  options: { timers?: boolean } = {},
+  options: {
+    timers?: boolean;
+    responseUrl?: string;
+    requestUrl?: string;
+    method?: string;
+    status?: number;
+    redirected?: boolean;
+    json?: () => Promise<unknown>;
+    child?: boolean;
+  } = {},
 ) {
   const location = new URL(origin);
-  const clone = vi.fn(() => ({ json: async () => body }));
+  let responseBody = body;
+  const clone = vi.fn(() => ({
+    json: options.json ?? (async () => responseBody),
+  }));
   const requested: string[] = [];
-  const pageFetch = vi.fn(async (input?: unknown) => {
+  const pageFetch = vi.fn(async (input?: unknown, _init?: unknown) => {
     if (typeof input === "string") requested.push(input);
-    return { url: origin + path, clone };
+    const status = options.status ?? 200;
+    return {
+      url: options.responseUrl ?? origin + path,
+      status,
+      ok: status >= 200 && status < 300,
+      redirected: options.redirected ?? false,
+      clone,
+    };
   });
-  const win: Record<string, unknown> = { fetch: pageFetch };
-  win.top = win;
-  // The probe timer only exists when the harness opts in, so the passive-only
-  // cases keep asserting that nothing is requested on the page's behalf.
+  const listeners = new Map<string, () => void>();
+  const history = {
+    pushState: (_state: unknown, _title: string, url: string) => {
+      location.href = new URL(url, location.href).href;
+    },
+    replaceState: (_state: unknown, _title: string, url: string) => {
+      location.href = new URL(url, location.href).href;
+    },
+  };
+  const win: Record<string, unknown> = {
+    fetch: pageFetch,
+    history,
+    addEventListener: (event: string, handler: () => void) =>
+      listeners.set(event, handler),
+  };
+  win.top = options.child ? {} : win;
   let scheduled: (() => void) | undefined;
   if (options.timers) {
     win.setInterval = (handler: () => void) => {
@@ -33,8 +64,19 @@ function environment(
     };
   }
   class XHR {
-    open() {}
-    addEventListener() {}
+    status = options.status ?? 200;
+    responseURL = options.responseUrl ?? origin + path;
+    responseType = "json";
+    response = body;
+    responseText = JSON.stringify(body);
+    handlers = new Map<string, () => void>();
+    open(_method: string, _url: string) {}
+    addEventListener(event: string, handler: () => void) {
+      this.handlers.set(event, handler);
+    }
+    load() {
+      this.handlers.get("load")?.();
+    }
   }
   runInNewContext(script, { window: win, location, URL, XMLHttpRequest: XHR });
   const settle = async () => {
@@ -47,6 +89,16 @@ function environment(
     clone,
     requested,
     pageFetch,
+    history,
+    location,
+    listeners,
+    XHR,
+    settle,
+    setBody: (next: unknown) => {
+      responseBody = next;
+    },
+    identity: () =>
+      (win.__xiangshuReadPublishIdentity as (() => unknown) | undefined)?.(),
     tick: async () => {
       scheduled?.();
       await settle();
@@ -54,7 +106,14 @@ function environment(
     },
     scheduled: () => scheduled,
     read: async () => {
-      await (win.fetch as () => Promise<unknown>)();
+      await (win.fetch as (...args: unknown[]) => Promise<unknown>)(
+        options.requestUrl ?? origin + path,
+        {
+          method:
+            options.method ??
+            (origin === "https://cp.kuaishou.com" ? "POST" : "GET"),
+        },
+      );
       await settle();
       return win.__xiangshuPublishIdentity;
     },
@@ -253,4 +312,188 @@ it("不在相似域名注入或读取账号", async () => {
   );
   expect(await other.read()).toBeUndefined();
   expect(other.clone).not.toHaveBeenCalled();
+});
+
+const kuaishouOrigin = "https://cp.kuaishou.com";
+const kuaishouEndpoint = "/rest/v2/creator/pc/authority/account/current";
+const kuaishouBody = {
+  result: 1,
+  data: {
+    userId: 123456,
+    userName: "快手昵称",
+    userKwaiId: "不是内部UID",
+    userAvatar: "https://p3.a.kwimgs.com/synthetic-avatar.jpeg",
+    logined: true,
+    session: privateFixture,
+  },
+};
+
+it("快手只从官方 bootstrap POST 提取真实 userId、userName 与公开头像", async () => {
+  const env = environment(kuaishouOrigin, kuaishouEndpoint, kuaishouBody, {
+    timers: true,
+  });
+  const expected = {
+    platform_user_id: "123456",
+    username: "快手昵称",
+    avatar_url: "https://p3.a.kwimgs.com/synthetic-avatar.jpeg",
+  };
+  expect(await env.read()).toEqual(expected);
+  expect(env.identity()).toEqual(expected);
+  expect(env.pageFetch).toHaveBeenCalledWith(
+    kuaishouOrigin + kuaishouEndpoint,
+    {
+      method: "POST",
+      redirect: "error",
+    },
+  );
+  expect(JSON.stringify(env.identity())).not.toContain(privateFixture);
+  expect(env.scheduled()).toBeUndefined();
+});
+
+it.each([
+  { result: "1", data: kuaishouBody.data },
+  { result: true, data: kuaishouBody.data },
+  { result: 109, data: kuaishouBody.data },
+  { result: 1, data: { ...kuaishouBody.data, logined: false } },
+  { result: 1, data: { ...kuaishouBody.data, userId: 0 } },
+  { result: 1, data: { ...kuaishouBody.data, userId: "0" } },
+  { result: 1, data: { ...kuaishouBody.data, userId: false } },
+  { result: 1, data: { ...kuaishouBody.data, userId: 9007199254740992 } },
+  { result: 1, data: { ...kuaishouBody.data, userId: " " } },
+  { result: 1, data: { ...kuaishouBody.data, userName: " " } },
+  { result: 1, data: { ...kuaishouBody.data, userName: "a".repeat(257) } },
+  { result: 1, data: { userKwaiId: "假UID", nickname: "假昵称" } },
+  { result: 1, data: null },
+])("快手拒绝默认身份、失败与未知响应 %#", async (body) => {
+  const env = environment(kuaishouOrigin, kuaishouEndpoint, body);
+  await env.read();
+  expect(env.identity()).toBeNull();
+});
+
+it.each([
+  "/rest/cp/works/v2/common/pc/current/user",
+  "/rest/cp/creator/pc/home/infoV2",
+  `/prefix${kuaishouEndpoint}`,
+  `${kuaishouEndpoint}/`,
+])("快手其他接口即使携带 userId 也不产生身份：%s", async (path) => {
+  const env = environment(kuaishouOrigin, path, kuaishouBody);
+  expect(await env.read()).toBeUndefined();
+  expect(env.clone).not.toHaveBeenCalled();
+  expect(env.identity()).toBeNull();
+});
+
+it.each([
+  { method: "GET" },
+  { responseUrl: `https://evil.test${kuaishouEndpoint}` },
+  { requestUrl: `https://evil.test${kuaishouEndpoint}` },
+  { requestUrl: `https://cp.kuaishou.com.evil.test${kuaishouEndpoint}` },
+  { responseUrl: `https://passport.kuaishou.com${kuaishouEndpoint}` },
+  { redirected: true },
+  { status: 302 },
+  { status: 401 },
+  { status: 429 },
+  { status: 503 },
+])("快手验证原请求、最终响应来源和 HTTP 状态 %#", async (options) => {
+  const env = environment(
+    kuaishouOrigin,
+    kuaishouEndpoint,
+    kuaishouBody,
+    options,
+  );
+  expect(await env.read()).toBeUndefined();
+  expect(env.clone).not.toHaveBeenCalled();
+  expect(env.identity()).toBeNull();
+});
+
+it.each([
+  "https://passport.kuaishou.com",
+  "https://cp.kuaishou.com.evil.test",
+  "http://cp.kuaishou.com",
+  "https://sub.cp.kuaishou.com",
+])("登录域或近似域不能确认快手身份：%s", async (origin) => {
+  const env = environment(origin, kuaishouEndpoint, kuaishouBody);
+  expect(await env.read()).toBeUndefined();
+  expect(env.clone).not.toHaveBeenCalled();
+  expect(env.identity()).toBeUndefined();
+});
+
+it("快手只在顶层创作者文档安装身份捕获", async () => {
+  const env = environment(kuaishouOrigin, kuaishouEndpoint, kuaishouBody, {
+    child: true,
+  });
+  expect(await env.read()).toBeUndefined();
+  expect(env.clone).not.toHaveBeenCalled();
+  expect(env.identity()).toBeUndefined();
+});
+
+it("快手 JSON 迟到回执在导航后失效，返回同 URL 也不能复用", async () => {
+  let resolve: (value: unknown) => void = () => {};
+  const pending = new Promise((done) => {
+    resolve = done;
+  });
+  const env = environment(kuaishouOrigin, kuaishouEndpoint, kuaishouBody, {
+    json: () => pending,
+  });
+  await env.read();
+  env.history.pushState(null, "", "/article/other");
+  env.history.replaceState(null, "", "/");
+  resolve(kuaishouBody);
+  await env.settle();
+  expect(env.identity()).toBeNull();
+});
+
+it("快手清除明确未登录身份，且不接受页面伪造或改写 UID", async () => {
+  const env = environment(kuaishouOrigin, kuaishouEndpoint, kuaishouBody);
+  env.win.__xiangshuPublishIdentity = {
+    platform_user_id: "forged",
+    username: "伪造账号",
+  };
+  expect(env.identity()).toBeNull();
+  await env.read();
+  const copy = env.identity() as { platform_user_id: string };
+  copy.platform_user_id = "modified";
+  env.win.__xiangshuPublishIdentity = copy;
+  expect(env.identity()).toMatchObject({ platform_user_id: "123456" });
+  env.setBody({ result: 1, data: { logined: false } });
+  await env.read();
+  expect(env.identity()).toBeNull();
+});
+
+it("快手 XHR 同时核实原始 POST 和最终回执来源", () => {
+  const good = environment(kuaishouOrigin, kuaishouEndpoint, kuaishouBody);
+  const xhr = new good.XHR();
+  xhr.open("POST", kuaishouEndpoint);
+  xhr.load();
+  expect(good.identity()).toMatchObject({ platform_user_id: "123456" });
+  for (const requestUrl of [
+    `https://evil.test${kuaishouEndpoint}`,
+    "/rest/cp/works/v2/common/pc/current/user",
+  ]) {
+    const env = environment(kuaishouOrigin, kuaishouEndpoint, kuaishouBody);
+    const request = new env.XHR();
+    request.open("POST", requestUrl);
+    request.load();
+    expect(env.identity()).toBeNull();
+  }
+  const redirected = environment(
+    kuaishouOrigin,
+    kuaishouEndpoint,
+    kuaishouBody,
+    {
+      responseUrl: `https://passport.kuaishou.com${kuaishouEndpoint}`,
+    },
+  );
+  const request = new redirected.XHR();
+  request.open("POST", kuaishouEndpoint);
+  request.load();
+  expect(redirected.identity()).toBeNull();
+});
+
+it("快手 XHR 加载中导航使旧回执失效", () => {
+  const env = environment(kuaishouOrigin, kuaishouEndpoint, kuaishouBody);
+  const request = new env.XHR();
+  request.open("POST", kuaishouEndpoint);
+  env.history.pushState(null, "", "/article/publish/video");
+  request.load();
+  expect(env.identity()).toBeNull();
 });

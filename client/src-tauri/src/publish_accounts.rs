@@ -21,6 +21,7 @@ pub enum Platform {
     Douyin,
     WechatChannels,
     Xiaohongshu,
+    Kuaishou,
 }
 
 impl Platform {
@@ -29,6 +30,7 @@ impl Platform {
             Self::Douyin => "https://creator.douyin.com",
             Self::WechatChannels => "https://channels.weixin.qq.com",
             Self::Xiaohongshu => "https://creator.xiaohongshu.com",
+            Self::Kuaishou => "https://cp.kuaishou.com",
         }
     }
 
@@ -37,6 +39,25 @@ impl Platform {
             Self::Douyin => "https://creator.douyin.com/",
             Self::WechatChannels => "https://channels.weixin.qq.com/platform",
             Self::Xiaohongshu => "https://creator.xiaohongshu.com/login",
+            Self::Kuaishou => "https://cp.kuaishou.com/article/publish/video",
+        }
+    }
+
+    fn allows_login_url(&self, url: &tauri::Url) -> bool {
+        let origin = url.origin().ascii_serialization();
+        origin == self.origin()
+            || (*self == Self::Kuaishou
+                && origin == "https://passport.kuaishou.com"
+                && matches!(url.path(), "/pc/account/login" | "/pc/account/login/"))
+    }
+
+    fn cookie_origins(&self) -> &'static [&'static str] {
+        match self {
+            Self::Douyin => &["https://creator.douyin.com"],
+            Self::WechatChannels => &["https://channels.weixin.qq.com"],
+            Self::Xiaohongshu => &["https://creator.xiaohongshu.com"],
+            // passport 的 host-only Cookie 不会出现在 cp 的单源查询结果中。
+            Self::Kuaishou => &["https://cp.kuaishou.com", "https://passport.kuaishou.com"],
         }
     }
 }
@@ -94,6 +115,10 @@ struct PageLogin {
 struct PageSnapshot {
     identity: Option<Identity>,
     login: Option<PageLogin>,
+    #[serde(default)]
+    href: Option<String>,
+    #[serde(default)]
+    document_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -164,6 +189,73 @@ fn parse_page_snapshot(value: &str) -> Result<Option<PageSnapshot>, String> {
         _ => serde_json::from_str::<Option<PageSnapshot>>(value),
     };
     parsed.map_err(|_| "平台账号信息解析失败".into())
+}
+
+fn login_snapshot_script(platform: &Platform) -> Result<String, String> {
+    let creator_guard = format!(
+        "location.origin === {}",
+        serde_json::to_string(platform.origin()).map_err(|e| e.to_string())?
+    );
+    let login_guard = if *platform == Platform::Kuaishou {
+        format!("({creator_guard} || (location.origin === \"https://passport.kuaishou.com\" && [\"/pc/account/login\", \"/pc/account/login/\"].includes(location.pathname)))")
+    } else {
+        creator_guard.clone()
+    };
+    // 登录页可以报告二维码，只有创作者同源页面可以报告身份。
+    Ok(format!(
+        "{login_guard} ? JSON.stringify({{identity: {creator_guard} && window.__xiangshuReadPublishIdentity ? window.__xiangshuReadPublishIdentity() : null, login: window.__xiangshuReadPublishLogin ? window.__xiangshuReadPublishLogin() : window.__xiangshuPublishLogin || null, href: location.href, document_id: window.__xiangshuPublishDocumentId || null}}) : \"null\""
+    ))
+}
+
+fn valid_identity(identity: &Identity, platform: &Platform) -> bool {
+    !identity.platform_user_id.trim().is_empty()
+        && !identity.username.trim().is_empty()
+        && identity.platform_user_id.len() <= 256
+        && identity.username.len() <= 1024
+        && (*platform != Platform::Kuaishou || identity.platform_user_id.trim() != "0")
+}
+
+/// 回执和导出必须属于同一个官方文档；同 URL 的重新加载也不能复用旧 UID。
+fn identity_snapshot_is_current(
+    window: &WebviewWindow,
+    platform: &Platform,
+    snapshot: &PageSnapshot,
+) -> Result<bool, String> {
+    let (Some(identity), Some(href), Some(document_id)) = (
+        snapshot.identity.as_ref(),
+        snapshot.href.as_deref(),
+        snapshot.document_id.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    if !valid_identity(identity, platform)
+        || document_id.is_empty()
+        || document_id.len() > 128
+        || href.len() > 16_000
+        || window.url().map_err(|e| e.to_string())?.as_str() != href
+    {
+        return Ok(false);
+    }
+    let expected = serde_json::json!({
+        "origin": platform.origin(),
+        "href": href,
+        "document_id": document_id,
+        "uid": identity.platform_user_id,
+        "username": identity.username,
+    });
+    let script = format!(
+        "(() => {{ const expected = {expected}; if (location.origin !== expected.origin || location.href !== expected.href || window.__xiangshuPublishDocumentId !== expected.document_id) return false; const identity = window.__xiangshuReadPublishIdentity?.(); return !!identity && identity.platform_user_id === expected.uid && identity.username === expected.username; }})()"
+    );
+    let (send, receive) = std::sync::mpsc::channel();
+    window
+        .eval_with_callback(script, move |value| {
+            let _ = send.send(value);
+        })
+        .map_err(|e| e.to_string())?;
+    let value = receive
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "官方页面未响应，请重新验证账号")?;
+    Ok(value == "true" && window.url().map_err(|e| e.to_string())?.as_str() == href)
 }
 
 fn valid_qr_image(value: &str) -> bool {
@@ -240,27 +332,6 @@ fn main_only(window: &WebviewWindow) -> Result<(), String> {
     if window.label() != "main" || !local {
         return Err("仅允许本机主窗口管理发布账号".into());
     }
-    Ok(())
-}
-
-/// 快手目前只提供手动发布入口；固定官方地址，不接收平台账号或任意 URL。
-#[tauri::command]
-pub fn open_kuaishou_creator(window: WebviewWindow) -> Result<(), String> {
-    main_only(&window)?;
-    // WebView2 默认拦截新窗口链接，交给系统浏览器保留官方登录与上传流程。
-    let mut command = match std::env::consts::OS {
-        "windows" => {
-            let mut command = std::process::Command::new("rundll32.exe");
-            command.arg("url.dll,FileProtocolHandler");
-            command
-        }
-        "macos" => std::process::Command::new("open"),
-        _ => std::process::Command::new("xdg-open"),
-    };
-    command
-        .arg("https://cp.kuaishou.com/article/publish/video")
-        .spawn()
-        .map_err(|error| format!("无法打开快手创作者中心：{error}"))?;
     Ok(())
 }
 
@@ -407,12 +478,42 @@ fn cookie_record(
     })
 }
 
+fn merge_cookie_records(
+    records: &mut Vec<serde_json::Value>,
+    cookies: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    // 两个官方源会重复返回父域 Cookie，同名但路径不同的记录必须分别保留。
+    for cookie in cookies {
+        if !records.iter().any(|existing| {
+            existing["name"] == cookie["name"]
+                && existing["domain"] == cookie["domain"]
+                && existing["path"] == cookie["path"]
+        }) {
+            records.push(cookie);
+        }
+    }
+    if records.len() > MAX_COOKIE_COUNT {
+        return Err("平台登录 Cookie 过多，请重新扫码".into());
+    }
+    Ok(())
+}
+
 fn platform_cookie_domain(domain: &str, platform: &Platform) -> bool {
-    let host = domain.trim_start_matches('.').to_ascii_lowercase();
+    let host = domain
+        .strip_prefix('.')
+        .unwrap_or(domain)
+        .to_ascii_lowercase();
+    if *platform == Platform::Kuaishou {
+        return matches!(
+            host.as_str(),
+            "kuaishou.com" | "cp.kuaishou.com" | "passport.kuaishou.com"
+        );
+    }
     let roots: &[&str] = match platform {
         Platform::Douyin => &["douyin.com"],
         Platform::WechatChannels => &["weixin.qq.com", "qq.com"],
         Platform::Xiaohongshu => &["xiaohongshu.com"],
+        Platform::Kuaishou => unreachable!(),
     };
     roots
         .iter()
@@ -499,39 +600,45 @@ fn read_cookies(
             Microsoft::Web::WebView2::Win32::{ICoreWebView2CookieList, ICoreWebView2_2},
         };
         use windows_core::{Interface, HSTRING};
-        let (send, receive) = std::sync::mpsc::channel::<Result<Vec<serde_json::Value>, String>>();
-        let origin = HSTRING::from(platform.origin());
-        let platform = platform.clone();
-        window
-            .with_webview(move |webview| {
-                let completed = send.clone();
-                let handler = GetCookiesCompletedHandler::create(Box::new(
-                    move |result: windows_core::Result<()>,
-                          list: Option<ICoreWebView2CookieList>| {
-                        let outcome = result
-                            .map_err(|error| error.to_string())
-                            .and_then(|_| list.ok_or_else(|| "cookie list missing".to_string()))
-                            .and_then(|list| collect_cookie_records(&list, &platform));
-                        let _ = completed.send(outcome);
-                        Ok(())
-                    },
-                ));
-                let result: windows_core::Result<()> = (|| unsafe {
-                    webview
-                        .controller()
-                        .CoreWebView2()?
-                        .cast::<ICoreWebView2_2>()?
-                        .CookieManager()?
-                        .GetCookies(&origin, &handler)
-                })();
-                if let Err(error) = result {
-                    let _ = send.send(Err(error.to_string()));
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        receive
-            .recv_timeout(Duration::from_secs(30))
-            .map_err(|_| "读取本机登录 Cookie 超时，请重试".to_string())?
+        let mut records = Vec::new();
+        for origin in platform.cookie_origins() {
+            let (send, receive) =
+                std::sync::mpsc::channel::<Result<Vec<serde_json::Value>, String>>();
+            let origin = HSTRING::from(*origin);
+            let platform = platform.clone();
+            window
+                .with_webview(move |webview| {
+                    let completed = send.clone();
+                    let handler = GetCookiesCompletedHandler::create(Box::new(
+                        move |result: windows_core::Result<()>,
+                              list: Option<ICoreWebView2CookieList>| {
+                            let outcome = result
+                                .map_err(|error| error.to_string())
+                                .and_then(|_| list.ok_or_else(|| "cookie list missing".to_string()))
+                                .and_then(|list| collect_cookie_records(&list, &platform));
+                            let _ = completed.send(outcome);
+                            Ok(())
+                        },
+                    ));
+                    let result: windows_core::Result<()> = (|| unsafe {
+                        webview
+                            .controller()
+                            .CoreWebView2()?
+                            .cast::<ICoreWebView2_2>()?
+                            .CookieManager()?
+                            .GetCookies(&origin, &handler)
+                    })();
+                    if let Err(error) = result {
+                        let _ = send.send(Err(error.to_string()));
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            let cookies = receive
+                .recv_timeout(Duration::from_secs(30))
+                .map_err(|_| "读取本机登录 Cookie 超时，请重试".to_string())??;
+            merge_cookie_records(&mut records, cookies)?;
+        }
+        Ok(records)
     }
     #[cfg(not(windows))]
     {
@@ -540,15 +647,19 @@ fn read_cookies(
     }
 }
 
-fn read_local_storage(window: &WebviewWindow) -> Result<Vec<serde_json::Value>, String> {
+fn read_local_storage(
+    window: &WebviewWindow,
+    platform: &Platform,
+) -> Result<Vec<serde_json::Value>, String> {
     let (send, receive) = std::sync::mpsc::channel();
+    let script = format!(
+        "JSON.stringify(location.origin === {} ? Object.entries(localStorage).map(([name, value]) => ({{name, value}})) : null)",
+        serde_json::to_string(platform.origin()).map_err(|e| e.to_string())?
+    );
     window
-        .eval_with_callback(
-            "JSON.stringify(Object.entries(localStorage).map(([name, value]) => ({name, value})))",
-            move |value| {
-                let _ = send.send(value);
-            },
-        )
+        .eval_with_callback(script, move |value| {
+            let _ = send.send(value);
+        })
         .map_err(|e| e.to_string())?;
     let raw = receive
         .recv_timeout(Duration::from_secs(5))
@@ -571,12 +682,19 @@ fn read_local_storage(window: &WebviewWindow) -> Result<Vec<serde_json::Value>, 
 fn export_storage_state(
     window: &WebviewWindow,
     platform: &Platform,
+    snapshot: &PageSnapshot,
 ) -> Result<serde_json::Value, String> {
+    if !identity_snapshot_is_current(window, platform, snapshot)? {
+        return Err("请先在官方创作者页面确认账号身份".into());
+    }
     let cookies = read_cookies(window, platform)?;
     if cookies.is_empty() {
         return Err("本机登录态没有平台 Cookie，请重新扫码".into());
     }
-    let local_storage = read_local_storage(window)?;
+    let local_storage = read_local_storage(window, platform)?;
+    if !identity_snapshot_is_current(window, platform, snapshot)? {
+        return Err("官方页面已跳转，请重新验证账号".into());
+    }
     Ok(serde_json::json!({
         "cookies": cookies,
         "origins": [{"origin": platform.origin(), "localStorage": local_storage}],
@@ -722,17 +840,12 @@ pub async fn check_local_publish_login(
     if url.as_str() == "about:blank" && elapsed < Duration::from_secs(45) {
         return Ok(LoginStatus::phase("loading"));
     }
-    if url.origin().ascii_serialization() != platform.origin() {
+    if !platform.allows_login_url(&url) {
         return Ok(LoginStatus::phase("action_required"));
     }
     let (send, receive) = std::sync::mpsc::channel();
-    // Return the payload as a JSON string: WebView2's default serialisation writes
-    // `Date.now()` as a float token (e.g. 1.789963907261e+12), which the Rust side
-    // must not have to guess at. Stringifying in the page keeps it byte-exact.
-    let script = format!(
-        "location.origin === {} ? JSON.stringify({{identity: window.__xiangshuPublishIdentity || null, login: window.__xiangshuReadPublishLogin ? window.__xiangshuReadPublishLogin() : window.__xiangshuPublishLogin || null}}) : \"null\"",
-        serde_json::to_string(platform.origin()).map_err(|e| e.to_string())?
-    );
+    // 字符串化保留二维码时间戳；passport 仅能报告二维码，不能报告账号身份。
+    let script = login_snapshot_script(&platform)?;
     official
         .eval_with_callback(script, move |value| {
             let _ = send.send(value);
@@ -752,23 +865,25 @@ pub async fn check_local_publish_login(
     if value.len() > 620_000 {
         return Err("平台登录信息过大，请重新扫码".into());
     }
+    if official.url().map_err(|e| e.to_string())? != url {
+        return Ok(LoginStatus::phase("loading"));
+    }
     let snapshot = parse_page_snapshot(&value)?;
     let Some(snapshot) = snapshot else {
         return Ok(LoginStatus::phase("loading"));
     };
-    let Some(identity) = snapshot.identity else {
+    let Some(identity) = snapshot.identity.clone() else {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_millis() as u64;
         return Ok(LoginStatus::from_page(snapshot.login, now));
     };
-    if identity.username.trim().is_empty()
-        || identity.platform_user_id.trim().is_empty()
-        || identity.username.len() > 1024
-        || identity.platform_user_id.len() > 1024
-    {
+    if !valid_identity(&identity, &platform) {
         return Err("平台返回的账号信息不完整".into());
+    }
+    if !identity_snapshot_is_current(&official, &platform, &snapshot)? {
+        return Ok(LoginStatus::phase("confirming"));
     }
     let mut logins = state.logins.lock().map_err(|_| "扫码会话忙，请重试")?;
     // Copy the field the terminal path needs; `discard_login_session` takes &mut.
@@ -800,6 +915,10 @@ pub async fn check_local_publish_login(
         discard_login_session(&app, &dir, &mut logins, &login_id)?;
         return Err("该平台账号已连接，请使用已有账号重新验证".into());
     }
+    let storage_state = export_storage_state(&official, &platform, &snapshot).ok();
+    if !identity_snapshot_is_current(&official, &platform, &snapshot)? {
+        return Ok(LoginStatus::phase("confirming"));
+    }
     let account = LocalAccount {
         id: login_id.clone(),
         platform,
@@ -817,9 +936,7 @@ pub async fn check_local_publish_login(
     let bytes = serde_json::to_vec(&account).map_err(|e| e.to_string())?;
     super::customer_credentials::write_file_atomically(&account_path(&dir, &login_id)?, &bytes)
         .map_err(|e| e.to_string())?;
-    // One-shot export for the server-side worker; a failure here keeps the local
-    // account (manual publishing still works) and surfaces as `storage_state: null`.
-    let storage_state = export_storage_state(&official, &account.platform).ok();
+    // 一次性导出失败仍保留已验证的本机资料，由界面提供重新同步入口。
     official.close().map_err(|e| e.to_string())?;
     logins.remove(&login_id);
     Ok(LoginStatus {
@@ -862,13 +979,14 @@ pub async fn export_local_publish_account_state(
     )?;
     let outcome = wait_for_identity(&official, &account.platform)
         .await
-        .and_then(|identity| {
+        .and_then(|snapshot| {
+            let identity = snapshot.identity.as_ref().ok_or("平台账号信息不完整")?;
             if identity.platform_user_id != account.platform_user_id {
                 return Err("当前登录的平台账号与原账号不同，请解绑后重新添加".to_string());
             }
-            let storage_state = export_storage_state(&official, &account.platform)?;
+            let storage_state = export_storage_state(&official, &account.platform, &snapshot)?;
             Ok(ExportedLogin {
-                identity,
+                identity: identity.clone(),
                 storage_state,
             })
         });
@@ -880,12 +998,9 @@ pub async fn export_local_publish_account_state(
 async fn wait_for_identity(
     official: &WebviewWindow,
     platform: &Platform,
-) -> Result<Identity, String> {
+) -> Result<PageSnapshot, String> {
     let deadline = Instant::now() + Duration::from_secs(45);
-    let script = format!(
-        "location.origin === {} ? (window.__xiangshuPublishIdentity || null) : null",
-        serde_json::to_string(platform.origin()).map_err(|e| e.to_string())?
-    );
+    let script = login_snapshot_script(platform)?;
     while Instant::now() < deadline {
         let url = official.url().map_err(|e| e.to_string())?;
         if url.origin().ascii_serialization() == platform.origin() {
@@ -901,12 +1016,10 @@ async fn wait_for_identity(
             .await
             .map_err(|e| e.to_string())?;
             if let Ok(value) = response {
-                if value.len() <= 20_000 {
-                    if let Ok(Some(identity)) = serde_json::from_str::<Option<Identity>>(&value) {
-                        if !identity.platform_user_id.trim().is_empty()
-                            && !identity.username.trim().is_empty()
-                        {
-                            return Ok(identity);
+                if value.len() <= 620_000 && official.url().map_err(|e| e.to_string())? == url {
+                    if let Ok(Some(snapshot)) = parse_page_snapshot(&value) {
+                        if identity_snapshot_is_current(official, platform, &snapshot)? {
+                            return Ok(snapshot);
                         }
                     }
                 }
@@ -916,7 +1029,7 @@ async fn wait_for_identity(
             .await
             .map_err(|e| e.to_string())?;
     }
-    Err("本机登录态已失效，请重新扫码".into())
+    Err("暂未核实平台账号，请重新扫码或在官方窗口完成验证".into())
 }
 
 #[tauri::command]
@@ -1252,5 +1365,122 @@ mod tests {
     #[test]
     fn page_snapshot_rejects_garbage() {
         assert!(parse_page_snapshot("<html>login</html>").is_err());
+    }
+
+    #[test]
+    fn kuaishou_login_allows_only_exact_official_origins_and_passport_paths() {
+        assert_eq!(
+            serde_json::to_string(&Platform::Kuaishou).unwrap(),
+            "\"kuaishou\""
+        );
+        assert_eq!(Platform::Kuaishou.origin(), "https://cp.kuaishou.com");
+        assert_eq!(
+            Platform::Kuaishou.login_url(),
+            "https://cp.kuaishou.com/article/publish/video"
+        );
+        for url in [
+            "https://cp.kuaishou.com/article/publish/video",
+            "https://passport.kuaishou.com/pc/account/login",
+            "https://passport.kuaishou.com/pc/account/login/?sid=kuaishou.web.cp.api",
+        ] {
+            assert!(Platform::Kuaishou.allows_login_url(&url.parse().unwrap()));
+        }
+        for url in [
+            "http://passport.kuaishou.com/pc/account/login/",
+            "https://passport.kuaishou.com:8443/pc/account/login/",
+            "https://passport.kuaishou.com.evil.test/pc/account/login/",
+            "https://passport.kuaishou.com/pc/account/login/other",
+            "https://passport.kuaishou.com/other/pc/account/login/",
+            "https://cp.kuaishou.com.evil.test/article/publish/video",
+        ] {
+            assert!(
+                !Platform::Kuaishou.allows_login_url(&url.parse().unwrap()),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            Platform::Kuaishou.cookie_origins(),
+            &["https://cp.kuaishou.com", "https://passport.kuaishou.com"]
+        );
+    }
+
+    #[test]
+    fn kuaishou_cookie_domains_exclude_other_subdomains() {
+        for domain in [
+            "kuaishou.com",
+            ".kuaishou.com",
+            "cp.kuaishou.com",
+            "passport.kuaishou.com",
+        ] {
+            assert!(platform_cookie_domain(domain, &Platform::Kuaishou));
+        }
+        for domain in [
+            "..kuaishou.com",
+            "foo.kuaishou.com",
+            "sub.cp.kuaishou.com",
+            "kuaishou.com.evil.test",
+            "notkuaishou.com",
+            "example.test",
+        ] {
+            assert!(
+                !platform_cookie_domain(domain, &Platform::Kuaishou),
+                "{domain}"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_queries_deduplicate_only_matching_name_domain_and_path() {
+        let make = |domain: &str, path: &str| {
+            cookie_record(
+                "sid".into(),
+                "synthetic".into(),
+                domain.into(),
+                path.into(),
+                -1.0,
+                true,
+                true,
+                "Lax",
+            )
+        };
+        let mut records = vec![];
+        merge_cookie_records(
+            &mut records,
+            vec![make(".kuaishou.com", "/"), make("cp.kuaishou.com", "/")],
+        )
+        .unwrap();
+        merge_cookie_records(
+            &mut records,
+            vec![
+                make(".kuaishou.com", "/"),
+                make(".kuaishou.com", "/rest"),
+                make("passport.kuaishou.com", "/"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[2]["path"], "/rest");
+    }
+
+    #[test]
+    fn kuaishou_identity_rejects_default_zero_uid_and_empty_fields() {
+        let identity = Identity {
+            platform_user_id: "123456".into(),
+            username: "快手昵称".into(),
+            avatar_url: None,
+        };
+        assert!(valid_identity(&identity, &Platform::Kuaishou));
+        for uid in ["0", " 0 ", "", " "] {
+            let invalid = Identity {
+                platform_user_id: uid.into(),
+                ..identity.clone()
+            };
+            assert!(!valid_identity(&invalid, &Platform::Kuaishou));
+        }
+        let invalid = Identity {
+            username: " ".into(),
+            ..identity
+        };
+        assert!(!valid_identity(&invalid, &Platform::Kuaishou));
     }
 }
