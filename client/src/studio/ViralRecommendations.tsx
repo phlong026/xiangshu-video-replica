@@ -23,6 +23,34 @@ function clockOffset(
     : 0;
 }
 
+function selectHomepageVideos(videos: StudioVideo[]) {
+  // 各平台的置顶序号独立分配；队首按推送时间合并，避免新平台上传被旧负序号挤走。
+  const groups = new Map<string, StudioVideo[]>();
+  const ranked = [...videos].sort(
+    (left, right) =>
+      (left.homepageRank ?? 2147483647) - (right.homepageRank ?? 2147483647) ||
+      Date.parse(right.pushedAt ?? "") - Date.parse(left.pushedAt ?? ""),
+  );
+  for (const video of ranked) {
+    const platform = video.platformKey ?? video.platform;
+    const queue = groups.get(platform) ?? [];
+    queue.push(video);
+    groups.set(platform, queue);
+  }
+  const pushedTime = (video?: StudioVideo) =>
+    Date.parse(video?.pushedAt ?? "") || 0;
+  const selected: StudioVideo[] = [];
+  while (selected.length < 4) {
+    const queues = [...groups.values()]
+      .filter((queue) => queue.length > 0)
+      .sort((left, right) => pushedTime(right[0]) - pushedTime(left[0]));
+    const next = queues[0]?.shift();
+    if (!next) break;
+    selected.push(next);
+  }
+  return selected;
+}
+
 export function ViralRecommendations() {
   const { review, user, requireLogin } = useStudio();
   if (requireLogin) return null;
@@ -134,22 +162,16 @@ function HomepageRecommendations() {
     return () => window.clearTimeout(timer);
   }, [data.homepageVideos, now, refresh, review]);
 
-  const videos = (source ?? [])
-    .filter(
+  const videos = selectHomepageVideos(
+    (source ?? []).filter(
       (video) =>
         video.homepageFeatured &&
         isPublishedViralVideo(
           video,
           now - (review ? 0 : clockOffset(video.platformKey, homepage?.timing)),
         ),
-    )
-    .sort(
-      (left, right) =>
-        (left.homepageRank ?? 2147483647) -
-          (right.homepageRank ?? 2147483647) ||
-        Date.parse(right.pushedAt ?? "") - Date.parse(left.pushedAt ?? ""),
-    )
-    .slice(0, 4);
+    ),
+  );
 
   return (
     <Panel className="studio-home-recommendations">

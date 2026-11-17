@@ -993,6 +993,46 @@ describe("V1.4 工作台首页爆款精选", () => {
     expect(value.navigate).toHaveBeenCalledWith("viral");
   });
 
+  it("跨平台新上传先展示，同时保留每个平台内部的人工顺序", async () => {
+    const videos = [
+      homepageVideo(1, {
+        title: "跨平台推荐 人工置首",
+        homepageRank: -30,
+        pushedAt: "2026-11-14T12:00:00Z",
+      }),
+      homepageVideo(2, {
+        title: "跨平台推荐 同平台次位",
+        homepageRank: -29,
+        pushedAt: "2026-11-16T12:00:00Z",
+      }),
+      homepageVideo(3, { title: "跨平台推荐 同平台第三", homepageRank: -28 }),
+      homepageVideo(4, { title: "跨平台推荐 第五张", homepageRank: -27 }),
+      homepageVideo(5, {
+        title: "跨平台推荐 小红书新上传",
+        platformKey: "xiaohongshu",
+        platform: "小红书",
+        homepageRank: -1,
+        pushedAt: "2026-11-17T11:59:59Z",
+      }),
+    ];
+    loadViralVideos.mockResolvedValue({ videos, errors: [] });
+    useStudio.mockReturnValue(
+      studio(undefined, { state: createState("workbench"), data: data([]) }),
+    );
+    render(<WorkbenchPage />);
+
+    await screen.findByText("跨平台推荐 小红书新上传");
+    expect(
+      screen.getAllByText(/^跨平台推荐 /).map((node) => node.textContent),
+    ).toEqual([
+      "跨平台推荐 小红书新上传",
+      "跨平台推荐 人工置首",
+      "跨平台推荐 同平台次位",
+      "跨平台推荐 同平台第三",
+    ]);
+    expect(screen.queryByText("跨平台推荐 第五张")).toBeNull();
+  });
+
   it.each([true, false])(
     "首页只展示推荐集合中已发布可用且排期生效的精选（审核：%s）",
     async (review) => {
