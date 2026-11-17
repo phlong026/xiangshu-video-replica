@@ -765,7 +765,7 @@ describe("真实 Studio 只读适配器", () => {
   });
 
   it.each(["audio", "text"] as const)(
-    "云端草稿恢复保留%s口播模式",
+    "云端草稿恢复将%s口播模式归一为文案驱动",
     async (driverMode) => {
       api.getStudioDraft.mockResolvedValue({
         draft_kind: "copy",
@@ -775,7 +775,7 @@ describe("真实 Studio 只读适配器", () => {
         updated_at: "2026-10-12T00:00:00Z",
       });
       expect((await loadCloudDraft())?.draft).toMatchObject({
-        driverMode,
+        driverMode: "text",
         audioId: "saved-audio",
       });
     },

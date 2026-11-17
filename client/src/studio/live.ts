@@ -1590,7 +1590,7 @@ function draftFromPayload(payload: unknown): StudioDraft | null {
     payload.rewriteWordCount <= 5000
       ? payload.rewriteWordCount
       : undefined;
-  merged.driverMode = payload.driverMode === "audio" ? "audio" : "text";
+  merged.driverMode = "text";
   merged.style = "standard";
   // 分仓迁移：升级前参考生视频的六段式正文就存在 prompt 里，分仓后参考页会看起来
   // 被清空。只搬结构明确的六段式——文/图模式的集成描述不含段名，不会被误搬；

@@ -418,7 +418,7 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(value.openLive).not.toHaveBeenCalled();
   });
 
-  it("真实音频口播再创作回到音频模式，未提供正文时禁用调整脚本", () => {
+  it("历史音频口播仍可查看成片，再创作使用待补全文案和声音的新稿", () => {
     const task = {
       ...taskA,
       backendKind: "oral_task" as const,
@@ -435,11 +435,19 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(screen.getByRole("button", { name: "调整脚本" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "新建草稿" }));
 
-    expect(value.navigate).toHaveBeenCalledWith("oral-audio", {
+    expect(loadTaskPreview).toHaveBeenCalledWith(task);
+    expect(screen.getByText("完整口播音频")).toBeInTheDocument();
+    expect(value.navigate).toHaveBeenCalledWith("oral", {
       returnTo: "task-detail",
     });
     expect(value.patchState).toHaveBeenCalledWith({
-      draft: expect.objectContaining({ audioId: "audio-original" }),
+      draft: expect.objectContaining({
+        driverMode: "text",
+        ipId: "person-a",
+        avatarId: "avatar-a",
+        voiceId: undefined,
+        script: expect.objectContaining({ text: "", confirmed: false }),
+      }),
     });
   });
 

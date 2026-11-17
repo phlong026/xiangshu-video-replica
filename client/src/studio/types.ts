@@ -18,7 +18,6 @@ export type StudioPage =
   | "video"
   | "reference"
   | "oral"
-  | "oral-audio"
   | "tasks"
   | "task-detail"
   | "people"
@@ -258,7 +257,7 @@ export type StudioScript = {
   updatedAt?: string;
 };
 export type StudioDraft = {
-  /** 音频口播与文字口播在草稿恢复时仍保持同一驱动方式。 */
+  /** 兼容历史音频任务快照；进入创作工作区时统一使用文案驱动。 */
   driverMode?: "text" | "audio";
   /** 独立视频生成批次的用户可见名称。 */
   videoName?: string;

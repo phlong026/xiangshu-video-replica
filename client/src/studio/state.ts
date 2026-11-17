@@ -29,7 +29,6 @@ export const pageTitles: Record<StudioPage, string> = {
   video: "视频生成 · 文/图生视频",
   reference: "视频生成 · 参考生视频",
   oral: "数字人口播",
-  "oral-audio": "数字人口播",
   tasks: "任务中心",
   "task-detail": "任务详情与结果",
   people: "人物库",
@@ -43,6 +42,17 @@ export const pageTitles: Record<StudioPage, string> = {
   settings: "系统设置",
   profile: "用户档案",
 };
+
+export function normalizeStudioPage(
+  page: StudioPage | "oral-audio",
+): StudioPage {
+  return page === "oral-audio" ? "oral" : page;
+}
+
+/** 旧草稿可能仍有音频模式；恢复与交接只保留文案驱动，素材引用不受影响。 */
+export function normalizeOralDraft(draft: StudioDraft): StudioDraft {
+  return draft.driverMode === "text" ? draft : { ...draft, driverMode: "text" };
+}
 
 export function routeFromHash(hash: string): StudioPage {
   return studioRouteFromHash(hash).page;
@@ -79,6 +89,7 @@ export function studioRouteFromHash(hash: string): Pick<
     projects: "replica",
     characters: "people",
     wallet: "profile",
+    "oral-audio": "oral",
   };
   const params = new URLSearchParams(query);
   const result: ReturnType<typeof studioRouteFromHash> = {
@@ -111,7 +122,8 @@ export function studioRouteFromHash(hash: string): Pick<
   result.selectedAssetId = params.get("asset") ?? undefined;
   result.selectedPersonId = params.get("person") ?? undefined;
   const returnTo = params.get("returnTo");
-  if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
+  if (returnTo === "oral-audio") result.returnTo = "oral";
+  else if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
     result.returnTo = returnTo as StudioPage;
   }
   return result;
@@ -125,25 +137,27 @@ export function studioHashForState(state: StudioState): string {
     params.set("asset", state.selectedAssetId);
   if (state.selectedPersonId && state.page.startsWith("person-"))
     params.set("person", state.selectedPersonId);
-  if (state.returnTo) params.set("returnTo", state.returnTo);
+  if (state.returnTo)
+    params.set("returnTo", normalizeStudioPage(state.returnTo));
   const path =
     state.page === "task-detail" &&
     state.selectedTaskKind &&
     state.selectedTaskBackendId
       ? `task-detail/${state.selectedTaskKind}/${encodeURIComponent(state.selectedTaskBackendId)}`
-      : state.page;
+      : normalizeStudioPage(state.page);
   const query = params.toString();
   return `#studio/${path}${query ? `?${query}` : ""}`;
 }
 
 export function navigateStudioState(
   state: StudioState,
-  page: StudioPage,
+  page: StudioPage | "oral-audio",
   patch: Partial<StudioState> = {},
 ): StudioState {
+  const nextPage = normalizeStudioPage(page);
   const keepTaskContext =
-    page === "task-detail" || patch.returnTo === "task-detail";
-  const keepPersonContext = page.startsWith("person-");
+    nextPage === "task-detail" || patch.returnTo === "task-detail";
+  const keepPersonContext = nextPage.startsWith("person-");
   return {
     ...state,
     selectedVideoId: undefined,
@@ -154,17 +168,10 @@ export function navigateStudioState(
       : undefined,
     selectedAssetId: undefined,
     selectedPersonId: keepPersonContext ? state.selectedPersonId : undefined,
-    returnTo: undefined,
     ...patch,
-    ...(page === "oral-audio"
-      ? {
-          draft: {
-            ...(patch.draft ?? state.draft),
-            driverMode: "audio" as const,
-          },
-        }
-      : {}),
-    page,
+    returnTo: patch.returnTo ? normalizeStudioPage(patch.returnTo) : undefined,
+    draft: normalizeOralDraft(patch.draft ?? state.draft),
+    page: nextPage,
   };
 }
 
@@ -198,13 +205,12 @@ export function createDraft(): StudioDraft {
   };
 }
 
-export function createState(page: StudioPage = "workbench"): StudioState {
+export function createState(
+  page: StudioPage | "oral-audio" = "workbench",
+): StudioState {
   return {
-    page,
-    draft: {
-      ...createDraft(),
-      driverMode: page === "oral-audio" ? "audio" : "text",
-    },
+    page: normalizeStudioPage(page),
+    draft: createDraft(),
     savedScripts: [],
     favorites: [],
   };
@@ -224,7 +230,7 @@ export function withImportedProject(
     return {
       ...state,
       draft: {
-        ...state.draft,
+        ...normalizeOralDraft(state.draft),
         sourceId: imported.sourceId,
         script: newer ? imported.script : current,
       },
@@ -232,7 +238,7 @@ export function withImportedProject(
   }
   return {
     ...state,
-    draft: imported,
+    draft: normalizeOralDraft(imported),
     selectedVideoId: undefined,
     selectedTaskId: undefined,
     selectedTaskKind: undefined,
@@ -254,7 +260,7 @@ export function draftFromTask(task: StudioTask): StudioDraft {
     id: fresh.id,
     projectId: task.projectId ?? snapshot?.projectId,
     ipId,
-    driverMode,
+    driverMode: "text",
     avatarId: task.avatarId ?? snapshot?.avatarId,
     voiceId:
       driverMode === "audio" ? undefined : (task.voiceId ?? snapshot?.voiceId),
@@ -292,6 +298,7 @@ export function patchStudioDraft(
   const next = {
     ...draft,
     ...patch,
+    driverMode: "text" as const,
     id: draft.id,
     quoteRevision: draft.quoteRevision + 1,
   };
@@ -400,28 +407,15 @@ export function patchStudioDraft(
   return next;
 }
 
-export function buildOralInput(
-  draft: StudioDraft,
-  mode: "text" | "audio" = draft.driverMode ?? "text",
-) {
-  if (mode === "text" && (!draft.script.confirmed || !draft.script.text.trim()))
+export function buildOralInput(draft: StudioDraft) {
+  if (!draft.script.confirmed || !draft.script.text.trim())
     throw new Error("请先在文案工坊确认终稿");
   if (!draft.ipId || !draft.avatarId)
     throw new Error("请选择人物与可用口播分身");
-  if (mode === "audio") {
-    if (!draft.audioId) throw new Error("请选择完整口播音频");
-    return {
-      draftId: draft.id,
-      mode,
-      ipId: draft.ipId,
-      avatarId: draft.avatarId,
-      audioAssetId: draft.audioId,
-    };
-  }
   if (!draft.voiceId) throw new Error("请选择已确认声音");
   return {
     draftId: draft.id,
-    mode,
+    mode: "text" as const,
     ipId: draft.ipId,
     avatarId: draft.avatarId,
     voiceId: draft.voiceId,

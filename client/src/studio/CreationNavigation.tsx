@@ -9,9 +9,7 @@ export function CreationNavigation() {
       ? "video"
       : state.page === "replacement"
         ? "replica"
-        : state.page === "oral-audio"
-          ? "oral"
-          : state.page;
+        : state.page;
   return (
     <div className="studio-creation-nav">
       <Tabs<StudioPage>

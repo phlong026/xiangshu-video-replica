@@ -4315,28 +4315,31 @@ describe("视频生成（C2 独立创作）", () => {
     );
   });
 
-  it("音频历史路由和云端恢复均保留驱动方式", async () => {
-    const restored = createReviewState("oral-audio").draft;
+  it("旧音频深链和云端草稿恢复均回到文案口播，不能以音频绕过终稿校验", async () => {
+    window.history.replaceState(null, "", "#studio/oral-audio");
+    const restored = createReviewState("oral").draft;
+    restored.driverMode = "audio";
     restored.voiceId = undefined;
     restored.script.text = "";
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      // 必须用窗口内的相对时间：硬编码日期会随日历流逝跌出 7 天提示窗口。
       updatedAt: freshUpdatedAt(),
+      revision: 1,
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
-    render(
-      <StudioWorkspace
-        currentUser={reviewUser}
-        initialState={createReviewState("oral")}
-      />,
-    );
+    render(<StudioWorkspace currentUser={reviewUser} />);
+
     fireEvent.click(await screen.findByRole("button", { name: RESTORE }));
     expect(
-      await screen.findByRole("heading", { name: "完整口播音频" }),
+      await screen.findByRole("heading", { name: "口播文案" }),
     ).toBeInTheDocument();
-    expect(window.location.hash).toBe("#studio/oral-audio");
+    expect(window.location.hash).toBe("#studio/oral");
+    expect(currentExtractionContext().state.draft.driverMode).toBe("text");
+    expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
+    act(() => currentExtractionContext().requestGeneration("数字人口播"));
+    expect(screen.getByText("请先在文案工坊确认终稿")).toBeInTheDocument();
+
     await act(async () => {
       window.history.pushState(null, "", "#studio/materials");
       window.dispatchEvent(new PopStateEvent("popstate"));
@@ -4345,43 +4348,50 @@ describe("视频生成（C2 独立创作）", () => {
       window.history.pushState(null, "", "#studio/oral-audio");
       window.dispatchEvent(new PopStateEvent("popstate"));
     });
-    expect(await findEnabledButton("生成口播视频")).toBeEnabled();
-    fireEvent.click(await findEnabledButton("生成口播视频"));
-    await waitFor(() =>
-      expect(api.getOralPrice).toHaveBeenCalledWith({
-        audio_asset_id: "speech",
-      }),
-    );
+    expect(currentExtractionContext().state.page).toBe("oral");
+    expect(currentExtractionContext().state.draft.driverMode).toBe("text");
+    expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
+    expect(api.getOralPrice).not.toHaveBeenCalled();
     expect(api.createOralTask).not.toHaveBeenCalled();
   });
 
-  it("音频页面按音频报价提交，不传旧文案声音字幕", async () => {
+  it("旧本地音频快照按文案报价，确认费用后仅提交 TTS", async () => {
     api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
     live.loadStudioData.mockResolvedValue(createReviewData());
-    const initial = createReviewState("oral-audio");
+    const initial = createReviewState("oral");
+    // 模拟旧版本持久化快照：活动页面类型已不再允许该入口。
+    initial.page = "oral-audio" as typeof initial.page;
+    initial.draft.driverMode = "audio";
     initial.draft.subtitles = true;
-    initial.draft.voiceId = undefined;
-    initial.draft.script.text = "";
-    initial.draft.script.confirmed = false;
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
-    expect(await findEnabledButton("生成口播视频")).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "添加" })).toBeNull();
     fireEvent.click(await findEnabledButton("生成口播视频"));
+    expect(currentExtractionContext().state).toMatchObject({
+      page: "oral",
+      draft: { driverMode: "text" },
+    });
+    expect(screen.queryByRole("button", { name: "已有音频" })).toBeNull();
     expect(await screen.findByText("5.00 元/秒")).toBeInTheDocument();
+    expect(api.getOralPrice).toHaveBeenCalledWith({
+      script_text: initial.draft.script.text,
+    });
+    expect(api.createOralTask).not.toHaveBeenCalled();
     fireEvent.click(await findEnabledButton("确认费用并提交"));
 
     await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
     expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        mode: "AUDIO",
-        audioAssetId: "speech",
+        mode: "TTS",
+        voiceId: initial.draft.voiceId,
+        scriptText: initial.draft.script.text,
+        subtitle: expect.any(Object),
+        quoteToken: "qo500",
+        maxCredits: 500,
       }),
     );
-    expect(api.getOralPrice).toHaveBeenCalledWith({ audio_asset_id: "speech" });
-    const submitted = api.createOralTask.mock.calls[0]?.[0];
-    for (const field of ["subtitle", "voiceId", "scriptText"])
-      expect(submitted).not.toHaveProperty(field);
+    expect(api.createOralTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "audioAssetId",
+    );
   });
 
   it("旧口播响应不会关闭后来重新打开的生成弹窗", async () => {

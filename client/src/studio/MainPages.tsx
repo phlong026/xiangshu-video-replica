@@ -1872,7 +1872,7 @@ export function TaskDetailPage() {
     const hasOralInputs =
       task.backendKind === "oral_task" &&
       (task.scriptText?.trim() ||
-        (page === "oral" && task.driverMode === "audio" && task.audioId));
+        (page === "oral" && task.driverMode === "audio"));
     if (!review && !task.draftSnapshot && !hasOralInputs) {
       openLive("tasks");
       notify(
@@ -1881,12 +1881,7 @@ export function TaskDetailPage() {
       return;
     }
     patchState({ draft: draftFromTask(task) });
-    navigate(
-      page === "oral" && task.driverMode === "audio" ? "oral-audio" : page,
-      {
-        returnTo: "task-detail",
-      },
-    );
+    navigate(page, { returnTo: "task-detail" });
     if (!review) notify("已创建新的创作草稿，请核对正文与素材后重新确认。");
   };
   const downloadResult = async () => {
