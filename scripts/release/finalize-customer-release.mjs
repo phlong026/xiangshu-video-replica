@@ -248,8 +248,7 @@ export async function verifyMacosApp(path, origin) {
   const endpointEscaped = Buffer.from(config.endpoints[0].replaceAll("/", "\\/"));
   const endpointFound = [endpointPlain, endpointEscaped].find((needle) =>
     binary.includes(needle),
-  );
-  const endpoint = endpointFound !== undefined;
+  );  const endpoint = endpointFound !== undefined;
   const pubkey = binary.includes(Buffer.from(config.pubkey));
   const staging = binary.includes(Buffer.from("staging.example.invalid"));
   // 向 stderr 打印发现值与取证上下文，任何 runner 上都能从日志定位失败层；
@@ -587,6 +586,8 @@ async function main() {
     "mac-x64-manifest-sha256",
     "output",
     "app-binary",
+    "overlay",
+    "base",
   ];
   const { values } = parseArgs({
     args,
@@ -596,6 +597,17 @@ async function main() {
     values.origin ?? process.env.VITE_API_BASE_URL ?? "https://video.zszhj.cn";
   if (command === "macos-overlay") {
     await writeFile(values.output, jsonText(await macosOverlay(origin)), { flag: "wx" });
+  } else if (command === "bake-base-config") {
+    // 2026-11-18 实锤：x86_64-apple-darwin 目标编译时丢失平台合并进来的数组
+    // 字段（bundle.icon、updater.endpoints），而主配置文件的字符串字段全部
+    // 正常进入二进制。把 updater 段直接写进主配置文件，绕开平台合并链路。
+    const basePath = values.base ?? join(repoRoot, "client/src-tauri/tauri.conf.json");
+    const overlay = await jsonFile(values.overlay);
+    const base = await jsonFile(basePath);
+    base.plugins ??= {};
+    base.plugins.updater = overlay.plugins.updater;
+    await writeFile(basePath, jsonText(base));
+    console.log("baked updater config into", basePath);
   } else if (command === "verify-macos-app") {
     await verifyMacosApp(values["app-binary"], origin);
   } else if (command === "prepare") {

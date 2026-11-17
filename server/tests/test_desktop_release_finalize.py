@@ -441,6 +441,51 @@ console.log(JSON.stringify(config));
     ]
 
 
+def test_bake_base_config_writes_updater_section(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "tauri.conf.json"
+    base.write_text(
+        json.dumps(
+            {
+                "$schema": "https://schema.tauri.app/config/2",
+                "productName": "众墅之家 AI 爆款视频工具",
+                "version": "2.6.8",
+                "identifier": "cn.zszhj.video",
+                "build": {"devUrl": "http://127.0.0.1:5173/"},
+                "app": {"security": {"csp": "default-src 'self'"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    code = r"""
+import { spawnSync } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+const corePath = fileURLToPath(process.argv[1]);
+const core = await import(process.argv[1]);
+const overlay = await core.macosOverlay("https://video.zszhj.cn");
+await writeFile(process.argv[2], JSON.stringify(overlay));
+const result = spawnSync(
+  process.execPath,
+  [corePath, "bake-base-config", "--overlay", process.argv[2], "--base", process.argv[3]],
+  { encoding: "utf8" },
+);
+if (result.status !== 0) throw new Error(result.stderr);
+console.log("baked");
+"""
+    result = run_node(code, str(tmp_path / "overlay.json"), str(base))
+    assert result.returncode == 0, result.stderr
+    merged = json.loads(base.read_text(encoding="utf-8"))
+    assert merged["productName"] == "众墅之家 AI 爆款视频工具"
+    assert merged["build"]["devUrl"] == "http://127.0.0.1:5173/"
+    assert merged["plugins"]["updater"]["endpoints"] == [
+        f"{ORIGIN}/downloads/customer-cloud/stable.json"
+    ]
+    assert merged["plugins"]["updater"]["pubkey"].startswith("dW50cnVzdGVk")
+
+
 @pytest.mark.parametrize("missing_archive", [False, True])
 def test_collector_requires_archive_for_explicit_mac_release(
     tmp_path: Path, missing_archive: bool
@@ -498,6 +543,7 @@ def test_workflow_and_signing_driver_keep_private_material_local() -> None:
     # macOS 配置通过覆写检出内平台文件进入构建（绕开 CLI 参数传递），不再用 --config。
     cp_line = 'cp "$RUNNER_TEMP/customer-macos-release.json" client/src-tauri/tauri.macos.conf.json'
     assert cp_line in workflow
+    assert "bake-base-config" in workflow
     assert "TAURI_CONFIG<<TAURI_CONFIG_EOF" in workflow
     assert 'config_args=(--config "$RUNNER_TEMP/customer-macos-release.json")' not in workflow
     assert "verify-macos-app" in workflow
