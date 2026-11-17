@@ -7,13 +7,12 @@ const context = { state: { page: "replacement" }, navigate };
 vi.mock("./context", () => ({ useStudio: () => context }));
 
 describe("统一创作导航", () => {
-  it("人物置换归属 <15s 视频拆解，长视频拆解与 AI 视频共用一个一级入口", () => {
+  it("人物置换归属 普通复刻 4–30 秒，长视频拆解与 AI 视频共用一个一级入口", () => {
     const { rerender } = render(<CreationNavigation />);
     expect(screen.getAllByRole("tab")).toHaveLength(4);
-    expect(screen.getByRole("tab", { name: "<15s 视频拆解" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(
+      screen.getByRole("tab", { name: "普通复刻 4–30 秒" }),
+    ).toHaveAttribute("aria-selected", "true");
     expect(
       screen.queryByRole("tab", { name: "人物置换" }),
     ).not.toBeInTheDocument();
@@ -31,7 +30,7 @@ describe("统一创作导航", () => {
       "aria-selected",
       "true",
     );
-    fireEvent.click(screen.getByRole("tab", { name: "<15s 视频拆解" }));
+    fireEvent.click(screen.getByRole("tab", { name: "普通复刻 4–30 秒" }));
     expect(navigate).toHaveBeenCalledWith("replica");
   });
 });

@@ -23,6 +23,7 @@ type WorkbenchUploadResult = {
   assetId: string;
   project?: Project;
   asset?: StudioAsset;
+  durationSeconds?: number;
 };
 
 const {
@@ -55,14 +56,7 @@ const {
   useStudio: vi.fn<() => StudioContextValue>(),
   loadTaskPreview: vi.fn(),
   uploadWorkbenchSourceVideo:
-    vi.fn<
-      (
-        file: File,
-        onProgress: (percent: number) => void,
-        signal?: AbortSignal,
-        purpose?: "replica" | "script",
-      ) => Promise<WorkbenchUploadResult>
-    >(),
+    vi.fn<typeof import("./live").uploadWorkbenchSourceVideo>(),
   readVideoDuration: vi.fn<(file: File) => Promise<number>>(),
   extractLocalVideoAudio: vi.fn<(file: File) => Promise<File>>(),
   studioVideoFromViral: vi.fn((item: import("../api").ViralVideoItem) => ({
@@ -1454,6 +1448,56 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [20, "开始复刻", "replica", "replica"],
+    [20, "视频拆解", "replica", "replica"],
+    [60, "开始复刻", "replica_prompt", "long-replica"],
+    [60, "视频拆解", "replica_prompt", "long-replica"],
+  ])(
+    "%s 秒来源经 %s 在返回首页后保持相同分流",
+    async (duration, button, purpose, page) => {
+      const value = workbench();
+      useStudio.mockReturnValue(value);
+      readVideoDuration.mockResolvedValue(duration);
+      extractLocalVideoAudio.mockResolvedValue(
+        new File(["audio"], "来源.m4a", { type: "audio/mp4" }),
+      );
+      uploadWorkbenchSourceVideo.mockResolvedValue({
+        projectId: "p-resume",
+        assetId: "a-resume",
+      });
+      const first = render(<WorkbenchPage />);
+      changeFile("来源.mp4");
+      await waitFor(() => expect(value.patchDraft).toHaveBeenCalled());
+      first.unmount();
+      value.state.draft = {
+        ...value.state.draft,
+        projectId: "p-resume",
+        sourceAssetId: "a-resume",
+        sourceId: "a-resume",
+        script: {
+          ...value.state.draft.script,
+          original: "保留原文",
+          text: "保留改写",
+        },
+      };
+      uploadWorkbenchSourceVideo.mockClear();
+      render(<WorkbenchPage />);
+      fireEvent.click(screen.getByRole("button", { name: button }));
+      await waitFor(() => expect(value.navigate).toHaveBeenCalledWith(page));
+      expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[3]).toBe(purpose);
+      expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[4]).toBe("p-resume");
+      expect(value.patchDraft).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          script: expect.objectContaining({
+            original: "保留原文",
+            text: "保留改写",
+          }),
+        }),
+      );
+    },
+  );
+
   it(">15s 来源点开始复刻：补传整片（replica_prompt 用途）并跳长视频拆解页签", async () => {
     const value = workbench({
       user: { id: "account-long" } as StudioContextValue["user"],
@@ -1567,7 +1611,10 @@ describe("V1.4 工作台上传与创作入口", () => {
     const pending: { resolve?: (value: WorkbenchUploadResult) => void } = {};
     let reportProgress: ((percent: number) => void) | undefined;
     uploadWorkbenchSourceVideo.mockImplementation(
-      (_file: File, onProgress: (percent: number) => void) =>
+      (
+        _file: import("../nativeSource").SourceFile,
+        onProgress: (percent: number) => void,
+      ) =>
         new Promise<{ projectId: string; assetId: string }>((resolve) => {
           pending.resolve = resolve;
           reportProgress = onProgress;
@@ -1721,7 +1768,7 @@ describe("V1.4 工作台上传与创作入口", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
-    expect(value.navigate).toHaveBeenCalledWith("replica");
+    await waitFor(() => expect(value.navigate).toHaveBeenCalledWith("replica"));
     expect(value.openLive).not.toHaveBeenCalled();
   });
 

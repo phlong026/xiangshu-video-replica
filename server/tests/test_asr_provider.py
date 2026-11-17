@@ -464,3 +464,67 @@ def test_only_confirmed_provider_terminal_status_allows_explicit_new_round(statu
     with pytest.raises(AsrConfirmedFailure):
         provider.resume("known-receipt")
     assert all(method == "GET" for method, _ in transport.calls)
+
+
+def test_source_download_streams_and_validates_before_billing(tmp_path, monkeypatch):
+    import hashlib
+
+    from app import script_from_audio as pipeline
+    from app.asr import FakeAsrProvider
+    from app.storage import LocalStorageAdapter
+
+    storage = LocalStorageAdapter(root=tmp_path / "storage")
+    content = b"source-video"
+    storage.put_object("source", content, content_type="video/mp4")
+    monkeypatch.setattr(storage, "get_object", lambda *a: pytest.fail("来源不能整载内存"))
+    monkeypatch.setattr(
+        pipeline, "extract_audio", lambda ff, source, target: target.write_bytes(b"audio")
+    )
+    monkeypatch.setattr(pipeline, "probe_duration_seconds", lambda *a: 600.0)
+    work = pipeline.PreparedScriptFromAudio(
+        "task",
+        "project",
+        "asset",
+        "source",
+        storage,
+        FakeAsrProvider(),
+        "ffmpeg",
+        "ffprobe",
+        "temporary.m4a",
+        source_sha256=hashlib.sha256(content).hexdigest(),
+        source_size=len(content),
+    )
+    assert pipeline.perform_script_from_audio_task(work).text
+    assert work.audio_deleted
+    assert storage.head_object("source") is not None
+
+
+@pytest.mark.parametrize("size,digest", [(1, None), (30, None), (12, "invalid")])
+def test_streamed_source_mismatch_never_submits_or_bills(tmp_path, monkeypatch, size, digest):
+    from fastapi import HTTPException
+
+    from app import script_from_audio as pipeline
+    from app.asr import FakeAsrProvider
+    from app.storage import LocalStorageAdapter
+
+    storage = LocalStorageAdapter(root=tmp_path / "storage")
+    storage.put_object("source", b"source-video", content_type="video/mp4")
+    monkeypatch.setattr(pipeline, "extract_audio", lambda *a: pytest.fail("校验失败不得抽音轨"))
+    work = pipeline.PreparedScriptFromAudio(
+        "task",
+        "project",
+        "asset",
+        "source",
+        storage,
+        FakeAsrProvider(),
+        "ffmpeg",
+        "ffprobe",
+        "temporary.m4a",
+        source_sha256=digest,
+        source_size=size,
+    )
+    with pytest.raises(HTTPException) as error:
+        pipeline.perform_script_from_audio_task(
+            work, before_provider_call=lambda: pytest.fail("校验失败不得计费")
+        )
+    assert error.value.detail["code"] == "SCRIPT_FROM_AUDIO_SOURCE_CHANGED"

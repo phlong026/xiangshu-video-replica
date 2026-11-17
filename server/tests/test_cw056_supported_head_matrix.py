@@ -109,7 +109,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261102T0900_customer_session_last_seen（会话 7 天滑动契约的 last_seen_at
 # 列）追加其上；20261113T1000_replica_pipeline_submit_intents（M6b 发送意图
 # 表）再追加，故链尾为该值。
-HEAD_REVISION = "20261113T1000_replica_pipeline_submit_intents"
+HEAD_REVISION = "20261115T1800_project_sources"
 
 
 @pytest.mark.pg
@@ -440,18 +440,18 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # timestamptz_columns +1（created_at）；digest 在空库→新 head 的 PG16 探针
 # 库（m6b_schema_probe）重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 409,
-    "columns": 1581,
-    "foreign_keys": 221,
+    "tables": 140,
+    "columns": 1597,
     "identity_columns": 0,
-    "jsonb_columns": 16,
-    "partial_indexes": 48,
-    "primary_keys": 139,
     "sequences": 8,
-    "tables": 139,
-    "timestamptz_columns": 131,
+    "jsonb_columns": 16,
+    "timestamptz_columns": 133,
     "triggers": 61,
-    "unique_constraints": 45,
+    "partial_indexes": 48,
+    "unique_constraints": 46,
+    "check_constraints": 410,
+    "foreign_keys": 221,
+    "primary_keys": 140,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -553,6 +553,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "oral_voices",
     "person_identities",
     "project_main_characters",
+    "project_sources",
     "projects",
     "prompt_optimization_receipts",
     "provider_runtime_state",
@@ -561,13 +562,13 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "publish_browser_accounts",
     "publish_browser_logins",
     "publish_records",
-    "replica_pipeline_submit_intents",
-    "replica_pipeline_tasks",
-    "replica_prompt_tasks",
     "recharge_orders",
     "recharge_packages",
     "refund_executions",
     "registration_bonus_settings",
+    "replica_pipeline_submit_intents",
+    "replica_pipeline_tasks",
+    "replica_prompt_tasks",
     "runtime_settings",
     "script_from_audio_tasks",
     "script_rewrite_tasks",
@@ -577,12 +578,12 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "studio_drafts",
     "studio_material_preferences",
     "studio_notification_preferences",
-    "training_materials",
     "studio_saved_scripts",
     "sub_account_permissions",
     "sub_account_quotas",
     "support_tickets",
     "task_diagnostic_refs",
+    "training_materials",
     "user_queue_cursors",
     "users",
     "versions",
@@ -715,7 +716,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
 # 2026-11-13 M6b 发送意图表追加后，在空库→新 head 的 PG16 探针库再重算。
-HEAD_SCHEMA_DIGEST = "621c790357b434a1e94a7dee59e4c6dc394fd9ebf705788284023a693d4baa16"
+HEAD_SCHEMA_DIGEST = "6198cbad9a47902118f1262a1ecfaeabcd38a177b245d15a253f266ffa7e0b8e"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

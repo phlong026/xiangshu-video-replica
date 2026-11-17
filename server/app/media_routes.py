@@ -135,6 +135,7 @@ class UploadIntentRequest(BaseModel):
     size_bytes: int = Field(ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     purpose: Literal["replica", "script", "replica_prompt"] = "replica"
+    post_upload_action: Literal["store_only", "start_analysis"] = "start_analysis"
 
 
 class UploadIntentResponse(BaseModel):
@@ -643,6 +644,7 @@ def create_asset_upload_intent(
             size_bytes=payload.size_bytes,
             sha256=payload.sha256,
             purpose=payload.purpose,
+            post_upload_action=payload.post_upload_action,
         )
         is_customer = actor.role == "customer"
     upload_url = intent.url

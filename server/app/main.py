@@ -80,6 +80,7 @@ from app.ops_metrics import (
 )
 from app.oral_routes import router as oral_router
 from app.payment_routes import router as payment_router
+from app.project_source_routes import router as project_source_router
 from app.prompt_optimizer_routes import router as prompt_optimizer_router
 from app.publish_browser_routes import router as publish_browser_router
 from app.publish_record_routes import router as publish_record_router
@@ -91,6 +92,9 @@ from app.registration_bonus_routes import router as registration_bonus_router
 from app.replica_pipeline_routes import router as replica_pipeline_router
 from app.replica_prompt_routes import router as replica_prompt_router
 from app.script_from_audio_routes import router as script_from_audio_router
+from app.text_documents import router as text_documents_router
+from app.source_analysis import router as source_analysis_router
+from app.source_trim import router as source_trim_router
 from app.settings import SettingsUnavailableError
 from app.settings_routes import router as settings_router
 from app.simple_character_routes import router as character_simple_router
@@ -398,6 +402,10 @@ app.include_router(publish_browser_router)
 app.include_router(publish_record_router)
 app.include_router(material_router)
 app.include_router(script_from_audio_router)
+app.include_router(text_documents_router)
+app.include_router(source_analysis_router)
+app.include_router(source_trim_router)
+app.include_router(project_source_router)
 app.include_router(replica_prompt_router)
 app.include_router(oral_router)
 app.include_router(independent_router)

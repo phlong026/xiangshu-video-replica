@@ -6,6 +6,11 @@ import {
   fetchViralVideoMedia,
   type ViralPlatform,
 } from "../api";
+import {
+  extractNativeAudio,
+  isNativeSource,
+  type SourceFile,
+} from "../nativeSource";
 
 /**
  * 爆款视频本地缓存（P2）的桌面端桥接。
@@ -163,9 +168,18 @@ export async function listenViralCacheProgress(
  * 单声道 m4a 只有几百 KB，包成 File 交回——上传、转写都只用它，原片不出
  * 本机。非桌面端直接抛错，由调用方兜底走整片上传。
  */
-export async function extractLocalVideoAudio(file: File): Promise<File> {
+export async function extractLocalVideoAudio(
+  file: SourceFile,
+  signal?: AbortSignal,
+): Promise<SourceFile> {
+  if (isNativeSource(file)) return extractNativeAudio(file, signal);
   if (!cacheAvailable()) {
     throw new Error("本地提取音轨需要桌面端；将改为直接上传视频。");
+  }
+  if (file.size > 8 * 1024 ** 2) {
+    throw new Error(
+      "大视频请使用上传按钮选择本机原片，以便直接从磁盘提取音轨。",
+    );
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   const audio = await invoke<ArrayBuffer | number[]>(

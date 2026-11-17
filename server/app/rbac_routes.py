@@ -107,6 +107,8 @@ class ProjectResponse(BaseModel):
     name: str
     status: str
     reference_asset_id: str | None
+    current_source_id: str | None = None
+    source_revision: int | None = None
     reference_upload_status: str
     analysis_status: str
     analysis_task_id: str | None = None
@@ -468,6 +470,8 @@ def list_projects(
                 projects.owner_user_id,
                 projects.name,
                 projects.status,
+                projects.current_source_id,
+                (SELECT revision FROM project_sources WHERE id=projects.current_source_id) AS source_revision,
                 reference_assets.id AS reference_asset_id,
                 CASE
                     WHEN reference_assets.id IS NULL THEN 'NOT_STARTED'
@@ -497,6 +501,9 @@ def list_projects(
                 (
                     SELECT script_assets.id FROM assets AS script_assets
                     WHERE script_assets.project_id = projects.id
+                        AND (projects.current_source_id IS NULL OR script_assets.id = (
+                            SELECT audio_source_asset_id FROM project_sources WHERE id=projects.current_source_id
+                        ))
                         AND script_assets.kind = 'reference_audio'
                         AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
                     ORDER BY script_assets.created_at DESC, script_assets.id DESC
@@ -507,6 +514,9 @@ def list_projects(
                 SELECT assets.id
                 FROM assets
                 WHERE assets.project_id = projects.id
+                    AND (projects.current_source_id IS NULL OR assets.id = (
+                        SELECT original_video_asset_id FROM project_sources WHERE id=projects.current_source_id
+                    ))
                     AND (
                         assets.kind = 'reference_video'
                         OR (
@@ -541,6 +551,8 @@ def list_projects(
                 projects.owner_user_id,
                 projects.name,
                 projects.status,
+                projects.current_source_id,
+                (SELECT revision FROM project_sources WHERE id=projects.current_source_id) AS source_revision,
                 reference_assets.id AS reference_asset_id,
                 CASE
                     WHEN reference_assets.id IS NULL THEN 'NOT_STARTED'
@@ -570,6 +582,9 @@ def list_projects(
                 (
                     SELECT script_assets.id FROM assets AS script_assets
                     WHERE script_assets.project_id = projects.id
+                        AND (projects.current_source_id IS NULL OR script_assets.id = (
+                            SELECT audio_source_asset_id FROM project_sources WHERE id=projects.current_source_id
+                        ))
                         AND script_assets.kind = 'reference_audio'
                         AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
                     ORDER BY script_assets.created_at DESC, script_assets.id DESC
@@ -580,6 +595,9 @@ def list_projects(
                 SELECT assets.id
                 FROM assets
                 WHERE assets.project_id = projects.id
+                    AND (projects.current_source_id IS NULL OR assets.id = (
+                        SELECT original_video_asset_id FROM project_sources WHERE id=projects.current_source_id
+                    ))
                     AND (
                         assets.kind = 'reference_video'
                         OR (
@@ -768,10 +786,19 @@ def delete_project(
             FROM first_frame_tasks
             WHERE first_frame_tasks.project_id = %s
               AND first_frame_tasks.status IN ('PENDING', 'RUNNING', 'SUBMISSION_UNCERTAIN')
+            UNION ALL
+            SELECT project_id FROM script_from_audio_tasks
+            WHERE project_id=%s AND status IN ('PENDING','RUNNING','SUBMISSION_UNCERTAIN')
+            UNION ALL
+            SELECT project_id FROM script_rewrite_tasks
+            WHERE project_id=%s AND status IN ('PENDING','RUNNING','SUBMISSION_UNCERTAIN')
+            UNION ALL
+            SELECT project_id FROM source_trim_tasks
+            WHERE project_id=%s AND status IN ('PENDING','RUNNING')
         ) AS active_project_tasks
         LIMIT 1
         """,
-        (project_id, project_id, project_id, project_id),
+        (project_id, project_id, project_id, project_id, project_id, project_id, project_id),
     ).fetchone()
     if has_active_tasks:
         raise HTTPException(
@@ -905,6 +932,8 @@ def project_detail_row(
             projects.owner_user_id,
             projects.name,
             projects.status,
+            projects.current_source_id,
+            (SELECT revision FROM project_sources WHERE id=projects.current_source_id) AS source_revision,
             reference_assets.id AS reference_asset_id,
             CASE
                 WHEN reference_assets.id IS NULL THEN 'NOT_STARTED'
@@ -934,6 +963,9 @@ def project_detail_row(
             (
                 SELECT script_assets.id FROM assets AS script_assets
                 WHERE script_assets.project_id = projects.id
+                    AND (projects.current_source_id IS NULL OR script_assets.id = (
+                        SELECT audio_source_asset_id FROM project_sources WHERE id=projects.current_source_id
+                    ))
                     AND script_assets.kind = 'reference_audio'
                     AND script_assets.sha256 <> '' AND script_assets.size_bytes > 0
                 ORDER BY script_assets.created_at DESC, script_assets.id DESC
@@ -944,6 +976,9 @@ def project_detail_row(
             SELECT assets.id
             FROM assets
             WHERE assets.project_id = projects.id
+                AND (projects.current_source_id IS NULL OR assets.id = (
+                    SELECT original_video_asset_id FROM project_sources WHERE id=projects.current_source_id
+                ))
                 AND (
                     assets.kind = 'reference_video'
                     OR (
@@ -1456,6 +1491,8 @@ def project_response(row: BusinessRow) -> ProjectResponse:
         else str(row["script_source_asset_id"])
     )
     return ProjectResponse(
+        current_source_id=str(row["current_source_id"]) if "current_source_id" in row.keys() and row["current_source_id"] is not None else None,
+        source_revision=int(row["source_revision"]) if "source_revision" in row.keys() and row["source_revision"] is not None else None,
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
         name=str(row["name"]),

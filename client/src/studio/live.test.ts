@@ -2693,6 +2693,29 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
     expect(api.deleteProject).not.toHaveBeenCalled();
   });
 
+  it("补传到已有项目失败时不删除已有正文项目", async () => {
+    mockUploadStart("p-existing", "a-new");
+    const existing = await api.createProject("已有项目");
+    api.createProject.mockClear();
+    api.uploadReferenceVideo.mockRejectedValue(new Error("补传断网"));
+    await expect(
+      live.uploadWorkbenchSourceVideo(
+        file,
+        () => {},
+        undefined,
+        "replica",
+        existing,
+      ),
+    ).rejects.toThrow("补传断网");
+    expect(api.createProject).not.toHaveBeenCalled();
+    expect(api.createVideoUploadIntent).toHaveBeenCalledWith(
+      existing.id,
+      file,
+      "replica",
+    );
+    expect(api.deleteProject).not.toHaveBeenCalled();
+  });
+
   it("上传失败时删除刚创建的项目，不留孤儿项目", async () => {
     mockUploadStart("p-orphan", "a-orphan");
     api.uploadReferenceVideo.mockRejectedValue(new Error("网络中断"));
@@ -2721,6 +2744,7 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
       asset_id: "a-ok",
       project_id: "p-ok",
       status: "READY",
+      metadata: { duration_seconds: 60 },
       analysis_task_id: null,
       analysis_task_status: null,
     });
@@ -2729,6 +2753,7 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
     const result = await live.uploadWorkbenchSourceVideo(file, () => {});
 
     expect(result.projectId).toBe("p-ok");
+    expect(result.durationSeconds).toBe(60);
     expect(api.deleteProject).not.toHaveBeenCalled();
   });
 

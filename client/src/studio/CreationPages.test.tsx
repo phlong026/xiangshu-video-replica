@@ -5322,16 +5322,16 @@ describe("视频复刻（模块①）", () => {
     expect(replicaLive.readVideoDuration).not.toHaveBeenCalled();
   });
 
-  it("上传本地预检：超过 15 秒的参考视频选完文件就拦截", async () => {
+  it("上传本地预检：超过 30 秒的参考视频选完文件就拦截", async () => {
     const value = openReplicaUpload();
     replicaLive.uploadWorkbenchSourceVideo.mockClear();
-    replicaLive.readVideoDuration.mockResolvedValue(20);
+    replicaLive.readVideoDuration.mockResolvedValue(31);
 
     pickUploadFile("long.mp4");
 
     await waitFor(() =>
       expect(value.notify).toHaveBeenCalledWith(
-        "参考视频时长不能超过 15 秒，请裁剪后再上传。",
+        "参考视频时长不能超过 30 秒，请裁剪后再上传。",
       ),
     );
     expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
@@ -5352,12 +5352,12 @@ describe("视频复刻（模块①）", () => {
     expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
 
-  it("上传本地预检：15.05 秒在服务端取整容差内，不误拦", async () => {
-    // media.py validate_duration 放行 MAX+0.1=15.1：取整后的边角素材服务端可收，
+  it("上传本地预检：30.05 秒在服务端取整容差内，不误拦", async () => {
+    // media.py validate_duration 放行 MAX+0.1=30.1：取整后的边角素材服务端可收，
     // 本地预检不能比服务端更严（与 media.py 同源需含 DURATION_ROUNDING_TOLERANCE）。
     const value = openReplicaUpload();
     replicaLive.uploadWorkbenchSourceVideo.mockClear();
-    replicaLive.readVideoDuration.mockResolvedValue(15.05);
+    replicaLive.readVideoDuration.mockResolvedValue(30.05);
     replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
       projectId: "project-upload-tol",
       assetId: "asset-upload-tol",

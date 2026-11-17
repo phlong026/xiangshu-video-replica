@@ -25,6 +25,7 @@ import {
   getWallet,
   type IndependentCapabilities,
   listMaterials,
+  materializeSmallDocument,
   type OralPrice,
   type Project,
 } from "../api";
@@ -1713,11 +1714,13 @@ export function StudioWorkspace({
     // 恢复轮询必须有界（上线审查 P1-2）：worker 崩溃会把任务永远停在 RUNNING，
     // 无上限的 2s 轮询会一直打到页面关闭，且 extractingRef 永不复位、手动提取
     // 被静默锁死。口径对齐 live.ts awaitScriptFromAudioTask：2s × 150 = 5 分钟。
-    const maxRestoreAttempts = 150;
+    let maxRestoreAttempts = 150;
     let restoreAttempts = 0;
     const restore = async () => {
       try {
         const task = await loadLatestScriptFromUpload(extractionProjectId);
+        if (task?.processingVersion === "segmented-v1")
+          maxRestoreAttempts = 43200;
         if (!restorationStillCurrent() || !task) return;
         const current = latestDraftRef.current;
         if (
@@ -1760,6 +1763,7 @@ export function StudioWorkspace({
               script: {
                 ...current.script,
                 original: text,
+                originalDocument: task.result?.document ?? undefined,
                 text: hasCopyResult(current.script) ? current.script.text : "",
                 resultKind: hasCopyResult(current.script)
                   ? "manual"
@@ -1867,6 +1871,10 @@ export function StudioWorkspace({
     }
   };
   const requestGeneration = (kind: StudioTask["type"]) => {
+    if ((latestDraftRef.current.script.textDocument?.char_count ?? 0) > 10000) {
+      notify("当前生成操作最多支持一万字，请先缩写文案并重新确认终稿。");
+      return;
+    }
     if (
       kind === "视频生成" &&
       latestDraftRef.current.replicaPreparationPending
@@ -2054,8 +2062,14 @@ export function StudioWorkspace({
     }
 
     void persistSavedScript(script, draft.projectId, draft.ipId)
-      .then(async () => {
+      .then(async (saved) => {
         if (!isCurrentSave()) return;
+        if (saved)
+          Object.assign(script, {
+            ...saved,
+            confirmed: script.confirmed,
+            resultKind: script.resultKind,
+          });
         try {
           await persistCloudDraftForScope(
             {
@@ -2085,43 +2099,64 @@ export function StudioWorkspace({
       });
   };
   const confirmFinalDraft = () => {
-    if (currentUserRoleRef.current === "auditor") {
-      notify("当前账号为只读权限，不能保存或确认创作内容。");
-      return;
-    }
-    const script = { ...state.draft.script, confirmed: true };
-    const draft = patchStudioDraft(state.draft, { script });
-    const accountId = currentUser.id;
-    const previousScope = savedDraftScope(accountId, state.draft);
-    const confirmedScope = savedDraftScope(accountId, draft);
-    patchDraft({ script });
-    if (review) return;
-    // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
-    const permissionGeneration = permissionGenerationRef.current;
-    void persistCloudDraftForScope(draft, accountId, () =>
-      Boolean(
-        saveMountedRef.current &&
-          currentUserRoleRef.current !== "auditor" &&
-          permissionGenerationRef.current === permissionGeneration &&
-          saveAccountRef.current === accountId &&
-          (saveScopeRef.current === previousScope ||
-            saveScopeRef.current === confirmedScope),
-      ),
-    ).catch(() => {});
-    if (!state.draft.projectId) return;
-    void publishScriptVersion(state.draft.projectId, script.text).then(
-      (result) => {
-        if (
-          currentUserRoleRef.current === "auditor" ||
-          permissionGenerationRef.current !== permissionGeneration
-        )
-          return;
-        // not-applicable = 项目尚无分镜，属正常边界，不提示失败。
-        if (result === "failed")
-          notify(
-            "终稿已确认，但同步到项目脚本版本未成功，可稍后在来源分析中重试。",
-          );
-      },
+    void (async () => {
+      if (currentUserRoleRef.current === "auditor") {
+        notify("当前账号为只读权限，不能保存或确认创作内容。");
+        return;
+      }
+      const expectedAccount = saveAccountRef.current;
+      const expectedPermission = permissionGenerationRef.current;
+      const expectedScript = JSON.stringify(latestDraftRef.current.script);
+      const selected = state.draft.script;
+      const canPublish =
+        !selected.textDocument || selected.textDocument.char_count <= 10000;
+      const text =
+        selected.textDocument && canPublish && !review
+          ? await materializeSmallDocument(selected.textDocument)
+          : selected.text;
+      if (
+        saveAccountRef.current !== expectedAccount ||
+        JSON.stringify(latestDraftRef.current.script) !== expectedScript ||
+        String(currentUserRoleRef.current) === "auditor" ||
+        permissionGenerationRef.current !== expectedPermission
+      )
+        return;
+      const script = { ...selected, text, confirmed: true };
+      const draft = patchStudioDraft(state.draft, { script });
+      const accountId = currentUser.id;
+      const previousScope = savedDraftScope(accountId, state.draft);
+      const confirmedScope = savedDraftScope(accountId, draft);
+      patchDraft({ script });
+      if (review) return;
+      // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
+      const permissionGeneration = permissionGenerationRef.current;
+      void persistCloudDraftForScope(draft, accountId, () =>
+        Boolean(
+          saveMountedRef.current &&
+            currentUserRoleRef.current !== "auditor" &&
+            permissionGenerationRef.current === permissionGeneration &&
+            saveAccountRef.current === accountId &&
+            (saveScopeRef.current === previousScope ||
+              saveScopeRef.current === confirmedScope),
+        ),
+      ).catch(() => {});
+      if (!state.draft.projectId || !canPublish) return;
+      void publishScriptVersion(state.draft.projectId, script.text).then(
+        (result) => {
+          if (
+            currentUserRoleRef.current === "auditor" ||
+            permissionGenerationRef.current !== permissionGeneration
+          )
+            return;
+          // not-applicable = 项目尚无分镜，属正常边界，不提示失败。
+          if (result === "failed")
+            notify(
+              "终稿已确认，但同步到项目脚本版本未成功，可稍后在来源分析中重试。",
+            );
+        },
+      );
+    })().catch((cause: unknown) =>
+      notify(cause instanceof Error ? cause.message : "确认文案失败，请重试。"),
     );
   };
   const extractingRef = useRef(false);
@@ -2215,7 +2250,7 @@ export function StudioWorkspace({
         ? awaitScriptFromAudioTask(preparedTaskId)
         : extractScriptFromUploadLive(projectId, assetId)
     )
-      .then(({ text: taskText, taskId }) => {
+      .then(({ text: taskText, taskId, document }) => {
         extractingRef.current = false;
         endCopyExtractionProgress();
         if (!scopeStillCurrent()) {
@@ -2263,6 +2298,7 @@ export function StudioWorkspace({
           script: {
             ...currentScript,
             original: text,
+            originalDocument: document,
             text: hasCopyResult(currentScript) ? currentScript.text : "",
             resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
             confirmed: false,
@@ -2274,7 +2310,8 @@ export function StudioWorkspace({
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
-        endCopyExtractionProgress();
+        if (saveAccountRef.current === extractionAccount)
+          endCopyExtractionProgress();
         if (!scopeStillCurrent()) {
           // M3/Codex r-P2：切账号后轮询用当前账号令牌，读原账号任务会鉴权失败
           // 落进本分支——费已花在原账号，同样不能静默，给出回原账号取回的指引。
@@ -2314,6 +2351,26 @@ export function StudioWorkspace({
     openPicker: setPicker,
     openLive,
     requestGeneration,
+    requestSourceAnalysis: () => {
+      const draft = latestDraftRef.current;
+      if (review || currentUserRoleRef.current === "auditor") {
+        notify("当前模式不能发起真实拆解。");
+        return;
+      }
+      if (!draft.projectId || (!draft.sourceAssetId && !draft.sourceRecordId)) {
+        notify("请先选择来源视频。");
+        return;
+      }
+      navigate("workbench", {
+        pendingSourceAnalysis: {
+          accountId: currentUser.id,
+          projectId: draft.projectId,
+          assetId: draft.sourceAssetId,
+          sourceRecordId: draft.sourceRecordId,
+          key: crypto.randomUUID(),
+        },
+      });
+    },
     saveDraft,
     discardSavedDraft,
     confirmFinalDraft,

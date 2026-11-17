@@ -19,12 +19,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import os
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -56,7 +59,7 @@ from app.task_lease import claim_script_from_audio_task
 logger = logging.getLogger("app.script_from_audio")
 
 SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES = 20
-SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES = 2_000_000_000
+SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES = 2 * 1024**3
 _DOWNLOAD_INTENT_EXPIRES = timedelta(minutes=30)
 
 
@@ -65,6 +68,7 @@ class ScriptFromAudioRequest(BaseModel):
 
     source_asset_id: str = Field(min_length=1, max_length=128)
     idempotency_key: str | None = Field(default=None, max_length=128)
+    processing_version: Literal["auto", "legacy-v1", "segmented-v1"] = "auto"
 
 
 class ScriptFromAudioResult(BaseModel):
@@ -75,6 +79,7 @@ class ScriptFromAudioResult(BaseModel):
     text: str | None = None
     duration_sec: float | None = None
     language: str | None = None
+    document: dict[str, object] | None = None
 
 
 class ScriptFromAudioTaskResponse(BaseModel):
@@ -93,6 +98,10 @@ class ScriptFromAudioTaskResponse(BaseModel):
     updated_at: str
     started_at: str | None
     completed_at: str | None
+    processing_version: str = "legacy-v1"
+    phase: str = "QUEUED"
+    completed_segments: int = 0
+    total_segments: int = 0
 
 
 # 归档指纹同样存在于真实生产任务，只能结合结算依据判定旧正文权益。
@@ -149,7 +158,17 @@ def script_from_audio_task_response(
                 None if payload.get("duration_sec") is None else float(payload["duration_sec"])
             ),
             language=(None if payload.get("language") is None else str(payload["language"])),
+            document=None if text is None else payload.get("document"),
         )
+    progress = (
+        None
+        if conn is None
+        else conn.execute(
+            "SELECT count(*) AS total,count(*) FILTER (WHERE status='SUCCEEDED') AS done "
+            "FROM asr_segments WHERE task_id=%s",
+            (row["id"],),
+        ).fetchone()
+    )
     return ScriptFromAudioTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -166,6 +185,12 @@ def script_from_audio_task_response(
         updated_at=str(row["updated_at"]),
         started_at=None if row["started_at"] is None else str(row["started_at"]),
         completed_at=(None if row["completed_at"] is None else str(row["completed_at"])),
+        processing_version=str(row["processing_version"])
+        if "processing_version" in row.keys()
+        else "legacy-v1",
+        phase=str(row["processing_phase"]) if "processing_phase" in row.keys() else "QUEUED",
+        completed_segments=int(progress["done"]) if progress else 0,
+        total_segments=int(progress["total"]) if progress else 0,
     )
 
 
@@ -241,6 +266,7 @@ def enqueue_script_from_audio_task(
     project_id: str,
     source_asset_id: str,
     idempotency_key: str,
+    processing_version: str = "auto",
 ) -> BusinessRow:
     require_not_auditor(
         conn,
@@ -315,7 +341,7 @@ def enqueue_script_from_audio_task(
             )
         return cast(BusinessRow, active)
 
-    _configured_asr(conn)
+    configured_asr = _configured_asr(conn)
     # 归因：内容经营报表按爆款身份聚合 ASR 收入/成本（viral_content_overview）。
     # 只作记录，不参与任何资格与计费判定；身份来自服务端导入任务关联，
     # 客户端自报的元数据不算数（2026-11-11 共享缓存退役后仅存的 viral_source）。
@@ -380,6 +406,37 @@ def enqueue_script_from_audio_task(
         )
     if str(row["id"]) != task_id:
         return cast(BusinessRow, row)
+    metadata = json.loads(str(asset["metadata_json"] or "{}"))
+    duration = float(metadata.get("duration_seconds") or metadata.get("duration_sec") or 0)
+    enabled = os.environ.get("VIDEO_REPLICA_SEGMENTED_ASR_ENABLED", "0") == "1"
+    if processing_version == "segmented-v1" and not enabled:
+        raise script_from_audio_error(
+            503, "SEGMENTED_ASR_DISABLED", "长音频分段转写尚未启用，请联系管理员。"
+        )
+    if (
+        not math.isfinite(duration)
+        or duration < 0
+        or duration > 43200
+        or (processing_version == "segmented-v1" and duration == 0)
+    ):
+        raise script_from_audio_error(
+            422, "SCRIPT_FROM_AUDIO_DURATION_INVALID", "来源时长无效或超过 12 小时，请分开上传。"
+        )
+    if enabled and (
+        processing_version == "segmented-v1" or (processing_version == "auto" and duration > 300)
+    ):
+        conn.execute(
+            "UPDATE script_from_audio_tasks SET processing_version='segmented-v1',processing_policy_json=%s WHERE id=%s",
+            (
+                json.dumps(configured_asr.model_policy())
+                if isinstance(configured_asr, DashScopeFunAsr)
+                else None,
+                task_id,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM script_from_audio_tasks WHERE id=%s", (task_id,)
+        ).fetchone()
     from app.permissions import write_audit
 
     # 每个用户为真实转写付自己的 ASR 按秒费（2026-11-11 极简化：无共享缓存，
@@ -619,25 +676,46 @@ def perform_script_from_audio_task(
             raise script_from_audio_error(
                 413, "SCRIPT_FROM_AUDIO_SOURCE_TOO_LARGE", "来源文件过大，请压缩后重新上传。"
             )
-        video_bytes = work.storage.get_object(work.object_key)
-        if len(video_bytes) > SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES:
-            raise script_from_audio_error(
-                413, "SCRIPT_FROM_AUDIO_SOURCE_TOO_LARGE", "来源文件过大，请压缩后重新上传。"
-            )
-        if (work.source_size is not None and len(video_bytes) != work.source_size) or (
-            work.source_sha256 is not None
-            and hashlib.sha256(video_bytes).hexdigest() != work.source_sha256
-        ):
-            raise script_from_audio_error(
-                409, "SCRIPT_FROM_AUDIO_SOURCE_CHANGED", "来源素材校验失败，请重新上传。"
-            )
         with tempfile.TemporaryDirectory(prefix="script-from-audio-") as tmp_dir:
             video_path = Path(tmp_dir) / "source-video"
             audio_path = Path(tmp_dir) / "extracted-audio.m4a"
-            video_path.write_bytes(video_bytes)
+            chunks = work.storage.iter_object(work.object_key)
+            digest = hashlib.sha256()
+            size_seen = 0
+            last_heartbeat = time.monotonic()
+            try:
+                with video_path.open("wb") as target:
+                    for chunk in chunks:
+                        size_seen += len(chunk)
+                        if size_seen > SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES:
+                            raise script_from_audio_error(
+                                413,
+                                "SCRIPT_FROM_AUDIO_SOURCE_TOO_LARGE",
+                                "来源文件过大，请压缩后重新上传。",
+                            )
+                        if work.source_size is not None and size_seen > work.source_size:
+                            raise script_from_audio_error(
+                                409,
+                                "SCRIPT_FROM_AUDIO_SOURCE_CHANGED",
+                                "来源素材校验失败，请重新上传。",
+                            )
+                        digest.update(chunk)
+                        target.write(chunk)
+                        if heartbeat is not None and time.monotonic() - last_heartbeat >= 15:
+                            heartbeat()
+                            last_heartbeat = time.monotonic()
+            finally:
+                close = getattr(chunks, "close", None)
+                if close is not None:
+                    close()
+            if (work.source_size is not None and size_seen != work.source_size) or (
+                work.source_sha256 is not None and digest.hexdigest() != work.source_sha256
+            ):
+                raise script_from_audio_error(
+                    409, "SCRIPT_FROM_AUDIO_SOURCE_CHANGED", "来源素材校验失败，请重新上传。"
+                )
             try:
                 extract_audio(work.ffmpeg_path, video_path, audio_path)
-                audio_bytes = audio_path.read_bytes()
             except MediaToolFailed as exc:
                 raise AsrProviderError(f"音轨抽取失败：{exc}") from exc
             duration = (
@@ -645,7 +723,7 @@ def perform_script_from_audio_task(
             )
             if heartbeat is not None:
                 heartbeat()
-            work.storage.put_object(work.audio_object_key, audio_bytes, content_type="audio/mp4")
+            work.storage.put_file(work.audio_object_key, audio_path, content_type="audio/mp4")
             intent = work.storage.create_download_intent(
                 work.audio_object_key,
                 expires_in=_DOWNLOAD_INTENT_EXPIRES,
@@ -653,6 +731,15 @@ def perform_script_from_audio_task(
             )
             audio_input = intent.url
             if isinstance(work.asr, DashScopeFunAsr):
+                audio_bytes = b""
+                if audio_input.startswith("local://"):
+                    from app.asr import max_inline_audio_bytes
+
+                    if audio_path.stat().st_size > max_inline_audio_bytes():
+                        raise AsrProviderError(
+                            "本地音频编码后过大，无法直接转写。请启用云存储后重新上传。"
+                        )
+                    audio_bytes = audio_path.read_bytes()
                 audio_input = work.asr.prepare_audio_input(
                     audio_input, audio_bytes=audio_bytes, duration_sec=duration
                 )
@@ -691,6 +778,8 @@ def complete_script_from_audio_task(
     lease: ScriptFromAudioTaskLease,
     result: TranscriptResult,
     audio_deleted: bool = False,
+    document: dict[str, object] | None = None,
+    segmented: bool = False,
 ) -> None:
     now = _time_text(datetime.now(UTC))
     result_payload: dict[str, object] = {
@@ -698,6 +787,8 @@ def complete_script_from_audio_task(
         "duration_sec": result.duration_sec,
         "language": result.language,
     }
+    if document is not None:
+        result_payload["document"] = document
     # 租约守卫：不在持锁状态即抛 SCRIPT_FROM_AUDIO_LEASE_LOST。
     _require_leased_task(conn, lease)
     result_json = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
@@ -726,7 +817,8 @@ def complete_script_from_audio_task(
         raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
     from app.usage_billing import complete_source_attempt, finish_source
 
-    complete_source_attempt(conn, lease.id, usage=result.duration_sec)
+    if not segmented:
+        complete_source_attempt(conn, lease.id, usage=result.duration_sec)
     if result.duration_sec is not None:
         finish_source(conn, lease.id, units=result.duration_sec, succeeded=True)
     else:

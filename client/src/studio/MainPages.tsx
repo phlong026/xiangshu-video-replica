@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CustomerProfile,
+  type ProjectSource,
+  type SourceAnalysisAction,
+  analyzeProjectSource,
+  currentProjectSource,
+  trimProjectSource,
   createGenerationTaskPreviewUrl,
   createViralImportTask,
+  createProject,
+  createProjectSource,
   customerVisibleErrorMessage,
   DIRECT_RESULT_RETENTION_HINT,
   getPublishSummary,
@@ -14,9 +21,17 @@ import {
   updateStudioNotificationPreferences,
   type ViralImportTask,
 } from "../api";
+import {
+  chooseNativeSource,
+  isNativeSource,
+  trimNativeSource,
+  nativeSourceAvailable,
+  type SourceFile,
+} from "../nativeSource";
 import { VideoPreview } from "../VideoPreview";
 import { useStudio } from "./context";
 import { LocalPublishAccountsPanel as PublishAccountsPanel } from "./LocalPublishAccountsPanel";
+import { SourceRangeDialog } from "./SourceRangeDialog";
 import {
   cancelStudioTask,
   downloadStudioTaskResult,
@@ -31,9 +46,11 @@ import {
   studioVideoFromViral,
   uploadWorkbenchSourceVideo,
 } from "./live";
+import { rememberLocalSource, restoreLocalSource } from "./localSourceSession";
 import { handOffLongReplicaSource } from "./longReplicaSession";
 import { PlatformLogo } from "./PlatformLogo";
 import { readPageCache, writePageCache } from "./pageCache";
+import { validateSourceAnalysis } from "./sourceAnalysis";
 import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioData, StudioTask, StudioVideo } from "./types";
@@ -235,6 +252,12 @@ export function WorkbenchPage() {
     refresh,
   } = useStudio();
   const accountId = user.id || "anonymous";
+  const sourceScope = JSON.stringify([
+    state.draft.projectId,
+    state.draft.sourceAssetId,
+  ]);
+  const currentSourceScopeRef = useRef(sourceScope);
+  currentSourceScopeRef.current = sourceScope;
   const accountGenerationRef = useRef({ accountId, generation: 0 });
   if (accountGenerationRef.current.accountId !== accountId) {
     accountGenerationRef.current = {
@@ -281,18 +304,25 @@ export function WorkbenchPage() {
     error: string;
     projectId: string | null;
     completed: boolean;
+    selected?: boolean;
   } | null>(null);
   const upload =
     uploadState?.accountContextKey === accountContextKey ? uploadState : null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const reselectOriginalRef = useRef(false);
+  const sourceIntentRef = useRef<string | null>(null);
+  const [rangeSource, setRangeSource] = useState<{ file?: SourceFile; cloud?: ProjectSource; duration: number; accountId: string; scope: string } | null>(null);
   const uploadOperationRef = useRef(0);
   const linkOperationRef = useRef(0);
   const viralOperationRef = useRef(0);
   const viralIdempotencyKeysRef = useRef(new Map<string, string>());
   const uploadAbortRef = useRef<AbortController | null>(null);
+  const analysisStartRef = useRef<string | null>(null);
   // >15s 原片登记：上传时只抽音轨供提取文案，原片留在本机；「开始复刻」
-  // 时按 replica_prompt 用途补传整片并跳长视频拆解页签。仅当前挂载有效。
-  const longOriginalRef = useRef<{ file: File; duration: number } | null>(null);
+  // 时按实际时长补传原片；跨页面引用按账号和音轨资产隔离保存。
+  const longOriginalRef = useRef<{ file: SourceFile; duration: number } | null>(
+    null,
+  );
   const [viralImportingId, setViralImportingId] = useState<string>();
   const [linkStateValue, setLinkState] = useState<{
     accountContextKey: string;
@@ -307,6 +337,7 @@ export function WorkbenchPage() {
   const activeAccountRef = useRef(accountId);
   if (activeAccountRef.current !== accountId) {
     activeAccountRef.current = accountId;
+    longOriginalRef.current = null;
     uploadOperationRef.current += 1;
     linkOperationRef.current += 1;
     viralOperationRef.current += 1;
@@ -497,19 +528,23 @@ export function WorkbenchPage() {
   const pendingViralSource = !state.draft.projectId
     ? data.videos.find((video) => video.id === state.draft.sourceId)
     : undefined;
-  // 长视频拆解入口：>15s 原片按 replica_prompt 用途补传整片（进度走同一个
+  // 音轨来源补传原片，按实际时长选择普通或长视频用途（进度走同一个
   // 上传状态位），成功后交接给长视频拆解页签自动建任务。本地先卡 180 秒/600MB，
   // 与服务端长视频门禁同口径，避免整片白传。
   const beginLongAnalysis = async (original: {
-    file: File;
+    file: SourceFile;
     duration: number;
+    range?: { start: number; end: number };
   }) => {
     if (original.duration > 180.1) {
-      notify("长视频拆解仅支持 4–180 秒的视频，请裁剪后再试。");
+      setRangeSource({ file: original.file, duration: original.duration, accountId, scope: currentSourceScopeRef.current });
       return;
     }
-    if (original.file.size > 600 * 1024 * 1024) {
-      notify("长视频不能超过 600 MB，请压缩后再上传。");
+    let purpose: "replica" | "replica_prompt";
+    try {
+      purpose = validateSourceAnalysis(original.duration, original.file.size);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "来源视频无效。");
       return;
     }
     const operation = ++uploadOperationRef.current;
@@ -533,7 +568,8 @@ export function WorkbenchPage() {
         (percent) => {
           if (
             operation !== uploadOperationRef.current ||
-            requestAccount !== activeAccountRef.current
+            requestAccount !== activeAccountRef.current ||
+            sourceScope !== currentSourceScopeRef.current
           )
             return;
           setUpload((current) =>
@@ -550,11 +586,21 @@ export function WorkbenchPage() {
           notify(`长视频上传中 ${step}%`);
         },
         abortController.signal,
-        "replica_prompt",
+        purpose,
+        data.projects.find((project) => project.id === state.draft.projectId) ??
+          state.draft.projectId ??
+          upload?.projectId ??
+          undefined,
+        { original: original.file, duration: original.duration, ...(original.range && state.draft.sourceRecordId ? { parent: { id: state.draft.sourceRecordId, ...original.range } } : {}), onPrepared: (project, source) => {
+          if (operation !== uploadOperationRef.current || requestAccount !== activeAccountRef.current || sourceScope !== currentSourceScopeRef.current) return;
+          rememberLocalSource(accountId, `source:${source.id}`, original);
+          if (project.id === state.draft.projectId) patchDraft({ sourceRecordId: source.id, sourceRevision: source.revision });
+        } },
       );
       if (
         operation !== uploadOperationRef.current ||
-        requestAccount !== activeAccountRef.current
+        requestAccount !== activeAccountRef.current ||
+        sourceScope !== currentSourceScopeRef.current
       )
         return;
       setUpload((current) =>
@@ -568,16 +614,59 @@ export function WorkbenchPage() {
           : current,
       );
       longOriginalRef.current = null;
-      handOffLongReplicaSource(accountId, {
+      rememberLocalSource(accountId, uploaded.assetId, original);
+      patchDraft({
         projectId: uploaded.projectId,
-        assetId: uploaded.assetId,
+        sourceId: uploaded.assetId,
+        sourceAssetId: uploaded.assetId,
+        sourceRecordId: uploaded.sourceRecordId,
+        sourceRevision: uploaded.sourceRevision,
+        // 音轨补回同源视频会改变资产 ID，显式保留文案，避免换源守卫清空原稿。
+        script: state.draft.script,
+        scriptEdited: state.draft.scriptEdited,
+        analysisTaskId: uploaded.analysisTaskId,
+        analysisTaskStatus: uploaded.analysisTaskStatus,
       });
-      notify("长视频已上传，开始拆解，预计 5–15 分钟。");
-      navigate("long-replica");
+      const uploadedProject = uploaded.project;
+      const uploadedAsset = uploaded.asset;
+      if (uploadedProject || uploadedAsset)
+        updateData((current) => ({
+          ...current,
+          projects: uploadedProject
+            ? [
+                uploadedProject,
+                ...current.projects.filter(
+                  (item) => item.id !== uploaded.projectId,
+                ),
+              ]
+            : current.projects,
+          assets: uploadedAsset
+            ? [
+                uploadedAsset,
+                ...current.assets.filter(
+                  (item) => item.id !== uploaded.assetId,
+                ),
+              ]
+            : current.assets,
+        }));
+      if (purpose === "replica_prompt") {
+        handOffLongReplicaSource(accountId, {
+          projectId: uploaded.projectId,
+          assetId: uploaded.assetId,
+          ...(uploaded.sourceAnalysisAction?.task_id
+            ? { taskId: uploaded.sourceAnalysisAction.task_id }
+            : {}),
+        });
+        notify("长视频已上传，开始拆解，预计 5–15 分钟。");
+        navigate("long-replica");
+      } else {
+        navigate("replica");
+      }
     } catch (error) {
       if (
         operation !== uploadOperationRef.current ||
-        requestAccount !== activeAccountRef.current
+        requestAccount !== activeAccountRef.current ||
+        sourceScope !== currentSourceScopeRef.current
       )
         return;
       setUpload((current) =>
@@ -593,13 +682,31 @@ export function WorkbenchPage() {
       );
     }
   };
-  const begin = async (mode: "copy" | "replica") => {
+  const adoptAnalysisAction = (source: ProjectSource, action: SourceAnalysisAction) => {
+    const assetId = source.original_video_asset_id;
+    if (!assetId || action.status !== "DISPATCHED" || !action.task_id) throw new Error("来源原片尚未准备完成。");
+    patchDraft({ projectId: source.project_id, sourceId: assetId, sourceAssetId: assetId,
+      sourceRecordId: source.id, sourceRevision: source.revision,
+      script: state.draft.script, scriptEdited: state.draft.scriptEdited,
+      analysisTaskId: action.route === "replica" ? action.task_id : undefined,
+      analysisTaskStatus: action.route === "replica" ? "PENDING" : undefined });
+    updateData((current) => ({ ...current, projects: current.projects.map((project) => project.id === source.project_id ? { ...project, reference_asset_id: assetId, reference_upload_status: "READY" } : project) }));
+    if (action.route === "replica_prompt") {
+      handOffLongReplicaSource(accountId, { projectId: source.project_id, assetId, taskId: action.task_id });
+      navigate("long-replica");
+    } else navigate("replica");
+  };
+  const beginInternal = async (mode: "copy" | "replica") => {
     if (requireLogin) {
       requireLogin();
       return;
     }
     if (review) {
       navigate(mode);
+      return;
+    }
+    if (upload && !upload.completed && !upload.error && !upload.selected) {
+      notify("来源正在上传，请等待完成后继续。");
       return;
     }
     if (sourceLink.trim()) {
@@ -681,14 +788,54 @@ export function WorkbenchPage() {
       return;
     }
     if (upload?.projectId || state.draft.sourceId || state.draft.projectId) {
+      if (mode === "copy" && state.draft.sourceRecordId && !state.draft.sourceAssetId) {
+        const original = longOriginalRef.current ?? await restoreLocalSource(accountId, `source:${state.draft.sourceRecordId}`, true);
+        if (accountId !== activeAccountRef.current) return;
+        if (!original) { notify("请重新选择本机原片，来源记录已保留。"); await chooseUploadSource(); return; }
+        handleUploadFile(original.file, false, true);
+        return;
+      }
       // 上传完成的来源已经写进当前草稿：复刻直接进分镜工作区；
       // 文案提取走 script-from-audio 异步管线（抽音轨→转写→回填草稿）。
       if (mode === "replica") {
-        // >15s 原片登记在案时走长视频拆解：补传整片后跳长视频页签自动开跑；
-        // ≤15s 或无登记保持原 <15s 复刻流程。
-        const original = longOriginalRef.current;
+        if (state.draft.sourceRecordId && state.draft.projectId) {
+          const expectedScope = currentSourceScopeRef.current;
+          const current = await currentProjectSource(state.draft.projectId);
+          if (accountId !== activeAccountRef.current || expectedScope !== currentSourceScopeRef.current) return;
+          if (!current || current.id !== state.draft.sourceRecordId) throw new Error("当前来源已变化，请刷新项目后继续。");
+          const action = await analyzeProjectSource(state.draft.projectId, current, `source-analysis:${current.id}:${current.revision}`);
+          if (accountId !== activeAccountRef.current || expectedScope !== currentSourceScopeRef.current) return;
+          if (action.status === "DISPATCHED") { adoptAnalysisAction(current, action); return; }
+          if (action.status === "NEEDS_RANGE_SELECTION") {
+            setRangeSource({ cloud: current, duration: current.verified_duration_seconds ?? current.declared_duration_seconds ?? 0, accountId, scope: expectedScope });
+            return;
+          }
+        }
+        // 已抽轨的来源需要先补原片，普通与长视频都由共享时长策略分流。
+        const original =
+          longOriginalRef.current ??
+          (await restoreLocalSource(
+            accountId,
+            state.draft.sourceRecordId ? `source:${state.draft.sourceRecordId}` : state.draft.sourceAssetId,
+            true,
+          ));
+        if (accountId !== activeAccountRef.current) return;
         if (original) {
           await beginLongAnalysis(original);
+          return;
+        }
+        const project = data.projects.find(
+          (item) => item.id === state.draft.projectId,
+        );
+        if (
+          (!project?.reference_asset_id && project?.script_source_asset_id) ||
+          data.assets.some(
+            (item) =>
+              item.id === state.draft.sourceAssetId && item.kind === "audio",
+          )
+        ) {
+          notify("需要重新选择原视频以继续拆解，已提取的文案会保留。");
+          await chooseUploadSource(true);
           return;
         }
         navigate("replica");
@@ -699,7 +846,70 @@ export function WorkbenchPage() {
     }
     openLive("projects");
   };
-  const handleUploadFile = (file: File) => {
+  const begin = async (mode: "copy" | "replica") => {
+    if (mode === "copy") return beginInternal(mode);
+    // 两个按钮共享在途保护，避免补传完成前重复创建资产和自动拆解任务。
+    if (analysisStartRef.current === accountContextKey) return;
+    const requestKey = accountContextKey;
+    analysisStartRef.current = requestKey;
+    try {
+      await beginInternal(mode);
+    } catch (cause) {
+      if (accountId === activeAccountRef.current)
+        notify(
+          cause instanceof Error
+            ? cause.message
+            : "来源恢复失败，请重新选择原视频。",
+        );
+    } finally {
+      if (analysisStartRef.current === requestKey)
+        analysisStartRef.current = null;
+    }
+  };
+  const handleUploadFile = (file: SourceFile, continueAnalysis = false, extractSelected = false) => {
+    if (!isNativeSource(file) && file.size > 2 * 1024 ** 3) { notify("网页端单个视频最多支持 2 GiB，请使用桌面端上传按钮从原片提取音轨。"); return; }
+    if (continueAnalysis) {
+      const requestAccount = accountId;
+      const selection = ++uploadOperationRef.current;
+      void readVideoDuration(file)
+        .then((duration) => {
+          if (
+            requestAccount !== activeAccountRef.current ||
+            selection !== uploadOperationRef.current ||
+            sourceScope !== currentSourceScopeRef.current
+          )
+            return;
+          return beginLongAnalysis({ file, duration });
+        })
+        .catch((cause: unknown) => {
+          if (requestAccount === activeAccountRef.current)
+            notify(
+              cause instanceof Error ? cause.message : "无法确认来源时长。",
+            );
+        });
+      return;
+    }
+    if (isNativeSource(file) && !extractSelected) {
+      const operation = ++uploadOperationRef.current;
+      const requestAccount = accountId;
+      uploadAbortRef.current?.abort();
+      setUpload({ accountContextKey, name: file.name, progress: 0, error: "", projectId: null, completed: false });
+      void createProject(file.name.replace(/\.[^.]+$/, "").slice(0, 120)).then(async (project) => {
+        if (operation !== uploadOperationRef.current || requestAccount !== activeAccountRef.current) return;
+        const source = await createProjectSource(project.id, file, file.duration_seconds);
+        if (operation !== uploadOperationRef.current || requestAccount !== activeAccountRef.current) return;
+        const original = { file, duration: file.duration_seconds };
+        longOriginalRef.current = original;
+        rememberLocalSource(accountId, `source:${source.id}`, original);
+        patchDraft({ projectId: project.id, sourceId: `source:${source.id}`, sourceAssetId: undefined, sourceRecordId: source.id, sourceRevision: source.revision });
+        updateData((current) => ({ ...current, projects: [project, ...current.projects.filter((item) => item.id !== project.id)] }));
+        setUpload({ accountContextKey, name: file.name, progress: 0, error: "", projectId: project.id, completed: false, selected: true });
+        notify("本机原片已选择，可直接拆解或提取文案。");
+      }).catch((cause: unknown) => {
+        if (operation === uploadOperationRef.current && requestAccount === activeAccountRef.current) setUpload((current) => current ? { ...current, error: cause instanceof Error ? cause.message : "来源登记失败，请重试。" } : current);
+      });
+      return;
+    }
     if (requireLogin) {
       requireLogin();
       return;
@@ -727,7 +937,7 @@ export function WorkbenchPage() {
     // 用途补传整片并跳长视频拆解页签。读不出时长、非桌面端或抽轨失败时
     // 回退整片上传（服务端 script 门禁已放开 15 秒）。
     const pickUploadFile = async (): Promise<{
-      file: File;
+      file: SourceFile;
       longDuration?: number;
     }> => {
       let duration: number | undefined;
@@ -736,11 +946,11 @@ export function WorkbenchPage() {
       } catch {
         duration = undefined;
       }
-      if (duration === undefined || duration <= 15.1) return { file };
+      if (duration === undefined || (duration <= 15.1 && !isNativeSource(file))) return { file };
       notify("正在提取视频音轨…");
       try {
         return {
-          file: await extractLocalVideoAudio(file),
+          file: await extractLocalVideoAudio(file, abortController.signal),
           longDuration: duration,
         };
       } catch (error) {
@@ -781,6 +991,8 @@ export function WorkbenchPage() {
           },
           abortController.signal,
           "script",
+          extractSelected ? state.draft.projectId : undefined,
+          { original: file, duration: pickedDuration },
         );
       })
       .then((uploaded) => {
@@ -791,8 +1003,10 @@ export function WorkbenchPage() {
         )
           return;
         const { projectId, assetId } = uploaded;
+        longDuration ??= uploaded.durationSeconds;
         if (longDuration !== undefined) {
           longOriginalRef.current = { file, duration: longDuration };
+          rememberLocalSource(accountId, assetId, longOriginalRef.current);
         }
         setUpload((current) =>
           current?.accountContextKey === accountContextKey
@@ -803,6 +1017,8 @@ export function WorkbenchPage() {
           projectId,
           sourceId: assetId,
           sourceAssetId: assetId,
+          sourceRecordId: uploaded.sourceRecordId,
+          sourceRevision: uploaded.sourceRevision,
           analysisTaskId: uploaded.analysisTaskId,
           analysisTaskStatus: uploaded.analysisTaskStatus,
           firstFrameId: undefined,
@@ -830,6 +1046,7 @@ export function WorkbenchPage() {
           }));
         }
         notify("视频已上传，来源已加入当前创作。");
+        if (extractSelected) extractScriptFromUpload(projectId, assetId);
       })
       .catch((error) => {
         if (
@@ -850,8 +1067,59 @@ export function WorkbenchPage() {
         );
       });
   };
+  const chooseUploadSource = async (continueAnalysis = false) => {
+    reselectOriginalRef.current = continueAnalysis;
+    if (!nativeSourceAvailable()) {
+      fileInputRef.current?.click();
+      return;
+    }
+    const requestAccount = accountId;
+    notify("正在读取本机视频信息…");
+    try {
+      const file = await chooseNativeSource(requestAccount);
+      if (file && requestAccount === activeAccountRef.current)
+        handleUploadFile(file, continueAnalysis);
+    } catch (cause) {
+      if (requestAccount === activeAccountRef.current)
+        notify(cause instanceof Error ? cause.message : "读取原视频失败。");
+    }
+  };
+  useEffect(() => {
+    const intent = state.pendingSourceAnalysis;
+    if (!intent || sourceIntentRef.current === intent.key) return;
+    sourceIntentRef.current = intent.key;
+    patchState({ pendingSourceAnalysis: undefined });
+    if (
+      intent.accountId !== accountId ||
+      intent.projectId !== state.draft.projectId ||
+      intent.assetId !== state.draft.sourceAssetId ||
+      (intent.sourceRecordId !== undefined && intent.sourceRecordId !== state.draft.sourceRecordId)
+    )
+      return;
+    void begin("replica");
+  });
   return (
     <section className="studio-home">
+      {rangeSource && rangeSource.accountId === accountId ? <SourceRangeDialog duration={rangeSource.duration} onClose={() => { uploadAbortRef.current?.abort(); setRangeSource(null); }} onConfirm={async (start, end) => {
+        const controller = new AbortController();
+        uploadAbortRef.current?.abort(); uploadAbortRef.current = controller;
+        if (!rangeSource.file || !isNativeSource(rangeSource.file)) {
+          const projectId = state.draft.projectId;
+          if (!projectId) throw new Error("请选择已上传的原视频。");
+          const current = rangeSource.cloud ?? await currentProjectSource(projectId);
+          if (!current) throw new Error("原视频来源不可用，请重新上传。");
+          notify("正在云端处理选段，完成后会继续拆解。");
+          const result = await trimProjectSource(projectId, current, start, end, controller.signal);
+          if (rangeSource.accountId !== activeAccountRef.current || rangeSource.scope !== currentSourceScopeRef.current) return;
+          if (result.source && result.action) adoptAnalysisAction(result.source, result.action);
+          setRangeSource(null);
+          return;
+        }
+        const clip = await trimNativeSource(rangeSource.file, start, end, controller.signal);
+        if (rangeSource.accountId !== activeAccountRef.current || rangeSource.scope !== currentSourceScopeRef.current) return;
+        await beginLongAnalysis({ file: clip, duration: clip.duration_seconds, range: { start, end } });
+        setRangeSource(null);
+      }} /> : null}
       <h2 className="studio-home-page-title">工作台</h2>
       <header className="studio-hero">
         <h1>
@@ -874,7 +1142,7 @@ export function WorkbenchPage() {
                 notify("审核示例不执行真实上传。");
                 return;
               }
-              fileInputRef.current?.click();
+              void chooseUploadSource();
             }}
           >
             <Icon name="upload" />
@@ -902,7 +1170,11 @@ export function WorkbenchPage() {
             hidden
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) handleUploadFile(file);
+              if (file) {
+                const continuing = reselectOriginalRef.current;
+                reselectOriginalRef.current = false;
+                handleUploadFile(file, continuing);
+              }
               event.target.value = "";
             }}
           />
@@ -928,6 +1200,7 @@ export function WorkbenchPage() {
               ? `上传失败：${upload.error}`
               : upload.completed
                 ? `已上传：${upload.name}`
+                : upload.selected ? `已选择本机原片：${upload.name}，选择拆解或提取文案后继续。`
                 : `正在上传 ${upload.name}… ${upload.progress}%`}
           </p>
         )}
@@ -969,7 +1242,12 @@ export function WorkbenchPage() {
                 ["oral", "数字人口播", "audio"],
               ] as const
             ).map(([page, title, icon]) => (
-              <Button key={page} onClick={() => navigate(page)}>
+              <Button
+                key={page}
+                onClick={() =>
+                  page === "replica" ? void begin("replica") : navigate(page)
+                }
+              >
                 <Icon name={icon} size={18} />
                 {title}
               </Button>
@@ -1110,7 +1388,7 @@ export function WorkbenchPage() {
                 description="从上传视频或选择素材开始创作"
                 action={
                   data.loading ? undefined : (
-                    <Button onClick={() => fileInputRef.current?.click()}>
+                    <Button onClick={() => void chooseUploadSource()}>
                       上传视频，开始第一支创作
                     </Button>
                   )

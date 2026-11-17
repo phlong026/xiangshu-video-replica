@@ -10,6 +10,11 @@ import {
 import { createControlRequest } from "./controlRequest";
 import { attachCustomerTaskReferences } from "./customerTaskReferences";
 import type { components } from "./generated/api";
+import {
+  isNativeSource,
+  type SourceFile,
+  uploadNativeSource,
+} from "./nativeSource";
 
 // MATERIAL-PERF-C（P0-6）：启动扇出约 20–40 个请求，5 秒硬超时会让任何一片
 // 慢请求把对应数据降级为空（首开缺内容）。默认放宽到 10 秒，配合 loadStudioData
@@ -873,6 +878,8 @@ export type StudioDraftCloudRecord = {
 };
 
 export type StudioSavedScriptRecord = {
+  text_document?: TextDocumentRef | null;
+  original_document?: TextDocumentRef | null;
   script_id: string;
   title: string;
   text: string;
@@ -885,7 +892,215 @@ export type StudioSavedScriptRecord = {
   updated_at: string;
 };
 
+export type TextDocumentRef = {
+  id: string;
+  revision: number;
+  char_count: number;
+  sha256: string;
+  immutable: boolean;
+};
+
+export type ProjectSource = {
+  verified_duration_seconds?: number | null;
+  id: string;
+  project_id: string;
+  revision: number;
+  filename: string;
+  declared_size_bytes: number;
+  declared_duration_seconds: number | null;
+  original_video_asset_id: string | null;
+  audio_source_asset_id: string | null;
+};
+export function currentProjectSource(projectId: string) {
+  return requestApiJson<ProjectSource | null>(
+    `/api/projects/${encodeURIComponent(projectId)}/sources/current`,
+    "恢复项目来源失败",
+  );
+}
+export function createProjectSource(
+  projectId: string,
+  original: SourceFile,
+  duration?: number,
+  parent?: { id: string; start: number; end: number },
+) {
+  return requestApiJson<ProjectSource>(
+    `/api/projects/${encodeURIComponent(projectId)}/sources`,
+    "登记项目来源失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        filename: original.name,
+        size_bytes: original.size,
+        duration_seconds: duration,
+      ...(parent ? { parent_source_id: parent.id, range_start_seconds: parent.start, range_end_seconds: parent.end } : {}),
+        idempotency_key: newControlWriteIdempotencyKey(),
+      }),
+    },
+  );
+}
+export function bindProjectSource(
+  projectId: string,
+  source: ProjectSource,
+  assetId: string,
+) {
+  return requestApiJson<ProjectSource>(
+    `/api/projects/${encodeURIComponent(projectId)}/sources/${encodeURIComponent(source.id)}/bind`,
+    "关联项目来源失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        asset_id: assetId,
+        expected_revision: source.revision,
+      }),
+    },
+  );
+}
+
+export type SourceAnalysisAction = {
+  id: string;
+  source_id: string;
+  status: "NEEDS_ORIGINAL_UPLOAD" | "NEEDS_RANGE_SELECTION" | "DISPATCHED";
+  route: "replica" | "replica_prompt" | null;
+  task_id: string | null;
+};
+
+export type SourceTrimTask = { id: string; status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED"; project_id: string; error_code: string | null; source: ProjectSource | null; action: SourceAnalysisAction | null };
+export async function trimProjectSource(projectId: string, source: ProjectSource, start: number, end: number, signal?: AbortSignal) {
+  const sessionCurrent = capturePromptSession();
+  let task = await requestApiJson<SourceTrimTask>(`/api/projects/${encodeURIComponent(projectId)}/source-trims`, "提交视频选段失败", { method: "POST", signal, body: JSON.stringify({ source_id: source.id, source_revision: source.revision, start, end, idempotency_key: `source-trim:${source.id}:${source.revision}:${start}:${end}` }) });
+  if (task.status === "FAILED") task = await requestApiJson<SourceTrimTask>(`/api/projects/${encodeURIComponent(projectId)}/source-trims/${encodeURIComponent(task.id)}/retry`, "重试视频选段失败", { method: "POST", signal });
+  const deadline = Date.now() + 60 * 60_000;
+  let current = task;
+  while (current.status === "PENDING" || current.status === "RUNNING") {
+    if (!sessionCurrent()) throw new Error("账号已切换，请回原项目查看选段结果。");
+    if (Date.now() >= deadline) throw new Error("选段仍在后台处理，可回到原项目继续查看。");
+    signal?.throwIfAborted();
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    current = await requestApiJson<SourceTrimTask>(`/api/projects/${encodeURIComponent(projectId)}/source-trims/${encodeURIComponent(task.id)}`, "读取视频选段进度失败", { signal });
+  }
+  if (current.status !== "SUCCEEDED" || !current.source || !current.action) throw new Error(current.error_code === "SOURCE_TRIM_BALANCE_INSUFFICIENT" ? "积分余额不足，请充值后重试选段拆解。" : "视频选段未完成，请检查来源后重试。");
+  return current;
+}
+export function analyzeProjectSource(
+  projectId: string,
+  source: ProjectSource,
+  idempotencyKey: string,
+  reanalyze = false,
+) {
+  return requestApiJson<SourceAnalysisAction>(
+    `/api/projects/${encodeURIComponent(projectId)}/source-analysis`,
+    "启动来源拆解失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        source_id: source.id,
+        source_revision: source.revision,
+        idempotency_key: idempotencyKey,
+        reanalyze,
+      }),
+    },
+  );
+}
+
+export async function materializeSmallDocument(
+  document: TextDocumentRef,
+  maxChars = 10000,
+): Promise<string> {
+  if (document.char_count > maxChars)
+    throw new Error(`当前操作最多支持 ${maxChars} 字，请先缩写文案。`);
+  const frozen = await requestApiJson<TextDocumentRef>(
+    `/api/text-documents/${encodeURIComponent(document.id)}/snapshot`,
+    "固定文案版本失败",
+    { method: "POST", body: JSON.stringify({ revision: document.revision }) },
+  );
+  let text = "";
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const page = await readTextDocumentBlocks(frozen.id, offset);
+    for (const block of page.blocks) text += block.text;
+    if (text.length > maxChars) throw new Error("文案超出当前操作上限。");
+    offset = page.next_offset;
+  }
+  return text;
+}
+
+export function readTextDocumentBlocks(id: string, offset = 0, search = "") {
+  const query = new URLSearchParams({
+    offset: String(offset),
+    limit: "1",
+    search,
+  });
+  return requestApiJson<{
+    document: TextDocumentRef;
+    blocks: { block_index: number; text: string }[];
+    next_offset: number | null;
+  }>(
+    `/api/text-documents/${encodeURIComponent(id)}/blocks?${query}`,
+    "读取文案段落失败",
+  );
+}
+
+export function forkTextDocument(document: TextDocumentRef) {
+  return requestApiJson<TextDocumentRef>(
+    `/api/text-documents/${encodeURIComponent(document.id)}/fork`,
+    "创建文案副本失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ revision: document.revision }),
+    },
+  );
+}
+
+export function cancelTextTask(kind: "asr" | "rewrite", taskId: string) {
+  return requestApiJson<{ accepted: boolean }>(
+    `/api/text-tasks/${kind}/${encodeURIComponent(taskId)}/cancel`,
+    "取消任务失败",
+    { method: "POST" },
+  );
+}
+
+export function retryTextTask(
+  kind: "asr" | "rewrite",
+  taskId: string,
+  idempotencyKey: string,
+) {
+  return requestApiJson<{ task_id: string; accepted: boolean }>(
+    `/api/text-tasks/${kind}/${encodeURIComponent(taskId)}/retry`,
+    "重试失败分段失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+  );
+}
+
+export function saveTextDocumentBlock(
+  document: TextDocumentRef,
+  index: number,
+  text: string,
+) {
+  return requestApiJson<TextDocumentRef>(
+    `/api/text-documents/${encodeURIComponent(document.id)}/blocks/${index}`,
+    "保存文案段落失败",
+    {
+      method: "PATCH",
+      body: JSON.stringify({ revision: document.revision, text }),
+    },
+  );
+}
+
+export async function exportTextDocument(id: string) {
+  const response = await requestApi(
+    `/api/text-documents/${encodeURIComponent(id)}/export`,
+    {},
+  );
+  if (!response.ok) throw new Error("导出文案失败，请重试。");
+  downloadBlob(await response.blob(), "文案.txt");
+}
+
 export type StudioSavedScriptInput = {
+  text_document?: TextDocumentRef;
+  original_document?: TextDocumentRef;
   script_id: string;
   title: string;
   text: string;
@@ -980,8 +1195,18 @@ export async function deleteStudioSavedScript(scriptId: string): Promise<void> {
 
 export type ScriptFromAudioTask = Omit<
   components["schemas"]["ScriptFromAudioTaskResponse"],
-  "status"
+  "status" | "result"
 > & {
+  result: {
+    text?: string | null;
+    duration_sec?: number | null;
+    language?: string | null;
+    document?: TextDocumentRef | null;
+  } | null;
+  phase?: string;
+  completed_segments?: number;
+  total_segments?: number;
+  processing_version?: string;
   status:
     | "PENDING"
     | "RUNNING"
@@ -2862,8 +3087,9 @@ export async function renameProject(
 
 export async function createVideoUploadIntent(
   projectId: string,
-  file: File,
+  file: SourceFile,
   purpose: "replica" | "script" | "replica_prompt" = "replica",
+  postUploadAction?: "store_only" | "start_analysis",
 ): Promise<UploadIntent> {
   const sha256 = await sha256ForUpload(file);
   return requestApiJson<UploadIntent>(
@@ -2874,6 +3100,7 @@ export async function createVideoUploadIntent(
       body: JSON.stringify({
         project_id: projectId,
         purpose,
+        ...(postUploadAction ? { post_upload_action: postUploadAction } : {}),
         filename: file.name,
         // Derive from the extension so a generic/empty file.type (e.g.
         // application/octet-stream from some file managers) is normalized.
@@ -2887,7 +3114,7 @@ export async function createVideoUploadIntent(
 
 export function uploadReferenceVideo(
   intent: UploadIntent,
-  file: File,
+  file: SourceFile,
   onProgress: (progressPercent: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -3193,11 +3420,19 @@ function uploadStorageObject(
     method: string;
     url: string;
   },
-  file: File,
+  file: SourceFile,
   onProgress: (progressPercent: number) => void,
   errorPrefix: string,
   signal?: AbortSignal,
 ): Promise<void> {
+  if (isNativeSource(file))
+    return uploadNativeSource(
+      file,
+      resolveManagedMediaUrl(intent.url),
+      intent.headers,
+      onProgress,
+      signal,
+    );
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     // API-managed uploads follow the same configured base (including a proxy
@@ -3461,12 +3696,16 @@ export async function publishCharacterVersion(
 
 export async function completeVideoUpload(
   assetId: string,
+  options?: { sourceSize?: number; signal?: AbortSignal },
 ): Promise<CompletedUpload> {
   return requestApiJson<CompletedUpload>(
     `/api/assets/${encodeURIComponent(assetId)}/complete`,
     "参考视频预检失败",
-    { method: "POST" },
-    CLOUD_OP_TIMEOUT_MS,
+    { method: "POST", ...(options?.signal ? { signal: options.signal } : {}) },
+    Math.max(
+      CLOUD_OP_TIMEOUT_MS,
+      Math.min(900_000, Math.ceil((options?.sourceSize ?? 0) / 10_000)),
+    ),
   );
 }
 
@@ -3845,12 +4084,15 @@ export async function listProjectCharacterVersions(
 }
 
 export type ScriptRewriteResult = {
+  document?: TextDocumentRef | null;
   rewritten_text: string;
   provider: string;
   model: string;
 };
 
 export type ScriptRewriteTask = {
+  processing_version?: string;
+  source_document?: TextDocumentRef | null;
   id: string;
   project_id: string;
   identity_id: string | null;
@@ -3897,6 +4139,8 @@ export async function rewriteProjectScript(
   sourceAssetId?: string,
   idempotencyKey: string = newControlWriteIdempotencyKey(),
   instructions = "",
+  document?: TextDocumentRef,
+  targetWords?: number,
 ): Promise<ScriptRewriteTask> {
   return requestApiJson<ScriptRewriteTask>(
     `/api/projects/${encodeURIComponent(projectId)}/script-rewrite`,
@@ -3904,7 +4148,10 @@ export async function rewriteProjectScript(
     {
       method: "POST",
       body: JSON.stringify({
-        text,
+        ...(document
+          ? { document_id: document.id, document_revision: document.revision }
+          : { text }),
+        ...(document && targetWords ? { target_words: targetWords } : {}),
         ...(identityId ? { identity_id: identityId } : {}),
         ...(instructions.trim() ? { instructions: instructions.trim() } : {}),
         ...(sourceAssetId ? { source_asset_id: sourceAssetId } : {}),
@@ -3967,10 +4214,13 @@ export async function waitForScriptRewriteTask(
 async function pollScriptRewriteTask(
   taskId: string,
 ): Promise<ScriptRewriteTask> {
-  const deadline = Date.now() + 10 * 60_000;
+  const started = Date.now();
+  let deadline = started + 10 * 60_000;
   const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
     const task = await getScriptRewriteTask(taskId);
+    if (task.processing_version === "segmented-v1")
+      deadline = started + 24 * 60 * 60_000;
     if (task.status === "SUCCEEDED") {
       if (!task.result) {
         throw new Error("AI 改写已完成，但结果暂不可用，请刷新后重试。");
@@ -6964,7 +7214,7 @@ async function emitWorkspaceSessionEnded(
   window.dispatchEvent(new Event(lifecycle));
 }
 
-function contentTypeForFile(file: File): string {
+function contentTypeForFile(file: Pick<File, "name" | "type">): string {
   const name = file.name.toLowerCase();
   // 本地抽音轨产物（>15s 提取文案链路）与用户直接选择的音频都走 audio/*。
   if (name.endsWith(".m4a")) return "audio/mp4";
@@ -6999,7 +7249,10 @@ function materialContentTypeForFile(file: File): string {
   return file.type || "application/octet-stream";
 }
 
-async function sha256ForUpload(file: File): Promise<string | null> {
+async function sha256ForUpload(file: SourceFile): Promise<string | null> {
+  if (isNativeSource(file)) return file.sha256;
+  // 浏览器没有增量 SubtleCrypto；大文件由服务端流式校验，避免为去重整载内存。
+  if (file.size > 8 * 1024 * 1024) return null;
   try {
     if (!globalThis.crypto?.subtle || typeof file.arrayBuffer !== "function") {
       return null;
@@ -8868,6 +9121,9 @@ export function fetchViralVideoSource(
 
 /** 提取记录条目：文案工坊「提取记录」页签的数据行（新→旧，最多 50 条）。 */
 export type ViralCopyExtractionRecord = {
+  document?: TextDocumentRef | null;
+  projectId?: string | null;
+  sourceAssetId?: string | null;
   platform: string;
   videoId: string;
   title: string;

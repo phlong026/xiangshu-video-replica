@@ -5,6 +5,7 @@ import type {
   Project,
   SavedPromptItem,
   StudioAnalytics,
+  TextDocumentRef,
 } from "../api";
 
 export type StudioPage =
@@ -243,6 +244,8 @@ export type StudioData = {
   };
 };
 export type StudioScript = {
+  originalDocument?: TextDocumentRef;
+  textDocument?: TextDocumentRef;
   resultKind?: "extracted" | "rewritten" | "manual";
   rewriteTaskId?: string;
   id: string;
@@ -269,7 +272,11 @@ export type StudioDraft = {
     requestKey?: string;
     startedAt?: number;
   };
-  rewriteCandidate?: { scopeKey: string; text: string };
+  rewriteCandidate?: {
+    scopeKey: string;
+    text: string;
+    document?: TextDocumentRef;
+  };
   rewriteMethod?: "ip" | "custom";
   rewriteInstructions?: string;
   rewriteLength?: "original" | "100" | "200" | "300" | "custom";
@@ -279,6 +286,8 @@ export type StudioDraft = {
   sourceId?: string;
   /** 上传来源视频的资产 id：提取文案（script-from-audio）管线输入。 */
   sourceAssetId?: string;
+  sourceRecordId?: string;
+  sourceRevision?: number;
   analysisTaskId?: string;
   analysisTaskStatus?: string;
   projectId?: string;
@@ -369,6 +378,13 @@ export type StudioPublishAccount = {
   createdAt: string;
 };
 export type StudioState = {
+  pendingSourceAnalysis?: {
+    accountId: string;
+    projectId: string;
+    assetId?: string;
+    sourceRecordId?: string;
+    key: string;
+  };
   page: StudioPage;
   draft: StudioDraft;
   selectedVideoId?: string;
@@ -425,6 +441,8 @@ export type StudioContextValue = {
     character?: { identityId: string; tab: "base" | "scenes" },
   ) => void;
   requestGeneration: (kind: StudioTask["type"]) => void;
+  /** 文案页交接到统一来源分流，动作与来源、账号绑定。 */
+  requestSourceAnalysis?: () => void;
   saveDraft: () => void;
   /** 放弃云端存着的「上次内容」（含本地未保存文本）。重来入口必须调它，
    * 只清内存的话下次打开软件旧内容又会被恢复回来。 */

@@ -138,7 +138,7 @@ def claim_script_rewrite_task(
             error_code = NULL, error_message_redacted = NULL, retryable = 0
         WHERE id = (
             SELECT id FROM script_rewrite_tasks
-            WHERE status = 'PENDING'
+            WHERE status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= now())
             ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
         ) AND status = 'PENDING'
         RETURNING *

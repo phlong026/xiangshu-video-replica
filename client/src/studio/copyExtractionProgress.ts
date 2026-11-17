@@ -11,6 +11,9 @@ export type CopyExtractionProgress = {
   active: boolean;
   startedAt: number;
   detail: string;
+  taskId?: string;
+  total?: number;
+  completed?: number;
 };
 
 const IDLE: CopyExtractionProgress = {
@@ -43,9 +46,12 @@ export const beginCopyExtractionProgress = (detail: string) => {
 };
 
 /** 仅在已有提取进行中时更新阶段说明（例如后台轮询拿到排队/转写状态）。 */
-export const updateCopyExtractionProgress = (detail: string) => {
+export const updateCopyExtractionProgress = (
+  detail: string,
+  task?: { taskId: string; total: number; completed: number },
+) => {
   if (!progress.active) return;
-  apply({ ...progress, detail });
+  apply({ ...progress, detail, ...task });
 };
 
 export const endCopyExtractionProgress = () => {

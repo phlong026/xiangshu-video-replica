@@ -340,6 +340,8 @@ export function patchStudioDraft(
     if (!Object.hasOwn(patch, "referenceIds")) next.referenceIds = [];
   }
   if (projectChanged || sourceChanged) {
+    if (!Object.hasOwn(patch, "sourceRecordId")) next.sourceRecordId = undefined;
+    if (!Object.hasOwn(patch, "sourceRevision")) next.sourceRevision = undefined;
     const blank = createDraft();
     if (!Object.hasOwn(patch, "replicaSourcePrompt"))
       next.replicaSourcePrompt = undefined;

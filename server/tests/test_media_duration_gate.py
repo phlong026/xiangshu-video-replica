@@ -54,6 +54,15 @@ def _prepared(purpose: str, storage: FakeStorageAdapter) -> PreparedUploadComple
     ("duration", "purpose", "expect_error"),
     [
         (10.0, "replica", False),
+        (float("nan"), "replica", True),
+        (float("nan"), "script", True),
+        (float("nan"), "replica_prompt", True),
+        (float("inf"), "replica", True),
+        (float("inf"), "script", True),
+        (float("inf"), "replica_prompt", True),
+        (float("-inf"), "replica", True),
+        (float("-inf"), "script", True),
+        (float("-inf"), "replica_prompt", True),
         # 30s + 0.1s 容差以内仍放行，与复刻分析入口的上限一致。
         (30.05, "replica", False),
         (30.2, "replica", True),
@@ -99,7 +108,8 @@ def test_validate_duration_error_copy_matches_scenario() -> None:
 def test_upload_byte_budget_follows_purpose() -> None:
     from app.media import upload_byte_budget
 
-    assert upload_byte_budget("replica") == upload_byte_budget("script")
+    assert upload_byte_budget("script") == 2 * 1024**3
+    assert upload_byte_budget("replica") == 200 * 1024**2
     assert upload_byte_budget("replica_prompt") > upload_byte_budget("replica")
 
 
@@ -241,3 +251,32 @@ def test_probe_completion_streams_oversized_object_via_temp_file(monkeypatch, tm
     assert "/verified-uploads/" in probed.storage_uri
     # 流式路径与字节路径写入同一 verified 键空间：对象确实被复制了一份。
     assert storage.get_object(storage_key_from_uri(probed.storage_uri)) == payload
+
+
+@pytest.mark.parametrize("failure", ["hash", "download"])
+def test_oversized_verification_cleans_file_on_early_failure(tmp_path, monkeypatch, failure):
+    import tempfile
+    from dataclasses import replace
+
+    from app import media
+
+    storage = FakeStorageAdapter(provider="fake", bucket="test-bucket")
+    prepared = replace(_prepared("replica_prompt", storage), expected_sha256="0" * 64)
+    monkeypatch.setattr(media, "MAX_UPLOAD_BYTES", 1)
+    original = tempfile.NamedTemporaryFile
+
+    def temporary(**kwargs):
+        kwargs["dir"] = tmp_path
+        return original(**kwargs)
+
+    monkeypatch.setattr(media.tempfile, "NamedTemporaryFile", temporary)
+    if failure == "download":
+
+        def broken_stream(*args, **kwargs):
+            yield b"first"
+            raise OSError("download disconnected")
+
+        monkeypatch.setattr(storage, "iter_object", broken_stream)
+    with pytest.raises((HTTPException, OSError)):
+        probe_upload_completion(prepared, storage=storage, probe=_FixedProbe(60))
+    assert list(tmp_path.iterdir()) == []

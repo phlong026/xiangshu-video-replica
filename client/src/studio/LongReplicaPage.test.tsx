@@ -134,10 +134,14 @@ async function pickFile(file: File) {
 function setupContext() {
   const notify = vi.fn();
   const openLive = vi.fn();
+  const navigate = vi.fn();
+  const patchDraft = vi.fn();
   useStudio.mockReturnValue({
     notify,
     openLive,
-    navigate: vi.fn(),
+    navigate,
+    patchDraft,
+    updateData: vi.fn(),
     state: {},
     data: {},
     review: false,
@@ -148,7 +152,7 @@ function setupContext() {
       role: "employee",
     },
   } as unknown as StudioContextValue);
-  return { notify, openLive };
+  return { notify, openLive, navigate, patchDraft };
 }
 
 function runningTask(): ReplicaPromptTask {
@@ -178,6 +182,26 @@ describe("LongReplicaPage 上传门禁", () => {
     Object.assign(navigator, {
       clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
     });
+  });
+
+  it("长视频页选择 20 秒来源转入普通复刻，不提交长视频付费任务", async () => {
+    const { navigate, patchDraft } = setupContext();
+    readVideoDuration.mockResolvedValue(20);
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "p-short",
+      assetId: "a-short",
+    });
+    render(<LongReplicaPage />);
+    await pickFile(new File(["video"], "short.mp4", { type: "video/mp4" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("replica"));
+    expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[3]).toBe("replica");
+    expect(patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "p-short",
+        sourceAssetId: "a-short",
+      }),
+    );
+    expect(startReplicaPromptTask).not.toHaveBeenCalled();
   });
 
   it("超过 180 秒的视频在上传前被拦截", async () => {

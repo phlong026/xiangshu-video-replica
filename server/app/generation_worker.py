@@ -129,6 +129,7 @@ from app.script_from_audio import (
     prepare_script_from_audio_task,
 )
 from app.script_rewrite import (
+    ScriptRewriteTaskLease,
     acquire_script_rewrite_task,
     complete_script_rewrite_task,
     fail_script_rewrite_task,
@@ -189,6 +190,9 @@ def _cleanup_audio_objects(
     connection: Callable[[], AbstractContextManager[BusinessConnection]],
     storage: StorageAdapter,
 ) -> None:
+    from app.segmented_asr import cleanup_segment_audio
+
+    cleanup_segment_audio(connection, storage)
     # Leave uncertain submissions' input available until the signed URL expires.
     cutoff = (datetime.now(UTC) - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
@@ -234,12 +238,55 @@ def _cleanup_audio_objects(
             logger.warning("ASR cleanup deferred for task %s: %s", row["id"], type(exc).__name__)
 
 
+def _run_rewrite_lease(
+    lease: ScriptRewriteTaskLease,
+    *,
+    connection: Callable[[], AbstractContextManager[BusinessConnection]],
+) -> None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT processing_version FROM script_rewrite_tasks WHERE id=%s", (lease.id,)
+        ).fetchone()
+    if row is not None and row["processing_version"] == "segmented-v1":
+        from app.segmented_rewrite import run_segmented_rewrite
+
+        with external_call_context("SCRIPT_REWRITE", lease.id, attempt=lease.attempt):
+            run_segmented_rewrite(lease, connection=connection)
+        return
+    submission_started = False
+    try:
+        with connection() as conn:
+            work = prepare_script_rewrite_task(conn, lease=lease)
+        with connection() as conn:
+            mark_script_rewrite_submission_started(conn, lease=lease)
+        submission_started = True
+        with external_call_context("SCRIPT_REWRITE", lease.id, attempt=lease.attempt):
+            result = perform_script_rewrite_task(work)
+        with connection() as conn:
+            complete_script_rewrite_task(conn, lease=lease, result=result)
+    except Exception as exc:
+        with connection() as conn:
+            fail_script_rewrite_task(
+                conn, lease=lease, cause=exc, submission_started=submission_started
+            )
+
+
 def _run_audio_lease(
     lease: ScriptFromAudioTaskLease,
     *,
     storage: StorageAdapter,
     connection: Callable[[], AbstractContextManager[BusinessConnection]],
 ) -> None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT processing_version FROM script_from_audio_tasks WHERE id=%s", (lease.id,)
+        ).fetchone()
+    if row is not None and row["processing_version"] == "segmented-v1":
+        from app.segmented_asr import run_segmented_audio
+
+        with external_call_context("SCRIPT_FROM_AUDIO", lease.id, attempt=lease.attempt):
+            run_segmented_audio(lease, connection=connection, storage=storage)
+        return
     submission_started = False
     work = None
 
@@ -693,37 +740,18 @@ def run_worker_once(
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
                 return processed
+        from app.source_trim import run_source_trim_one
+
+        if run_source_trim_one(lambda: _sqlite_audio_connection(conn), storage, worker_id):
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
         script_rewrite_lease = acquire_script_rewrite_task(conn, worker_id=worker_id)
         if script_rewrite_lease is not None:
-            submission_started = False
-            try:
-                rewrite_work = prepare_script_rewrite_task(
-                    conn,
-                    lease=script_rewrite_lease,
-                )
-                mark_script_rewrite_submission_started(
-                    conn,
-                    lease=script_rewrite_lease,
-                )
-                submission_started = True
-                with external_call_context(
-                    "SCRIPT_REWRITE",
-                    script_rewrite_lease.id,
-                    attempt=script_rewrite_lease.attempt,
-                ):
-                    rewrite_result = perform_script_rewrite_task(rewrite_work)
-                complete_script_rewrite_task(
-                    conn,
-                    lease=script_rewrite_lease,
-                    result=rewrite_result,
-                )
-            except Exception as exc:
-                fail_script_rewrite_task(
-                    conn,
-                    lease=script_rewrite_lease,
-                    cause=exc,
-                    submission_started=submission_started,
-                )
+            _run_rewrite_lease(
+                script_rewrite_lease, connection=lambda: _sqlite_audio_connection(conn)
+            )
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
@@ -1747,45 +1775,20 @@ def run_pg_worker_once(
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
                 return processed
+        from app.source_trim import run_source_trim_one
+
+        if run_source_trim_one(_pg_audio_connection, storage, worker_id):
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
         with pg_transaction() as raw_conn:
             script_rewrite_lease = acquire_script_rewrite_task(
                 BusinessConnection.postgres(raw_conn),
                 worker_id=worker_id,
             )
         if script_rewrite_lease is not None:
-            submission_started = False
-            try:
-                with pg_transaction() as raw_conn:
-                    rewrite_work = prepare_script_rewrite_task(
-                        BusinessConnection.postgres(raw_conn),
-                        lease=script_rewrite_lease,
-                    )
-                with pg_transaction() as raw_conn:
-                    mark_script_rewrite_submission_started(
-                        BusinessConnection.postgres(raw_conn),
-                        lease=script_rewrite_lease,
-                    )
-                submission_started = True
-                with external_call_context(
-                    "SCRIPT_REWRITE",
-                    script_rewrite_lease.id,
-                    attempt=script_rewrite_lease.attempt,
-                ):
-                    rewrite_result = perform_script_rewrite_task(rewrite_work)
-                with pg_transaction() as raw_conn:
-                    complete_script_rewrite_task(
-                        BusinessConnection.postgres(raw_conn),
-                        lease=script_rewrite_lease,
-                        result=rewrite_result,
-                    )
-            except Exception as exc:
-                with pg_transaction() as raw_conn:
-                    fail_script_rewrite_task(
-                        BusinessConnection.postgres(raw_conn),
-                        lease=script_rewrite_lease,
-                        cause=exc,
-                        submission_started=submission_started,
-                    )
+            _run_rewrite_lease(script_rewrite_lease, connection=_pg_audio_connection)
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:

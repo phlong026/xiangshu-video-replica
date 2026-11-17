@@ -193,6 +193,9 @@ class ViralDetailViewResponse(BaseModel):
 
 
 class ViralCopyExtractionRecord(BaseModel):
+    document: dict[str, object] | None = None
+    projectId: str | None = None
+    sourceAssetId: str | None = None
     platform: str
     videoId: str
     title: str
@@ -1089,19 +1092,30 @@ def list_viral_copy_extractions(
     ).fetchall()
     latest_ids = [str(row["latest_task_id"]) for row in rows]
     latest_texts: dict[str, tuple[str | None, str | None]] = {}
+    latest_documents: dict[str, tuple[dict[str, object] | None, str, str]] = {}
     if latest_ids:
         for latest in conn.execute(
-            "SELECT id, result_json, updated_at FROM script_from_audio_tasks WHERE id = ANY(%s)",
+            "SELECT id, result_json, updated_at,project_id,source_asset_id FROM script_from_audio_tasks WHERE id = ANY(%s)",
             (latest_ids,),
         ).fetchall():
             try:
-                text = str(json.loads(str(latest["result_json"])).get("text", "")) or None
+                payload = json.loads(str(latest["result_json"]))
+                text = str(payload.get("text", "")) or None
             except (ValueError, TypeError):
+                payload = {}
                 text = None
             latest_texts[str(latest["id"])] = (text, _iso_updated_at(latest["updated_at"]))
+            latest_documents[str(latest["id"])] = (
+                payload.get("document"),
+                str(latest["project_id"]),
+                str(latest["source_asset_id"]),
+            )
     items: list[ViralCopyExtractionRecord] = []
     for row in rows:
         text, updated_at = latest_texts.get(str(row["latest_task_id"]), (None, None))
+        document, project_id, source_asset_id = latest_documents.get(
+            str(row["latest_task_id"]), (None, "", "")
+        )
         items.append(
             ViralCopyExtractionRecord(
                 platform=str(row["platform"]),
@@ -1111,6 +1125,9 @@ def list_viral_copy_extractions(
                 times=int(row["times"]),
                 text=text,
                 updatedAt=updated_at,
+                document=document,
+                projectId=project_id or None,
+                sourceAssetId=source_asset_id or None,
             )
         )
     # 旧 claim 可以直接购买而不创建个人转写任务。仅恢复本人读取过、且所属

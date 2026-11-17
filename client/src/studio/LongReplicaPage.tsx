@@ -27,6 +27,7 @@ import {
   isCurrentLongReplicaSession,
   type LongReplicaRun,
 } from "./longReplicaSession";
+import { validateSourceAnalysis } from "./sourceAnalysis";
 import { Button, Empty, Icon, Panel } from "./ui";
 
 import "./longReplica.css";
@@ -127,7 +128,7 @@ export function LongReplicaPage() {
 }
 
 function LongReplicaAccountPage({ accountId }: { accountId: string }) {
-  const { notify, openLive } = useStudio();
+  const { notify, openLive, navigate, patchDraft, updateData } = useStudio();
   const [cache] = useState(() => getLongReplicaSession(accountId));
   const [stage, setStage] = useState<Stage>(cache.result ? "ready" : "idle");
   const [error, setError] = useState("");
@@ -369,6 +370,15 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         return;
       }
     }
+    let purpose: "replica" | "replica_prompt" = "replica_prompt";
+    if (duration !== undefined) {
+      try {
+        purpose = validateSourceAnalysis(duration, file.size);
+      } catch (cause) {
+        notify(cause instanceof Error ? cause.message : "来源视频无效。");
+        return;
+      }
+    }
     // 新文件通过校验才替换实际任务；无效选择不能让已有上传的回调失效。
     const session = ++sessionRef.current;
     abortRef.current?.abort();
@@ -403,9 +413,47 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
           notify(`长视频上传中 ${step}%`);
         },
         abortController.signal,
-        "replica_prompt",
+        purpose,
       );
       if (!isActive(session)) return;
+      if (uploaded.durationSeconds !== undefined) {
+        purpose = validateSourceAnalysis(uploaded.durationSeconds, file.size);
+      }
+      if (purpose === "replica") {
+        patchDraft({
+          projectId: uploaded.projectId,
+          sourceId: uploaded.assetId,
+          sourceAssetId: uploaded.assetId,
+          analysisTaskId: uploaded.analysisTaskId,
+          analysisTaskStatus: uploaded.analysisTaskStatus,
+        });
+        const uploadedProject = uploaded.project;
+        const uploadedAsset = uploaded.asset;
+        if (uploadedProject || uploadedAsset)
+          updateData((current) => ({
+            ...current,
+            projects: uploadedProject
+              ? [
+                  uploadedProject,
+                  ...current.projects.filter(
+                    (item) => item.id !== uploaded.projectId,
+                  ),
+                ]
+              : current.projects,
+            assets: uploadedAsset
+              ? [
+                  uploadedAsset,
+                  ...current.assets.filter(
+                    (item) => item.id !== uploaded.assetId,
+                  ),
+                ]
+              : current.assets,
+          }));
+        cache.run = null;
+        setStage("idle");
+        navigate("replica");
+        return;
+      }
       setUploadPercent(-1);
       setStage("analyzing");
       const run = { ...uploaded, taskId: "" };

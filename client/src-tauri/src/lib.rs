@@ -1,4 +1,5 @@
 mod customer_credentials;
+mod local_sources;
 mod publish_accounts;
 mod video_downloads;
 mod viral_audio;
@@ -19,10 +20,18 @@ fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(local_sources::SourceJobs::default())
         .manage(video_downloads::VideoDownloads::default())
         .manage(publish_accounts::PublishAccounts::default())
         .invoke_handler(tauri::generate_handler![
             restart_app,
+            local_sources::choose_local_source,
+            local_sources::get_local_source,
+            local_sources::extract_source_audio,
+            local_sources::trim_source_video,
+            local_sources::upload_local_source,
+            local_sources::cancel_source_operation,
+            local_sources::release_source_audio,
             publish_accounts::list_local_publish_accounts,
             publish_accounts::start_local_publish_login,
             publish_accounts::check_local_publish_login,
@@ -54,6 +63,7 @@ pub fn run() {
             viral_audio::local_video_extract_audio,
         ])
         .setup(|app| {
+            local_sources::prune_cached_audio(app.handle());
             // 缓存根目录落在应用数据目录下，必须在 App 就绪后才能解析，
             // 因此用 manage 而不是在 builder 链上直接构造。
             app.manage(viral_cache::ViralCache::from_app(app.handle())?);

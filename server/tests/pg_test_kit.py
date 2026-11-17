@@ -84,6 +84,8 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
     {
         "t13_customer_activation_test",
         "customer_v3_test",
+        "project_sources_test",
+        "long_text_pipeline_test",
         # 场景造型删除守卫矩阵（test_scene_look_delete_pg.py）：persona 级
         # 删除守卫与资产/存储清理的真库验证。
         "scene_look_delete_test",

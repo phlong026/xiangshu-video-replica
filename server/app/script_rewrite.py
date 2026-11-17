@@ -16,7 +16,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.auth import CurrentUser
 from app.db_portable import (
@@ -88,11 +88,23 @@ SCRIPT_REWRITE_SYSTEM_PROMPT = (
 class ScriptRewriteRequest(BaseModel):
     """``POST /script-rewrite`` 请求体：待改写的原口播稿全文。"""
 
-    text: str = Field(min_length=1, max_length=20000)
+    text: str = Field(default="", max_length=20000)
+    document_id: str | None = Field(default=None, min_length=1, max_length=128)
+    document_revision: int | None = Field(default=None, ge=1)
+    target_words: int | None = Field(default=None, ge=50, le=3000)
     instructions: str = Field(default="", max_length=2000)
     identity_id: str | None = Field(default=None, min_length=1, max_length=128)
     source_asset_id: str | None = Field(default=None, min_length=1, max_length=128)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
+
+    @model_validator(mode="after")
+    def require_source(self) -> ScriptRewriteRequest:
+        if self.document_id is not None:
+            if self.text or self.document_revision is None:
+                raise ValueError("文档引用必须包含版本，且不能同时提交全文。")
+        elif not self.text.strip():
+            raise ValueError("请提交文案或文档引用。")
+        return self
 
 
 class ScriptRewriteResult(BaseModel):
@@ -101,6 +113,7 @@ class ScriptRewriteResult(BaseModel):
     rewritten_text: str
     provider: str
     model: str
+    document: dict[str, object] | None = None
 
 
 # 租约凭据统一为共享 TaskLease（T7）；别名保住既有导入面。
@@ -124,6 +137,7 @@ class ValidatedScriptRewriteRequest:
     source_asset_id: str | None
     ip_profile_snapshot: dict[str, object] | None
     instructions: str = ""
+    document: dict[str, object] | None = None
 
 
 def validate_script_rewrite_text(source_text: str) -> str:
@@ -194,6 +208,10 @@ def require_current_script_rewrite_source(
 
 
 def validated_script_rewrite_request(row: BusinessRow) -> ValidatedScriptRewriteRequest:
+    if "processing_version" in row.keys() and row["processing_version"] == "segmented-v1":
+        from app.segmented_rewrite import validated_long_request
+
+        return validated_long_request(row)
     try:
         payload = json.loads(str(row["request_json"]))
         if not isinstance(payload, dict):

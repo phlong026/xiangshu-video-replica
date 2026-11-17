@@ -34,6 +34,7 @@ tauri-plugin-updater = "2"
 # is locked (搂10.2 dependency-review posture for the credential vault).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10.9"
 uuid = { version = "1.24", features = ["v4"] }
 
 # P2 客户端本地缓存：视频号原片改为客户端直取，平台不再代理下载，因此需要
@@ -44,6 +45,7 @@ uuid = { version = "1.24", features = ["v4"] }
 # 开了会连带拉进 futures-util，而本模块并不需要 StreamExt。
 # 也显式关掉 default features，避免同时拉进 native-tls/schannel 两套 TLS 后端。
 reqwest = { version = "0.13", default-features = false, features = [
+  "blocking",
   "rustls",
   "http2",
   "system-proxy",

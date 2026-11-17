@@ -199,7 +199,7 @@ fn safe_filename(filename: &str) -> String {
     )
 }
 
-fn local_origin(webview: &Webview) -> Result<String, String> {
+pub(crate) fn local_origin(webview: &Webview) -> Result<String, String> {
     let url = webview.url().map_err(|_| "无法确认窗口来源")?;
     let origin = url.origin().ascii_serialization();
     validate_origin(webview.label(), &origin)?;
@@ -218,6 +218,30 @@ fn validate_origin(label: &str, origin: &str) -> Result<(), String> {
 fn valid_blob(url: &str, origin: &str) -> bool {
     url.strip_prefix(&format!("blob:{origin}/"))
         .is_some_and(|id| !id.is_empty() && !id.contains(['/', '?', '#']))
+}
+
+pub(crate) async fn choose_source_path(window: &WebviewWindow) -> Result<Option<PathBuf>, String> {
+    local_origin(window.as_ref())?;
+    #[cfg(not(windows))]
+    {
+        Err("原生来源选择目前支持 Windows 桌面端".into())
+    }
+    #[cfg(windows)]
+    {
+        let owner = window.hwnd().map_err(|_| "无法打开文件窗口")?.0 as usize;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        window
+            .run_on_main_thread(move || {
+                let _ = sender.send(windows_dialog::choose_source(owner));
+            })
+            .map_err(|_| "无法打开文件窗口")?;
+        let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|_| "文件窗口异常退出")?
+            .map_err(|_| "文件窗口未返回结果")??;
+        local_origin(window.as_ref())?;
+        Ok(selected)
+    }
 }
 
 #[tauri::command]
@@ -434,8 +458,38 @@ mod windows_dialog {
 
     #[link(name = "comdlg32")]
     extern "system" {
+        fn GetOpenFileNameW(value: *mut OpenFileName) -> i32;
         fn GetSaveFileNameW(value: *mut OpenFileName) -> i32;
         fn CommDlgExtendedError() -> u32;
+    }
+
+    pub fn choose_source(owner: usize) -> Result<Option<PathBuf>, String> {
+        let mut buffer = vec![0_u16; 32768];
+        let filter: Vec<u16> = "视频文件\0*.mp4;*.mov\0\0".encode_utf16().collect();
+        let title: Vec<u16> = "选择来源视频\0".encode_utf16().collect();
+        let mut value: OpenFileName = unsafe { std::mem::zeroed() };
+        value.size = std::mem::size_of::<OpenFileName>() as u32;
+        value.owner = owner as *mut c_void;
+        value.filter = filter.as_ptr();
+        value.filter_index = 1;
+        value.file = buffer.as_mut_ptr();
+        value.max_file = buffer.len() as u32;
+        value.title = title.as_ptr();
+        // 不改变进程工作目录，只接受已经存在的真实文件。
+        value.flags = 0x8 | 0x800 | 0x1000 | 0x80000;
+        if unsafe { GetOpenFileNameW(&mut value) } == 0 {
+            let code = unsafe { CommDlgExtendedError() };
+            return if code == 0 {
+                Ok(None)
+            } else {
+                Err(format!("选择来源视频失败（{code}）"))
+            };
+        }
+        let end = buffer
+            .iter()
+            .position(|unit| *unit == 0)
+            .ok_or("来源路径无效")?;
+        Ok(Some(PathBuf::from(OsString::from_wide(&buffer[..end]))))
     }
 
     pub fn choose(owner: usize, filename: &str) -> Result<Option<PathBuf>, String> {

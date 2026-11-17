@@ -1,3 +1,4 @@
+import type { TextDocumentRef } from "../api";
 import type { StudioDraft } from "./types";
 
 export function resolvePendingRewrite(
@@ -20,6 +21,8 @@ export function resolvePendingRewrite(
 }
 
 export type ScriptRewriteScope = {
+  document?: TextDocumentRef;
+  resultDocument?: TextDocumentRef;
   accountId: string;
   projectId: string;
   /** 解析文案路径没有来源视频：二创按纯文本提交（与后端可选语义对齐）。 */
@@ -55,6 +58,9 @@ function scopeFingerprint(scope: ScriptRewriteScope) {
     scope.text,
     scope.instructions ?? "",
     scope.profileFingerprint ?? "",
+    scope.document
+      ? [scope.document.id, scope.document.revision, scope.document.sha256]
+      : null,
   ]);
 }
 

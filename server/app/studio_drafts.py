@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.auth import CurrentUser
 from app.db_portable import BusinessConnection, BusinessRow
 from app.permissions import require_not_auditor
+from app.text_documents import DocumentRef, document_text, snapshot_document
 
 DraftKind = Literal["copy", "oral", "replica", "publishing"]
 DRAFT_KINDS: tuple[str, ...] = ("copy", "oral", "replica", "publishing")
@@ -97,7 +98,9 @@ class SavedScriptRequest(BaseModel):
     script_id: str = Field(min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=300)
     text: str = Field(min_length=1, max_length=MAX_SAVED_SCRIPT_TEXT_CHARS)
-    original: str | None = None
+    original: str | None = Field(default=None, max_length=MAX_SAVED_SCRIPT_TEXT_CHARS)
+    text_document: DocumentRef | None = None
+    original_document: DocumentRef | None = None
     version: int = Field(default=1, ge=1)
     ip_id: str | None = None
     source_project_id: str | None = None
@@ -111,6 +114,8 @@ class SavedScriptResponse(BaseModel):
     title: str
     text: str
     original: str | None
+    text_document: DocumentRef | None = None
+    original_document: DocumentRef | None = None
     version: int
     ip_id: str | None
     source_project_id: str | None
@@ -394,12 +399,27 @@ def save_saved_script(
             },
         )
     now = _utc_now_text()
+    text_document = (
+        None
+        if request.text_document is None
+        else snapshot_document(
+            conn, actor, request.text_document.id, request.text_document.revision
+        )
+    )
+    original_document = (
+        None
+        if request.original_document is None
+        else snapshot_document(
+            conn, actor, request.original_document.id, request.original_document.revision
+        )
+    )
     conn.execute(
         """
         INSERT INTO studio_saved_scripts (
             id, user_id, script_id, title, text, original, version,
-            ip_id, source_project_id, source_kind, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ip_id, source_project_id, source_kind, created_at, updated_at,
+            text_document_json, original_document_json
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (user_id, script_id) DO UPDATE SET
             title = excluded.title,
             text = excluded.text,
@@ -408,6 +428,8 @@ def save_saved_script(
             ip_id = excluded.ip_id,
             source_project_id = excluded.source_project_id,
             source_kind = excluded.source_kind,
+            text_document_json = excluded.text_document_json,
+            original_document_json = excluded.original_document_json,
             updated_at = excluded.updated_at
         """,
         (
@@ -415,14 +437,18 @@ def save_saved_script(
             actor.id,
             request.script_id,
             request.title,
-            request.text,
-            request.original,
+            request.text if text_document is None else document_text(conn, text_document.id)[:2000],
+            request.original
+            if original_document is None
+            else document_text(conn, original_document.id)[:2000],
             request.version,
             request.ip_id,
             request.source_project_id,
             request.source_kind,
             now,
             now,
+            None if text_document is None else text_document.model_dump_json(),
+            None if original_document is None else original_document.model_dump_json(),
         ),
     )
     row = conn.execute(
@@ -482,6 +508,12 @@ def _saved_script_response(row: BusinessRow) -> SavedScriptResponse:
         title=str(row["title"]),
         text=str(row["text"]),
         original=None if row["original"] is None else str(row["original"]),
+        text_document=None
+        if row["text_document_json"] is None
+        else DocumentRef.model_validate_json(str(row["text_document_json"])),
+        original_document=None
+        if row["original_document_json"] is None
+        else DocumentRef.model_validate_json(str(row["original_document_json"])),
         version=int(row["version"]),
         ip_id=None if row["ip_id"] is None else str(row["ip_id"]),
         source_project_id=(

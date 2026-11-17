@@ -1,3 +1,5 @@
+import { endCopyExtractionProgress } from "./copyExtractionProgress";
+import { clearLocalSources } from "./localSourceSession";
 /** 创作草稿的本地残留清理（LEFTOVER-ON-OPEN）。
  *
  * 主因是云端那一行 studio_draft，这里管的是它之外的本地残留：未保存的口播稿
@@ -54,7 +56,9 @@ export function clearCreationDraftResidue(accountId: string): void {
 /** 登出/切账号时的清理：创作草稿残留 + 任务中心的上次批次定位 + 页间缓存。
  * 页间缓存是模块级 Map，同一进程内换账号不清就会串数据。 */
 export function clearAccountResidue(accountId: string): void {
+  endCopyExtractionProgress();
   clearLongReplicaSession(accountId);
+  clearLocalSources(accountId);
   clearCreationDraftResidue(accountId);
   const batchKey = `${BATCH_STORAGE_KEY_PREFIX}${encodeURIComponent(accountId)}`;
   removeKeys((key) => key === batchKey);

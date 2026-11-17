@@ -1,5 +1,7 @@
 import {
+  analyzeProjectSource,
   archiveGenerationTask,
+  bindProjectSource,
   type CurrentUser,
   cancelGenerationBatch,
   cancelOralTask,
@@ -10,10 +12,12 @@ import {
   createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
   createProject,
+  createProjectSource,
   createPublishAccount,
   createScriptFromAudioTask,
   createScriptVersion,
   createVideoUploadIntent,
+  currentProjectSource,
   defaultBatchProvider,
   deleteGenerationBatch,
   deleteOralTask,
@@ -53,23 +57,32 @@ import {
   type OralTaskRecord,
   type OralVoiceRecord,
   type Project,
+  type ProjectSource,
   type PublishAccountItem,
   putMaterial,
   readAnalysisPayload,
   renameGenerationBatch,
   resolveMaterials,
   retryOralTaskArchive,
+  retryTextTask,
   type SimpleLibraryEntry,
+  type SourceAnalysisAction,
   type StudioDraftCloudRecord,
   type StudioDraftKind,
   type StudioSavedScriptInput,
   saveStudioDraft,
   saveStudioSavedScript,
+  type TextDocumentRef,
   uploadReferenceVideo,
   type ViralVideoItem,
   verifyPublishAccount,
 } from "../api";
 import { resolveManagedMediaUrl } from "../apiBase";
+import {
+  isNativeSource,
+  releaseNativeAudio,
+  type SourceFile,
+} from "../nativeSource";
 import {
   clearIdempotencyRecord,
   restoreIdempotencyRecord,
@@ -256,7 +269,8 @@ export function readAudioDuration(file: File): Promise<number> {
 }
 
 /** 探测本机视频时长（秒）：R2V 参考视频上传前用于 ≤15s 拦截，与 readAudioDuration 同构。 */
-export function readVideoDuration(file: File): Promise<number> {
+export function readVideoDuration(file: SourceFile): Promise<number> {
+  if (isNativeSource(file)) return Promise.resolve(file.duration_seconds);
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const video = document.createElement("video");
@@ -1075,10 +1089,12 @@ export function mergePolledTasks(
  * storage through the presigned intent, and hand back the source identity so
  * 后续复刻/文案提取都拿这个来源继续，而不是把大视频当解析输入。 */
 export async function uploadWorkbenchSourceVideo(
-  file: File,
+  file: SourceFile,
   onProgress: (percent: number) => void,
   signal?: AbortSignal,
   purpose: "replica" | "script" | "replica_prompt" = "replica",
+  existingProject?: Project | string,
+  sourceDescriptor?: { original: SourceFile; duration?: number; parent?: { id: string; start: number; end: number }; onPrepared?: (project: Project, source: ProjectSource) => void },
 ): Promise<{
   projectId: string;
   assetId: string;
@@ -1086,14 +1102,56 @@ export async function uploadWorkbenchSourceVideo(
   asset?: StudioAsset;
   analysisTaskId?: string;
   analysisTaskStatus?: string;
+  durationSeconds?: number;
+  sourceAnalysisAction?: SourceAnalysisAction;
+  sourceRecordId?: string;
+  sourceRevision?: number;
 }> {
   const base = file.name.replace(/\.(mp4|mov|m4a|mp3|wav|aac)$/i, "").trim();
   signal?.throwIfAborted();
   const sessionCurrent = capturePromptSession();
-  const project = await createProject((base || file.name).slice(0, 120));
+  const restoredProject =
+    typeof existingProject === "string"
+      ? (await listProjects()).find((item) => item.id === existingProject)
+      : existingProject;
+  if (existingProject && !restoredProject)
+    throw new Error("来源项目不可用，请刷新项目后重试。");
+  const project =
+    restoredProject ?? (await createProject((base || file.name).slice(0, 120)));
   try {
     signal?.throwIfAborted();
-    const intent = await createVideoUploadIntent(project.id, file, purpose);
+    let sourceRecord: ProjectSource | undefined;
+    if (sourceDescriptor) {
+      const current = existingProject
+        ? await currentProjectSource(project.id)
+        : null;
+      const original = sourceDescriptor.original;
+      sourceRecord =
+        current &&
+        current.filename === original.name &&
+        current.declared_size_bytes === original.size
+          ? current
+          : await createProjectSource(
+              project.id,
+              original,
+              sourceDescriptor.duration,
+              sourceDescriptor.parent,
+            );
+      signal?.throwIfAborted();
+      sourceDescriptor.onPrepared?.(project, sourceRecord);
+    }
+    const analysisSource = sourceRecord;
+    const analysisKey = analysisSource ? `source-analysis:${analysisSource.id}:${analysisSource.revision}` : "";
+    if (purpose !== "script" && analysisSource && !analysisSource.original_video_asset_id) {
+      await analyzeProjectSource(project.id, analysisSource, analysisKey);
+      signal?.throwIfAborted();
+    }
+    const intent = await createVideoUploadIntent(
+      project.id,
+      file,
+      purpose,
+      ...(sourceDescriptor ? ["store_only" as const] : []),
+    );
     signal?.throwIfAborted();
     // 命中去重复用时没有 complete 这一步，自动拆解任务随意图回执带回（FIX-08）。
     let analysisTaskId: string | undefined =
@@ -1101,14 +1159,43 @@ export async function uploadWorkbenchSourceVideo(
     let analysisTaskStatus: string | undefined =
       intent.analysis_task_status ?? undefined;
     let assetId = intent.asset_id;
+    let durationSeconds: number | undefined;
     if (intent.upload_required !== false) {
       await uploadReferenceVideo(intent, file, onProgress, signal);
       signal?.throwIfAborted();
-      const completed = await completeVideoUpload(intent.asset_id);
+      const completed = await completeVideoUpload(intent.asset_id, {
+        sourceSize: file.size,
+        signal,
+      });
       signal?.throwIfAborted();
       assetId = completed.asset_id;
+      const measured = completed.metadata?.duration_seconds;
+      if (
+        typeof measured === "number" &&
+        Number.isFinite(measured) &&
+        measured > 0
+      )
+        durationSeconds = measured;
       analysisTaskId = completed.analysis_task_id ?? undefined;
       analysisTaskStatus = completed.analysis_task_status ?? undefined;
+    }
+    let sourceAnalysisAction: SourceAnalysisAction | undefined;
+    if (sourceRecord) {
+      signal?.throwIfAborted();
+      const bound = await bindProjectSource(project.id, sourceRecord, assetId);
+      sourceRecord = bound;
+      if (purpose !== "script") {
+        sourceAnalysisAction = await analyzeProjectSource(
+          project.id,
+          analysisSource ?? bound,
+          analysisKey,
+        );
+        if (sourceAnalysisAction.route === "replica") {
+          analysisTaskId = sourceAnalysisAction.task_id ?? undefined;
+          analysisTaskStatus = "PENDING";
+        }
+      }
+      signal?.throwIfAborted();
     }
     // 桌面端对 >15 秒视频只上传抽出的音轨：它只能用于提取文案，服务端也不把它算作
     // 复刻参考视频。本地状态与服务端口径保持一致，否则刷新后项目「来源」凭空消失。
@@ -1126,9 +1213,13 @@ export async function uploadWorkbenchSourceVideo(
       () => undefined,
     );
     signal?.throwIfAborted();
+    await releaseNativeAudio(file).catch(() => {});
     return {
       projectId: project.id,
       assetId,
+      ...(sourceAnalysisAction ? { sourceAnalysisAction } : {}),
+      ...(sourceRecord ? { sourceRecordId: sourceRecord.id, sourceRevision: sourceRecord.revision } : {}),
+      ...(durationSeconds === undefined ? {} : { durationSeconds }),
       project: uploadedProject,
       asset: audioOnly
         ? {
@@ -1148,7 +1239,8 @@ export async function uploadWorkbenchSourceVideo(
     // 失败上传不留孤儿项目：项目只为这次上传而建，上传没成行就只是项目
     // 列表里的一个空壳。清理是尽力而为，不掩盖原始错误。
     // 离开页面或重选文件也会中止上传；身份未变时仍清理空项目，换账号则停止清理。
-    if (sessionCurrent()) await deleteProject(project.id).catch(() => {});
+    if (!existingProject && sessionCurrent())
+      await deleteProject(project.id).catch(() => {});
     throw cause;
   }
 }
@@ -1662,6 +1754,8 @@ export async function persistCloudDraft(
 
 /** 我的文案列表：云端记录 → StudioScript（confirmed 不持久化，回填后需重新确认终稿）。 */
 export function savedScriptFromRecord(record: {
+  text_document?: TextDocumentRef | null;
+  original_document?: TextDocumentRef | null;
   script_id: string;
   title: string;
   text: string;
@@ -1677,6 +1771,8 @@ export function savedScriptFromRecord(record: {
     id: record.script_id,
     title: record.title,
     original: record.original ?? "",
+    originalDocument: record.original_document ?? undefined,
+    textDocument: record.text_document ?? undefined,
     text: record.text,
     version: record.version,
     confirmed: false,
@@ -1720,19 +1816,24 @@ export async function persistSavedScript(
   script: StudioScript,
   sourceProjectId: string | undefined = script.sourceProjectId,
   ipId?: string,
-): Promise<void> {
+): Promise<StudioScript | undefined> {
   const input: StudioSavedScriptInput = {
     script_id: script.id,
     // 标题留空时按正文首行起一个可辨认的兜底标题，不再存「未命名文案」。
     title: script.title || fallbackCopyTitle(script.text),
     text: script.text,
     original: script.original || null,
+    ...(script.textDocument ? { text_document: script.textDocument } : {}),
+    ...(script.originalDocument
+      ? { original_document: script.originalDocument }
+      : {}),
     version: script.version,
     ip_id: ipId ?? script.ipId ?? null,
     source_project_id: sourceProjectId ?? null,
     source_kind: script.sourceKind ?? (sourceProjectId ? "project" : null),
   };
-  await saveStudioSavedScript(input);
+  const saved = await saveStudioSavedScript(input);
+  return saved ? savedScriptFromRecord(saved) : undefined;
 }
 
 export type ProjectScriptPublishResult =
@@ -1851,6 +1952,7 @@ export async function loadPersonAssets(
  * 不再有「爆款任务置空等 claim」的口径。失败抛出带服务端文案的 Error
  * （含 SUBMISSION_UNCERTAIN）。 */
 export type ScriptExtractionResult = {
+  document?: TextDocumentRef;
   text: string;
   taskId: string;
 };
@@ -1859,6 +1961,15 @@ export async function extractScriptFromUpload(
   projectId: string,
   assetId: string,
 ): Promise<ScriptExtractionResult> {
+  const previous = await getLatestScriptFromAudioTask(projectId);
+  if (
+    previous?.source_asset_id === assetId &&
+    previous.processing_version === "segmented-v1"
+  ) {
+    if (previous.status === "FAILED")
+      await retryTextTask("asr", previous.id, crypto.randomUUID());
+    return awaitScriptFromAudioTask(previous.id);
+  }
   const submitted = await createScriptFromAudioTask(
     projectId,
     assetId,
@@ -1871,22 +1982,45 @@ export async function extractScriptFromUpload(
 export async function awaitScriptFromAudioTask(
   taskId: string,
 ): Promise<ScriptExtractionResult> {
-  const maxAttempts = 150;
+  const sessionCurrent = capturePromptSession();
+  let maxAttempts = 150;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    if (!sessionCurrent())
+      throw new Error("账号已切换，请登录原账号查看提取结果。");
     const task = await getScriptFromAudioTask(taskId);
+    if (task.processing_version === "segmented-v1") maxAttempts = 43200;
     if (task.status === "SUCCEEDED" && task.result) {
       return {
         text: task.result.text ?? "",
         taskId: task.id,
+        document: task.result.document ?? undefined,
       };
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "文案提取失败，请稍后重试。");
     }
-    // 任务没有真实进度字段，把排队/转写状态同步到进度横幅，让等待可见。
+    const phaseLabel =
+      task.phase === "PREPARING"
+        ? "正在准备音轨"
+        : task.phase === "DRAINING"
+          ? "正在等待已提交分段结束"
+          : task.phase === "WAITING_FOR_CONFIRMATION"
+            ? "正在核对提交结果"
+            : "正在分段转写";
     updateCopyExtractionProgress(
-      task.status === "PENDING" ? "转写任务排队中…" : "正在转写音频为文案…",
+      task.total_segments
+        ? `${phaseLabel}：${task.completed_segments ?? 0} / ${task.total_segments}`
+        : task.status === "PENDING"
+          ? "转写任务排队中…"
+          : "正在转写音频为文案…",
+      task.processing_version === "segmented-v1"
+        ? {
+            taskId: task.id,
+            total: task.total_segments ?? 0,
+            completed: task.completed_segments ?? 0,
+          }
+        : undefined,
     );
   }
   throw new Error("文案仍在后台提取，请返回文案工坊恢复本次任务。");
@@ -1901,6 +2035,7 @@ export async function loadLatestScriptFromUpload(projectId: string) {
         result: task.result,
         errorMessage: task.error_message ?? undefined,
         sourceAssetId: task.source_asset_id ?? undefined,
+        processingVersion: task.processing_version,
       }
     : null;
 }

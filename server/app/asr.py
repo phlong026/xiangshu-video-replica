@@ -17,7 +17,7 @@ import math
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -98,10 +98,38 @@ class AsrTaskPending(AsrProviderError):
 
 
 @dataclass(frozen=True)
+class TranscriptSpan:
+    text: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
 class TranscriptResult:
     text: str
     duration_sec: float | None
     language: str | None
+    spans: tuple[TranscriptSpan, ...] = ()
+
+
+def _transcript_spans(transcript: dict[str, Any]) -> tuple[TranscriptSpan, ...]:
+    """接口时间戳单位为毫秒；优先词级边界，缺失时保留句级边界。"""
+    spans: list[TranscriptSpan] = []
+    for sentence in transcript.get("sentences") or []:
+        if not isinstance(sentence, dict):
+            continue
+        words = sentence.get("words") or [sentence]
+        for word in words:
+            if not isinstance(word, dict):
+                continue
+            try:
+                start, end = float(word["begin_time"]) / 1000, float(word["end_time"]) / 1000
+                text = str(word.get("text") or "") + str(word.get("punctuation") or "")
+                if text and math.isfinite(start) and math.isfinite(end) and 0 <= start <= end:
+                    spans.append(TranscriptSpan(text, start, end))
+            except (ValueError, TypeError, KeyError):
+                continue
+    return tuple(spans)
 
 
 @dataclass(frozen=True)
@@ -157,10 +185,13 @@ def _default_transport(
             provider="asr",
             endpoint=endpoint_from_url(url),
             opener=urlopen,
+            read_limit=16 * 1024**2 + 1,
         )
+        if len(response_body) > 16 * 1024**2:
+            raise AsrProviderError("转写响应超出处理预算，请联系管理员核查已有任务。")
         return status, response_body
     except HTTPError as exc:
-        return exc.code, exc.read()
+        return exc.code, exc.read(65536)
     except (TimeoutError, URLError, OSError) as exc:
         logger.warning("ASR transport failed: %s", type(exc).__name__)
         raise AsrSubmissionUncertain("语音转写服务连接暂时中断。") from exc
@@ -201,6 +232,16 @@ class DashScopeFunAsr:
         self._sleep = sleep
 
     # ---------------- public ----------------
+
+    def model_policy(self) -> dict[str, str]:
+        return {"model": self._config.model}
+
+    def with_model_policy(self, policy: dict[str, str]) -> DashScopeFunAsr:
+        return DashScopeFunAsr(
+            replace(self._config, model=policy["model"]),
+            transport=self._transport,
+            sleep=self._sleep,
+        )
 
     def _uses_flash(self, duration_sec: float | None) -> bool:
         return (
@@ -339,6 +380,35 @@ class DashScopeFunAsr:
         except (AsrSubmissionUncertain, AsrServiceUnavailable) as exc:
             raise AsrTaskPending("已有转写任务连接暂时中断，正在恢复查询。") from exc
 
+    def submit_segment(self, file_url: str) -> str:
+        """尾段也使用有回执的异步协议，避免重启后重复同步调用。"""
+        self._validate_audio_input(file_url, duration_sec=None)
+        return self._submit_async_task(file_url)
+
+    def poll_segment(self, task_id: str) -> TranscriptResult | None:
+        """只查询一次，把等待交回数据库调度器，不占用工作线程。"""
+        try:
+            status, body = self._transport(
+                "GET",
+                f"{self._config.base_url}/api/v1/tasks/{task_id}",
+                headers=self._headers(),
+                body=None,
+                timeout_seconds=15.0,
+            )
+            data = self._decode(status, body)
+            output = data.get("output") or {}
+            state = output.get("task_status")
+            if state in {"FAILED", "CANCELED"}:
+                raise AsrConfirmedFailure("语音转写分段未能完成。")
+            if state != "SUCCEEDED":
+                return None
+            return self._download_transcription(output, allow_empty=True)
+        except AsrConfirmedFailure:
+            raise
+        except (AsrProviderError, OSError, ValueError, KeyError) as exc:
+            # 有回执的查询或下载故障永远不能回到提交路径。
+            raise AsrTaskPending("正在恢复查询已有转写分段。") from exc
+
     def _submit_async_task(self, file_url: str) -> str:
         cfg = self._config
         payload = {
@@ -397,7 +467,9 @@ class DashScopeFunAsr:
                 raise AsrConfirmedFailure(f"语音转写任务失败：{message or task_status}")
         raise AsrTaskPending("语音转写任务轮询超时，正在继续查询原任务。")
 
-    def _download_transcription(self, output: dict[str, Any]) -> TranscriptResult:
+    def _download_transcription(
+        self, output: dict[str, Any], *, allow_empty: bool = False
+    ) -> TranscriptResult:
         transcription_url = None
         for item in output.get("results", []) or []:
             if item.get("subtask_status") == "SUCCEEDED" and item.get("transcription_url"):
@@ -418,14 +490,19 @@ class DashScopeFunAsr:
         )
         transcripts = data.get("transcripts") or []
         if not transcripts:
+            if allow_empty and duration is not None:
+                return TranscriptResult("", duration, "zh")
             raise AsrProviderError("语音转写结果缺少转写内容", usage_seconds=duration)
         full_text = transcripts[0].get("text") if isinstance(transcripts[0], dict) else None
         if not isinstance(full_text, str) or not full_text.strip():
+            if allow_empty and isinstance(full_text, str) and duration is not None:
+                return TranscriptResult("", duration, "zh")
             raise AsrProviderError("语音转写返回空文本", usage_seconds=duration)
         return TranscriptResult(
             text=full_text.strip(),
             duration_sec=duration,
             language="zh",
+            spans=_transcript_spans(transcripts[0]),
         )
 
     # ---------------- helpers ----------------

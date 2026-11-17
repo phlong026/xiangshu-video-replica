@@ -137,6 +137,7 @@ class ScriptRewriteIpProfileSummary(BaseModel):
 
 
 class ScriptRewriteTaskResponse(BaseModel):
+    processing_version: str = "legacy-v1"
     id: str
     project_id: str
     identity_id: str | None
@@ -145,6 +146,7 @@ class ScriptRewriteTaskResponse(BaseModel):
     source_asset_id: str | None
     source_text: str
     instructions: str = ""
+    source_document: dict[str, object] | None = None
     status: str
     attempt: int
     result: ScriptRewriteResult | None
@@ -201,6 +203,20 @@ def rewrite_project_script(
     db: BusinessDbDep,
 ) -> ScriptRewriteTaskResponse:
     with db.write() as (conn, actor):
+        from app.segmented_rewrite import enabled, enqueue_long_rewrite
+
+        if request.document_id is not None or (
+            enabled() and len(request.text.encode("utf-8")) > 6000
+        ):
+            return script_rewrite_task_response(
+                enqueue_long_rewrite(
+                    conn,
+                    actor=actor,
+                    project_id=project_id,
+                    request=request,
+                    idempotency_key=request.idempotency_key or str(uuid4()),
+                )
+            )
         row = enqueue_script_rewrite_task(
             conn,
             actor=actor,
@@ -309,6 +325,9 @@ def script_rewrite_task_response(row: BusinessRow) -> ScriptRewriteTaskResponse:
     except ValueError as exc:
         raise _script_rewrite_request_integrity_error(row["id"], exc) from exc
     return ScriptRewriteTaskResponse(
+        processing_version=str(row["processing_version"])
+        if "processing_version" in row.keys()
+        else "legacy-v1",
         id=str(row["id"]),
         project_id=str(row["project_id"]),
         identity_id=None if row["identity_id"] is None else str(row["identity_id"]),
@@ -317,6 +336,7 @@ def script_rewrite_task_response(row: BusinessRow) -> ScriptRewriteTaskResponse:
         source_asset_id=request.source_asset_id,
         source_text=request.source_text,
         instructions=request.instructions,
+        source_document=request.document,
         status=str(row["status"]),
         attempt=int(row["attempt"]),
         result=script_rewrite_task_result(row),
