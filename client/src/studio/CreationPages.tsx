@@ -5986,15 +5986,6 @@ export function OralPage() {
         </div>
       </header>
       <CreationNavigation />
-      <div className="creation-style-controls">
-        <Button
-          variant="outline"
-          disabled={readOnly}
-          onClick={() => navigate("oral")}
-        >
-          文案驱动
-        </Button>
-      </div>
       <OralJourney step={journeyStep} done={journeyDone} />
       <div className="oral-composer-grid">
         <Panel className="oral-source-panel">

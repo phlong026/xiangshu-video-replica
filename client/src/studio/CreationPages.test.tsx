@@ -4143,7 +4143,7 @@ describe("V1.4 创作页面", () => {
     expect(current.patchDraft).not.toHaveBeenCalled();
   });
 
-  it("旧音频草稿也显示文案驱动，音频不能替代终稿与已确认声音", () => {
+  it("旧音频草稿进入文案页且无模式切换，仍须终稿与已确认声音", () => {
     const value = studio();
     value.state.page = "oral";
     value.state.draft.driverMode = "audio";
@@ -4153,9 +4153,7 @@ describe("V1.4 创作页面", () => {
     useStudio.mockReturnValue(value);
     const view = render(<OralPage />);
 
-    expect(
-      screen.getByRole("button", { name: "文案驱动" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "文案驱动" })).toBeNull();
     expect(screen.queryByRole("button", { name: "已有音频" })).toBeNull();
     expect(screen.queryByRole("button", { name: "选择口播音频" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "完整口播音频" })).toBeNull();
