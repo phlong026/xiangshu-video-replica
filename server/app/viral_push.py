@@ -121,8 +121,10 @@ def mark_viral_push_published(
     ).fetchone()
     if applied is None:
         return False
-    if auto_feature and existing is not None and (
-        existing[0] is None or refeature and not existing[1]
+    if (
+        auto_feature
+        and existing is not None
+        and (existing[0] is None or refeature and not existing[1])
     ):
         _feature_homepage_top(conn, platform=platform, video_id=video_id)
     # actor_user_id 有外键：空串（历史配置缺操作人）必须落 NULL 而不是 ''。
