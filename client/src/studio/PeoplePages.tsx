@@ -900,7 +900,6 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
       <div className="panel-heading">
         <div>
           <h2>形象照片</h2>
-          <p>五视图是一张合成图；场景形象照按套单独管理。</p>
         </div>
         <div>
           <Button
@@ -991,7 +990,6 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
       {review && assets.filter((asset) => !asset.composite).length === 0 ? (
         <Empty
           title={data.loading ? "正在读取场景形象照…" : "还没有场景形象照"}
-          description="生成完成的场景会保存在当前人物下。可点击右上角 AI 生成场景照创建第一套。"
         />
       ) : null}
       <div className="scene-grid">
