@@ -175,6 +175,14 @@ jobs:
           node scripts/release/finalize-customer-release.mjs verify-macos-app \
             --app-binary "${apps[0]}/Contents/MacOS/video-replica-desktop"
           hdiutil verify "${images[0]}"
+      - name: Upload macOS app binary for offline diagnosis
+        if: runner.os == 'macOS' && failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-${{ matrix.platform }}-app-binary-debug
+          path: .cargo-target/${{ matrix.target }}/release/bundle/macos/*.app/Contents/MacOS/video-replica-desktop
+          if-no-files-found: error
+          retention-days: 1
       - name: Collect installer and provenance
         run: |
           provenance_args=()

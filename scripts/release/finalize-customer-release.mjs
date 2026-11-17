@@ -252,7 +252,7 @@ export async function verifyMacosApp(path, origin) {
   const endpoint = endpointFound !== undefined;
   const pubkey = binary.includes(Buffer.from(config.pubkey));
   const staging = binary.includes(Buffer.from("staging.example.invalid"));
-  // 向 stderr 打印发现值与端点上下文，任何 runner 上都能从日志定位失败层；
+  // 向 stderr 打印发现值与取证上下文，任何 runner 上都能从日志定位失败层；
   // stdout 保持给调用方解析配置。
   const contexts = [];
   let cursor = binary.indexOf(Buffer.from("video.zszhj.cn"));
@@ -260,6 +260,17 @@ export async function verifyMacosApp(path, origin) {
     contexts.push(binary.subarray(Math.max(0, cursor - 60), cursor + 80).toString("latin1"));
     cursor = binary.indexOf(Buffer.from("video.zszhj.cn"), cursor + 1);
   }
+  const count = (needle) => {
+    const n = Buffer.from(needle);
+    let total = 0;
+    let at = binary.indexOf(n);
+    while (at !== -1) {
+      total += 1;
+      at = binary.indexOf(n, at + 1);
+    }
+    return total;
+  };
+  const pubkeyAt = binary.indexOf(Buffer.from(config.pubkey));
   console.error(
     "verify-macos-app findings:",
     JSON.stringify({
@@ -268,6 +279,14 @@ export async function verifyMacosApp(path, origin) {
       pubkey,
       staging,
       size: binary.length,
+      counts: {
+        zszhj: count("zszhj"),
+        stableJson: count("stable.json"),
+        customerCloud: count("customer-cloud"),
+        endpointsKey: count('"endpoints"'),
+        updaterKey: count('"updater"'),
+      },
+      pubkeyContext: pubkeyAt === -1 ? null : binary.subarray(Math.max(0, pubkeyAt - 120), pubkeyAt + 260).toString("latin1"),
       contexts,
     }),
   );
