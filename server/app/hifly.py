@@ -99,7 +99,8 @@ def normalize_legacy_subtitle(subtitle: Mapping[str, Any] | None) -> dict[str, A
     if subtitle is None:
         return None
     if not isinstance(subtitle, Mapping):
-        return subtitle  # type: ignore[return-value]
+        # 防御性透传：正常类型下签名已限定 Mapping|None，此分支仅兜底运行时脏数据。
+        return cast(dict[str, Any], subtitle)
     normalized: dict[str, Any] = {}
     for key, value in subtitle.items():
         new_key = _LEGACY_SUBTITLE_KEY_MAP.get(key, key)
