@@ -870,8 +870,7 @@ class ApilioGemini:
                     if (
                         exc.failure_phase == HTTP_FAILURE_PHASE
                         and exc.http_status == 400
-                        and (payload.get("response_format") or {}).get("type")
-                        == "json_schema"
+                        and (payload.get("response_format") or {}).get("type") == "json_schema"
                     ):
                         logger.warning(
                             "%s 模型 %s 不支持 json_schema（HTTP 400），降级 json_object 重发",
@@ -1315,6 +1314,7 @@ def analyze_video(
         response = provider.analyze(video_uri=video_uri, duration_seconds=video_duration_seconds)
     if on_provider_result is not None:
         on_provider_result()
+
     def _unwrap_analysis_payload(payload_text: str) -> tuple[VideoAnalysis, Any]:
         # 宽容解析链（llm_json）：裸换行剥离只是其中一级，另覆盖 markdown
         # 围栏、前后杂文本、尾随逗号等已知形态；strategy 供运维统计注入率。
@@ -1388,9 +1388,7 @@ def analyze_video(
                 if hasattr(provider, "repair_json")
                 else ""
             )
-            raise AnalysisProviderFailed(
-                f"拆解结果格式无效{detail}；请重新拆解。"
-            ) from exc
+            raise AnalysisProviderFailed(f"拆解结果格式无效{detail}；请重新拆解。") from exc
     generation_prompt = None
     if generation_context is not None:
         try:

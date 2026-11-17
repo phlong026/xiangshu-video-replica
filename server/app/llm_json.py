@@ -24,9 +24,7 @@ import re
 from typing import Any
 
 # markdown 围栏：```json … ``` / ``` … ```（围栏语言标记可有可无）。
-_FENCE_PATTERN = re.compile(
-    r"^\s*```[a-zA-Z0-9_-]*\s*\n(?P<body>.*?)\n?\s*```\s*$", re.S
-)
+_FENCE_PATTERN = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(?P<body>.*?)\n?\s*```\s*$", re.S)
 
 # 尾随逗号：``,,]``、``, }``（仅在原样解析失败后使用，见模块 docstring）。
 _TRAILING_COMMA_PATTERN = re.compile(r",\s*(?=[\]}])")
@@ -81,15 +79,11 @@ def parse_llm_json(text: str) -> tuple[Any, str]:
     unfenced = strip_code_fence(body)
     if unfenced != body:
         candidates.append((unfenced, _STRATEGY_UNFENCE))
-        candidates.append(
-            (unfenced.replace("\r", "").replace("\n", ""), _STRATEGY_UNFENCE_STRIP)
-        )
+        candidates.append((unfenced.replace("\r", "").replace("\n", ""), _STRATEGY_UNFENCE_STRIP))
     extracted = extract_outermost_json(body)
     if extracted is not None and extracted != body:
         candidates.append((extracted, _STRATEGY_EXTRACT))
-        candidates.append(
-            (extracted.replace("\r", "").replace("\n", ""), _STRATEGY_EXTRACT_STRIP)
-        )
+        candidates.append((extracted.replace("\r", "").replace("\n", ""), _STRATEGY_EXTRACT_STRIP))
         extracted_unfenced = strip_code_fence(extracted)
         if extracted_unfenced != extracted:
             candidates.append(

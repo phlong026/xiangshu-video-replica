@@ -62,9 +62,7 @@ def read_analysis_parse_stats(actor: AdminReader) -> dict[str, object]:
             "ANALYSIS_PARSE_STATS_UNAVAILABLE",
             "拆解解析统计暂不可用（数据库配置缺失）。",
         ) from exc
-    call_rows = [
-        {"model": row[0], "outcome": row[1], "count": int(row[2])} for row in calls
-    ]
+    call_rows = [{"model": row[0], "outcome": row[1], "count": int(row[2])} for row in calls]
     total_calls = sum(row["count"] for row in call_rows)
     ok_calls = sum(row["count"] for row in call_rows if row["outcome"] == "SUCCEEDED")
     return {
