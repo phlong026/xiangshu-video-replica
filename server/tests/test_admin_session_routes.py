@@ -3272,6 +3272,9 @@ def test_demand_inventory_priority_and_partial_daily_history(client, route_state
                     "VALUES(%s,'collection','douyin',%s,'热门词')",
                     (batch, kind),
                 )
+        # 可见口径只认已推送素材：仅 'ready' 具备完整推送链路（hidden/blocked/
+        # deleted/cover/failed 各有门挡，expired 未推送=运营未授权展示）。
+        conn.execute("UPDATE viral_videos SET pushed_at=now() WHERE video_id='ready'")
         for ident, status in [("hidden", "HIDDEN"), ("blocked", "UNAVAILABLE")]:
             conn.execute(
                 "INSERT INTO viral_video_visibility(platform,video_id,status) "
@@ -4022,8 +4025,9 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
     from app.db_portable import BusinessConnection
     from app.viral_content_observations import record_content_source, record_customer_read
 
-    # customer_visible 只放行 7 天采集窗内的视频：published_at 必须取相对当前
-    # 时间，否则夹具落库一周后「ready」滑出窗口、用例必然转红。
+    # 客户可见口径（2026-11-17 起）只认「已推送（pushed_at）+ 就绪 + 未下架 +
+    # 排期窗口内」：夹具给 states 全部置 pushed_at，让可见性差异只落在各自的
+    # 门（隐藏/删除/素材）上；published_at 不再参与可见性，仅用于发布期筛选。
     #
     # 日期必须按上海时区取：published_from/published_to 在服务端是按 SHANGHAI
     # 的零点换算的，用 UTC 日期会在上海 00:00–08:00（= UTC 16:00–24:00）算出一个
@@ -4041,7 +4045,8 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
             raw.execute(
                 "INSERT INTO "
                 "viral_videos(platform,video_id,title,category,published_at,collection_publ"
-                "ished,homepage_featured) VALUES('douyin',%s,'庭院内容','施工',%s,1,%s)",
+                "ished,pushed_at,homepage_featured) VALUES('douyin',%s,'庭院内容','施工',%s,1"
+                ",now(),%s)",
                 (
                     state,
                     published_ts,

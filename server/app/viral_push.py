@@ -81,11 +81,14 @@ def mark_viral_push_published(
     reason: str = "",
     request_id: str = "",
     refeature: bool = False,
+    auto_feature: bool = True,
 ) -> bool:
     """素材就绪前提下上架；只有明确的管理端重新上架意图能重置首页位置。
 
     守卫与客户可见口径（``ready_sql`` + visibility）同源：媒体已归档、封面
     就绪、未删除、未下架才允许置位。推送动作幂等——重复推送不覆盖首推时间。
+    ``auto_feature=False`` 用于关键词采集等批量自动上架：只补公共展示授权，
+    不自动占用首页推荐位（首页仍由运营策展）。
     """
     # 上传和手工推送共用编排锁，避免并发首推读到同一个最小rank或重复占用容量。
     conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
@@ -118,7 +121,9 @@ def mark_viral_push_published(
     ).fetchone()
     if applied is None:
         return False
-    if existing is not None and (existing[0] is None or refeature and not existing[1]):
+    if auto_feature and existing is not None and (
+        existing[0] is None or refeature and not existing[1]
+    ):
         _feature_homepage_top(conn, platform=platform, video_id=video_id)
     # actor_user_id 有外键：空串（历史配置缺操作人）必须落 NULL 而不是 ''。
     conn.execute(

@@ -2568,6 +2568,7 @@ def curate_collected_viral_video(
         conn.execute(
             """UPDATE viral_videos SET homepage_featured=%s,
                 collection_published=CASE WHEN %s THEN 1 ELSE collection_published END,
+                pushed_at=CASE WHEN %s THEN COALESCE(pushed_at, %s) ELSE pushed_at END,
                 deleted_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE deleted_at END,
                 homepage_rank=%s,
                 homepage_intent_version=homepage_intent_version+CASE WHEN %s THEN 0 ELSE 1 END,
@@ -2579,6 +2580,8 @@ def curate_collected_viral_video(
             (
                 featured_value,
                 payload.action == "feature",
+                payload.action == "feature",
+                datetime.now(UTC).isoformat(),
                 payload.action in ("delete", "block"),
                 next_rank,
                 payload.action in ("pin", "unpin"),

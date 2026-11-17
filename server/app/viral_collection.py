@@ -824,6 +824,7 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
                 _require_lease(conn, lease)
                 applied = conn.execute(
                     "UPDATE viral_videos v SET homepage_featured=1, collection_published=1, "
+                    "pushed_at=COALESCE(v.pushed_at, %s), "
                     "homepage_featured_at=COALESCE(homepage_featured_at,now()) "
                     "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL "
                     "AND homepage_intent_version=%s AND homepage_featured=0 "
@@ -840,6 +841,7 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
                     (
                         lease.platform,
                         str(video_id),
+                        datetime.now(UTC).isoformat(),
                         int(feature_after.get("versions", {}).get(str(video_id), 0)),
                     ),
                 ).fetchone()
@@ -1066,15 +1068,17 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
             )
         with _connection() as conn:
             _require_lease(conn, lease)
-            conn.execute(
-                "UPDATE viral_videos SET collection_published=0 WHERE platform=%s",
-                (lease.platform,),
-            )
+            # 关键词采集即自动上架（不顶首页）：新可见口径里 pushed_at 是公共
+            # 展示授权，采集批次为就绪素材补授权；展示期仍由运营排期与下架
+            # 控制，不再整批撤旧（保留上轮列表由覆盖语义天然完成）。
+            from app.viral_push import mark_viral_push_published
+
             for video_id in prepared:
-                conn.execute(
-                    "UPDATE viral_videos SET collection_published=1 "
-                    "WHERE platform=%s AND video_id=%s",
-                    (lease.platform, video_id),
+                mark_viral_push_published(
+                    conn,
+                    platform=lease.platform,
+                    video_id=str(video_id),
+                    auto_feature=False,
                 )
             stamp = datetime.now(UTC).isoformat()
             window = datetime.fromtimestamp(int(config["window_end"]), UTC).isoformat()
