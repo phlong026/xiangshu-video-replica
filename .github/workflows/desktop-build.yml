@@ -90,7 +90,6 @@ jobs:
       BUNDLE_DIR: ${{ matrix.bundle_dir }}
       BINARY_ARCH: ${{ matrix.binary_arch }}
       PLATFORM: ${{ matrix.platform }}
-      MACOS_RELEASE_CONFIG: ${{ runner.temp }}/customer-macos-release.json
     steps:
       - name: Checkout source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,7 +119,7 @@ jobs:
         if: runner.os == 'macOS'
         # 静态 overlay 保留开发占位端点；只有本流程注入已校验 origin 和 Windows 生产公钥。
         # CI 仅产出配置正确的归档，updater 签名留在本机 finalizer。
-        run: node scripts/release/finalize-customer-release.mjs macos-overlay --output "$MACOS_RELEASE_CONFIG"
+        run: node scripts/release/finalize-customer-release.mjs macos-overlay --output "$RUNNER_TEMP/customer-macos-release.json"
       - name: Build desktop installer
         run: |
           sign_args=()
@@ -128,7 +127,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             sign_args=(--no-sign)
           else
-            config_args+=(--config "$MACOS_RELEASE_CONFIG")
+            config_args+=(--config "$RUNNER_TEMP/customer-macos-release.json")
           fi
           npm run tauri --workspace client -- build \
             "${config_args[@]}" --bundles "$BUNDLE_TYPES" \
@@ -173,7 +172,7 @@ jobs:
         run: |
           provenance_args=()
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            provenance_args=("$MACOS_RELEASE_CONFIG")
+            provenance_args=("$RUNNER_TEMP/customer-macos-release.json")
           fi
           node scripts/release/collect-desktop-artifacts.mjs "$PLATFORM" \
             ".cargo-target/$RUST_TARGET/release/bundle/$BUNDLE_DIR" \
