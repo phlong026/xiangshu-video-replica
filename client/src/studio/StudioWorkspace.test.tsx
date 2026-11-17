@@ -4308,8 +4308,8 @@ describe("视频生成（C2 独立创作）", () => {
         subtitle: {
           st_show: true,
           st_font_size: 30,
-          st_primary_color: "0xFFFFFF",
-          st_outline_color: "0x000000",
+          st_primary_color: "#FFFFFF",
+          st_outline_color: "#000000",
         },
       }),
     );

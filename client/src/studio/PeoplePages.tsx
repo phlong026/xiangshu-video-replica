@@ -1573,7 +1573,8 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         {/* 拍摄建议压缩成单行要点：分步教程式长文对熟手是噪音（界面精简
             2026-11-15），创建弹窗里保留逐步引导。 */}
         <p className="oral-guide-compact">
-          拍摄建议：单人正面出镜 · 嘴部清晰无遮挡 · 画面稳定光线均匀。
+          拍摄建议：单人正面出镜 · 嘴部清晰无遮挡 · 画面稳定光线均匀。视频需为
+          MP4/MOV（H.264）· 5 秒至 30 分钟 · 360p～4K。
         </p>
         <section className="oral-library-voice">
           <h3>我的声音</h3>
@@ -1667,6 +1668,9 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                 placeholder="例如：张工 · 设计室讲解"
               />
             </Field>
+            <small className="oral-field-hint">
+              最多 60 字；提交给数字人服务的名称最多保留前 20 字。
+            </small>
             <label className="oral-consent">
               <input
                 aria-label="确认分身克隆授权"
@@ -2453,7 +2457,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
                   <Icon name="upload" size={28} />
                 </span>
                 <strong>上传录音</strong>
-                <span>5 秒到 3 分钟 · MP3、M4A、WAV 等 · 最大 20 MB</span>
+                <span>5 秒到 3 分钟 · MP3/M4A/WAV 等常见音频 · 最大 20 MB</span>
               </button>
               <Button
                 disabled={readOnly}
@@ -2498,6 +2502,9 @@ function VoicePanel({ person }: { person: StudioPerson }) {
                   placeholder="例如：张工本人音色 V2"
                 />
               </Field>
+              <small className="oral-field-hint">
+                最多 60 字；提交给数字人服务的名称最多保留前 20 字。
+              </small>
               <Field label="录音里说的是">
                 <select
                   disabled={readOnly || busy}

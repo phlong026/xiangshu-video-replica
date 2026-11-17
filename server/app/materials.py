@@ -75,6 +75,10 @@ MaterialOrientation = Literal["portrait", "landscape", "square"]
 
 IMAGE_UPLOAD_LIMIT = 10 * 1024 * 1024
 VOICE_CLONE_UPLOAD_LIMIT = 20 * 1024 * 1024
+# 飞影 V2 文档：完整口播音频（create_by_audio）≤100MB。上传阶段按用途精确限制，
+# 与创建阶段 oral.ORAL_SOURCE_MAX_BYTES["audio"] 同一数值，避免"上传成功却建任务失败"。
+# 声音克隆 20MB 单列；参考音频沿用通用 200MB 预算。
+ORAL_AUDIO_UPLOAD_LIMIT = 100 * 1024 * 1024
 # R2V 参考音频时长上下限：与参考视频同口径，生成端也按 2–15 秒校验
 # （前端拦截 + 后端音频探测双保险）。
 MIN_REFERENCE_AUDIO_SECONDS = 2.0
@@ -1648,6 +1652,8 @@ def create_material_upload_intent(
         validate_audio_purpose_suffix(audio_purpose=request.audio_purpose, safe_suffix=safe_suffix)
     if request.audio_purpose == "voice_clone" and request.size_bytes > VOICE_CLONE_UPLOAD_LIMIT:
         raise material_error(413, "MATERIAL_TOO_LARGE", "声音克隆样本不能超过 20MB。")
+    if request.audio_purpose == "oral_audio" and request.size_bytes > ORAL_AUDIO_UPLOAD_LIMIT:
+        raise material_error(413, "MATERIAL_TOO_LARGE", "完整口播音频不能超过 100MB。")
     reuse = _reuse_registered_material(
         conn,
         actor=actor,

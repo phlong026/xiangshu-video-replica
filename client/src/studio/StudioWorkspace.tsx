@@ -233,11 +233,12 @@ const emptyData: StudioData = {
   analytics30: null,
 };
 const TASKS_POLL_INTERVAL_MS = 20_000;
+// 飞影 V2 文档：颜色为 #RRGGBB（旧版误用 0xRRGGBB），坐标字段为 st_pos_x/st_pos_y。
 const ORAL_SUBTITLE_PRESET = {
   st_show: true,
   st_font_size: 30,
-  st_primary_color: "0xFFFFFF",
-  st_outline_color: "0x000000",
+  st_primary_color: "#FFFFFF",
+  st_outline_color: "#000000",
 };
 
 function savedDraftScope(accountId: string, draft: StudioDraft) {

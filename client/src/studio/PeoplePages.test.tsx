@@ -1596,7 +1596,7 @@ describe("PeoplePages", () => {
     );
 
     expect(
-      screen.getByText("5 秒到 3 分钟 · MP3、M4A、WAV 等 · 最大 20 MB"),
+      screen.getByText("5 秒到 3 分钟 · MP3/M4A/WAV 等常见音频 · 最大 20 MB"),
     ).toBeInTheDocument();
   });
 

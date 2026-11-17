@@ -32,6 +32,7 @@ from app.hifly import (
     HiflySubmissionUncertain,
     HiflyTimeoutError,
     HiflyUploadTarget,
+    normalize_legacy_subtitle,
 )
 from app.internal_billing import finalize_oral_billing, release_oral_queue_slot
 from app.media import storage_key_from_uri
@@ -647,6 +648,10 @@ def _perform_submission(
         content = _object_bytes(storage, str(row["source_storage_uri"]))
         image_source = str(row["source_kind"]) == "IMAGE"
         extension = "png" if image_source else "mp4"
+        # 本地只校验可解码，时长/编码/分辨率等约束交给厂商（错误码 2014/2015 已在
+        # hifly._VENDOR_CODE_MESSAGES 中给出可操作提示）。历史经验（分身素材本地
+        # 臆造时长门禁会误杀边缘素材，见 task_archive 的同类注释）表明此处不宜硬校验；
+        # 前端已前置展示文档约束 5s~30min / H.264 / 360p~4K。
         inspect_media_bytes(
             content,
             suffix=f".{extension}",
@@ -696,7 +701,9 @@ def _perform_submission(
             avatar=str(row["vendor_avatar_id"]),
             title=oral_vendor_title(str(row["title"]), row.get("vendor_short_ref")),
             aigc_flag=True,
-            subtitle=(json.loads(str(row["subtitle_json"])) if row["subtitle_json"] else None),
+            subtitle=normalize_legacy_subtitle(
+                json.loads(str(row["subtitle_json"])) if row["subtitle_json"] else None
+            ),
         )
     else:
         content = _object_bytes(storage, str(row["audio_storage_uri"]))

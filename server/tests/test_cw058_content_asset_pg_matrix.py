@@ -212,6 +212,30 @@ def test_voice_clone_upload_intent_rejects_files_over_twenty_megabytes(
     assert raised.value.detail["code"] == "MATERIAL_TOO_LARGE"
 
 
+def test_oral_audio_upload_intent_rejects_files_over_one_hundred_megabytes(
+    bus: BusinessConnection,
+) -> None:
+    """飞影 V2：完整口播音频(create_by_audio)≤100MB，上传意图阶段按用途精确拦截。"""
+    from app.materials import MaterialUploadIntentRequest, create_material_upload_intent
+
+    with pytest.raises(HTTPException) as raised:
+        create_material_upload_intent(
+            bus,
+            actor=actor("employee_1", "employee"),
+            storage=FakeStorageAdapter(provider="fake", bucket="cw058-tests"),
+            request=MaterialUploadIntentRequest(
+                filename="oral.mp3",
+                content_type="audio/mpeg",
+                size_bytes=100 * 1024 * 1024 + 1,
+                audio_purpose="oral_audio",
+                duration_seconds=600,
+            ),
+        )
+    assert raised.value.status_code == 413
+    assert raised.value.detail["code"] == "MATERIAL_TOO_LARGE"
+    assert "100MB" in raised.value.detail["message"]
+
+
 @pytest.mark.parametrize(
     ("suffix", "content_type", "audio_codec", "with_video"),
     [

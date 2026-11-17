@@ -97,7 +97,8 @@ const projectLimit = 24;
 const personLimit = 8;
 const projectPreviewLimit = 8;
 const sceneLimit = 12;
-const MAX_ORAL_SOURCE_BYTES = 200 * 1024 * 1024;
+// 飞影 V2 文档：完整口播音频(create_by_audio)≤100MB；视频分身上限在 PeoplePages 单独定义。
+const MAX_ORAL_AUDIO_BYTES = 100 * 1024 * 1024;
 
 type FrozenReplicaRequest = {
   storageKey: string;
@@ -216,11 +217,18 @@ export function validateOralAudioFile(
   const allowed = purpose === "voice_clone" ? VOICE_CLONE_EXTENSIONS : ["mp3"];
   if (!extension || !allowed.includes(extension)) {
     return purpose === "voice_clone"
-      ? "请选择 MP3、M4A、WAV、WMA、AAC、FLAC、OGG、OPUS、AIFF、AMR 音频或带音轨的 WMV 文件。"
-      : "仅支持 MP3 音频。";
+      ? "请选择 MP3、M4A、WAV、WMA、AAC、FLAC、OGG、OPUS、AIFF/AIF、AMR 音频或带音轨的 WMV 文件。"
+      : "完整口播音频仅支持 MP3。";
   }
   if (file.size <= 0) return "上传文件不能为空。";
-  if (file.size > MAX_ORAL_SOURCE_BYTES) return "上传文件不能超过 200 MB。";
+  // 完整口播音频按飞影文档限 100MB；声音克隆样本的外层校验已限 20MB，这里兜底放宽。
+  const sizeLimit =
+    purpose === "oral_audio" ? MAX_ORAL_AUDIO_BYTES : 200 * 1024 * 1024;
+  if (file.size > sizeLimit) {
+    return purpose === "oral_audio"
+      ? "完整口播音频不能超过 100 MB。"
+      : "上传文件不能超过 200 MB。";
+  }
   return undefined;
 }
 
