@@ -101,7 +101,8 @@ def video_business_metrics(
         "count(*) FILTER(WHERE a.effective_cost_fen IS NULL AND a.state<>'PENDING'),"
         "count(*) FILTER(WHERE a.state='PENDING') "
         "FROM billing_operations o JOIN billing_effective_attempts a ON a.operation_id=o.id "
-        "WHERE o.user_id IS NULL AND o.service='viral_data' "
+        "WHERE o.user_id IS NULL AND (o.service='viral_data' OR "
+        "(o.service='link_resolution' AND o.api_metadata->>'api_type'='viral_media_refresh')) "
         "AND o.api_metadata::jsonb->>'video_platform'=%s "
         "AND o.api_metadata::jsonb->>'video_id'=%s",
         (platform, video_id),

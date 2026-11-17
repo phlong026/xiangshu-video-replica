@@ -676,6 +676,28 @@ def finalize_pending_operation(
         conn.execute("RELEASE SAVEPOINT billing_reconcile_item")
 
 
+def finalize_interrupted_media_refresh_operation(
+    conn: BusinessConnection, *, operation_id: str
+) -> bool:
+    """中断的后台解析只结束平台请求，供应商费用保留未知以便补证。"""
+    operation = conn.execute(
+        "SELECT state FROM billing_operations WHERE id=%s AND user_id IS NULL "
+        "AND service='link_resolution' AND api_metadata->>'api_type'='viral_media_refresh' "
+        "FOR UPDATE",
+        (operation_id,),
+    ).fetchone()
+    if operation is None or operation["state"] != "PENDING":
+        return False
+    attempts = conn.execute(
+        "SELECT id FROM billing_attempts WHERE operation_id=%s AND state='PENDING' FOR UPDATE",
+        (operation_id,),
+    ).fetchall()
+    for attempt in attempts:
+        complete_attempt(conn, attempt_id=str(attempt["id"]), usage=None)
+    finish_operation(conn, operation_id=operation_id, units=0, succeeded=False)
+    return True
+
+
 def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
     """Recover finalization after terminal task writes, including worker crashes.
 
@@ -683,6 +705,23 @@ def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
     Recoverable in-flight requests stay pending. No HTTP polling is billed.
     """
     _reconcile_first_frame_auxiliary_costs(conn, limit=limit)
+    # 人工重新入队可能清掉任务检查点，仍需按成本元数据收尾中断的后台解析。
+    media_refreshes = conn.execute(
+        "SELECT o.id FROM billing_operations o WHERE o.state='PENDING' "
+        "AND o.user_id IS NULL AND o.service='link_resolution' "
+        "AND o.api_metadata->>'api_type'='viral_media_refresh' "
+        "AND o.created_at<now()-interval '30 minutes' AND NOT EXISTS ("
+        "SELECT 1 FROM viral_refresh_tasks t WHERE t.id=o.api_metadata->>'refresh_task_id' "
+        "AND t.attempt::text=o.api_metadata->>'refresh_task_attempt' "
+        "AND t.status='RUNNING' AND t.locked_until IS NOT NULL "
+        "AND t.locked_until::timestamptz>now()) "
+        "ORDER BY o.created_at,o.id LIMIT %s FOR UPDATE OF o SKIP LOCKED",
+        (limit,),
+    ).fetchall()
+    media_settled = sum(
+        finalize_interrupted_media_refresh_operation(conn, operation_id=str(row["id"]))
+        for row in media_refreshes
+    )
     # A bounded synchronous refresh cannot still be running after thirty minutes.
     # Preserve each delivered cache update and release any unperformed remainder.
     stale = conn.execute(
@@ -770,7 +809,7 @@ def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
         FOR UPDATE OF o SKIP LOCKED""",
         (limit,),
     ).fetchall()
-    settled = len(stale) + len(searches)
+    settled = media_settled + len(stale) + len(searches)
     for operation in operations:
         if finalize_pending_operation(
             conn,

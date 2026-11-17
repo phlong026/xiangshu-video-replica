@@ -5,17 +5,29 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.error import HTTPError, URLError
 from uuid import uuid4
+
+import psycopg
 
 from app.billing_meter import collection_billing_context, video_billing_context
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
+from app.external_calls import Outcome, record_external_call
 from app.storage import StorageAdapter
+from app.usage_billing import (
+    accept_platform_operation,
+    begin_attempt,
+    complete_attempt,
+    finalize_interrupted_media_refresh_operation,
+    finish_operation,
+)
 from app.viral_collection_billing import (
     FrozenCollectionBilling,
     create_collection_batch,
@@ -27,14 +39,15 @@ from app.viral_collection_failures import classify_collection_failure
 from app.viral_collection_schedule import advance_collection_time
 from app.viral_content_observations import record_content_source, record_content_stage
 from app.viral_keywords import ViralKeywordConfig
-from app.viral_media import (
-    CoverEnricher,
-    UrlFetcher,
-    ViralMediaDNSUnavailable,
-    ViralMediaError,
-    ViralMediaPipeline,
+from app.viral_link import (
+    DOUYIN_CANONICAL_URL_TEMPLATE,
+    DouyidouLinkClient,
+    ViralLinkError,
+    douyidou_link_client_from_settings,
 )
-from app.viral_refresh import ViralRefreshLease, _require_lease
+from app.viral_media import CoverEnricher, UrlFetcher, ViralMediaPipeline
+from app.viral_media_preparation import ViralMediaBusy, ViralMediaLeaseLost
+from app.viral_refresh import ViralBatchPartialError, ViralRefreshLease, _require_lease
 from app.viral_store import (
     get_viral_video,
     update_viral_cover,
@@ -45,7 +58,7 @@ from app.viral_store import (
 )
 from app.viral_tikhub import (
     PLATFORM_DOUYIN,
-    ViralSourceClient,
+    PLATFORM_WECHAT,
     ViralSourceError,
     ViralVideo,
     viral_source_client_from_settings,
@@ -284,6 +297,14 @@ def _checkpoint(
     conn: BusinessConnection, lease: ViralRefreshLease, progress: dict[str, Any]
 ) -> None:
     _require_lease(conn, lease)
+    row = conn.execute(
+        "SELECT checkpoint_json FROM viral_refresh_tasks WHERE id=%s", (lease.id,)
+    ).fetchone()
+    current = json.loads(row["checkpoint_json"] or "{}") if row is not None else {}
+    # 批量进度可能是旧快照，不能覆盖另一短事务写入的发送标记和成本记录。
+    for key in ("media_refresh_requests", "media_refresh_accounting", "media_refresh_results"):
+        if key in current:
+            progress[key] = current[key]
     conn.execute(
         "UPDATE viral_refresh_tasks SET checkpoint_json=%s WHERE id=%s",
         (json.dumps(progress, ensure_ascii=False), lease.id),
@@ -300,39 +321,251 @@ def _checkpoint(
     )
 
 
-def _refresh_douyin_play_url(
-    conn: BusinessConnection, client: ViralSourceClient | None, video: ViralVideo
-) -> ViralVideo | None:
-    """按视频 ID 重外呼刷新抖音播放地址，取到新直链就回库并返回该条目.
+def _settle_interrupted_media_refreshes(lease: ViralRefreshLease) -> None:
+    """接管时先收尾旧解析费用，缓存命中也不能遗留进行中的账目。"""
+    with _connection() as conn:
+        _require_lease(conn, lease)
+        row = conn.execute(
+            "SELECT checkpoint_json FROM viral_refresh_tasks WHERE id=%s", (lease.id,)
+        ).fetchone()
+        progress = json.loads(row["checkpoint_json"] or "{}")
+        requests = progress.get("media_refresh_requests", {})
+        accounting = progress.get("media_refresh_accounting", {})
+        if not isinstance(requests, dict) or not isinstance(accounting, dict):
+            return
+        changed = False
+        for video_id, state in requests.items():
+            details = accounting.get(video_id)
+            if (
+                state == "SENDING"
+                and isinstance(details, dict)
+                and details.get("task_attempt") != lease.attempt
+            ):
+                finalize_interrupted_media_refresh_operation(
+                    conn, operation_id=str(details["operation_id"])
+                )
+                requests[video_id] = "BLOCKED"
+                changed = True
+        if changed:
+            conn.execute(
+                "UPDATE viral_refresh_tasks SET checkpoint_json=%s WHERE id=%s",
+                (json.dumps(progress, ensure_ascii=False), lease.id),
+            )
 
-    库里存的 ``play_url`` 是采集/导入当时的限时 CDN 签名直链，延后转存必然
-    403（生产 2026-11-15 实锤：同条目 play_url 403、audio_url 200）。数据源
-    没有单条详情接口，复用「视频 ID 当关键词」的综合搜索刷新通道；只认精确
-    命中本视频且带新 ``play_url`` 的结果，任何无关视频都不得入库。视频号链
-    接条目已有解析通道重取，不走这里。拿不到有效新地址返回 None（调用方保
-    持原失败），调用方只在普通 ``ViralMediaError`` 时进入本路径——Busy（他
-    人在准备）与 DNS 不可达（重取无济于事）不消耗这次外呼。
-    """
-    if client is None or video.platform != PLATFORM_DOUYIN:
-        return None
-    try:
-        candidates = client.douyin_refresh(platform=video.platform, video_id=video.video_id)
-    except ViralSourceError:
-        return None
-    refreshed = next(
-        (item for item in candidates if item.video_id == video.video_id and item.play_url),
-        None,
+
+def _mark_media_refresh(
+    lease: ViralRefreshLease,
+    video_id: str,
+    state: str,
+    *,
+    succeeded: bool = False,
+    original_url: str | None = None,
+    refreshed_url: str | None = None,
+) -> None:
+    """发送标记和平台成本同事务落库，未知结果不得自动再次请求。"""
+    unresolved = False
+    with _connection() as conn:
+        _require_lease(conn, lease)
+        row = conn.execute(
+            "SELECT checkpoint_json FROM viral_refresh_tasks WHERE id=%s", (lease.id,)
+        ).fetchone()
+        progress = json.loads(row["checkpoint_json"] or "{}")
+        requests = progress.get("media_refresh_requests")
+        accounting = progress.get("media_refresh_accounting")
+        results = progress.get("media_refresh_results")
+        if not isinstance(requests, dict):
+            requests = {}
+        if not isinstance(accounting, dict):
+            accounting = {}
+        if not isinstance(results, dict):
+            results = {}
+        previous = requests.get(video_id)
+        details = accounting.get(video_id)
+        if state == "SENDING" and previous in ("SENDING", "BLOCKED"):
+            # 接管旧任务时将已发送但无结果的费用留为未知，不能误记零成本。
+            if previous == "SENDING" and isinstance(details, dict):
+                if details.get("task_attempt") != lease.attempt:
+                    finalize_interrupted_media_refresh_operation(
+                        conn, operation_id=str(details["operation_id"])
+                    )
+                    requests[video_id] = "BLOCKED"
+            unresolved = True
+        elif state == "SENDING":
+            operation_id = accept_platform_operation(
+                conn,
+                service="link_resolution",
+                source_id=str(uuid4()),
+                api_metadata={
+                    "api_type": "viral_media_refresh",
+                    "video_platform": lease.platform,
+                    "video_id": video_id,
+                    "refresh_task_id": lease.id,
+                    "refresh_task_attempt": str(lease.attempt),
+                },
+            )
+            attempt_id = begin_attempt(conn, operation_id=operation_id, attempt_key="request")
+            accounting[video_id] = {
+                "operation_id": operation_id,
+                "attempt_id": attempt_id,
+                "task_attempt": lease.attempt,
+            }
+            requests[video_id] = "SENDING"
+            results.pop(video_id, None)
+        else:
+            if previous != "SENDING" or not isinstance(details, dict):
+                raise ViralSourceError("视频地址解析记录已更新，请重新执行。")
+            conn.execute(
+                "SELECT id FROM billing_operations WHERE id=%s FOR UPDATE",
+                (str(details["operation_id"]),),
+            )
+            complete_attempt(
+                conn, attempt_id=str(details["attempt_id"]), usage=1 if succeeded else None
+            )
+            finish_operation(
+                conn,
+                operation_id=str(details["operation_id"]),
+                units=1 if succeeded else 0,
+                succeeded=succeeded,
+            )
+            requests[video_id] = state
+            if succeeded and refreshed_url:
+                # 与视频表相同的临时直链只保存在服务端检查点，不写日志。
+                results[video_id] = {"original_url": original_url, "play_url": refreshed_url}
+        progress["media_refresh_requests"] = requests
+        progress["media_refresh_accounting"] = accounting
+        progress["media_refresh_results"] = results
+        conn.execute(
+            "UPDATE viral_refresh_tasks SET checkpoint_json=%s WHERE id=%s",
+            (json.dumps(progress, ensure_ascii=False), lease.id),
+        )
+    if unresolved:
+        raise ViralLinkError(
+            409,
+            "VIRAL_MEDIA_REFRESH_UNCERTAIN",
+            "上次视频地址解析结果待核对，请确认后重新执行。",
+            retryable=False,
+            uncertain=True,
+        )
+
+
+def _can_refresh_douyin(video: ViralVideo) -> bool:
+    return (
+        video.platform == PLATFORM_DOUYIN
+        and video.video_id.isascii()
+        and video.video_id.isdecimal()
+        and 15 <= len(video.video_id) <= 22
     )
-    if refreshed is None:
+
+
+def _refresh_douyin_play_url(client: DouyidouLinkClient, video: ViralVideo) -> ViralVideo | None:
+    """重解析失效的直链，只接受与原视频身份一致的结果。"""
+    if not _can_refresh_douyin(video):
         return None
-    upsert_viral_videos(conn, [refreshed])
-    return refreshed
+    started = time.monotonic()
+    try:
+        resolved = client.resolve(
+            DOUYIN_CANONICAL_URL_TEMPLATE.format(video_id=video.video_id), purpose="replica"
+        )
+    except ViralLinkError as exc:
+        cause = exc.__cause__
+        outcome: Outcome
+        if isinstance(cause, HTTPError):
+            outcome = "PROVIDER_ERROR"
+        elif isinstance(cause, TimeoutError) or (
+            isinstance(cause, URLError) and isinstance(cause.reason, TimeoutError)
+        ):
+            outcome = "TIMEOUT"
+        elif isinstance(cause, (URLError, OSError)):
+            outcome = "NETWORK_ERROR"
+        else:
+            outcome = "PROVIDER_ERROR"
+        record_external_call(
+            provider="douyidou",
+            endpoint="api/parse",
+            method="GET",
+            url=None,
+            outcome=outcome,
+            error_code=exc.code,
+            exception_type=type(exc).__name__,
+            latency_ms=round((time.monotonic() - started) * 1000),
+        )
+        raise
+    valid = (
+        resolved.platform == video.platform
+        and resolved.video_id == video.video_id
+        and bool(resolved.video_url)
+    )
+    record_external_call(
+        provider="douyidou",
+        endpoint="api/parse",
+        method="GET",
+        url=None,
+        outcome="SUCCEEDED" if valid else "PARSE_ERROR",
+        error_code=None if valid else "VIRAL_LINK_MEDIA_MISMATCH",
+        latency_ms=round((time.monotonic() - started) * 1000),
+    )
+    return replace(video, play_url=resolved.video_url) if valid else None
+
+
+def _store_douyin_play_url(
+    original: ViralVideo, refreshed: ViralVideo, *, lease: ViralRefreshLease, storage_uri: str
+) -> ViralVideo | None:
+    """归档成功后只回写直链，并校验该归档结果仍是当前版本。"""
+    for attempt in range(5):
+        try:
+            with _connection() as conn:
+                # 避免与导入、任务接管的不同加锁顺序形成无限等待。
+                conn.execute("SET LOCAL lock_timeout = '250ms'")
+                media = conn.execute(
+                    "SELECT id FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
+                    "AND media_kind='video' AND status='SUCCEEDED' AND storage_uri=%s FOR UPDATE",
+                    (original.platform, original.video_id, storage_uri),
+                ).fetchone()
+                if media is None:
+                    raise ViralMediaLeaseLost("素材记录已更新，请重新读取。")
+                current = conn.execute(
+                    "SELECT play_url FROM viral_videos "
+                    "WHERE platform=%s AND video_id=%s FOR UPDATE",
+                    (original.platform, original.video_id),
+                ).fetchone()
+                if current is None:
+                    return None
+                _require_lease(conn, lease)
+                if (
+                    viral_video_availability(
+                        conn, platform=original.platform, video_id=original.video_id
+                    )
+                    != "available"
+                ):
+                    return None
+                # 解析期间若有新导入，以新导入的地址为准，不能覆盖并发更新。
+                if current["play_url"] == original.play_url:
+                    conn.execute(
+                        "UPDATE viral_videos SET play_url=%s, updated_at=CURRENT_TIMESTAMP "
+                        "WHERE platform=%s AND video_id=%s AND play_url IS NOT DISTINCT FROM %s",
+                        (
+                            refreshed.play_url,
+                            original.platform,
+                            original.video_id,
+                            original.play_url,
+                        ),
+                    )
+                latest = get_viral_video(
+                    conn, platform=original.platform, video_id=original.video_id
+                )
+            return latest if latest is not None and latest.play_url else None
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
+            if attempt == 4:
+                raise ViralMediaBusy("素材正在更新，请稍后重试。") from exc
+            time.sleep(0.1)
+    raise AssertionError("unreachable")
 
 
 def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video_id: str) -> None:
     """Prepare an existing item only; never search, bill customers or replace a list."""
     with _keep_lease(lease) as check, video_billing_context(lease.platform, video_id):
         check()
+        _settle_interrupted_media_refreshes(lease)
         with _connection() as conn:
             video = get_viral_video(conn, platform=lease.platform, video_id=video_id)
             if (
@@ -341,31 +574,113 @@ def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video
                 != "available"
             ):
                 raise ViralSourceError("视频已删除、下架或屏蔽，停止准备。")
-            client = viral_source_client_from_settings(conn)
-            # 链接导入条目的直链可能已过期：注入解析通道以便重取；未配置则退化为直链直下。
+            # 抖音、小红书与视频号分享链接均可直下，只有视频号加密详情需要数据源客户端。
+            client = (
+                viral_source_client_from_settings(conn)
+                if video.platform == PLATFORM_WECHAT and not (video.native or {}).get("share_url")
+                else None
+            )
             wechat_link_client = wechat_link_client_from_settings_or_none(conn)
-        if video is None:
-            raise ViralSourceError("视频已删除，停止归档。")
+            task = conn.execute(
+                "SELECT collection_config_json FROM viral_refresh_tasks WHERE id=%s", (lease.id,)
+            ).fetchone()
+            task_config = json.loads(task["collection_config_json"] or "{}") if task else {}
+        refreshed_video: ViralVideo | None = None
+        original_for_refresh = video
+
+        def reuse_resolved_video(current: ViralVideo) -> ViralVideo:
+            nonlocal refreshed_video, original_for_refresh
+            with _connection() as conn:
+                _require_lease(conn, lease)
+                row = conn.execute(
+                    "SELECT checkpoint_json FROM viral_refresh_tasks WHERE id=%s", (lease.id,)
+                ).fetchone()
+                progress = json.loads(row["checkpoint_json"] or "{}")
+                latest = get_viral_video(conn, platform=current.platform, video_id=current.video_id)
+            if latest and latest.play_url and latest.play_url != current.play_url:
+                original_for_refresh = latest
+                refreshed_video = latest
+                return latest
+            results = progress.get("media_refresh_results", {})
+            saved = results.get(current.video_id) if isinstance(results, dict) else None
+            if (
+                isinstance(saved, dict)
+                and saved.get("original_url") == current.play_url
+                and isinstance(saved.get("play_url"), str)
+                and saved["play_url"]
+            ):
+                original_for_refresh = current
+                refreshed_video = replace(current, play_url=saved["play_url"])
+                return refreshed_video
+            return current
+
+        def recover_video(current: ViralVideo) -> ViralVideo | None:
+            nonlocal refreshed_video, original_for_refresh
+            if not _can_refresh_douyin(current):
+                return None
+            check()
+            try:
+                with _connection() as conn:
+                    latest = get_viral_video(
+                        conn, platform=current.platform, video_id=current.video_id
+                    )
+                    if latest is None:
+                        return None
+                    original_for_refresh = latest
+                    link_client = douyidou_link_client_from_settings(conn)
+            except ViralLinkError as exc:
+                if exc.uncertain or not exc.retryable:
+                    raise
+                return None
+            _mark_media_refresh(lease, current.video_id, "SENDING")
+            try:
+                refreshed_video = _refresh_douyin_play_url(link_client, current)
+            except ViralLinkError as exc:
+                blocked = exc.uncertain or not exc.retryable
+                _mark_media_refresh(lease, current.video_id, "BLOCKED" if blocked else "DONE")
+                if blocked:
+                    raise
+                return None
+            except Exception as exc:
+                _mark_media_refresh(lease, current.video_id, "BLOCKED")
+                raise ViralLinkError(
+                    503,
+                    "VIRAL_MEDIA_REFRESH_UNCERTAIN",
+                    "视频地址解析结果待核对，请确认后再操作。",
+                    retryable=False,
+                    uncertain=True,
+                ) from exc
+            _mark_media_refresh(
+                lease,
+                current.video_id,
+                "DONE",
+                succeeded=True,
+                original_url=original_for_refresh.play_url,
+                refreshed_url=refreshed_video.play_url if refreshed_video else None,
+            )
+            return refreshed_video
+
         pipeline = ViralMediaPipeline(
             client=client,
             storage=storage,
             shared=True,
+            refresh_video=reuse_resolved_video if video.platform == PLATFORM_DOUYIN else None,
+            recover_video=recover_video if video.platform == PLATFORM_DOUYIN else None,
+            failed_wait_seconds=0 if task_config.get("kind") == "archive_batch" else 7,
             cancellation_check=check,
             wechat_link_client=wechat_link_client,
         )
-        try:
-            pipeline.fetch(video, prefer="video")
-        except ViralMediaDNSUnavailable:
-            raise
-        except ViralMediaError:
-            # 播放地址是限时签名直链：入库后未及时转存就会过期（403）。重取一条
-            # 新直链回库再试一次；再失败按原样抛出，任务进既有失败/重试通道。
-            with _connection() as conn:
-                fresh = _refresh_douyin_play_url(conn, client, video)
-            if fresh is None:
-                raise
-            pipeline.fetch(fresh, prefer="video")
-            video = fresh
+        media = pipeline.fetch(video, prefer="video")
+        if refreshed_video is None and video.platform == PLATFORM_DOUYIN:
+            # 发布后、地址回写前中断时，下轮缓存命中也要补上地址更新。
+            reuse_resolved_video(video)
+        if refreshed_video is not None:
+            latest = _store_douyin_play_url(
+                original_for_refresh, refreshed_video, lease=lease, storage_uri=media.storage_uri
+            )
+            if latest is None:
+                raise ViralSourceError("视频已删除、下架或屏蔽，停止准备。")
+            video = latest
         # 首次下载取得的详情（视频号解密详情等）要跨过下面的音频回访保留：
         # pipeline.fetch 每次都会把 detail 清空，音频回访即使等价命中缓存也会
         # 抹掉它，统计回写就会丢失（Codex 收尾评审 P2）。
@@ -455,10 +770,18 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
         feature_after = config.get("feature_after") or None
         publish_after = config.get("publish_after") or None
         failed = []
+        nonretryable_error: ViralLinkError | None = None
+        retryable_failure = False
         for video_id in config.get("video_ids", []):
             try:
                 _run_single_archive(lease, storage, str(video_id))
-            except Exception:
+            except Exception as exc:
+                # 不确定的解析不能自动重试，但其余独立视频仍需如实处理和记录。
+                if isinstance(exc, ViralLinkError) and (exc.uncertain or not exc.retryable):
+                    if nonretryable_error is None or exc.uncertain:
+                        nonretryable_error = exc
+                else:
+                    retryable_failure = True
                 # 逐条保留结果；租约丢失必须中止，普通素材失败不阻塞后面的条目。
                 with _connection() as conn:
                     _require_lease(conn, lease)
@@ -547,6 +870,10 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
                         ),
                     ),
                 )
+        if nonretryable_error is not None:
+            if retryable_failure:
+                raise ViralBatchPartialError(uncertain=nonretryable_error.uncertain)
+            raise nonretryable_error
         if failed:
             raise ViralSourceError(f"有 {len(failed)} 条素材准备失败，其他就绪视频已处理；可重试。")
         return

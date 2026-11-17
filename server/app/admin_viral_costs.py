@@ -33,10 +33,16 @@ class OperationEstimateRequest(BaseModel):
 def cost_snapshot(conn: BusinessConnection) -> tuple[str, float | None]:
     tariff = read_tariff(conn, "viral_data")
     price = tariff.unit_cost_fen if tariff else None
+    link_tariff = read_tariff(conn, "link_resolution")
+    link_price = link_tariff.unit_cost_fen if link_tariff else None
     state = {
         "service": "viral_data",
         "price": str(price) if price is not None else None,
         "version": tariff.version if tariff else None,
+        "link_resolution": {
+            "price": str(link_price) if link_price is not None else None,
+            "version": link_tariff.version if link_tariff else None,
+        },
     }
     return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest(), (
         float(price) if price is not None else None
@@ -55,7 +61,14 @@ def operation_estimate(
     from app.viral_store import get_viral_video
 
     snapshot, price = cost_snapshot(conn)
+    link_tariff = read_tariff(conn, "link_resolution")
+    link_price = (
+        float(link_tariff.unit_cost_fen)
+        if link_tariff and link_tariff.unit_cost_fen is not None
+        else None
+    )
     calls = 1 if payload.action == "search" else 0
+    link_calls = 0
     reused = 0
     media = 0
     seen: set[tuple[str, str]] = set()
@@ -88,8 +101,21 @@ def operation_estimate(
             else:
                 media += 1
                 calls += int(target.platform == "wechat_channels")
+                if (
+                    target.platform == "douyin"
+                    and target.video_id.isascii()
+                    and target.video_id.isdecimal()
+                    and 15 <= len(target.video_id) <= 22
+                ):
+                    link_calls += 1
     # 单条详情进程缓存可能减少请求；后台续跑与断机结果未知，不能给最终费用上限。
     normal_max = calls * 3
+    link_max = link_calls * 3
+    known_data_max = (
+        price * normal_max + (link_price or 0) * link_max
+        if price is not None and (not link_max or link_price is not None)
+        else None
+    )
     return {
         "action": payload.action,
         "service": "viral_data",
@@ -97,7 +123,9 @@ def operation_estimate(
         "unitCostFen": price,
         "logicalCallsMax": calls,
         "normalRetryCallsMax": normal_max,
-        "dataCostMaxFen": price * normal_max if price is not None else None,
+        "dataCostMaxFen": known_data_max,
+        "linkResolutionCallsMax": link_max,
+        "linkResolutionUnitCostFen": link_price,
         "reusedVideos": reused,
         "mediaDownloadsMax": media,
         "storageCostFen": None,
@@ -105,7 +133,8 @@ def operation_estimate(
         "totalCostFen": None,
         "customerCredits": 0,
         "note": (
-            "按当前数据接口成本单价估算；缓存、过滤和复用会降低请求次数。"
+            "按当前数据接口与地址解析单价估算，包含抖音直链失效时可能发生的重新解析；"
+            "缓存、过滤和复用会降低请求次数。"
             "常规最多3次物理尝试；后台续跑、断机及重定向次数不在此范围内，最终上限未知。"
             "下载、存储和流量未计量，总费用未知。管理端本操作不扣客户积分。"
         ),

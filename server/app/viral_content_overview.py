@@ -53,6 +53,8 @@ def content_overview(
           WHERE a.created_at>=%s AND a.created_at<%s AND
           (o.service IN ('viral_search','viral_detail','viral_copy')
             OR (o.service='viral_data' AND o.user_id IS NULL)
+            OR (o.service='link_resolution' AND o.user_id IS NULL
+                AND o.api_metadata->>'api_type'='viral_media_refresh')
             OR (o.service='asr' AND EXISTS(SELECT 1 FROM script_from_audio_tasks t
               WHERE t.id=o.source_id
               AND jsonb_typeof(t.request_json::jsonb->'viral_source')='array')))""",
@@ -60,7 +62,8 @@ def content_overview(
     ).fetchone()
     missing = conn.execute(
         """SELECT count(*) FROM billing_operations o
-          WHERE o.service='viral_data' AND o.user_id IS NULL
+          WHERE o.user_id IS NULL AND (o.service='viral_data'
+            OR (o.service='link_resolution' AND o.api_metadata->>'api_type'='viral_media_refresh'))
           AND o.state IN ('SUCCEEDED','FAILED') AND COALESCE(o.completed_at,o.created_at)>=%s
           AND COALESCE(o.completed_at,o.created_at)<%s AND NOT EXISTS
           (SELECT 1 FROM billing_attempts a WHERE a.operation_id=o.id)""",
