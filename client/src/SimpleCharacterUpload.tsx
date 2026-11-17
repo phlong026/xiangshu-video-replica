@@ -180,8 +180,7 @@ export function SimpleCharacterUpload({
           上传人物图片，生成五视图拼合图
         </p>
         <p className="simple-character-upload__note">
-          授权图片 PNG / JPEG / WebP / GIF / BMP / TIFF / AVIF，不超过 10MB · AI
-          绘制约 1~3 分钟
+          授权图片 PNG / JPEG / WebP / GIF / BMP / TIFF / AVIF，不超过 10MB
         </p>
       </div>
       <div className="simple-character-upload-form">

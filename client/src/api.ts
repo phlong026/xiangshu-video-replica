@@ -4,6 +4,7 @@ import { apiBaseUrl, resolveManagedMediaUrl } from "./apiBase";
 import {
   characterOperationDigest,
   finishCharacterOperation,
+  finishObservedCharacterTask,
   openCharacterOperation,
   saveCharacterOperation,
 } from "./characterTaskOperation";
@@ -4226,12 +4227,13 @@ export class CharacterSheetTaskError extends Error {
     message: string,
     taskId: string | null,
     status: DurableImageTaskStatus | "UNKNOWN",
+    recoveryRequired = status !== "FAILED",
   ) {
     super(message);
     this.name = "CharacterSheetTaskError";
     this.taskId = taskId;
     this.status = status;
-    this.recoveryRequired = status !== "FAILED";
+    this.recoveryRequired = recoveryRequired;
   }
 }
 
@@ -4248,14 +4250,33 @@ async function runCharacterOperation(
   );
   if (epoch !== workspaceCredentialEpoch)
     throw new Error("登录状态已变化，请重新读取人物任务。");
+  const submitSameOperation = async () => {
+    const task = await submit(operation.key);
+    if (epoch !== workspaceCredentialEpoch)
+      throw new Error("登录状态已变化，请重新读取人物任务。");
+    operation.taskId = task.id;
+    saveCharacterOperation(operation);
+    onTask?.(task);
+    return task.id;
+  };
   try {
-    if (!operation.taskId) {
-      const task = await submit(operation.key);
-      operation.taskId = task.id;
-      saveCharacterOperation(operation);
-      onTask?.(task);
+    const taskId = operation.taskId ?? (await submitSameOperation());
+    let completed: CharacterSheetTask;
+    try {
+      completed = await waitForCharacterSheetTask(taskId, onTask);
+    } catch (cause) {
+      const details = cause as RequestError;
+      if (
+        epoch !== workspaceCredentialEpoch ||
+        details?.status !== 404 ||
+        details.code !== "IMAGE_TASK_NOT_FOUND"
+      )
+        throw cause;
+      // 本地任务号可能过期；仅用原 key 回放一次，由服务端决定恢复哪一个任务。
+      // 网络错误或未知结果不能换 key 重提，否则可能重复预留额度。
+      const recoveredId = await submitSameOperation();
+      completed = await waitForCharacterSheetTask(recoveredId, onTask);
     }
-    const completed = await waitForCharacterSheetTask(operation.taskId, onTask);
     if (epoch !== workspaceCredentialEpoch)
       throw new Error("登录状态已变化，请重新读取人物任务。");
     finishCharacterOperation(operation);
@@ -4265,10 +4286,21 @@ async function runCharacterOperation(
       if (cause.status === "FAILED") finishCharacterOperation(operation);
       throw cause;
     }
+    const details = cause as RequestError;
+    const rejected =
+      !operation.taskId &&
+      details?.status !== undefined &&
+      details.status >= 400 &&
+      details.status < 500 &&
+      details.status !== 408 &&
+      details.status !== 409;
+    const message =
+      cause instanceof Error ? cause.message : "读取人物任务失败。";
     throw new CharacterSheetTaskError(
-      `${cause instanceof Error ? cause.message : "读取人物任务失败。"} 请核对上次任务状态，不要另行重复生成。`,
+      rejected ? message : `${message} 请核对上次任务状态，不要另行重复生成。`,
       operation.taskId ?? null,
       "UNKNOWN",
+      !rejected,
     );
   }
 }
@@ -4464,8 +4496,21 @@ export async function getCharacterSheetTask(
   );
 }
 
+async function readLatestCharacterSheetTask(
+  path: string,
+  errorPrefix: string,
+): Promise<CharacterSheetTask | null> {
+  const task = await requestApiJson<CharacterSheetTask | null>(
+    path,
+    errorPrefix,
+  );
+  if (task?.status === "FAILED" || task?.status === "SUCCEEDED")
+    finishObservedCharacterTask(task.id);
+  return task;
+}
+
 export async function getLatestCharacterSheetTask(): Promise<CharacterSheetTask | null> {
-  return requestApiJson<CharacterSheetTask | null>(
+  return readLatestCharacterSheetTask(
     "/api/simple-characters/tasks/active-or-latest",
     "读取人物生成任务失败",
   );
@@ -4474,7 +4519,7 @@ export async function getLatestCharacterSheetTask(): Promise<CharacterSheetTask 
 export async function getLatestSceneLookTask(
   identityId: string,
 ): Promise<CharacterSheetTask | null> {
-  return requestApiJson<CharacterSheetTask | null>(
+  return readLatestCharacterSheetTask(
     `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks/tasks/active-or-latest`,
     "读取场景造型生成任务失败",
   );

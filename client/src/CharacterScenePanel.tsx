@@ -7,7 +7,9 @@ import {
 } from "react";
 import {
   type CharacterSheetTask,
+  CharacterSheetTaskError,
   createCharacterSceneLook,
+  customerVisibleErrorMessage,
   getCachedCharacterAssetUrl,
   getLatestSceneLookTask,
   listCharacterSceneLooks,
@@ -17,9 +19,7 @@ import {
 import "./legacy-panels.css";
 
 function sceneError(cause: unknown) {
-  return cause instanceof Error
-    ? cause.message
-    : "场景造型暂不可用，请稍后重试。";
+  return customerVisibleErrorMessage(cause, "场景造型暂不可用，请稍后重试。");
 }
 
 const viewLabels: Record<string, string> = {
@@ -59,6 +59,8 @@ export function CharacterScenePanel({
   const [looks, setLooks] = useState<SimpleSceneLook[]>([]);
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
+  const [previewError, setPreviewError] = useState("");
+  const [previousFailure, setPreviousFailure] = useState("");
   const [loading, setLoading] = useState(true);
   const [taskChecked, setTaskChecked] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -72,6 +74,10 @@ export function CharacterScenePanel({
   const [expandedId, setExpandedId] = useState("");
   const [limit, setLimit] = useState(12);
   const scopeRef = useRef<object | null>(null);
+  const submittingRef = useRef(false);
+  const observedTaskRef = useRef<{ identityId: string; taskId: string } | null>(
+    null,
+  );
   const formRef = useRef<HTMLFormElement>(null);
   const callbacks = useRef({ onChanged, onActiveTask, onRefresh });
   callbacks.current = { onChanged, onActiveTask, onRefresh };
@@ -91,9 +97,14 @@ export function CharacterScenePanel({
     const scope = { revision };
     scopeRef.current = scope;
     const active = () => scopeRef.current === scope;
+    submittingRef.current = false;
     setLoading(true);
     setTaskChecked(false);
+    setGenerating(false);
+    setTask(null);
+    setSubmittedName("");
     setError("");
+    setPreviousFailure("");
     void (async () => {
       try {
         const [itemsResult, taskResult] = await Promise.allSettled([
@@ -107,12 +118,18 @@ export function CharacterScenePanel({
         else setError(sceneError(itemsResult.reason));
         if (taskResult.status === "rejected")
           throw new Error(
-            "读取生成任务状态失败，请刷新场景后再生成，避免重复提交。",
+            `读取生成任务状态失败，请点击“刷新场景”重试。${sceneError(taskResult.reason)}`,
           );
         const latest = taskResult.value;
         setTaskChecked(true);
         setTask(latest);
         setLoading(false);
+        if (
+          latest?.status === "PENDING" ||
+          latest?.status === "RUNNING" ||
+          latest?.status === "SUBMISSION_UNCERTAIN"
+        )
+          observedTaskRef.current = { identityId, taskId: latest.id };
         if (revision > 0) callbacks.current.onRefresh?.();
         if (latest?.status === "PENDING" || latest?.status === "RUNNING") {
           callbacks.current.onActiveTask?.();
@@ -136,16 +153,24 @@ export function CharacterScenePanel({
             setTask(result);
             callbacks.current.onChanged?.();
           }
-        } else if (
-          latest?.status === "FAILED" ||
-          latest?.status === "SUBMISSION_UNCERTAIN"
-        ) {
-          setError(
-            latest.error_message || "场景造型生成未完成，请查看任务状态。",
-          );
+        } else if (latest?.status === "FAILED") {
+          const message =
+            latest.error_message || "场景造型生成未完成，请重新生成。";
+          // 正在跟进的任务转失败必须即时提示；初次读到的历史失败单独保留诊断号。
+          if (
+            observedTaskRef.current?.identityId === identityId &&
+            observedTaskRef.current.taskId === latest.id
+          )
+            setError(message);
+          else setPreviousFailure(message);
         }
       } catch (cause) {
-        if (active()) setError(sceneError(cause));
+        if (
+          active() &&
+          (!(cause instanceof CharacterSheetTaskError) ||
+            cause.status !== "SUBMISSION_UNCERTAIN")
+        )
+          setError(sceneError(cause));
       } finally {
         if (active()) setLoading(false);
       }
@@ -154,6 +179,16 @@ export function CharacterScenePanel({
       if (active()) scopeRef.current = null;
     };
   }, [identityId, revision, showResults]);
+
+  useEffect(() => {
+    if (!uncertain || loading || generating) return;
+    // 服务端会继续核对未知结果；只读刷新终态，不能在这里重提收费请求。
+    const timer = window.setTimeout(
+      () => setRevision((value) => value + 1),
+      10_000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [uncertain, loading, generating]);
 
   const assetKey = (showResults ? looks : [])
     .slice(0, limit)
@@ -164,9 +199,10 @@ export function CharacterScenePanel({
     .filter(Boolean)
     .join("\n");
   useEffect(() => {
-    // Explicit refresh retries signed previews even when their IDs have not changed.
+    // 显式刷新也要重读签名链接，不能因为资产编号没变就跳过。
     void revision;
     let active = true;
+    setPreviewError("");
     const ids = [...new Set(assetKey.split("\n").filter(Boolean))];
     void Promise.allSettled(
       ids.map(
@@ -182,7 +218,7 @@ export function CharacterScenePanel({
         ),
       );
       if (results.some((result) => result.status === "rejected"))
-        setError("部分图片暂时无法加载，可点击刷新场景重试。");
+        setPreviewError("部分图片暂时无法加载，可点击刷新场景重试。");
     });
     return () => {
       active = false;
@@ -191,7 +227,15 @@ export function CharacterScenePanel({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canManage || pending || loading || !taskChecked || uncertain) return;
+    if (
+      !canManage ||
+      submittingRef.current ||
+      pending ||
+      loading ||
+      !taskChecked ||
+      uncertain
+    )
+      return;
     const input = {
       scene_name: name.trim(),
       scene_description: description.trim(),
@@ -207,10 +251,13 @@ export function CharacterScenePanel({
     }
     const scope = scopeRef.current;
     const active = () => scope !== null && scopeRef.current === scope;
+    // 同一事件批次的第二次提交可能早于 React 重绘，必须同步占住提交入口。
+    submittingRef.current = true;
     setGenerating(true);
     setTask(null);
     setSubmittedName(input.scene_name);
     setError("");
+    setPreviousFailure("");
     let observedTask = false;
     try {
       const created = await createCharacterSceneLook(
@@ -218,7 +265,10 @@ export function CharacterScenePanel({
         input,
         (next) => {
           observedTask = true;
-          if (active()) setTask(next);
+          if (active()) {
+            observedTaskRef.current = { identityId, taskId: next.id };
+            setTask(next);
+          }
         },
       );
       if (!active()) return;
@@ -234,15 +284,26 @@ export function CharacterScenePanel({
       callbacks.current.onChanged?.();
     } catch (cause) {
       if (active()) {
-        if (!observedTask) setTaskChecked(false);
-        setError(
-          observedTask
-            ? sceneError(cause)
-            : `${sceneError(cause)} 请先刷新场景核对提交状态，再决定是否重新生成。`,
-        );
+        const recoveryRequired =
+          cause instanceof CharacterSheetTaskError
+            ? cause.recoveryRequired
+            : !observedTask;
+        if (!observedTask && recoveryRequired) setTaskChecked(false);
+        if (
+          !(cause instanceof CharacterSheetTaskError) ||
+          cause.status !== "SUBMISSION_UNCERTAIN"
+        )
+          setError(
+            !observedTask && recoveryRequired
+              ? `${sceneError(cause)} 请先刷新场景核对提交状态。`
+              : sceneError(cause),
+          );
       }
     } finally {
-      if (active()) setGenerating(false);
+      if (active()) {
+        submittingRef.current = false;
+        setGenerating(false);
+      }
     }
   }
 
@@ -293,16 +354,19 @@ export function CharacterScenePanel({
                   ? "正在生成五视图，完成后会自动显示在这里。"
                   : "正在提交场景生成任务…"}
             </p>
-            <small>
-              可收起表单；返回此人物时会恢复任务状态，请勿重复提交。
-            </small>
           </div>
         </div>
       ) : null}
       {uncertain ? (
         <p className="settings-error" role="alert">
-          提交结果待核对，请先刷新场景确认，避免重复生成。
+          {task.error_message || "提交结果待核对，正在确认任务状态。"}
         </p>
+      ) : null}
+      {previousFailure ? (
+        <details className="character-scene-history">
+          <summary>上次场景生成未完成</summary>
+          <p>{previousFailure}</p>
+        </details>
       ) : null}
       {formOpen && canManage ? (
         <form ref={formRef} className="character-scene-form" onSubmit={submit}>
@@ -313,7 +377,7 @@ export function CharacterScenePanel({
               maxLength={80}
               placeholder="例如：工地巡检"
               value={name}
-              disabled={pending}
+              disabled={pending || uncertain}
               onChange={(event) => setName(event.target.value)}
             />
           </label>
@@ -325,7 +389,7 @@ export function CharacterScenePanel({
               maxLength={600}
               placeholder="例如：乡村别墅施工现场，白天自然光"
               value={description}
-              disabled={pending}
+              disabled={pending || uncertain}
               onChange={(event) => setDescription(event.target.value)}
             />
           </label>
@@ -337,23 +401,35 @@ export function CharacterScenePanel({
               maxLength={600}
               placeholder="例如：黄色安全帽、深蓝色工装和反光背心"
               value={costume}
-              disabled={pending}
+              disabled={pending || uncertain}
               onChange={(event) => setCostume(event.target.value)}
             />
           </label>
-          <p>生成完成后保存到当前人物，每次生成一张五视图合成图。</p>
           <button
             className="primary-button"
             disabled={pending || loading || !taskChecked || uncertain}
             type="submit"
           >
-            {pending ? "正在生成，预计 1–3 分钟…" : "生成场景五视图"}
+            {pending
+              ? task?.status === "PENDING"
+                ? "等待生成…"
+                : task?.status === "RUNNING"
+                  ? "正在生成…"
+                  : "正在提交…"
+              : uncertain
+                ? "正在核对任务…"
+                : "生成场景五视图"}
           </button>
         </form>
       ) : null}
       {error ? (
         <p className="settings-error" role="alert">
           {error}
+        </p>
+      ) : null}
+      {previewError ? (
+        <p className="settings-error" role="alert">
+          {previewError}
         </p>
       ) : null}
       {loading && looks.length === 0 ? (
@@ -364,12 +440,12 @@ export function CharacterScenePanel({
       {(showResults || resultCount === 0) &&
       !loading &&
       !pending &&
+      !uncertain &&
       !formOpen &&
       looks.length === 0 &&
       !error ? (
         <div className="character-scene-empty">
           <strong>还没有场景形象照</strong>
-          <p>基于这个人物创建不同场景、服装的形象，完成后会显示在这里。</p>
           {canManage && !formOpen ? (
             <button
               className="secondary-button"
@@ -404,7 +480,9 @@ export function CharacterScenePanel({
                       src={sheetUrl}
                       loading="lazy"
                       onError={() =>
-                        setError("部分图片暂时无法加载，可点击刷新场景重试。")
+                        setPreviewError(
+                          "部分图片暂时无法加载，可点击刷新场景重试。",
+                        )
                       }
                     />
                   ) : (
@@ -417,7 +495,7 @@ export function CharacterScenePanel({
                   <strong>{look.scene_name}</strong>
                   <span>{look.scene_description}</span>
                   <small>{look.costume_description}</small>
-                  <em>1 套 · 五视图已发布</em>
+                  <em>1 套 · 五视图合成图</em>
                   {renderActions?.(
                     look,
                     photo ? urls[photo.asset_id] : undefined,

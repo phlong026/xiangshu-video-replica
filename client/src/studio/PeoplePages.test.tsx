@@ -53,7 +53,10 @@ const live = vi.hoisted(() => ({
   validateOralAudioFile: vi.fn(),
 }));
 
-vi.mock("../api", () => api);
+vi.mock("../api", async (original) => ({
+  ...(await original<typeof import("../api")>()),
+  ...api,
+}));
 vi.mock("./live", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   ...live,

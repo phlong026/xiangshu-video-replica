@@ -1057,7 +1057,7 @@ export function PendingCharacterCard({
             ? "结果尚未确认，请核对原任务或联系管理员，不要重复生成。"
             : character.status === "error"
               ? "请检查提示后重新提交。"
-              : "预计需要 1–3 分钟，可离开当前页面，任务会在后台继续。"}
+              : "任务进行中，完成后会自动更新。"}
         </p>
         {character.status === "uncertain" && onRecover ? (
           <button
