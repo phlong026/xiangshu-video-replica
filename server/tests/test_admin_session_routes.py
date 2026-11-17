@@ -1025,7 +1025,7 @@ def test_homepage_selection_repairs_missing_cover_without_recollecting_video(
 
 
 @pytest.mark.pg
-def test_manual_feature_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
+def test_manual_push_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
     client: TestClient, route_state: str
 ) -> None:
     from datetime import UTC, datetime
@@ -1046,22 +1046,60 @@ def test_manual_feature_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
             "'SUCCEEDED','fake://test/video.mp4')"
         )
     path = "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/curation"
-    for action in ("feature", "unfeature"):
-        response = client.patch(
-            path,
-            headers={**headers, "Idempotency-Key": f"catalog-{action}"},
-            json={"action": action, "reason": "验收普通列表及首页独立展示", "confirm": True},
-        )
-        assert response.status_code == 200, response.text
-        with psycopg.connect(route_state) as conn:
-            bus = BusinessConnection.postgres(conn)
-            page = list_viral_video_page(bus, platform="douyin", sort="hot", limit=12)
-            assert page.total == 1
-            assert [item.video_id for item in page.items] == ["admin-video/opaque=id"]
-            featured = list_viral_video_page(
+    # 展示到首页只是首页标记，不授予公共展示授权；推送才进客户目录。
+    featured = client.patch(
+        path,
+        headers={**headers, "Idempotency-Key": "catalog-feature"},
+        json={"action": "feature", "reason": "验收首页标记不发布", "confirm": True},
+    )
+    assert featured.status_code == 200, featured.text
+    with psycopg.connect(route_state) as conn:
+        bus = BusinessConnection.postgres(conn)
+        assert list_viral_video_page(bus, platform="douyin", sort="hot", limit=12).total == 0
+        assert (
+            list_viral_video_page(
                 bus, platform="douyin", sort="hot", limit=12, featured_only=True
-            )
-            assert featured.total == int(action == "feature")
+            ).total
+            == 0
+        )
+    pushed = client.post(
+        "/api/control/viral/videos/curation:batch",
+        headers={**headers, "Idempotency-Key": "catalog-push"},
+        json={
+            "confirm": True,
+            "action": "push",
+            "reason": "验收推送进目录",
+            "items": [{"platform": "douyin", "video_id": "admin-video/opaque=id"}],
+        },
+    )
+    assert pushed.status_code == 200, pushed.text
+    with psycopg.connect(route_state) as conn:
+        bus = BusinessConnection.postgres(conn)
+        page = list_viral_video_page(bus, platform="douyin", sort="hot", limit=12)
+        assert page.total == 1
+        assert [item.video_id for item in page.items] == ["admin-video/opaque=id"]
+        assert (
+            list_viral_video_page(
+                bus, platform="douyin", sort="hot", limit=12, featured_only=True
+            ).total
+            == 1
+        )
+    unfeatured = client.patch(
+        path,
+        headers={**headers, "Idempotency-Key": "catalog-unfeature"},
+        json={"action": "unfeature", "reason": "撤出首页", "confirm": True},
+    )
+    assert unfeatured.status_code == 200, unfeatured.text
+    with psycopg.connect(route_state) as conn:
+        bus = BusinessConnection.postgres(conn)
+        # 推送授权不随撤出首页回收：目录保留，首页清零。
+        assert list_viral_video_page(bus, platform="douyin", sort="hot", limit=12).total == 1
+        assert (
+            list_viral_video_page(
+                bus, platform="douyin", sort="hot", limit=12, featured_only=True
+            ).total
+            == 0
+        )
 
 
 @pytest.mark.pg
@@ -1076,7 +1114,7 @@ def test_homepage_pin_orders_featured_list_and_unpin_restores(
     headers = _admin_session(client)
     with psycopg.connect(route_state) as conn:
         conn.execute(
-            "UPDATE viral_videos SET published_at=%s,collection_published=0",
+            "UPDATE viral_videos SET published_at=%s,collection_published=1,pushed_at=now()",
             (int(datetime.now(UTC).timestamp()),),
         )
         conn.execute(
@@ -1092,7 +1130,7 @@ def test_homepage_pin_orders_featured_list_and_unpin_restores(
             "('douyin','admin-video/second=id','第二条待选视频','施工')"
         )
         conn.execute(
-            "UPDATE viral_videos SET published_at=%s,collection_published=0 "
+            "UPDATE viral_videos SET published_at=%s,collection_published=1,pushed_at=now() "
             "WHERE video_id='admin-video/second=id'",
             (int(datetime.now(UTC).timestamp()),),
         )
@@ -1180,7 +1218,7 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
             "INSERT INTO viral_videos(platform,video_id,title) "
             "VALUES('xiaohongshu','parsed-link','用户解析小红书')"
         )
-    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 1
+    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 2
     page = client.get("/api/control/viral/videos?query=后台&limit=1", headers=headers)
     assert page.status_code == 200, page.text
     assert page.json()["total"] == 1
@@ -1221,6 +1259,29 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
         ).json()
         == selected.json()
     )
+    # 首页标记本身不能发布历史采集；只有管理员明确推送后才进入客户首页。
+    with psycopg.connect(route_state) as conn:
+        assert (
+            list_viral_video_page(
+                BusinessConnection.postgres(conn),
+                platform="douyin",
+                sort="hot",
+                limit=12,
+                featured_only=True,
+            ).total
+            == 0
+        )
+    pushed = client.post(
+        "/api/control/viral/videos/curation:batch",
+        headers={**headers, "Idempotency-Key": "selected-push"},
+        json={
+            "confirm": True,
+            "action": "push",
+            "reason": "确认发布",
+            "items": [{"platform": "douyin", "video_id": "admin-video/opaque=id"}],
+        },
+    )
+    assert pushed.status_code == 200, pushed.text
     with psycopg.connect(route_state) as conn:
         assert (
             list_viral_video_page(
@@ -1255,7 +1316,7 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
         ).json()
         == deleted.json()
     )
-    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 0
+    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 1
     with psycopg.connect(route_state) as conn:
         bus = BusinessConnection.postgres(conn)
         assert original is not None
@@ -1313,9 +1374,8 @@ def test_single_block_keeps_tombstone_and_recycle_state_after_recollection(
 
 
 @pytest.mark.pg
-def test_seven_day_visibility_uses_database_clock_when_collection_is_paused(
-    client: TestClient,
-    route_state: str,
+def test_manual_publication_uses_push_marker_when_collection_is_paused(
+    client: TestClient, route_state: str
 ) -> None:
     from app.db_portable import BusinessConnection
     from app.viral_store import (
@@ -1329,20 +1389,20 @@ def test_seven_day_visibility_uses_database_clock_when_collection_is_paused(
         now = int(raw.execute("SELECT floor(extract(epoch FROM now()))").fetchone()[0])
         raw.execute(
             "INSERT INTO viral_fetch_state(platform,sort,fetched_at) "
-            "VALUES('douyin','weekly_window', (now()-interval '30 days')::text) "
+            "VALUES('douyin','weekly_window',(now()-interval '30 days')::text) "
             "ON CONFLICT(platform,sort) DO UPDATE SET fetched_at=excluded.fetched_at"
         )
-        for video_id, age, featured in [
-            ("seventh-day", 7 * 86400 - 60, 0),
-            ("eighth-day", 8 * 86400, 0),
-            ("old-featured", 8 * 86400, 1),
-            ("old-favorite", 8 * 86400, 0),
+        for video_id, age, featured, pushed in [
+            ("seventh-day", 7 * 86400 - 60, 0, False),
+            ("eighth-day", 8 * 86400, 0, True),
+            ("old-featured", 8 * 86400, 1, True),
+            ("old-favorite", 8 * 86400, 1, False),
         ]:
             raw.execute(
                 "INSERT INTO viral_videos(platform,video_id,title,published_at,"
-                "collection_published,homepage_featured) "
-                "VALUES('douyin',%s,'隔离七天内容',%s,1,%s)",
-                (video_id, now - age, featured),
+                "collection_published,homepage_featured,pushed_at) "
+                "VALUES('douyin',%s,'人工发布内容',%s,1,%s,CASE WHEN %s THEN now() END)",
+                (video_id, now - age, featured, pushed),
             )
             raw.execute(
                 "INSERT INTO viral_media_preparations(id,platform,video_id,"
@@ -1355,15 +1415,15 @@ def test_seven_day_visibility_uses_database_clock_when_collection_is_paused(
             "VALUES('customer_u','douyin','old-favorite')"
         )
         conn = BusinessConnection.postgres(raw)
-        # 普通入口与后台客户可见集合一致，也包含仍有效的长期首页推荐。
-        assert [v.video_id for v in list_viral_videos(conn, platform="douyin", sort="hot")] == [
-            "seventh-day",
-            "old-featured",
-        ]
+        # 源站发布时间与旧首页/收藏都不授予公开权限；已推送的老内容持续可见。
+        expected = ["eighth-day", "old-featured"]
+        assert [
+            v.video_id for v in list_viral_videos(conn, platform="douyin", sort="hot")
+        ] == expected
         assert [
             v.video_id
             for v in list_viral_video_page(conn, platform="douyin", sort="hot", limit=12).items
-        ] == ["seventh-day", "old-featured"]
+        ] == expected
         assert [
             v.video_id
             for v in list_viral_video_page(
@@ -1375,11 +1435,11 @@ def test_seven_day_visibility_uses_database_clock_when_collection_is_paused(
             user_id="customer_u",
             platform="douyin",
             video_ids=["seventh-day", "eighth-day", "old-featured", "old-favorite"],
-        ) == ["eighth-day"]
+        ) == ["seventh-day", "old-favorite"]
     visible = client.get(
         "/api/control/viral/videos", headers=headers, params={"customer_visible": True}
     ).json()
-    assert {row["video_id"] for row in visible["items"]} == {"seventh-day", "old-featured"}
+    assert {row["video_id"] for row in visible["items"]} == {"eighth-day", "old-featured"}
 
 
 @pytest.mark.pg
@@ -1461,7 +1521,7 @@ def test_collected_video_list_projects_card_fields_and_status_segments(
             "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
             "('ready-media','douyin','ready-video','video','SUCCEEDED','fake://test/ready.mp4')"
         )
-        # 链接导入 / 其它平台的行不属于采集库视图，任何分段都不应出现。
+        # 小红书同样进入后台内容池；客户是否可见仍取决于推送标记。
         conn.execute(
             "INSERT INTO viral_videos(platform,video_id,title) "
             "VALUES('xiaohongshu','parsed-link','用户解析小红书')"
@@ -1474,7 +1534,7 @@ def test_collected_video_list_projects_card_fields_and_status_segments(
     page = client.get("/api/control/viral/videos", headers=headers)
     assert page.status_code == 200, page.text
     items = {item["video_id"]: item for item in page.json()["items"]}
-    assert set(items) == {"admin-video/opaque=id", "ready-video"}
+    assert set(items) == {"admin-video/opaque=id", "ready-video", "parsed-link"}
     pending = items["admin-video/opaque=id"]
     assert pending["author"] == "庭院设计阿伟"
     assert pending["author_avatar"] == "https://cdn.example.com/avatar.jpg"
@@ -3250,6 +3310,9 @@ def test_demand_inventory_priority_and_partial_daily_history(client, route_state
                     "VALUES(%s,'collection','douyin',%s,'热门词')",
                     (batch, kind),
                 )
+        # 可见口径只认已推送素材：仅 'ready' 具备完整推送链路（hidden/blocked/
+        # deleted/cover/failed 各有门挡，expired 未推送=运营未授权展示）。
+        conn.execute("UPDATE viral_videos SET pushed_at=now() WHERE video_id='ready'")
         for ident, status in [("hidden", "HIDDEN"), ("blocked", "UNAVAILABLE")]:
             conn.execute(
                 "INSERT INTO viral_video_visibility(platform,video_id,status) "
@@ -3730,6 +3793,10 @@ def test_homepage_order_schedule_share_customer_clock_and_conflict_guard(
                 "VALUES(%s,'douyin',%s,'video','SUCCEEDED','fake://test.mp4')",
                 (ident, ident),
             )
+        conn.execute(
+            "UPDATE viral_videos SET pushed_at=now() WHERE platform='douyin' AND video_id=ANY(%s)",
+            (ids,),
+        )
     current = client.get("/api/control/viral/homepage?platform=douyin", headers=headers).json()
     assert [v["video_id"] for v in current["preview"]] == ids
     with psycopg.connect(route_state) as raw:
@@ -3996,8 +4063,9 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
     from app.db_portable import BusinessConnection
     from app.viral_content_observations import record_content_source, record_customer_read
 
-    # customer_visible 只放行 7 天采集窗内的视频：published_at 必须取相对当前
-    # 时间，否则夹具落库一周后「ready」滑出窗口、用例必然转红。
+    # 客户可见口径（2026-11-17 起）只认「已推送（pushed_at）+ 就绪 + 未下架 +
+    # 排期窗口内」：夹具给 states 全部置 pushed_at，让可见性差异只落在各自的
+    # 门（隐藏/删除/素材）上；published_at 不再参与可见性，仅用于发布期筛选。
     #
     # 日期必须按上海时区取：published_from/published_to 在服务端是按 SHANGHAI
     # 的零点换算的，用 UTC 日期会在上海 00:00–08:00（= UTC 16:00–24:00）算出一个
@@ -4015,7 +4083,8 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
             raw.execute(
                 "INSERT INTO "
                 "viral_videos(platform,video_id,title,category,published_at,collection_publ"
-                "ished,homepage_featured) VALUES('douyin',%s,'庭院内容','施工',%s,1,%s)",
+                "ished,pushed_at,homepage_featured) VALUES('douyin',%s,'庭院内容','施工',%s,1"
+                ",now(),%s)",
                 (
                     state,
                     published_ts,
@@ -4322,7 +4391,9 @@ def test_pending_homepage_schedule_worker_and_observed_milestone(
     with psycopg.connect(route_state) as raw:
         raw.execute("DELETE FROM viral_refresh_tasks")
         raw.execute(
-            "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin',%s,'专题')", (ident,)
+            "INSERT INTO viral_videos(platform,video_id,title,collection_published,pushed_at) "
+            "VALUES('douyin',%s,'专题',1,now())",
+            (ident,),
         )
         record_content_source(
             BusinessConnection.postgres(raw),
@@ -4540,8 +4611,8 @@ def test_homepage_page_revision_total_share_one_pg_snapshot(
         raw.execute("UPDATE viral_videos SET homepage_featured=0")
         for rank, ident in enumerate(ids, 1):
             raw.execute(
-                "INSERT INTO viral_videos(platform,video_id,title,homepage_featured,homepage_rank) "
-                "VALUES('douyin',%s,'庭院快照',1,%s)",
+                "INSERT INTO viral_videos(platform,video_id,title,homepage_featured,homepage_rank,"
+                "collection_published,pushed_at) VALUES('douyin',%s,'庭院快照',1,%s,1,now())",
                 (ident, rank),
             )
             raw.execute(
@@ -5334,7 +5405,9 @@ def test_enabled_keyword_limit_and_zero_result_run_are_consumed_by_worker(
         "/api/control/viral/discoveries", headers=headers, params={"date": search_day}
     ).json()["keywords"][0]
     assert after["configured"] is True
-    assert after["inventory"] == (0 if zero_results else 2)
+    # 采集只完成归档，不自动上架（可见口径要 pushed_at）：库存仍为 0，
+    # 运营推送后才计入需求库存（见 test_weekly_collection_failure_* 的收尾）。
+    assert after["inventory"] == 0
     from app.viral_refresh import complete_viral_refresh_task
 
     with psycopg.connect(route_state) as raw:
@@ -5631,7 +5704,7 @@ def test_admin_private_cover_missing_and_storage_failure_are_closed(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("platform", ["douyin", "wechat_channels"])
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu"])
 def test_admin_upload_auto_publishes_to_customers_and_homepage(
     client, route_state, monkeypatch, platform, tmp_path
 ):
@@ -5639,6 +5712,7 @@ def test_admin_upload_auto_publishes_to_customers_and_homepage(
     弹窗补填的元数据直落卡片字段；幂等重放不重新置顶；媒体照常可复刻/提取文案."""
     import subprocess
 
+    from app import admin_viral_upload
     from app.auth import CurrentUser
     from app.db_portable import BusinessConnection
     from app.media_tools import resolve_media_binary
@@ -5653,6 +5727,22 @@ def test_admin_upload_auto_publishes_to_customers_and_homepage(
     )
     from app.viral_store import list_viral_video_page
 
+    original_upsert = admin_viral_upload.upsert_viral_videos
+
+    def assert_upload_lock_precedes_video_write(conn, videos, *, commit=True):
+        # 在upsert拿视频行锁之前，另一连接应已拿不到策展锁；反向锁序会导致重传/下架死锁。
+        with psycopg.connect(route_state) as contender:
+            assert (
+                contender.execute(
+                    "SELECT pg_try_advisory_xact_lock(%s)", (202609260001,)
+                ).fetchone()[0]
+                is False
+            )
+        return original_upsert(conn, videos, commit=commit)
+
+    monkeypatch.setattr(
+        admin_viral_upload, "upsert_viral_videos", assert_upload_lock_precedes_video_write
+    )
     source = tmp_path / "video.mp4"
     subprocess.run(
         [
@@ -5680,6 +5770,9 @@ def test_admin_upload_auto_publishes_to_customers_and_homepage(
         capture_output=True,
     )
     storage = FakeStorageAdapter(provider="cos", bucket="test")
+    monkeypatch.setattr(
+        storage, "_signed_url", lambda method, key, expires_at: f"https://archive.invalid/{key}"
+    )
     monkeypatch.setattr("app.media_routes.get_media_storage", lambda conn: storage)
     headers = {**_admin_session(client), "Idempotency-Key": "upload-video"}
     data = {
@@ -5755,6 +5848,56 @@ def test_admin_upload_auto_publishes_to_customers_and_homepage(
             outcome = perform_viral_import_task(work)
             complete_viral_import_task(conn, lease=lease, outcome=outcome)
             assert outcome.media_kind == "video" and outcome.stored.size > 0
+
+    # 上传后必须能在后台管理完整生命周期，小红书不能只在上传Literal中受理。
+    path = f"/api/control/viral/videos/{platform}/{video_id}"
+    listing = client.get(
+        "/api/control/viral/videos", headers=headers, params={"platform": platform}
+    )
+    assert listing.status_code == 200, listing.text
+    assert video_id in {item["video_id"] for item in listing.json()["items"]}
+    details = client.get(f"{path}/details", headers=headers)
+    assert details.status_code == 200, details.text
+    assert details.json()["video"]["customer_visible"] is True
+    preview = client.get(f"{path}/preview", headers=headers)
+    assert preview.status_code == 200 and "url" in preview.json(), preview.text
+    cover = client.get(f"/api/control/viral/covers/{platform}/{video_id}", headers=headers)
+    assert cover.status_code == 200 and cover.content, cover.text
+    hide = client.patch(
+        f"{path}/availability",
+        headers={**headers, "Idempotency-Key": "upload-hide"},
+        json={"confirm": True, "reason": "下架回归", "status": "HIDDEN"},
+    )
+    assert hide.status_code == 200, hide.text
+    assert (
+        client.get(f"{path}/details", headers=headers).json()["video"]["customer_visible"] is False
+    )
+    pushed = client.post(
+        "/api/control/viral/videos/curation:batch",
+        headers={**headers, "Idempotency-Key": "upload-repush"},
+        json={
+            "confirm": True,
+            "reason": "重新推送",
+            "action": "push",
+            "items": [{"platform": platform, "video_id": video_id}],
+        },
+    )
+    assert pushed.status_code == 200 and pushed.json()["items"][0]["published"], pushed.text
+    homepage = client.get(
+        "/api/control/viral/homepage", headers=headers, params={"platform": platform}
+    )
+    assert homepage.status_code == 200, homepage.text
+    assert homepage.json()["preview"][0]["video_id"] == video_id
+    deleted = client.patch(
+        f"{path}/curation",
+        headers={**headers, "Idempotency-Key": "upload-delete"},
+        json={"confirm": True, "reason": "删除回归", "action": "delete"},
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert client.get(f"{path}/details", headers=headers).status_code == 404
+    recycle = client.get("/api/control/viral/recycle", headers=headers)
+    assert recycle.status_code == 200, recycle.text
+    assert video_id in {item["video_id"] for item in recycle.json()["items"]}
 
 
 def test_admin_upload_requires_content_permission_and_rejects_invalid_files(client, route_state):

@@ -31,6 +31,7 @@ PG-lane 事实（CW-043 审计确认）：``viral_import_tasks`` 的 ``locked_un
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -78,6 +79,9 @@ def test_replica_import_rejects_out_of_range_duration(monkeypatch, duration_ms):
     )
     monkeypatch.setattr(
         viral_import, "viral_video_availability", lambda *_args, **_kwargs: "available"
+    )
+    monkeypatch.setattr(
+        viral_import, "is_customer_visible_viral_video", lambda *_args, **_kwargs: True
     )
     actor = CurrentUser(id="u1", username="u1", display_name="用户", role="customer")
     request = viral_import.ViralImportRequest(
@@ -674,7 +678,15 @@ def pg_state(import_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 # 叶子优先 DELETE：viral_import_tasks 的 project_id/owner_user_id 是 FK。
-_CLEANUP_ORDER = ("viral_import_tasks", "projects", "users")
+_CLEANUP_ORDER = (
+    "viral_import_tasks",
+    "viral_link_resolution_receipts",
+    "viral_media_preparations",
+    "viral_video_visibility",
+    "viral_videos",
+    "projects",
+    "users",
+)
 
 
 def _exec(dsn: str, sql: str, params: tuple[Any, ...] = ()) -> None:
@@ -711,6 +723,187 @@ def _seed_base(dsn: str) -> None:
         "INSERT INTO projects (id, name, owner_user_id) VALUES"
         " ('proj-1', 'CW043 Viral Import', 'u1')",
     )
+
+
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu"])
+def test_private_link_receipt_preserves_owner_import_without_public_listing(
+    pg_state, monkeypatch, platform
+):
+    from app.auth import CurrentUser
+    from app.storage import FakeStorageAdapter
+    from app.viral_import import (
+        ViralImportRequest,
+        complete_viral_import_task,
+        enqueue_viral_import_task,
+        perform_viral_import_task,
+        prepare_viral_import_task,
+    )
+    from app.viral_media import UrlFetcher
+    from app.viral_media_preparation import ViralMediaPreparation
+    from app.viral_store import is_customer_visible_viral_video, list_viral_video_page
+
+    _seed_base(pg_state)
+    monkeypatch.setenv("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1")
+    _exec(
+        pg_state,
+        "INSERT INTO viral_runtime_controls(id,import_enabled) VALUES(1,1) "
+        "ON CONFLICT(id) DO UPDATE SET import_enabled=1",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO viral_videos(platform,video_id,title,category,duration_ms) "
+        "VALUES(%s,'private-link','本人链接素材','链接导入',6000)",
+        (platform,),
+    )
+    response = {
+        "item": {"platform": platform, "videoId": "private-link"},
+        "importIdempotencyKey": "personal-link",
+    }
+    _exec(
+        pg_state,
+        "INSERT INTO viral_link_resolution_receipts(id,owner_user_id,idempotency_key,"
+        "normalized_url,purpose,request_hash,status,response_json,lease_owner,lease_expires_at) "
+        "VALUES('private-receipt','u1','resolve-personal','https://example.invalid/share',"
+        "'replica','hash','SUCCEEDED',%s,'owner',now())",
+        (json.dumps(response),),
+    )
+    storage = FakeStorageAdapter(provider="cos", bucket="personal-import")
+    ViralMediaPreparation(storage=storage).fetch(
+        platform=platform,
+        video_id="private-link",
+        kind="video",
+        prepare=lambda key, check: storage.put_object(
+            key, b"private-video", content_type="video/mp4"
+        ),
+    )
+
+    def forbid_source(*args, **kwargs):
+        raise AssertionError("个人导入worker只读取已归档素材")
+
+    monkeypatch.setattr(UrlFetcher, "iter_fetch", forbid_source)
+    request = ViralImportRequest(platform=platform, videoId="private-link", purpose="replica")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert list_viral_video_page(conn, platform=platform, sort="hot", limit=10).total == 0
+        for user_id, expected in (("u1", True), ("u2", False)):
+            assert (
+                is_customer_visible_viral_video(
+                    conn, platform=platform, video_id="private-link", user_id=user_id
+                )
+                is expected
+            )
+        with pytest.raises(ViralImportError) as denied:
+            enqueue_viral_import_task(
+                conn,
+                actor=CurrentUser(id="u2", username="u2", display_name="他人", role="employee"),
+                request=request,
+                idempotency_key="stolen-link",
+            )
+        assert denied.value.status_code == 404
+        row = enqueue_viral_import_task(
+            conn,
+            actor=CurrentUser(id="u1", username="u1", display_name="本人", role="employee"),
+            request=request,
+            idempotency_key="personal-link",
+        )
+        task_id = str(row["id"])
+    lease = _acquire("personal-worker")
+    assert lease is not None and lease.id == task_id
+    with pg_transaction() as raw:
+        work = prepare_viral_import_task(
+            BusinessConnection.postgres(raw), lease=lease, storage=storage
+        )
+    outcome = perform_viral_import_task(work)
+    with pg_transaction() as raw:
+        complete_viral_import_task(BusinessConnection.postgres(raw), lease=lease, outcome=outcome)
+    assert _import_row(pg_state, task_id)["status"] == "SUCCEEDED"
+    assert _one(pg_state, "SELECT count(*) FROM assets WHERE created_by_user_id='u1'") == 1
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert list_viral_video_page(conn, platform=platform, sort="hot", limit=10).total == 0
+        assert not is_customer_visible_viral_video(
+            conn, platform=platform, video_id="private-link", user_id="u2"
+        )
+
+
+@pytest.mark.parametrize("phase", ["enqueue", "prepare", "complete"])
+@pytest.mark.parametrize("state", ["never_pushed", "hidden", "future", "expired", "deleted"])
+def test_public_import_rechecks_publication_at_each_delivery_boundary(pg_state, phase, state):
+    from app.auth import CurrentUser
+    from app.storage import FakeStorageAdapter
+    from app.viral_import import (
+        ViralImportOutcome,
+        ViralImportRequest,
+        complete_viral_import_task,
+        enqueue_viral_import_task,
+        prepare_viral_import_task,
+    )
+
+    _seed_base(pg_state)
+    _exec(
+        pg_state,
+        "INSERT INTO viral_runtime_controls(id,import_enabled) VALUES(1,1) "
+        "ON CONFLICT(id) DO UPDATE SET import_enabled=1",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO viral_videos(platform,video_id,title,duration_ms,collection_published,"
+        "pushed_at,homepage_featured) "
+        "VALUES('douyin','publication-guard','人工发布',6000,1,now(),1)",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO viral_media_preparations(id,platform,video_id,media_kind,status,storage_uri) "
+        "VALUES('publication-media','douyin','publication-guard','video','SUCCEEDED',"
+        "'cos://guard/source.mp4')",
+    )
+    actor = CurrentUser(id="u1", username="u1", display_name="本人", role="employee")
+    request = ViralImportRequest(platform="douyin", videoId="publication-guard", purpose="replica")
+    if phase != "enqueue":
+        with pg_transaction() as raw:
+            enqueue_viral_import_task(
+                BusinessConnection.postgres(raw),
+                actor=actor,
+                request=request,
+                idempotency_key="guard",
+            )
+        lease = _acquire("guard-worker")
+        assert lease is not None
+    if state == "hidden":
+        _exec(
+            pg_state,
+            "INSERT INTO viral_video_visibility(platform,video_id,status) "
+            "VALUES('douyin','publication-guard','HIDDEN')",
+        )
+    else:
+        assignment = {
+            "never_pushed": "pushed_at=NULL",
+            "future": "homepage_starts_at=now()+interval '1 day'",
+            "expired": "homepage_ends_at=now()-interval '1 day'",
+            "deleted": "deleted_at=now()",
+        }[state]
+        _exec(pg_state, f"UPDATE viral_videos SET {assignment} WHERE video_id='publication-guard'")
+    storage = FakeStorageAdapter(provider="cos", bucket="guard")
+    with pytest.raises(ViralImportError) as denied:
+        with pg_transaction() as raw:
+            conn = BusinessConnection.postgres(raw)
+            if phase == "enqueue":
+                enqueue_viral_import_task(
+                    conn, actor=actor, request=request, idempotency_key="guard"
+                )
+            elif phase == "prepare":
+                prepare_viral_import_task(conn, lease=lease, storage=storage)
+            else:
+                stored = storage.put_object("source.mp4", b"video", content_type="video/mp4")
+                complete_viral_import_task(
+                    conn,
+                    lease=lease,
+                    outcome=ViralImportOutcome(
+                        stored=stored, media_kind="video", duration_seconds=6
+                    ),
+                )
+    assert denied.value.detail["code"] in {"VIRAL_VIDEO_NOT_FOUND", "VIRAL_VIDEO_UNAVAILABLE"}
+    assert _one(pg_state, "SELECT count(*) FROM assets") == 0
 
 
 def _seed_import_task(
@@ -788,6 +981,16 @@ def test_import_commit_acknowledgement_loss_preserves_published_project_copy(pg_
     from app.viral_import import ViralImportOutcome
 
     _seed_base(pg_state)
+    _exec(
+        pg_state,
+        "INSERT INTO viral_videos(platform,video_id,title,collection_published,pushed_at) "
+        "VALUES('douyin','vid-1','已推送素材',1,now())",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO viral_media_preparations(id,platform,video_id,media_kind,status,storage_uri) "
+        "VALUES('commit-media','douyin','vid-1','video','SUCCEEDED','cos://project/source.mp4')",
+    )
     _seed_import_task(pg_state, task_id="commit-receipt")
     storage = FakeStorageAdapter(provider="cos", bucket="project")
     stored = storage.put_object("project/attempt-1.mp4", b"project-video", content_type="video/mp4")

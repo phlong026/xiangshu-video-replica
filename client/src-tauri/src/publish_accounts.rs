@@ -243,6 +243,27 @@ fn main_only(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// 快手目前只提供手动发布入口；固定官方地址，不接收平台账号或任意 URL。
+#[tauri::command]
+pub fn open_kuaishou_creator(window: WebviewWindow) -> Result<(), String> {
+    main_only(&window)?;
+    // WebView2 默认拦截新窗口链接，交给系统浏览器保留官方登录与上传流程。
+    let mut command = match std::env::consts::OS {
+        "windows" => {
+            let mut command = std::process::Command::new("rundll32.exe");
+            command.arg("url.dll,FileProtocolHandler");
+            command
+        }
+        "macos" => std::process::Command::new("open"),
+        _ => std::process::Command::new("xdg-open"),
+    };
+    command
+        .arg("https://cp.kuaishou.com/article/publish/video")
+        .spawn()
+        .map_err(|error| format!("无法打开快手创作者中心：{error}"))?;
+    Ok(())
+}
+
 fn read_accounts(root: &Path) -> Result<Vec<LocalAccount>, String> {
     if !root.exists() {
         return Ok(vec![]);

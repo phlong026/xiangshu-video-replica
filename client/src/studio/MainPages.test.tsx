@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +29,9 @@ type WorkbenchUploadResult = {
 const {
   useStudio,
   loadTaskPreview,
+  loadViralVideos,
+  saveViralFavorite,
+  removeViralFavorite,
   uploadWorkbenchSourceVideo,
   readVideoDuration,
   studioVideoFromViral,
@@ -54,6 +58,12 @@ const {
 } = vi.hoisted(() => ({
   useStudio: vi.fn<() => StudioContextValue>(),
   loadTaskPreview: vi.fn(),
+  loadViralVideos: vi.fn<typeof import("./live").loadViralVideos>(async () => ({
+    videos: [],
+    errors: [],
+  })),
+  saveViralFavorite: vi.fn(async () => ({ isFavorite: true })),
+  removeViralFavorite: vi.fn(async () => ({ isFavorite: false })),
   uploadWorkbenchSourceVideo:
     vi.fn<
       (
@@ -128,9 +138,12 @@ vi.mock("../api", async (importOriginal) => ({
   updateStudioNotificationPreferences,
   getPublishSummary,
   publishBrowserRequest,
+  saveViralFavorite,
+  removeViralFavorite,
 }));
 vi.mock("./live", () => ({
   loadTaskPreview,
+  loadViralVideos,
   uploadWorkbenchSourceVideo,
   readVideoDuration,
   studioVideoFromViral,
@@ -198,8 +211,6 @@ function data(
     materials: [],
     loading: false,
     stats: null,
-    analytics7: null,
-    analytics30: null,
   };
 }
 
@@ -265,7 +276,7 @@ describe("V1.4 任务详情真实成片预览", () => {
         selectedTaskId: "oral-deep",
         selectedTaskKind: "oral_task",
         selectedTaskBackendId: "deep",
-        returnTo: "analytics",
+        returnTo: "workbench",
       },
       data: data([]),
       user: { id: "account-a" } as StudioContextValue["user"],
@@ -418,7 +429,7 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(value.openLive).not.toHaveBeenCalled();
   });
 
-  it("真实音频口播再创作回到音频模式，未提供正文时禁用调整脚本", () => {
+  it("历史音频口播仍可查看成片，再创作使用待补全文案和声音的新稿", () => {
     const task = {
       ...taskA,
       backendKind: "oral_task" as const,
@@ -435,11 +446,19 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(screen.getByRole("button", { name: "调整脚本" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "新建草稿" }));
 
-    expect(value.navigate).toHaveBeenCalledWith("oral-audio", {
+    expect(loadTaskPreview).toHaveBeenCalledWith(task);
+    expect(screen.getByText("完整口播音频")).toBeInTheDocument();
+    expect(value.navigate).toHaveBeenCalledWith("oral", {
       returnTo: "task-detail",
     });
     expect(value.patchState).toHaveBeenCalledWith({
-      draft: expect.objectContaining({ audioId: "audio-original" }),
+      draft: expect.objectContaining({
+        driverMode: "text",
+        ipId: "person-a",
+        avatarId: "avatar-a",
+        voiceId: undefined,
+        script: expect.objectContaining({ text: "", confirmed: false }),
+      }),
     });
   });
 
@@ -888,34 +907,418 @@ describe("V1.4 工作台正在进行行", () => {
   });
 });
 
-describe("V1.4 工作台新版首页布局（爆款精选已下线）", () => {
-  it("首页不再渲染爆款视频精选区（2026-11-16 定价决策下线）", () => {
+describe("V1.4 工作台首页爆款精选", () => {
+  const clock = new Date("2026-11-17T12:00:00Z");
+
+  beforeEach(() => {
+    useStudio.mockReset();
+    loadViralVideos.mockReset().mockResolvedValue({ videos: [], errors: [] });
+    saveViralFavorite.mockReset().mockResolvedValue({ isFavorite: true });
+    removeViralFavorite.mockReset().mockResolvedValue({ isFavorite: false });
+    vi.useFakeTimers({ now: clock, toFake: ["Date"] });
+  });
+
+  afterEach(() => {
+    loadViralVideos.mockReset().mockResolvedValue({ videos: [], errors: [] });
+    vi.useRealTimers();
+  });
+
+  function homepageVideo(
+    index: number,
+    overrides: Partial<StudioVideo> = {},
+  ): StudioVideo {
+    return {
+      id: `homepage-${index}`,
+      nativeId: `homepage-${index}`,
+      platformKey: "douyin",
+      platform: "抖音",
+      title: `精选视频 ${index}`,
+      author: "管理员上传",
+      category: "乡墅",
+      poster: `/poster-${index}.jpg`,
+      duration: "00:10",
+      durationMs: 10_000,
+      likes: 1000,
+      collections: 10,
+      shares: 5,
+      description: "乡墅爆款案例",
+      homepageFeatured: true,
+      pushedAt: "2026-11-16T12:00:00Z",
+      availability: "available",
+      ...overrides,
+    };
+  }
+
+  it("首页精选位于指标与网格之间，按置顶顺序和推送时间展示四条", () => {
+    const videos = [
+      homepageVideo(1, { homepageRank: 20, likes: 999999 }),
+      homepageVideo(2, { homepageRank: 1, likes: 1 }),
+      homepageVideo(3, { homepageRank: 2, pushedAt: "2026-11-14T12:00:00Z" }),
+      homepageVideo(4, { homepageRank: 2, pushedAt: "2026-11-15T12:00:00Z" }),
+      homepageVideo(5, { homepageRank: 30 }),
+    ];
+    const value = studio(undefined, {
+      review: true,
+      state: createState("workbench"),
+      data: { ...data([]), homepageVideos: videos },
+    });
+    useStudio.mockReturnValue(value);
+    const { container } = render(<WorkbenchPage />);
+    const panel = container.querySelector<HTMLElement>(
+      ".studio-home-recommendations",
+    );
+    if (!panel) throw new Error("未找到首页精选区域");
+
+    expect(
+      within(panel).getByRole("heading", { name: "爆款视频精选" }),
+    ).toBeInTheDocument();
+    expect(panel.previousElementSibling).toHaveClass("studio-home-metrics");
+    expect(panel.nextElementSibling).toHaveClass("studio-home-grid");
+    expect(
+      within(panel)
+        .getAllByText(/^精选视频 \d$/)
+        .map((node) => node.textContent),
+    ).toEqual(["精选视频 2", "精选视频 4", "精选视频 3", "精选视频 1"]);
+    expect(panel.querySelectorAll(".viral-card")).toHaveLength(4);
+    expect(within(panel).queryByText("精选视频 5")).toBeNull();
+    expect(
+      within(panel).getAllByRole("button", { name: "查看详情" }),
+    ).toHaveLength(4);
+    expect(
+      within(panel).getByRole("button", { name: "下载视频 精选视频 2" }),
+    ).toBeEnabled();
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "查看全部爆款" }),
+    );
+    expect(value.navigate).toHaveBeenCalledWith("viral");
+  });
+
+  it("跨平台新上传先展示，同时保留每个平台内部的人工顺序", async () => {
+    const videos = [
+      homepageVideo(1, {
+        title: "跨平台推荐 人工置首",
+        homepageRank: -30,
+        pushedAt: "2026-11-14T12:00:00Z",
+      }),
+      homepageVideo(2, {
+        title: "跨平台推荐 同平台次位",
+        homepageRank: -29,
+        pushedAt: "2026-11-16T12:00:00Z",
+      }),
+      homepageVideo(3, { title: "跨平台推荐 同平台第三", homepageRank: -28 }),
+      homepageVideo(4, { title: "跨平台推荐 第五张", homepageRank: -27 }),
+      homepageVideo(5, {
+        title: "跨平台推荐 小红书新上传",
+        platformKey: "xiaohongshu",
+        platform: "小红书",
+        homepageRank: -1,
+        pushedAt: "2026-11-17T11:59:59Z",
+      }),
+    ];
+    loadViralVideos.mockResolvedValue({ videos, errors: [] });
+    useStudio.mockReturnValue(
+      studio(undefined, { state: createState("workbench"), data: data([]) }),
+    );
+    render(<WorkbenchPage />);
+
+    await screen.findByText("跨平台推荐 小红书新上传");
+    expect(
+      screen.getAllByText(/^跨平台推荐 /).map((node) => node.textContent),
+    ).toEqual([
+      "跨平台推荐 小红书新上传",
+      "跨平台推荐 人工置首",
+      "跨平台推荐 同平台次位",
+      "跨平台推荐 同平台第三",
+    ]);
+    expect(screen.queryByText("跨平台推荐 第五张")).toBeNull();
+  });
+
+  it.each([true, false])(
+    "首页只展示推荐集合中已发布可用且排期生效的精选（审核：%s）",
+    async (review) => {
+      const current = homepageVideo(1);
+      const excluded: StudioVideo[] = [
+        homepageVideo(2, { homepageFeatured: false }),
+        homepageVideo(3, { pushedAt: null }),
+        homepageVideo(4, { pushedAt: undefined }),
+        homepageVideo(5, { availability: "hidden" }),
+        homepageVideo(6, { availability: "unavailable" }),
+        homepageVideo(7, { homepageStartsAt: "2026-11-18T12:00:00Z" }),
+        homepageVideo(8, { homepageEndsAt: "2026-11-17T12:00:00Z" }),
+      ];
+      loadViralVideos.mockResolvedValue({
+        videos: [current, ...excluded],
+        errors: [],
+      });
+      useStudio.mockReturnValue(
+        studio(undefined, {
+          review,
+          state: createState("workbench"),
+          data: {
+            ...data(
+              [],
+              [homepageVideo(9, { title: "普通爆款网格的精选缓存" })],
+            ),
+            homepageVideos: [current, ...excluded],
+          },
+        }),
+      );
+      render(<WorkbenchPage />);
+
+      expect(await screen.findByText(current.title)).toBeInTheDocument();
+      expect(loadViralVideos).toHaveBeenCalledTimes(review ? 0 : 1);
+      for (const video of excluded)
+        expect(screen.queryByText(video.title)).toBeNull();
+      expect(screen.queryByText("普通爆款网格的精选缓存")).toBeNull();
+    },
+  );
+
+  it("没有独立首页推荐时保留空态，不从公共网格补入视频", () => {
     useStudio.mockReturnValue(
       studio(undefined, {
+        review: true,
         state: createState("workbench"),
-        data: data(
-          [],
-          Array.from({ length: 5 }, (_, index) => ({
-            id: `video-${index + 1}`,
-            title: `爆款 ${index + 1}`,
-            author: `作者 ${index + 1}`,
-            platform: "抖音" as const,
-            category: "乡墅",
-            poster: `/poster-${index + 1}.jpg`,
-            duration: "00:56",
-            likes: 1000,
-            collections: 10,
-            shares: 5,
-            description: "乡墅爆款案例",
-          })),
-        ),
+        data: {
+          ...data([], [homepageVideo(1)]),
+          homepageVideos: [],
+        },
       }),
     );
     render(<WorkbenchPage />);
-    expect(screen.queryByRole("heading", { name: "爆款视频精选" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "查看全部爆款" })).toBeNull();
-    expect(screen.queryAllByText(/提取文案：/)).toHaveLength(0);
+
+    expect(screen.getByText("暂无推荐视频")).toBeInTheDocument();
+    expect(screen.queryByText("精选视频 1")).toBeNull();
+    expect(screen.getByRole("button", { name: "查看全部爆款" })).toBeEnabled();
   });
+
+  it("重新进入真实首页先重验，待确认和失败时都不复活启动缓存中的旧推荐", async () => {
+    const oldVideo = homepageVideo(1, { title: "已撤回的旧推荐" });
+    const pending = deferred<Awaited<ReturnType<typeof loadViralVideos>>>();
+    loadViralVideos
+      .mockResolvedValueOnce({ videos: [oldVideo], errors: [] })
+      .mockReturnValueOnce(pending.promise)
+      .mockRejectedValue(new Error("推荐读取离线"));
+    useStudio.mockReturnValue(
+      studio(undefined, {
+        state: createState("workbench"),
+        data: { ...data([]), homepageVideos: [oldVideo] },
+      }),
+    );
+    const first = render(<WorkbenchPage />);
+    await screen.findByText(oldVideo.title);
+    first.unmount();
+    render(<WorkbenchPage />);
+
+    expect(screen.queryByText(oldVideo.title)).toBeNull();
+    expect(screen.getByText("正在读取推荐视频")).toBeInTheDocument();
+    await act(async () => {
+      pending.resolve({ videos: [], errors: [] });
+    });
+    expect(screen.getByText("暂无推荐视频")).toBeInTheDocument();
+    fireEvent.focus(window);
+    await waitFor(() => expect(loadViralVideos).toHaveBeenCalledTimes(3));
+    await act(async () => Promise.resolve());
+    expect(screen.queryByText(oldVideo.title)).toBeNull();
+    expect(screen.getByText("暂无推荐视频")).toBeInTheDocument();
+  });
+
+  it("空推荐按各平台服务端时钟的最早边界上线，到期刷新失败也立即移出", async () => {
+    vi.useFakeTimers({
+      now: clock,
+      toFake: ["Date", "setTimeout", "clearTimeout"],
+    });
+    const video = homepageVideo(1, {
+      title: "按服务端排期上线",
+      homepageStartsAt: "2026-11-17T11:00:02Z",
+      homepageEndsAt: "2026-11-17T11:00:04Z",
+    });
+    loadViralVideos
+      .mockResolvedValueOnce({
+        videos: [],
+        errors: [],
+        timing: [
+          {
+            platformKey: "douyin",
+            serverTime: "2026-11-17T11:00:00Z",
+            nextChangeAt: "2026-11-17T11:00:02Z",
+            receivedAt: clock.getTime(),
+          },
+          {
+            platformKey: "wechat_channels",
+            serverTime: "2026-11-17T12:00:00Z",
+            nextChangeAt: "2026-11-17T12:00:10Z",
+            receivedAt: clock.getTime(),
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        videos: [video],
+        errors: [],
+        timing: [
+          {
+            platformKey: "douyin",
+            serverTime: "2026-11-17T11:00:02Z",
+            nextChangeAt: "2026-11-17T11:00:04Z",
+            receivedAt: clock.getTime() + 2_000,
+          },
+        ],
+      })
+      .mockRejectedValue(new Error("到期刷新离线"));
+    useStudio.mockReturnValue(
+      studio(undefined, { state: createState("workbench"), data: data([]) }),
+    );
+    render(<WorkbenchPage />);
+    await act(async () => Promise.resolve());
+    expect(screen.getByText("暂无推荐视频")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(loadViralVideos).toHaveBeenCalledOnce();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2);
+    });
+    expect(loadViralVideos).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(video.title)).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(loadViralVideos).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText(video.title)).toBeNull();
+    expect(screen.getByText("暂无推荐视频")).toBeInTheDocument();
+  });
+
+  it("等待慢平台期间已经跨过的排期边界在聚合结果到达后立即重验", async () => {
+    vi.useFakeTimers({
+      now: clock,
+      toFake: ["Date", "setTimeout", "clearTimeout"],
+    });
+    const video = homepageVideo(1, { title: "慢响应后已上线" });
+    loadViralVideos
+      .mockResolvedValueOnce({
+        videos: [],
+        errors: [],
+        timing: [
+          {
+            platformKey: "douyin",
+            serverTime: "2026-11-17T11:00:00Z",
+            nextChangeAt: "2026-11-17T11:00:02Z",
+            receivedAt: clock.getTime() - 5_000,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ videos: [video], errors: [] });
+    useStudio.mockReturnValue(
+      studio(undefined, { state: createState("workbench"), data: data([]) }),
+    );
+    render(<WorkbenchPage />);
+    await act(async () => Promise.resolve());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(loadViralVideos).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(video.title)).toBeInTheDocument();
+  });
+
+  it("焦点和可见性触发重验时丢弃乱序结果，换账号立即隔离上一账号推荐", async () => {
+    const first = deferred<Awaited<ReturnType<typeof loadViralVideos>>>();
+    const focus = deferred<Awaited<ReturnType<typeof loadViralVideos>>>();
+    const visible = deferred<Awaited<ReturnType<typeof loadViralVideos>>>();
+    const accountB = deferred<Awaited<ReturnType<typeof loadViralVideos>>>();
+    loadViralVideos
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(focus.promise)
+      .mockReturnValueOnce(visible.promise)
+      .mockReturnValueOnce(accountB.promise);
+    const stale = homepageVideo(1, { title: "账号A旧响应" });
+    const latestA = homepageVideo(2, { title: "账号A最新推荐" });
+    const latestB = homepageVideo(3, { title: "账号B推荐" });
+    let current = studio(undefined, {
+      state: createState("workbench"),
+      data: data([]),
+      user: { id: "account-a" } as StudioContextValue["user"],
+    });
+    useStudio.mockImplementation(() => current);
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    const view = render(<WorkbenchPage />);
+    try {
+      fireEvent.focus(window);
+      await act(async () => {
+        first.resolve({ videos: [stale], errors: [] });
+      });
+      expect(screen.queryByText(stale.title)).toBeNull();
+      fireEvent(document, new Event("visibilitychange"));
+      await act(async () => {
+        visible.resolve({ videos: [latestA], errors: [] });
+      });
+      expect(screen.getByText(latestA.title)).toBeInTheDocument();
+      current = {
+        ...current,
+        user: { id: "account-b" } as StudioContextValue["user"],
+      };
+      view.rerender(<WorkbenchPage />);
+      expect(screen.queryByText(latestA.title)).toBeNull();
+      await act(async () => {
+        focus.resolve({ videos: [stale], errors: [] });
+      });
+      expect(screen.queryByText(stale.title)).toBeNull();
+      await act(async () => {
+        accountB.resolve({ videos: [latestB], errors: [] });
+      });
+      expect(screen.getByText(latestB.title)).toBeInTheDocument();
+      expect(loadViralVideos).toHaveBeenCalledTimes(4);
+    } finally {
+      visibility.mockRestore();
+    }
+  });
+
+  it.each([true, false])(
+    "首页已收藏内容首击取消收藏，失败回滚且刷新其他卡不覆盖操作（成功：%s）",
+    async (succeeds) => {
+      const video = homepageVideo(1, { isFavorite: true });
+      const other = homepageVideo(2);
+      loadViralVideos
+        .mockResolvedValueOnce({ videos: [video, other], errors: [] })
+        .mockResolvedValueOnce({
+          videos: [video, { ...other, title: "其他推荐已更新" }],
+          errors: [],
+        });
+      if (!succeeds)
+        removeViralFavorite.mockRejectedValueOnce(new Error("保存失败"));
+      const value = studio(undefined, {
+        state: createState("workbench"),
+        data: data([]),
+      });
+      useStudio.mockReturnValue(value);
+      render(<WorkbenchPage />);
+      const favorite = await screen.findByRole("button", {
+        name: `收藏 ${video.title}`,
+      });
+      expect(favorite).toHaveAttribute("aria-pressed", "true");
+      fireEvent.click(favorite);
+      await waitFor(() =>
+        expect(removeViralFavorite).toHaveBeenCalledExactlyOnceWith(
+          "douyin",
+          video.nativeId,
+        ),
+      );
+      await waitFor(() => expect(favorite).toBeEnabled());
+      expect(favorite).toHaveAttribute(
+        "aria-pressed",
+        succeeds ? "false" : "true",
+      );
+      expect(saveViralFavorite).not.toHaveBeenCalled();
+      if (!succeeds)
+        expect(value.notify).toHaveBeenCalledWith("收藏失败，已恢复原状态");
+      fireEvent.focus(window);
+      await screen.findByText("其他推荐已更新");
+      expect(favorite).toHaveAttribute(
+        "aria-pressed",
+        succeeds ? "false" : "true",
+      );
+    },
+  );
 });
 
 describe("V1.4 工作台对齐网格", () => {
@@ -949,12 +1352,27 @@ describe("V1.4 工作台对齐网格", () => {
     const areas = Array.from(grid.children).map(
       (cell) => (cell as HTMLElement).dataset.area,
     );
-    // 爆款区块已下线（2026-11-16 定价决策）：网格三区块
+    // 首页精选独立于此网格，网格仍保留任务、动态与快捷入口。
     expect(areas).toEqual(["running", "activity", "shortcuts"]);
 
     // 标题必须位于卡片内部（此前左栏 h2 悬在卡片外，行首高度受外部标题影响）
     const runningCell = grid.children[0] as HTMLElement;
     expect(runningCell.querySelector("h2")?.textContent).toBe("正在进行");
+  });
+
+  it("快捷入口改为任务列表并保持四个可用入口", () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    expect(screen.getAllByRole("button", { name: /^快捷入口：/ })).toHaveLength(
+      4,
+    );
+    expect(
+      screen.queryByRole("button", { name: "快捷入口：数据看板" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "快捷入口：任务列表" }));
+    expect(value.navigate).toHaveBeenCalledWith("tasks");
   });
 
   it("任务动态最多展示 4 条，超出时提供进入任务中心出口", () => {
@@ -2173,7 +2591,7 @@ describe("V1.4 任务中心列表", () => {
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "类型：全部类型" }));
-    // 标题已让给数据看板页签外壳，外部点击改用页面内其他元素验证下拉收起。
+    // 点击筛选器外的历史任务入口时，下拉菜单应收起。
     fireEvent.pointerDown(
       screen.getByRole("button", { name: "历史任务与下载" }),
     );

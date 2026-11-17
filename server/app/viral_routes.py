@@ -1,11 +1,6 @@
-"""爆款视频路由（C4 重启）.
+"""客户爆款目录只读管理员发布的三平台内容，播放与下载只使用归档素材。
 
-- ``GET /api/viral/videos?platform=&sort=``：按服务端配置的关键词聚合
-  两个平台的最近 7 天爆款列表（结果带 TTL 缓存，作为计费护栏）。
-- ``POST /api/viral/videos/media``：按需取媒体文件（抖音音频优先/低清
-  兜底；视频号解密后直传主存储），返回带签名的可播放地址。
-
-供应商红线：所有响应文案与字段保持中性，不出现数据源供应商名称。
+上游搜索、抓取和源站拉流仍由独立退役开关保护；浏览不构造上游客户端。
 """
 
 from __future__ import annotations
@@ -43,14 +38,12 @@ from app.viral_media import (
     viral_cover_key,
 )
 from app.viral_media_preparation import ViralMediaBusy
-from app.viral_refresh import viral_refresh_status
 from app.viral_resource_metering import measured_object_chunks
 from app.viral_store import (
     InvalidViralCursorError,
     ViralAvailability,
     add_viral_favorite,
     favorite_viral_video_ids,
-    fetch_state_is_fresh,
     get_viral_video,
     is_customer_visible_viral_video,
     is_viral_favorite,
@@ -117,6 +110,7 @@ class ViralVideoItem(BaseModel):
     homepageRank: int | None = None
     homepageStartsAt: str | None = None
     homepageEndsAt: str | None = None
+    pushedAt: str | None = None
     platform: str
     videoId: str
     category: str
@@ -307,6 +301,9 @@ def _item(
         availability=availability,
         detailCharged=detail_charged,
     )
+    # 播放必须重新通过归档媒体权限校验；旧源站直链和原始解析字段不能随详情泄露。
+    item.playUrl = None
+    item.native = {}
     if not video.cover_key:
         item.coverUrl = None
     if item.coverUrl and item.coverUrl.startswith("/"):
@@ -325,7 +322,7 @@ def list_viral_videos(
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
     featured_only: bool = False,
 ) -> ViralListResponse:
-    _require_client_enabled()
+    # 恢复：列表只读库内「管理员上传/推送」内容，不依赖抓取客户端，故不再 410。
     if platform not in _VALID_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -343,9 +340,7 @@ def list_viral_videos(
                 status_code=400,
                 detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
             ) from exc
-    fresh = fetch_state_is_fresh(conn, platform=platform, sort=sort, max_age=VIRAL_LIST_CACHE_TTL)
     homepage_clock = viral_publication_clock(conn, platform=platform, featured_only=featured_only)
-    refreshing, refresh_error = viral_refresh_status(conn, platform=platform, sort=SORT_HOT)
     try:
         page = list_viral_video_page(
             conn,
@@ -391,10 +386,7 @@ def list_viral_videos(
             for video in page.items
         ],
         fetchedAt=viral_fetched_at(conn, platform=platform, sort=sort),
-        dataVersion=viral_fetched_at(conn, platform=platform, sort=sort),
-        stale=not fresh,
-        refreshing=refreshing,
-        refreshError=refresh_error,
+        dataVersion=page.data_version,
         total=page.total,
         hasMore=page.has_more,
         nextCursor=page.next_cursor,
@@ -411,7 +403,6 @@ def list_viral_favorites(
     limit: Annotated[int, Query(ge=1, le=50)] = 24,
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
 ) -> ViralFavoritesResponse:
-    _require_client_enabled()
     if platform is not None and platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -496,12 +487,17 @@ def _require_stored_video(
 
 
 def require_customer_viral_access(
-    conn: BusinessConnection, *, actor: AuthenticatedUser, platform: str, video_id: str
+    conn: BusinessConnection,
+    *,
+    actor: AuthenticatedUser,
+    platform: str,
+    video_id: str,
+    public_only: bool = False,
 ) -> ViralVideo:
     """已知 ID 也必须满足列表权限，计费和读取素材不能成为私有内容的旁路。"""
     video = _require_stored_video(conn, platform=platform, video_id=video_id)
     if not is_customer_visible_viral_video(
-        conn, platform=platform, video_id=video_id, user_id=actor.id
+        conn, platform=platform, video_id=video_id, user_id=actor.id, public_only=public_only
     ):
         raise HTTPException(status_code=404, detail={"code": "VIRAL_VIDEO_NOT_FOUND"})
     return video
@@ -513,9 +509,10 @@ def add_viral_video_favorite(
     platform: str,
     video_id: str,
 ) -> ViralFavoriteMutationResponse:
-    _require_client_enabled()
     with db.write() as (conn, actor):
-        require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
+        require_customer_viral_access(
+            conn, actor=actor, platform=platform, video_id=video_id, public_only=True
+        )
         add_viral_favorite(conn, user_id=actor.id, platform=platform, video_id=video_id)
     return ViralFavoriteMutationResponse(isFavorite=True)
 
@@ -528,7 +525,6 @@ def remove_viral_video_favorite(
     platform: str,
     video_id: str,
 ) -> ViralFavoriteMutationResponse:
-    _require_client_enabled()
     if platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -544,9 +540,8 @@ def fetch_viral_video_statistics(
     payload: ViralStatisticsRequest,
     conn: Database,
     actor: AuthenticatedUser,
-    client: ViralSourceClientDep,
 ) -> ViralStatisticsResponse:
-    _require_client_enabled()
+    # 兼容旧客户端只读库内统计；此入口不能构造数据源客户端或触发补采。
     from app.viral_statistics import _load_wechat_videos
 
     videos = _load_wechat_videos(conn, payload.videoIds)
@@ -555,7 +550,11 @@ def fetch_viral_video_statistics(
             _item(video)
             for video in videos
             if is_customer_visible_viral_video(
-                conn, platform=video.platform, video_id=video.video_id, user_id=actor.id
+                conn,
+                platform=video.platform,
+                video_id=video.video_id,
+                user_id=actor.id,
+                public_only=True,
             )
         ]
     )
@@ -606,7 +605,6 @@ def audit_local_viral_cache(
     只读、不计费：回收动作发生在用户机器上，但判据必须由服务端给出——删除与下架
     都不会在客户端的旧分页数据里留下痕迹。
     """
-    _require_client_enabled()
     if payload.platform not in _STORED_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -871,7 +869,7 @@ def get_viral_cover(
         conn = BusinessConnection.postgres(pg_conn)
         video = get_viral_video(conn, platform=platform, video_id=video_id)
         visible = is_customer_visible_viral_video(
-            conn, platform=platform, video_id=video_id, user_id=""
+            conn, platform=platform, video_id=video_id, user_id="", public_only=True
         )
         storage = get_media_storage(conn)
     if (

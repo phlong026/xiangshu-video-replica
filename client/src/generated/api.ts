@@ -14506,7 +14506,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu";
       /** Video Id */
       video_id: string;
       /**
@@ -14575,7 +14575,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu";
       /** Video Id */
       video_id: string;
     };
@@ -14780,7 +14780,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu";
       /** Video Id */
       video_id: string;
       /** Position */
@@ -14804,7 +14804,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu";
       /** Video Ids */
       video_ids: string[];
       /** Expected Video Ids */
@@ -15301,6 +15301,8 @@ export interface components {
       homepageStartsAt?: string | null;
       /** Homepageendsat */
       homepageEndsAt?: string | null;
+      /** Pushedat */
+      pushedAt?: string | null;
       /** Platform */
       platform: string;
       /** Videoid */
@@ -24600,7 +24602,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
-        platform: "douyin" | "wechat_channels";
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
         video_id: string;
       };
       cookie?: never;
@@ -24691,7 +24693,7 @@ export interface operations {
   read_collected_viral_videos_api_control_viral_videos_get: {
     parameters: {
       query?: {
-        platform?: ("douyin" | "wechat_channels") | null;
+        platform?: ("douyin" | "wechat_channels" | "xiaohongshu") | null;
         status?: ("ready" | "pending" | "failed" | "featured") | null;
         content_state?:
           | (
@@ -24962,7 +24964,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        platform: "douyin" | "wechat_channels";
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
         video_id: string;
       };
       cookie?: never;
@@ -24996,7 +24998,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
-        platform: "douyin" | "wechat_channels";
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
         video_id: string;
       };
       cookie?: never;
@@ -25028,7 +25030,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
-        platform: "douyin" | "wechat_channels";
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
         video_id: string;
       };
       cookie?: never;
@@ -25062,7 +25064,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
-        platform: "douyin" | "wechat_channels";
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
         video_id: string;
       };
       cookie?: never;
@@ -25133,7 +25135,7 @@ export interface operations {
   read_viral_homepage_api_control_viral_homepage_get: {
     parameters: {
       query?: {
-        platform?: "douyin" | "wechat_channels";
+        platform?: "douyin" | "wechat_channels" | "xiaohongshu";
       };
       header?: never;
       path?: never;
@@ -25203,7 +25205,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
-        platform: "douyin" | "wechat_channels";
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
         video_id: string;
       };
       cookie?: never;
@@ -25261,7 +25263,7 @@ export interface operations {
   read_viral_content_overview_api_control_viral_content_overview_get: {
     parameters: {
       query?: {
-        platform?: ("douyin" | "wechat_channels") | null;
+        platform?: ("douyin" | "wechat_channels" | "xiaohongshu") | null;
       };
       header?: never;
       path?: never;
@@ -25383,7 +25385,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
-        platform: "douyin" | "wechat_channels";
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
         video_id: string;
       };
       cookie?: never;

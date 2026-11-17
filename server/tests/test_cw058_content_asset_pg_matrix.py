@@ -4050,8 +4050,10 @@ def test_publish_freezes_hash_and_enforces_published_view_uniqueness_on_pg(
 
 
 def _publish_test_media(bus: BusinessConnection) -> None:
-    """Fixtures used by pagination tests represent a completed collection."""
-    bus.execute("UPDATE viral_videos SET collection_published=1, cover_key='cover.jpg'")
+    """分页夹具代表运营已确认推送的归档；采集本身不授予公共展示权限。"""
+    bus.execute(
+        "UPDATE viral_videos SET collection_published=1, pushed_at=now(), cover_key='cover.jpg'"
+    )
     bus.execute("""INSERT INTO viral_media_preparations
         (id,platform,video_id,media_kind,status,storage_uri)
         SELECT platform || video_id,platform,video_id,'video','SUCCEEDED','fake://tests/media.mp4'
@@ -4170,6 +4172,12 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
     assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
     assert calls.count("good") == 1
     assert streams.count("https://cdn.example/good.mp4") == 1
+    # 恢复采集只完成归档，不能把新采集内容自动恢复到客户目录。
+    assert list_viral_video_page(bus, platform="douyin", sort="hot", limit=20).total == 0
+    from app.viral_push import mark_viral_push_published
+
+    for video_id in ("bad", "good"):
+        assert mark_viral_push_published(bus, platform="douyin", video_id=video_id)
     assert {
         v.video_id
         for v in list_viral_video_page(bus, platform="douyin", sort="hot", limit=20).items
@@ -4366,6 +4374,7 @@ def test_viral_favorites_idempotent_isolated_and_paginated_on_pg(
         bus,
         [viral_video("douyin", f"fv-{index:02d}") for index in range(60)],
     )
+    _publish_test_media(bus)
     assert (
         add_viral_favorite(bus, user_id="employee_1", platform="douyin", video_id="fv-00") is True
     )
@@ -4557,7 +4566,15 @@ def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
     page = list_viral_video_page(
         BusinessConnection.postgres(pg), platform="douyin", sort="hot", limit=20
     )
-    assert page.total == 2
+    # 抓取归档不再自动获得公共展示权；必须由运营明确推送。
+    assert page.total == 0
+    from app.viral_push import mark_viral_push_published
+
+    conn = BusinessConnection.postgres(pg)
+    for index in range(2):
+        assert mark_viral_push_published(conn, platform="douyin", video_id=f"worker-{index}")
+    assert list_viral_video_page(conn, platform="douyin", sort="hot", limit=20).total == 2
+    pg.commit()
 
     # 回源已落库：fetch_state 新鲜，后续请求不再新增上游调用。
     assert fetch_state_is_fresh(

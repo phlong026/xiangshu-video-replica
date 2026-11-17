@@ -31,8 +31,6 @@ from app.db_portable import BusinessConnection
 def test_nonfeatured_page_rejects_featured_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import viral_store
 
-    monkeypatch.setattr(viral_store, "_collection_window_end", lambda *_args: 0)
-    monkeypatch.setattr(viral_store, "viral_fetched_at", lambda *_args, **_kwargs: "v1")
     payload = {"v": 3, "p": "douyin", "s": "hot", "d": "v1", "k": [0, 10, 1, "video"]}
     cursor = urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
 

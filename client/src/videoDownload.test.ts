@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   archiveGenerationTask,
   downloadGenerationTaskResult,
+  downloadVideoToFile,
   isResultUrlExpired,
   openVideoDownloadFolder,
   VideoDownloadUnconfirmedError,
@@ -338,6 +339,86 @@ describe("desktop video download feedback", () => {
     expect(native.invoke).not.toHaveBeenCalled();
     expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledOnce();
   });
+
+  it("Web 通用下载验证签名地址的 MP4 后用 blob 链接启动下载，不调用桌面保存桥", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    native.isTauri.mockReturnValue(false);
+    const blob = new Blob([mp4HeaderFixture], { type: "video/mp4" });
+    fetchMock
+      .mockReset()
+      .mockResolvedValue({ ok: true, blob: async () => blob });
+    const getUrl = vi.fn(
+      async () => "https://signed.example/archived-viral.mp4",
+    );
+    const links: { href: string; download: string; attached: boolean }[] = [];
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      links.push({
+        href: this.href,
+        download: this.download,
+        attached: this.isConnected,
+      });
+    });
+
+    await expect(
+      downloadVideoToFile(getUrl, "管理员发布.mp4"),
+    ).resolves.toEqual({ status: "started" });
+
+    expect(getUrl).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      "https://signed.example/archived-viral.mp4",
+      {
+        signal: expect.any(AbortSignal),
+        credentials: "omit",
+      },
+    );
+    expect(URL.createObjectURL).toHaveBeenCalledWith(blob);
+    expect(links).toEqual([
+      {
+        href: "blob:http://tauri.localhost/video-1",
+        download: "管理员发布.mp4",
+        attached: true,
+      },
+    ]);
+    expect(document.querySelector('a[download="管理员发布.mp4"]')).toBeNull();
+    expect(native.invoke).not.toHaveBeenCalled();
+    expect(native.listen).not.toHaveBeenCalled();
+    expect(revoke).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(revoke).toHaveBeenCalledWith("blob:http://tauri.localhost/video-1");
+  });
+
+  it.each(["错误页", "伪装MP4", "签名失效"])(
+    "Web 下载拒绝%s且不创建下载或调用桌面桥",
+    async (failure) => {
+      native.isTauri.mockReturnValue(false);
+      fetchMock.mockReset().mockResolvedValue(
+        failure === "签名失效"
+          ? { ok: false, status: 403 }
+          : {
+              ok: true,
+              blob: async () =>
+                new Blob(["<html>文件暂不可用</html>"], {
+                  type: failure === "错误页" ? "text/html" : "video/mp4",
+                }),
+            },
+      );
+
+      await expect(
+        downloadVideoToFile(
+          async () => "https://signed.example/unusable.mp4",
+          "video.mp4",
+        ),
+      ).rejects.toThrow();
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(URL.createObjectURL).not.toHaveBeenCalled();
+      expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+      expect(native.invoke).not.toHaveBeenCalled();
+      expect(native.listen).not.toHaveBeenCalled();
+    },
+  );
 
   it("downloads an authorized inline fixture without fetching a data URL", async () => {
     fetchMock.mockReset().mockResolvedValueOnce({

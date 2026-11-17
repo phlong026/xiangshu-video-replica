@@ -12,6 +12,7 @@ import type {
   Project,
   SimpleLibraryEntry,
   SimpleSceneLook,
+  StudioStats,
   ViralVideoItem,
 } from "../api";
 import * as live from "./live";
@@ -48,7 +49,7 @@ const api = vi.hoisted(() => ({
   listStudioSavedScripts: vi.fn(),
   saveStudioSavedScript: vi.fn(),
   getStudioAnalytics: vi.fn(async () => null),
-  getStudioStats: vi.fn(async () => null),
+  getStudioStats: vi.fn<() => Promise<StudioStats | null>>(async () => null),
   getLatestScriptVersion: vi.fn(),
   listCharacterSceneLooks: vi.fn(),
   listCharacterSceneLooksPage: vi.fn(),
@@ -197,7 +198,56 @@ describe("loadPeopleEntries 并发加载（FIX-16）", () => {
     }
     const result = await loading;
     expect(result.people.map((person) => person.id)).toEqual(["a", "b", "c"]);
+    expect(result.people.map((person) => person.portraitAssetId)).toEqual([
+      "face-a",
+      "face-b",
+      "face-c",
+    ]);
     expect(result.errors).toEqual([]);
+  });
+
+  it("保留实际封面资产以便局部恢复，正脸优先且签名失败也不丢资产号", async () => {
+    vi.resetAllMocks();
+    api.listOralAvatars.mockResolvedValue([]);
+    api.listOralVoices.mockResolvedValue([]);
+    api.getCachedCharacterAssetUrl.mockImplementation(async (id: string) => {
+      if (id === "front") throw new Error("签名暂不可读");
+      return { url: `/signed/${id}` };
+    });
+    const entry = (id: string, views: SimpleLibraryEntry["views"]) =>
+      ({
+        identity_id: id,
+        display_name: id,
+        role: "",
+        views,
+        contact_sheet_asset_id: null,
+        status: "PUBLISHED",
+        scene_look_count: 0,
+      }) as unknown as SimpleLibraryEntry;
+    const result = await loadPeopleEntries(
+      [
+        entry("front-person", [
+          { asset_id: "side", view_type: "LEFT_SIDE" },
+          { asset_id: "front", view_type: "FRONT_FACE" },
+        ]),
+        entry("side-person", [
+          { asset_id: "side-fallback", view_type: "LEFT_SIDE" },
+        ]),
+        entry("no-photo", []),
+      ],
+      null,
+      3,
+    );
+    expect(result.people.map((person) => person.portraitAssetId)).toEqual([
+      "front",
+      "side-fallback",
+      undefined,
+    ]);
+    expect(result.people[0].portrait).toBeUndefined();
+    expect(result.people[1].portrait).toBe("/signed/side-fallback");
+    expect(api.getCachedCharacterAssetUrl.mock.calls.map(([id]) => id)).toEqual(
+      ["front", "side-fallback"],
+    );
   });
 });
 
@@ -765,7 +815,7 @@ describe("真实 Studio 只读适配器", () => {
   });
 
   it.each(["audio", "text"] as const)(
-    "云端草稿恢复保留%s口播模式",
+    "云端草稿恢复将%s口播模式归一为文案驱动",
     async (driverMode) => {
       api.getStudioDraft.mockResolvedValue({
         draft_kind: "copy",
@@ -775,7 +825,7 @@ describe("真实 Studio 只读适配器", () => {
         updated_at: "2026-10-12T00:00:00Z",
       });
       expect((await loadCloudDraft())?.draft).toMatchObject({
-        driverMode,
+        driverMode: "text",
         audioId: "saved-audio",
       });
     },
@@ -1117,16 +1167,31 @@ describe("真实 Studio 只读适配器", () => {
   });
 
   it("启动切片瞬时失败自动重试一次（P0-6）", async () => {
-    let analyticsCalls = 0;
-    // allSettled 依序发起 analytics7 → analytics30；第一次调用瞬时失败。
-    api.getStudioAnalytics.mockImplementation(async () => {
-      analyticsCalls += 1;
-      if (analyticsCalls === 1) throw new Error("瞬时超时");
-      return null;
-    });
-    api.getStudioStats.mockResolvedValue(null);
+    api.getStudioStats
+      .mockRejectedValueOnce(new Error("瞬时超时"))
+      .mockResolvedValue(null);
     const data = await loadStudioData(user);
+    expect(api.getStudioStats).toHaveBeenCalledTimes(2);
     expect(data.errors).toEqual([]);
+  });
+
+  it("启动保留工作台统计，不再请求客户看板的 7/30 天聚合", async () => {
+    const stats = {
+      today_completed: 2,
+      running: 1,
+      queued: 3,
+      needs_attention: 0,
+      total_completed: 8,
+    };
+    api.getStudioStats.mockResolvedValue(stats);
+
+    const data = await loadStudioData(user);
+
+    expect(api.getStudioStats).toHaveBeenCalledOnce();
+    expect(data.stats).toEqual(stats);
+    expect(api.getStudioAnalytics).not.toHaveBeenCalled();
+    expect(data).not.toHaveProperty("analytics7");
+    expect(data).not.toHaveProperty("analytics30");
   });
 
   it("映射项目、单张五视图合成图和真实批次进度", async () => {
@@ -1297,7 +1362,7 @@ describe("真实 Studio 只读适配器", () => {
     });
   });
 
-  it("一个爆款平台失败时保留另一平台并上报错误", async () => {
+  it("一个爆款平台失败时保留其他两平台首页精选并上报错误", async () => {
     api.listViralVideos.mockImplementation((platform: string) => {
       if (platform === "wechat_channels") {
         return Promise.reject(new Error("channels timeout"));
@@ -1309,8 +1374,11 @@ describe("真实 Studio 只读适配器", () => {
         fetchedAt: "2026-09-06T10:00:00Z",
         items: [
           {
-            platform: "douyin",
-            videoId: "douyin-1",
+            platform,
+            videoId: `${platform}-1`,
+            homepageFeatured: true,
+            pushedAt: "2026-11-16T10:00:00Z",
+            availability: "available",
             category: "建房预算",
             title: "预算拆解",
             author: "张工",
@@ -1335,8 +1403,16 @@ describe("真实 Studio 只读适配器", () => {
 
     const data = await loadStudioData(user);
 
-    expect(data.videos).toHaveLength(1);
-    expect(data.videos[0]?.nativeId).toBe("douyin-1");
+    expect(data.videos).toEqual([]);
+    expect(data.homepageVideos?.map((video) => video.nativeId)).toEqual([
+      "douyin-1",
+      "xiaohongshu-1",
+    ]);
+    for (const platform of ["douyin", "wechat_channels", "xiaohongshu"]) {
+      expect(api.listViralVideos).toHaveBeenCalledWith(platform, "hot", {
+        featuredOnly: true,
+      });
+    }
     expect(data.errors).toContain("读取视频号爆款失败：channels timeout");
   });
 
@@ -1347,6 +1423,7 @@ describe("真实 Studio 只读适配器", () => {
 
     expect(data.projects).toEqual([project]);
     expect(data.videos).toEqual([]);
+    expect(data.homepageVideos).toEqual([]);
     expect(api.listViralVideos).not.toHaveBeenCalled();
   });
 
@@ -2497,6 +2574,10 @@ describe("爆款视频封面地址", () => {
   const item = {
     platform: "douyin",
     videoId: "v1",
+    homepageFeatured: true,
+    pushedAt: "2026-11-16T12:00:00Z",
+    availability: "available",
+    isFavorite: true,
     category: "民宿",
     title: "标题",
     author: "作者",
@@ -2567,7 +2648,8 @@ describe("爆款视频封面地址", () => {
     });
   });
 
-  it("合并抖音与视频号精选时保留各自置顶顺序", async () => {
+  it("只请求抖音、视频号与小红书首页精选并保留各自发布与置顶信息", async () => {
+    api.listViralVideos.mockReset();
     api.listViralVideos.mockImplementation(async (platform: string) => ({
       platform,
       sort: "hot",
@@ -2585,13 +2667,92 @@ describe("爆款视频封面地址", () => {
 
     await expect(live.loadViralVideos()).resolves.toMatchObject({
       videos: [
-        { platformKey: "douyin", homepageRank: 2 },
-        { platformKey: "wechat_channels", homepageRank: 1 },
+        {
+          platformKey: "douyin",
+          homepageRank: 2,
+          homepageFeatured: true,
+          pushedAt: item.pushedAt,
+          availability: "available",
+          isFavorite: true,
+        },
+        {
+          platformKey: "wechat_channels",
+          homepageRank: 1,
+          homepageFeatured: true,
+          pushedAt: item.pushedAt,
+          availability: "available",
+          isFavorite: true,
+        },
+        {
+          platformKey: "xiaohongshu",
+          homepageRank: 1,
+          homepageFeatured: true,
+          pushedAt: item.pushedAt,
+          availability: "available",
+          isFavorite: true,
+        },
       ],
       errors: [],
     });
-    expect(api.listViralVideos).toHaveBeenCalledWith("douyin", "hot");
-    expect(api.listViralVideos).toHaveBeenCalledWith("wechat_channels", "hot");
+    expect(api.listViralVideos).toHaveBeenCalledTimes(3);
+    for (const platform of ["douyin", "wechat_channels", "xiaohongshu"]) {
+      expect(api.listViralVideos).toHaveBeenCalledWith(platform, "hot", {
+        featuredOnly: true,
+      });
+    }
+  });
+  it("各平台独立记录实际收到响应的时刻，慢平台不重置早返回平台的排期时钟", async () => {
+    const startedAt = Date.parse("2026-11-17T12:00:00Z");
+    vi.useFakeTimers({ now: startedAt, toFake: ["Date"] });
+    try {
+      const replies = new Map<string, (value: unknown) => void>();
+      api.listViralVideos.mockReset().mockImplementation(
+        (platform: string) =>
+          new Promise((resolve) => {
+            replies.set(platform, resolve);
+          }),
+      );
+      const loading = live.loadViralVideos();
+      for (const [platform, elapsed] of [
+        ["douyin", 0],
+        ["wechat_channels", 3_000],
+        ["xiaohongshu", 5_000],
+      ] as const) {
+        vi.setSystemTime(startedAt + elapsed);
+        replies.get(platform)?.({
+          platform,
+          items: [],
+          serverTime: new Date(startedAt - 3_600_000 + elapsed).toISOString(),
+          nextChangeAt: new Date(
+            startedAt - 3_600_000 + elapsed + 2_000,
+          ).toISOString(),
+        });
+        await Promise.resolve();
+      }
+      const result = await loading;
+      expect(result.timing).toEqual([
+        {
+          platformKey: "douyin",
+          receivedAt: startedAt,
+          serverTime: "2026-11-17T11:00:00.000Z",
+          nextChangeAt: "2026-11-17T11:00:02.000Z",
+        },
+        {
+          platformKey: "wechat_channels",
+          receivedAt: startedAt + 3_000,
+          serverTime: "2026-11-17T11:00:03.000Z",
+          nextChangeAt: "2026-11-17T11:00:05.000Z",
+        },
+        {
+          platformKey: "xiaohongshu",
+          receivedAt: startedAt + 5_000,
+          serverTime: "2026-11-17T11:00:05.000Z",
+          nextChangeAt: "2026-11-17T11:00:07.000Z",
+        },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

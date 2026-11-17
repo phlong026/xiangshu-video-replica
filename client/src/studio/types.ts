@@ -4,7 +4,6 @@ import type {
   OralVoiceLanguage,
   Project,
   SavedPromptItem,
-  StudioAnalytics,
 } from "../api";
 
 export type StudioPage =
@@ -18,7 +17,6 @@ export type StudioPage =
   | "video"
   | "reference"
   | "oral"
-  | "oral-audio"
   | "tasks"
   | "task-detail"
   | "people"
@@ -28,7 +26,6 @@ export type StudioPage =
   | "person-voices"
   | "materials"
   | "publishing"
-  | "analytics"
   | "settings"
   | "profile";
 export type AssetKind = "image" | "video" | "audio";
@@ -114,6 +111,8 @@ export type StudioPerson = {
   name: string;
   role: string;
   portrait?: string;
+  /** 封面加载失败时只为该视角重新读取签名，不重载整个人物库。 */
+  portraitAssetId?: string;
   version: number;
   scope: string;
   audience: string;
@@ -134,6 +133,11 @@ export type StudioVideo = {
   homepageFeatured?: boolean;
   homepageStartsAt?: string | null;
   homepageEndsAt?: string | null;
+  /** 已推送到客户前端的发布标记（管理员上传/手工推送后非空）。 */
+  pushedAt?: string | null;
+  availability?: "available" | "hidden" | "unavailable";
+  /** 当前账号的收藏状态；旧响应和审核样例可缺省。 */
+  isFavorite?: boolean;
   /** 首页精选置顶顺序；数值越小越靠前，空值表示未置顶。 */
   homepageRank?: number | null;
   id: string;
@@ -168,6 +172,13 @@ export type StudioVideo = {
   /** 爆款源视频时长（毫秒）：详情页按时长分流复刻入口（≤15s 才可复刻）。 */
   durationMs?: number;
   playUrl?: string | null;
+};
+export type StudioViralTiming = {
+  platformKey: NonNullable<StudioVideo["platformKey"]>;
+  serverTime?: string | null;
+  nextChangeAt?: string | null;
+  /** 该平台响应抵达客户端的时间（毫秒）；分别记录，避免聚合等待延后排期。 */
+  receivedAt: number;
 };
 export type StudioTask = {
   draftSnapshot?: StudioDraft;
@@ -231,10 +242,6 @@ export type StudioData = {
   loading: boolean;
   /** 平台侧真实统计（/api/studio/stats）；加载失败或审核模式为 null。 */
   stats: StudioStats | null;
-  /** 平台侧真实成片聚合（/api/studio/analytics，C6 数据看板），7/30 天双窗口；
-   * 加载失败为 null，看板页回退"尚未就绪"空态。 */
-  analytics7: StudioAnalytics | null;
-  analytics30: StudioAnalytics | null;
   pagination?: {
     people?: { nextCursor: string | null; total: number };
     scenes?: Record<string, { loaded: number; total: number }>;
@@ -258,7 +265,7 @@ export type StudioScript = {
   updatedAt?: string;
 };
 export type StudioDraft = {
-  /** 音频口播与文字口播在草稿恢复时仍保持同一驱动方式。 */
+  /** 兼容历史音频任务快照；进入创作工作区时统一使用文案驱动。 */
   driverMode?: "text" | "audio";
   /** 独立视频生成批次的用户可见名称。 */
   videoName?: string;

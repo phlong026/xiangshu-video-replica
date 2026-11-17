@@ -696,6 +696,22 @@ html:has(.studio-shell) {
   color: #e9a82d;
   font-weight: 600;
 }
+.studio-home-recommendations {
+  margin: 0 0 16px;
+  min-width: 0;
+}
+.studio-home-recommendations-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.studio-home-recommendations-heading h2 {
+  margin: 0;
+  font-size: var(--font-subtitle);
+  font-weight: 500;
+}
 .studio-home-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.74fr) minmax(360px, 1fr);
@@ -1536,6 +1552,25 @@ html:has(.studio-shell) {
   background: #11140f;
   color: #eef1e8;
   padding: 10px 12px;
+}
+/* 数字人口播确认弹窗：作品名就地可改，避免为一个字段多占一行。 */
+.studio-details dd > .studio-generation-title {
+  width: min(340px, 48vw);
+  min-width: 180px;
+  border: 1px solid #3b4431;
+  border-radius: 8px;
+  background: #11140f;
+  color: #eef1e8;
+  padding: 8px 11px;
+  text-align: right;
+  font: inherit;
+}
+.studio-details dd > .studio-generation-title:hover {
+  border-color: #55624a;
+}
+.studio-details dd > .studio-generation-title:focus {
+  border-color: #e9a82d;
+  outline: none;
 }
 .studio-picker-grid--reference {
   grid-template-columns: 1fr;

@@ -284,14 +284,19 @@ jobs:
       - name: Audit JavaScript dependencies
         if: needs.changes.outputs.frontend == 'true'
         shell: bash
+        env:
+          # 上游无补丁版本公告白名单（构建期工具不随产物发布；上游发布补丁后
+          # 立即移除并锁新版本）：
+          # - GHSA-fc5q-39xc-vjpf picomatch ReDoS（Patched: None，2026-11-18 记；
+          #   vite/vitest/fdir/tinyglobby 传递链连带，全部是 client 构建测试工具）
+          NPM_AUDIT_WAIVED: GHSA-fc5q-39xc-vjpf
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
             set +e
-            output="$(timeout 120s npm audit --audit-level=high 2>&1)"
+            output="$(timeout 120s npm audit --audit-level=high --json 2>&1)"
             status=$?
             set -e
-            printf '%s\n' "$output"
 
             if [[ "$status" -eq 0 ]]; then
               exit 0
@@ -303,8 +308,26 @@ jobs:
               continue
             fi
 
-            exit "$status"
+            break
           done
+
+          # 明文输出给人看。
+          printf '%s\n' "$output"
+          [[ "$status" -eq 124 ]] && exit 124
+
+          # 无补丁的已豁免公告不拦门；其余 high/critical 仍然拦截。
+          remaining="$(printf '%s' "$output" | python3 scripts/ci/npm_audit_filter.py "$NPM_AUDIT_WAIVED")"
+
+          if [[ "$remaining" == "__ONLY_WAIVED__" ]]; then
+            echo "npm audit: 仅剩已豁免的无补丁公告（$NPM_AUDIT_WAIVED），放行并提示。" >&2
+            exit 0
+          fi
+          if [[ -z "$remaining" || "$remaining" == "__AUDIT_JSON_PARSE_FAIL__" ]]; then
+            # JSON 解析失败或没有任何可识别公告：保守起见维持原判失败。
+            exit 1
+          fi
+          echo "npm audit: 存在未豁免的 high/critical 公告：$remaining" >&2
+          exit 1
       - name: Stop PostgreSQL fixture
         if: always()
         # Keep a persistent self-hosted runner clean between runs (idempotent on

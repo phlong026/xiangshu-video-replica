@@ -4,7 +4,7 @@ from typing import Literal
 from uuid import uuid4
 
 from app.db_portable import BusinessConnection
-from app.viral_content_state import ready_sql
+from app.viral_content_state import customer_visible_sql, ready_sql
 from app.viral_homepage import live_homepage_sql
 
 
@@ -23,7 +23,7 @@ def record_content_source(
         "viral_content_sources(batch_id,source_kind,platform,video_id,keyword,prepared_at,h"
         "omepage_at,is_new) "
         f"SELECT %s,%s,v.platform,v.video_id,%s,CASE WHEN {ready_sql()} THEN now() END, "
-        f"CASE WHEN {ready_sql()} AND {live_homepage_sql('v')} THEN now() END,%s "
+        f"CASE WHEN {customer_visible_sql()} AND {live_homepage_sql('v')} THEN now() END,%s "
         "FROM viral_videos v WHERE v.platform=%s AND v.video_id=%s AND v.deleted_at IS NULL "
         "ON CONFLICT DO NOTHING",
         (batch_id, source_kind, keyword, is_new, platform, video_id),
@@ -50,7 +50,7 @@ def record_content_stage(
             "AND EXISTS (SELECT 1 FROM viral_videos v "
             "WHERE v.platform=viral_content_sources.platform "
             f"AND v.video_id=viral_content_sources.video_id AND {live_homepage_sql('v')} "
-            f"AND {ready_sql()})"
+            f"AND {customer_visible_sql()})"
             if stage == "homepage"
             else ""
         ),
@@ -90,8 +90,6 @@ def observe_due_homepages(conn: BusinessConnection) -> int:
         "UPDATE viral_content_sources s SET homepage_at=now() FROM viral_videos v "
         "WHERE s.platform=v.platform AND s.video_id=v.video_id AND s.homepage_at IS NULL "
         "AND s.collected_at<=now() AND v.deleted_at IS NULL "
-        f"AND {ready_sql()} AND {live_homepage_sql('v')} "
-        "AND NOT EXISTS (SELECT 1 FROM viral_video_visibility vis "
-        "WHERE vis.platform=v.platform AND vis.video_id=v.video_id AND vis.status!='AVAILABLE')"
+        f"AND {customer_visible_sql()} AND {live_homepage_sql('v')} "
     )
     return result.rowcount

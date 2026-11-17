@@ -45,14 +45,31 @@
    多为 9:16，contain 会在 3:4 容器里留黑边，网格观感参差。正文区行数与统计
    行高度钉死，三者缺一卡片高度都会随人物数据漂移。 */
 .person-card__portrait {
+  position: relative;
   width: 100%;
   aspect-ratio: 3 / 4;
   background: #1d1d1b;
 }
-.person-card__portrait .studio-media,
-.person-card__portrait .studio-media img {
+.person-card__portrait-status {
+  position: absolute;
+  z-index: 2;
+  inset: auto 0 0;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: rgb(16 17 17 / 90%);
+  color: #b7baaf;
+  font-size: var(--font-label);
+}
+.person-card__portrait .studio-media {
   width: 100%;
   height: 100%;
+}
+/* 只覆盖人物卡前景，优先于公共预览的 fit 规则；五视图与视频仍完整显示。 */
+.person-card__portrait
+  .person-card__portrait-media.video-preview.video-preview--fit
+  > img.video-preview__foreground {
   object-fit: cover;
   object-position: center top;
 }

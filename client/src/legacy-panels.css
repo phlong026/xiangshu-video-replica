@@ -3007,8 +3007,16 @@
 .character-scene-progress p {
   margin: 6px 0;
 }
-.character-scene-progress small {
-  color: #b5b19f;
+.character-scene-history {
+  color: #999b95;
+  font-size: var(--font-label);
+  line-height: 1.6;
+}
+.character-scene-history summary {
+  cursor: pointer;
+}
+.character-scene-history p {
+  margin: 8px 0 0;
 }
 .character-scene-progress__indicator {
   flex: 0 0 18px;

@@ -5,7 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as api from "./api";
 import { CharacterScenePanel } from "./CharacterScenePanel";
 
@@ -54,6 +54,22 @@ beforeEach(() => {
   }));
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+function fillScene() {
+  fireEvent.change(screen.getByLabelText("场景名称"), {
+    target: { value: "办公室" },
+  });
+  fireEvent.change(screen.getByLabelText("场景描述"), {
+    target: { value: "日间办公室" },
+  });
+  fireEvent.change(screen.getByLabelText("服装描述"), {
+    target: { value: "西装" },
+  });
+}
+
 it("返回人物后恢复后台任务，完成后刷新并按一套展示", async () => {
   vi.mocked(api.getLatestSceneLookTask).mockResolvedValue(task("RUNNING"));
   const finished = deferred<api.CharacterSheetTask>();
@@ -71,7 +87,7 @@ it("返回人物后恢复后台任务，完成后刷新并按一套展示", asyn
     await screen.findByRole("status", { name: "场景造型生成进度" }),
   ).toHaveTextContent("正在生成五视图");
   fireEvent.click(screen.getByRole("button", { name: "新增场景造型" }));
-  expect(screen.getByRole("button", { name: /正在生成，预计/ })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "正在生成…" })).toBeDisabled();
   await act(async () => finished.resolve(task("SUCCEEDED")));
   expect(
     await screen.findByRole("button", { name: "查看办公室职场五视图" }),
@@ -131,7 +147,7 @@ it("未知提交态禁止重提，只读用户没有生成入口", async () => {
     />,
   );
   expect(await screen.findByText(/提交结果待核对/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "生成场景五视图" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "正在核对任务…" })).toBeDisabled();
   mounted.unmount();
   render(
     <CharacterScenePanel
@@ -145,6 +161,8 @@ it("未知提交态禁止重提，只读用户没有生成入口", async () => {
     expect(api.getLatestSceneLookTask).toHaveBeenCalledTimes(2),
   );
   expect(screen.queryByLabelText("场景名称")).not.toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent("提交结果待核对");
+  expect(screen.queryByText("还没有场景形象照")).not.toBeInTheDocument();
 });
 
 it("切换人物后忽略旧人物迟到的生成结果", async () => {
@@ -217,4 +235,197 @@ it("提交回执丢失后先核对后台任务，不直接重复生成", async (
     await screen.findByRole("status", { name: "场景造型生成进度" }),
   ).toHaveTextContent("正在生成五视图");
   expect(api.createCharacterSceneLook).toHaveBeenCalledTimes(1);
+});
+
+it.each([false, true])(
+  "回执丢失后刷新查到的本次失败保持当前警示，不折成历史（有旧任务=%s）",
+  async (hasPreviousTask) => {
+    vi.mocked(api.getLatestSceneLookTask)
+      .mockResolvedValueOnce(
+        hasPreviousTask
+          ? {
+              ...task("FAILED"),
+              id: "historical-task",
+              error_message: "上次任务失败。 错误编号：B1C2D3E4",
+            }
+          : null,
+      )
+      .mockResolvedValueOnce({
+        ...task("FAILED"),
+        id: "new-submission-task",
+        error_message: "本次生成未完成。 错误编号：A1B2C3D4",
+      });
+    vi.mocked(api.createCharacterSceneLook).mockRejectedValue(
+      new api.CharacterSheetTaskError("提交回执丢失。", null, "UNKNOWN"),
+    );
+    render(
+      <CharacterScenePanel
+        identityId="p1"
+        displayName="人物"
+        canManage
+        createRequest={1}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "生成场景五视图" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fillScene();
+    fireEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "请先刷新场景核对提交状态",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "刷新场景" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "本次生成未完成。 错误编号：A1B2C3D4",
+      ),
+    );
+    expect(screen.queryByText("上次场景生成未完成")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "生成场景五视图" }),
+    ).toBeEnabled();
+    expect(api.createCharacterSceneLook).toHaveBeenCalledTimes(1);
+  },
+);
+
+it("历史失败单独标注并保留诊断号，不冒充新表单错误或自动提交", async () => {
+  vi.mocked(api.getLatestSceneLookTask).mockResolvedValue({
+    ...task("FAILED"),
+    error_message: "生成结果未按时返回，额度已释放。 错误编号：A1B2C3D4",
+  });
+  render(
+    <CharacterScenePanel
+      identityId="p1"
+      displayName="人物"
+      canManage
+      createRequest={1}
+    />,
+  );
+  expect(await screen.findByText("上次场景生成未完成")).toBeInTheDocument();
+  expect(
+    screen.getByText(/错误编号：A1B2C3D4/).closest("details"),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "生成场景五视图" })).toBeEnabled();
+  expect(api.createCharacterSceneLook).not.toHaveBeenCalled();
+});
+
+it("同一事件批次的重复提交只发起一次生成", async () => {
+  const finished = deferred<api.SimpleSceneLook>();
+  vi.mocked(api.createCharacterSceneLook).mockReturnValue(finished.promise);
+  render(
+    <CharacterScenePanel
+      identityId="p1"
+      displayName="人物"
+      canManage
+      createRequest={1}
+    />,
+  );
+  const button = screen.getByRole("button", { name: "生成场景五视图" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fillScene();
+  const form = button.closest("form") as HTMLFormElement;
+  act(() => {
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+  });
+  expect(api.createCharacterSceneLook).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "正在提交…" })).toBeDisabled();
+  await act(async () => finished.resolve(look));
+  expect(
+    await screen.findByRole("button", { name: "查看办公室职场五视图" }),
+  ).toBeInTheDocument();
+});
+
+it("当前生成失败保留错误与诊断号，图片加载失败不能覆盖它，明确失败后可重试", async () => {
+  const message = "本次生成失败，请稍后重试。 错误编号：A1B2C3D4";
+  vi.mocked(api.listCharacterSceneLooks).mockResolvedValue([look]);
+  vi.mocked(api.createCharacterSceneLook)
+    .mockImplementationOnce(async (_id, _input, onTask) => {
+      onTask?.({ ...task("FAILED"), error_message: message });
+      throw new api.CharacterSheetTaskError(message, "task1", "FAILED");
+    })
+    .mockResolvedValueOnce(look);
+  render(
+    <CharacterScenePanel
+      identityId="p1"
+      displayName="人物"
+      canManage
+      createRequest={1}
+    />,
+  );
+  const button = screen.getByRole("button", { name: "生成场景五视图" });
+  await waitFor(() => expect(button).toBeEnabled());
+  const image = await screen.findByAltText("人物 办公室职场");
+  fillScene();
+  fireEvent.click(button);
+  expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  fireEvent.error(image);
+  expect(screen.getByText(message)).toBeInTheDocument();
+  expect(screen.getByText(/部分图片暂时无法加载/)).toBeInTheDocument();
+  expect(button).toBeEnabled();
+  fireEvent.click(button);
+  await waitFor(() =>
+    expect(api.createCharacterSceneLook).toHaveBeenCalledTimes(2),
+  );
+  await waitFor(() =>
+    expect(screen.queryByLabelText("场景名称")).not.toBeInTheDocument(),
+  );
+});
+
+it("受理前明确拒绝不会永久锁住表单", async () => {
+  vi.mocked(api.createCharacterSceneLook).mockRejectedValue(
+    new api.CharacterSheetTaskError(
+      "积分不足，请充值后重试。",
+      null,
+      "UNKNOWN",
+      false,
+    ),
+  );
+  render(
+    <CharacterScenePanel
+      identityId="p1"
+      displayName="人物"
+      canManage
+      createRequest={1}
+    />,
+  );
+  const button = screen.getByRole("button", { name: "生成场景五视图" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fillScene();
+  fireEvent.click(button);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "积分不足，请充值后重试。",
+  );
+  expect(button).toBeEnabled();
+  expect(
+    screen.queryByText(/请先刷新场景核对提交状态/),
+  ).not.toBeInTheDocument();
+});
+
+it("待核对任务只读刷新到终态后恢复提交，不重发生成", async () => {
+  vi.useFakeTimers();
+  vi.mocked(api.getLatestSceneLookTask)
+    .mockResolvedValueOnce(task("SUBMISSION_UNCERTAIN"))
+    .mockResolvedValueOnce({
+      ...task("FAILED"),
+      error_message: "生成结果未按时返回。 错误编号：A1B2C3D4",
+    });
+  await act(async () => {
+    render(
+      <CharacterScenePanel
+        identityId="p1"
+        displayName="人物"
+        canManage
+        createRequest={1}
+      />,
+    );
+  });
+  expect(screen.getByRole("button", { name: "正在核对任务…" })).toBeDisabled();
+  expect(screen.getByLabelText("场景名称")).toBeDisabled();
+  await act(async () => vi.advanceTimersByTimeAsync(10_000));
+  expect(api.getLatestSceneLookTask).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("button", { name: "生成场景五视图" })).toBeEnabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("错误编号：A1B2C3D4");
+  expect(screen.queryByText("上次场景生成未完成")).not.toBeInTheDocument();
+  expect(api.createCharacterSceneLook).not.toHaveBeenCalled();
 });

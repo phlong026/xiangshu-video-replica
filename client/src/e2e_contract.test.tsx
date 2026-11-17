@@ -98,28 +98,6 @@ describe("Fake provider E2E contract", () => {
       if (url.endsWith("/api/projects")) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
-      // 数据看板默认落在「数据概览」：analytics 载荷必须是带 daily 数组的
-      // 完整形状，兜底透传批次对象会让 AnalyticsOverview 读 daily.map 崩溃。
-      if (url.includes("/api/studio/analytics")) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            range_days: 7,
-            generated_at: "",
-            today_completed: 0,
-            range_completed: 0,
-            total_completed: 0,
-            today_generation_batches: 0,
-            range_generation_batches: 0,
-            total_generation_batches: 0,
-            range_generation_outputs: 0,
-            range_oral_outputs: 0,
-            daily: [],
-            kind_breakdown: [],
-            recent_works: [],
-          }),
-        });
-      }
       return Promise.resolve({
         ok: true,
         json: async () => completedFakeBatch,
@@ -128,15 +106,12 @@ describe("Fake provider E2E contract", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<StudioWorkspace currentUser={testUser} />);
-    // 2026-10-31：任务中心下沉为数据看板页签，先展示本地任务概览，
-    // 再由真实 LiveWorkspacePanel 打开记录。
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
         "button",
-        { name: /数据看板/ },
+        { name: /任务列表/ },
       ),
     );
-    fireEvent.click(await screen.findByRole("tab", { name: "任务中心" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "历史任务与下载" }),
     );

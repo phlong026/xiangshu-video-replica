@@ -25,8 +25,6 @@ export function CustomerWelcomePage({ onLogin }: { onLogin(): void }) {
         errors: [],
         loading: false,
         stats: null,
-        analytics7: null,
-        analytics30: null,
       },
       requireLogin: onLogin,
       navigate: onLogin,

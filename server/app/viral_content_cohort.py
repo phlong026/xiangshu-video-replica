@@ -34,7 +34,7 @@ def cohort_sql(
         "FROM viral_content_sources s "
         "JOIN viral_videos v ON v.platform=s.platform AND v.video_id=s.video_id "
         "WHERE s.collected_at>=%s AND s.collected_at<%s "
-        "AND s.platform IN ('douyin','wechat_channels')"
+        "AND s.platform IN ('douyin','wechat_channels','xiaohongshu')"
         + platform_filter
         + " GROUP BY s.platform,s.video_id",
         params,

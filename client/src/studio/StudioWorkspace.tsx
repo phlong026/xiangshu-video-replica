@@ -37,8 +37,12 @@ import {
 } from "../rechargePackageDisplay";
 import { SettingsPanel } from "../SettingsPanel";
 import type { WorkspaceShellProps } from "../workspace-shell";
-import { AnalyticsPage } from "./AnalyticsPage";
-import { MaterialsPage, PublishPage } from "./ContentPages";
+import {
+  MaterialsPage,
+  PublishPage,
+  ViralDetailPage,
+  ViralPage,
+} from "./ContentPages";
 import {
   CopyPage,
   customerDurationMax,
@@ -107,6 +111,8 @@ import {
   MIN_REFERENCE_MEDIA_SECONDS,
   mergeStudioAssets,
   navigateStudioState,
+  normalizeOralDraft,
+  normalizeStudioPage,
   patchStudioDraft,
   resolveSubmittedRatio,
   resolveVideoMode,
@@ -229,8 +235,6 @@ const emptyData: StudioData = {
   errors: [],
   loading: true,
   stats: null,
-  analytics7: null,
-  analytics30: null,
 };
 const TASKS_POLL_INTERVAL_MS = 20_000;
 // 飞影 V2 文档：颜色为 #RRGGBB（旧版误用 0xRRGGBB），坐标字段为 st_pos_x/st_pos_y。
@@ -251,7 +255,6 @@ const creationPages = new Set<StudioPage>([
   "video",
   "reference",
   "oral",
-  "oral-audio",
 ]);
 export const navGroups: {
   label?: string;
@@ -266,8 +269,9 @@ export const navGroups: {
   {
     label: "创作",
     pages: [
-      // 爆款数据功能已下线（2026-11-16 定价决策）：入口下架；服务端 /api/viral/*
-      // 同步返回 410。历史项目数据保留，恢复功能 revert 即可。
+      // 爆款视频（2026-11-17 恢复）：只展示管理员后台上传/推送的内容；
+      // 客户列表接口已放开，抓取类接口（source/search/统计补采）仍保持 410。
+      { id: "viral", title: "爆款视频", icon: "fire" },
       { id: "copy", title: "文案工坊", icon: "pen" },
       { id: "replica", title: "视频拆解", icon: "video" },
     ],
@@ -281,10 +285,7 @@ export const navGroups: {
   },
   {
     label: "分发",
-    pages: [
-      { id: "publishing", title: "发布管理", icon: "upload" },
-      { id: "analytics", title: "数据看板", icon: "chart" },
-    ],
+    pages: [{ id: "publishing", title: "发布管理", icon: "upload" }],
   },
 ];
 
@@ -334,15 +335,28 @@ export function StudioWorkspace({
   const review = Boolean(import.meta.env.DEV && reviewData);
   const [state, setState] = useState<StudioState>(() => {
     if (initialState)
-      return initialState.page === "oral-audio"
-        ? {
-            ...initialState,
-            draft: { ...initialState.draft, driverMode: "audio" },
-          }
-        : initialState;
+      return {
+        ...initialState,
+        page: normalizeStudioPage(initialState.page),
+        returnTo: initialState.returnTo
+          ? normalizeStudioPage(initialState.returnTo)
+          : undefined,
+        draft: normalizeOralDraft(initialState.draft),
+      };
     const route = studioRouteFromHash(window.location.hash);
     return { ...createState(route.page), ...route };
   });
+  useEffect(() => {
+    const [path, query = ""] = window.location.hash
+      .replace(/^#(?:studio\/)?/, "")
+      .split("?", 2);
+    if (
+      path === "analytics" ||
+      new URLSearchParams(query).get("returnTo") === "analytics"
+    ) {
+      window.history.replaceState(null, "", studioHashForState(state));
+    }
+  }, [state]);
   const studioPageRef = useRef(state.page);
   studioPageRef.current = state.page;
   const [data, setData] = useState<StudioData>(() =>
@@ -811,20 +825,15 @@ export function StudioWorkspace({
     setPendingRestore(null);
     setRestoreError("");
     lastDraftRevisionRef.current = restore.revision;
-    latestDraftRef.current = restore.draft;
+    const draft = normalizeOralDraft(restore.draft);
+    latestDraftRef.current = draft;
     setState((previous) => {
-      const page: StudioState["page"] =
-        previous.page === "oral" || previous.page === "oral-audio"
-          ? restore.draft.driverMode === "audio"
-            ? "oral-audio"
-            : "oral"
-          : previous.page;
-      const next = { ...previous, page, draft: restore.draft };
+      const next = { ...previous, draft };
       window.history.replaceState(null, "", studioHashForState(next));
       return next;
     });
     notify("已恢复上次云端草稿，请核对内容并确认终稿。");
-    void restoreDraftAssets(restore.draft);
+    void restoreDraftAssets(draft);
   };
 
   // 放弃只删「上次存下的那份」，不动用户这次已经敲进去的内容——
@@ -874,11 +883,7 @@ export function StudioWorkspace({
     setOralPriceFen(null);
     setOralQuoteStatus("loading");
     setOralQuoteError("");
-    void getOralPrice(
-      state.draft.driverMode === "audio"
-        ? { audio_asset_id: state.draft.audioId }
-        : { script_text: state.draft.script.text },
-    )
+    void getOralPrice({ script_text: state.draft.script.text })
       .then((price) => {
         if (active) {
           if (!isCurrentQuote(price)) {
@@ -913,14 +918,7 @@ export function StudioWorkspace({
     return () => {
       active = false;
     };
-  }, [
-    review,
-    generation,
-    oralQuoteRevision,
-    state.draft.script.text,
-    state.draft.driverMode,
-    state.draft.audioId,
-  ]);
+  }, [review, generation, oralQuoteRevision, state.draft.script.text]);
 
   const retryOralQuote = useCallback(
     () => setOralQuoteRevision((value) => value + 1),
@@ -1110,17 +1108,11 @@ export function StudioWorkspace({
       const request = {
         identityId: input.ipId,
         avatarId: input.avatarId,
-        title: draft.script.title || "未命名口播",
-        ...(input.mode === "audio"
-          ? { mode: "AUDIO" as const, audioAssetId: input.audioAssetId }
-          : {
-              mode: "TTS" as const,
-              voiceId: input.voiceId,
-              scriptText: draft.script.text,
-            }),
-        ...(input.mode === "text" && input.subtitles
-          ? { subtitle: ORAL_SUBTITLE_PRESET }
-          : {}),
+        title: draft.script.title.trim() || "未命名口播",
+        mode: "TTS" as const,
+        voiceId: input.voiceId,
+        scriptText: draft.script.text,
+        ...(input.subtitles ? { subtitle: ORAL_SUBTITLE_PRESET } : {}),
       };
       const fingerprint = JSON.stringify(request);
       if (oralSubmissionRef.current?.fingerprint !== fingerprint) {
@@ -1439,14 +1431,15 @@ export function StudioWorkspace({
       ...(sameAccount ? previous : emptyData),
       loading: true,
     }));
-    const coreLoad = loadStudioData(workspaceUser, { includeViral: false });
+    const coreLoad = loadStudioData(workspaceUser, { includeViral: true });
     void coreLoad
       .then((result) => {
         if (active)
-          setData({
+          setData((previous) => ({
             ...result,
+            videos: previous.videos,
             assets: mergeStudioAssets(result.assets, restoredAssetsRef.current),
-          });
+          }));
       })
       .catch((cause: unknown) => {
         if (active)
@@ -1458,7 +1451,6 @@ export function StudioWorkspace({
             ],
           });
       });
-    // 爆款数据功能已下线（2026-11-16 定价决策）：不再请求爆款列表。
     return () => {
       active = false;
     };
@@ -1867,22 +1859,11 @@ export function StudioWorkspace({
         )
           throw new Error("请选择当前人物已就绪的口播分身");
         if (
-          input.mode === "text" &&
           !person.voices.some(
             (voice) => voice.id === input.voiceId && voice.confirmed,
           )
         )
           throw new Error("请选择当前人物已确认的声音");
-        if (
-          input.mode === "audio" &&
-          !data.assets.some(
-            (asset) =>
-              asset.id === input.audioAssetId &&
-              asset.kind === "audio" &&
-              (!asset.allowedUses || asset.allowedUses.includes("oral_audio")),
-          )
-        )
-          throw new Error("完整口播音频已失效，请重新选择");
       }
       if (kind === "视频生成") {
         const mode = resolveVideoMode(
@@ -2267,7 +2248,12 @@ export function StudioWorkspace({
       });
   };
   const patchState = useCallback<StudioContextValue["patchState"]>(
-    (patch) => setState((previous) => ({ ...previous, ...patch })),
+    (patch) =>
+      setState((previous) => ({
+        ...previous,
+        ...patch,
+        draft: normalizeOralDraft(patch.draft ?? previous.draft),
+      })),
     [],
   );
   const context: StudioContextValue = {
@@ -2549,9 +2535,7 @@ export function StudioWorkspace({
               {review
                 ? "当前为效果审核，不会创建真实生成任务，也不会扣费。"
                 : generation === "数字人口播"
-                  ? state.draft.driverMode === "audio"
-                    ? "将使用完整音频创建数字人口播任务，提交前请核对音频与分身。"
-                    : "将创建一条数字人口播任务，提交前请核对文案与声音。"
+                  ? "将创建一条数字人口播任务，提交前请核对文案与声音。"
                   : generation === "视频生成"
                     ? "将按提示词与参数创建视频生成任务，按秒计费，提交前请核对。"
                     : "此独立创作接口尚未接入。现有项目复刻可通过已实现的生成流程报价与提交。"}
@@ -2574,9 +2558,27 @@ export function StudioWorkspace({
               <div>
                 <dt>作品</dt>
                 <dd>
-                  {generation === "视频生成"
-                    ? state.draft.videoName?.trim() || "未命名视频"
-                    : state.draft.script.title || "未命名创作"}
+                  {generation === "视频生成" ? (
+                    state.draft.videoName?.trim() || "未命名视频"
+                  ) : generation === "数字人口播" ? (
+                    <input
+                      aria-label="作品名称"
+                      className="studio-generation-title"
+                      maxLength={120}
+                      onChange={(event) =>
+                        patchDraft({
+                          script: {
+                            ...state.draft.script,
+                            title: event.target.value,
+                          },
+                        })
+                      }
+                      placeholder="未命名口播"
+                      value={state.draft.script.title}
+                    />
+                  ) : (
+                    state.draft.script.title || "未命名创作"
+                  )}
                 </dd>
               </div>
               <div>
@@ -2701,8 +2703,9 @@ function StudioPageContent({
     case "workbench":
       return <WorkbenchPage />;
     case "viral":
+      return <ViralPage />;
     case "viral-detail":
-      return <ViralFeatureRetiredPage />;
+      return <ViralDetailPage />;
     case "copy":
       return <CopyPage />;
     case "replica":
@@ -2715,7 +2718,6 @@ function StudioPageContent({
     case "reference":
       return <VideoPage />;
     case "oral":
-    case "oral-audio":
       return <OralPage />;
     case "tasks":
       return (
@@ -2724,8 +2726,6 @@ function StudioPageContent({
           <TasksPage />
         </>
       );
-    case "analytics":
-      return <AnalyticsPage />;
     case "task-detail":
       return <TaskDetailPage />;
     case "people":
@@ -2751,17 +2751,6 @@ function StudioPageContent({
         <ProfilePage accountSummary={accountSummary} />
       );
   }
-}
-
-function ViralFeatureRetiredPage() {
-  const { navigate } = useStudio();
-  return (
-    <Empty
-      title="爆款数据功能已下线"
-      description="此页面已停止提供服务，请返回工作台继续创作。"
-      action={<Button onClick={() => navigate("workbench")}>返回工作台</Button>}
-    />
-  );
 }
 
 function StudioSettingsPage() {

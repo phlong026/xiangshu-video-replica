@@ -34,7 +34,6 @@ import {
   getLatestScriptVersion,
   getOralTask,
   getScriptFromAudioTask,
-  getStudioAnalytics,
   getStudioDraft,
   getStudioStats,
   listCharacterSceneLooksPage,
@@ -89,6 +88,7 @@ import type {
   StudioStats,
   StudioTask,
   StudioVideo,
+  StudioViralTiming,
   StudioVoice,
 } from "./types";
 import { readAppliedOptimization } from "./usePromptOptimization";
@@ -569,6 +569,9 @@ function basePerson(
     name: entry.display_name,
     role: entry.role,
     portrait,
+    portraitAssetId:
+      entry.views.find((view) => view.view_type === "FRONT_FACE")?.asset_id ??
+      entry.views[0]?.asset_id,
     version: entry.version_number ?? 0,
     scope: entry.service_scope,
     audience: entry.target_audience,
@@ -1301,33 +1304,49 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     homepageRank: item.homepageRank ?? null,
     homepageStartsAt: item.homepageStartsAt ?? null,
     homepageEndsAt: item.homepageEndsAt ?? null,
+    pushedAt: item.pushedAt ?? null,
+    availability: item.availability,
+    isFavorite: item.isFavorite,
     hasPlayableAudio: item.hasPlayableAudio,
     detailCharged: item.detailCharged === true,
     playUrl: item.playUrl,
   };
 }
 
-/** 爆款视频（C4 重启）：两个平台各自聚合；数据源未配置或失败时保持
- * 空态，不打断工作台其余数据的加载（与统计指标同一容错口径）。 */
+/** 首页推荐只读取管理员已推送的精选内容；某个平台失败不阻塞其余工作区。 */
 export async function loadViralVideos(): Promise<{
   videos: StudioVideo[];
   errors: string[];
+  timing?: StudioViralTiming[];
 }> {
-  const results = await Promise.allSettled([
-    listViralVideos("douyin", "hot"),
-    listViralVideos("wechat_channels", "hot"),
-  ]);
-  const labels = ["抖音", "视频号"];
+  const platforms = ["douyin", "wechat_channels", "xiaohongshu"] as const;
+  const results = await Promise.allSettled(
+    platforms.map(async (platformKey) => {
+      const result = await listViralVideos(platformKey, "hot", {
+        featuredOnly: true,
+      });
+      // 独立记录每个平台的响应时刻，后续等待其他平台不能重置其服务端时钟。
+      return { ...result, receivedAt: Date.now() };
+    }),
+  );
+  const labels = ["抖音", "视频号", "小红书"];
   const videos: StudioVideo[] = [];
   const errors: string[] = [];
+  const timing: StudioViralTiming[] = [];
   results.forEach((result, index) => {
     if (result.status === "fulfilled") {
       videos.push(...result.value.items.map(studioVideoFromViral));
+      timing.push({
+        platformKey: platforms[index],
+        serverTime: result.value.serverTime ?? null,
+        nextChangeAt: result.value.nextChangeAt ?? null,
+        receivedAt: result.value.receivedAt,
+      });
     } else {
       errors.push(`读取${labels[index]}爆款失败：${errorText(result.reason)}`);
     }
   });
-  return { videos, errors };
+  return { videos, errors, timing };
 }
 
 /** MATERIAL-PERF-C（P0-6）：失败切片重试一次（400ms 退避）——启动 allSettled
@@ -1351,8 +1370,6 @@ export async function loadStudioData(
     peopleResult,
     tasksResult,
     statsResult,
-    analytics7Result,
-    analytics30Result,
     oralResult,
     viralResult,
     materialsResult,
@@ -1361,8 +1378,6 @@ export async function loadStudioData(
     retryOnce(loadPeople),
     retryOnce(() => loadTasks(currentUser)),
     retryOnce(getStudioStats),
-    retryOnce(() => getStudioAnalytics(7)),
-    retryOnce(() => getStudioAnalytics(30)),
     retryOnce(loadOralTasks),
     options.includeViral === false
       ? Promise.resolve({ videos: [], errors: [] })
@@ -1384,11 +1399,6 @@ export async function loadStudioData(
   ];
   // 统计加载失败不打断工作区：指标卡回退为 "—"，重试路径会再次拉取。
   const stats = statsResult.status === "fulfilled" ? statsResult.value : null;
-  // 数据看板聚合同理：失败回退 null，看板页展示"尚未就绪"空态。
-  const analytics7 =
-    analytics7Result.status === "fulfilled" ? analytics7Result.value : null;
-  const analytics30 =
-    analytics30Result.status === "fulfilled" ? analytics30Result.value : null;
 
   if (projectsResult.status === "rejected") {
     errors.push(`读取项目失败：${errorText(projectsResult.reason)}`);
@@ -1417,7 +1427,7 @@ export async function loadStudioData(
     people: peopleData.people,
     assets: [...projectData.assets, ...peopleData.assets],
     materials,
-    videos: viralResult.status === "fulfilled" ? viralResult.value.videos : [],
+    videos: [],
     homepageVideos:
       viralResult.status === "fulfilled" ? viralResult.value.videos : [],
     tasks,
@@ -1425,8 +1435,6 @@ export async function loadStudioData(
     errors,
     loading: false,
     stats,
-    analytics7,
-    analytics30,
     pagination: {
       people: {
         nextCursor: peopleData.nextCursor,
@@ -1590,7 +1598,7 @@ function draftFromPayload(payload: unknown): StudioDraft | null {
     payload.rewriteWordCount <= 5000
       ? payload.rewriteWordCount
       : undefined;
-  merged.driverMode = payload.driverMode === "audio" ? "audio" : "text";
+  merged.driverMode = "text";
   merged.style = "standard";
   // 分仓迁移：升级前参考生视频的六段式正文就存在 prompt 里，分仓后参考页会看起来
   // 被清空。只搬结构明确的六段式——文/图模式的集成描述不含段名，不会被误搬；

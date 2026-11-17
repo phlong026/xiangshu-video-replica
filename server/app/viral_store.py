@@ -1,12 +1,7 @@
-"""爆款视频参考库持久化（C4 重启）.
+"""爆款视频持久化：客户目录只读取管理员上传或手工推送的归档内容。
 
-搜索结果按 ``(platform, video_id)`` 唯一 upsert 到 ``viral_videos``：
-跨分类/跨排序去重，互动数据随每次回源刷新，未再出现的条目保留在库中
-作为长期参考。列表仅读取已完成云归档并发布的每周批次，
-``viral_fetch_state`` 固定批次的时间窗口；浏览不请求上游。
-
-SQL 一律走 ``BusinessConnection.execute``（PostgreSQL ``%s`` 占位符，
-SQLite 由 ``translate_to_sqlite`` 翻译）。
+历史采集与个人导入仍保存在内容池；公共发布权限统一由 customer_visible_sql 决定。
+列表、计数和游标共享数据库快照，浏览不请求上游。
 """
 
 from __future__ import annotations
@@ -23,8 +18,7 @@ from uuid import uuid4
 
 from app.db_portable import BusinessConnection
 from app.viral_content_state import customer_visible_sql
-from app.viral_homepage import live_homepage_sql
-from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail, is_irrelevant_viral_video
+from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail
 
 VIRAL_FETCH_TTL = timedelta(hours=1)
 # 链接导入素材的分类标记：既是管理端可读的来源标识，也是「不进首页」的判据。
@@ -93,8 +87,7 @@ _AVAILABILITY_VALUES = {"available", "hidden", "unavailable"}
 # featured 排序中「未置顶」的哨兵：int4 上限，等价于 NULLS LAST。
 _VIRAL_RANK_SENTINEL = 2147483647
 
-# Metadata is staged by the collector; only a completed batch is published.
-# Keep this predicate common to page rows and totals.
+# 公共列表、收藏和缓存回收必须共用发布判据。
 _PUBLISHED_SQL = "AND " + customer_visible_sql("viral_videos")
 
 
@@ -108,6 +101,7 @@ class ViralVideoPage:
     total: int
     has_more: bool
     next_cursor: str | None
+    data_version: str | None = None
 
 
 def _row_to_video(row: Any) -> ViralVideo:
@@ -132,6 +126,7 @@ def _row_to_video(row: Any) -> ViralVideo:
         homepage_ends_at=(
             str(mapping["homepage_ends_at"]) if mapping.get("homepage_ends_at") else None
         ),
+        pushed_at=(str(mapping["pushed_at"]) if mapping.get("pushed_at") else None),
         duration_ms=int(mapping.get("duration_ms") or 0),
         likes=mapping.get("likes"),
         comments=mapping.get("comments"),
@@ -267,78 +262,29 @@ def upsert_viral_videos(
     return inserted
 
 
-def _collection_window_end(conn: BusinessConnection, platform: str) -> int:
-    # 采集快照用于分页版本；客户可见期始终由数据库当前时间判断，停采不能延长七天。
-    del platform
-    row = conn.execute("SELECT extract(epoch FROM now())").fetchone()
-    assert row is not None
-    return int(row[0])
-
-
 def list_viral_videos(conn: BusinessConnection, *, platform: str, sort: str) -> list[ViralVideo]:
     order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
-    now = _collection_window_end(conn, platform)
     rows = conn.execute(
-        f"""
-        SELECT * FROM viral_videos
-        WHERE platform = %s AND ((collection_published=1
-        AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL))
-        OR {live_homepage_sql()})
-        {_PUBLISHED_SQL}
-        ORDER BY {order}
-        """,
-        (platform, now - int(timedelta(days=7).total_seconds()), now),
+        f"SELECT * FROM viral_videos WHERE platform=%s {_PUBLISHED_SQL} ORDER BY {order}",
+        (platform,),
     ).fetchall()
-    return [_row_to_video(row) for row in rows if not is_irrelevant_viral_video(str(row["title"]))]
+    return [_row_to_video(row) for row in rows]
 
 
 def reclaimable_viral_video_ids(
     conn: BusinessConnection, *, user_id: str, platform: str, video_ids: list[str]
 ) -> list[str]:
-    """挑出「本地已缓存、服务端却已不再下发」的条目，桌面端据此回收本地缓存。
-
-    判据必须由服务端回答：客户端手里只有翻过的页，拿它当「还在下发」的依据会把
-    仍然有效的缓存误删。这里与首页列表口径完全一致（窗口内 + 已发布 + 归档就绪 +
-    标题可用），再看是否已下架，最后排除收藏——收藏是用户主动保留的内容，不受首页
-    窗口与下架影响，误删等于丢数据。
-    """
+    """按公共发布权限回收目录缓存；收藏不能保留已撤回或从未推送的内容。"""
+    del user_id
     if not video_ids:
         return []
-    window_end = _collection_window_end(conn, platform)
-    placeholders = ", ".join("%s" for _ in video_ids)
     rows = conn.execute(
-        f"""
-        SELECT video_id, title FROM viral_videos
-        WHERE platform = %s AND video_id IN ({placeholders})
-            AND ((collection_published = 1
-                  AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL))
-                 OR {live_homepage_sql()})
-            {_PUBLISHED_SQL}
-        """,
-        (
-            platform,
-            *video_ids,
-            window_end - int(timedelta(days=7).total_seconds()),
-            window_end,
-        ),
+        f"SELECT video_id FROM viral_videos WHERE platform=%s AND video_id=ANY(%s) "
+        f"{_PUBLISHED_SQL}",
+        (platform, video_ids),
     ).fetchall()
-    still_served = {
-        str(row["video_id"]) for row in rows if not is_irrelevant_viral_video(str(row["title"]))
-    }
-    availability = viral_video_availabilities(
-        conn, platform=platform, video_ids=sorted(still_served)
-    )
-    favorites = favorite_viral_video_ids(
-        conn, user_id=user_id, platform=platform, video_ids=video_ids
-    )
-    reclaim: list[str] = []
-    for video_id in video_ids:
-        if video_id in favorites:
-            continue
-        if video_id in still_served and availability.get(video_id, "available") == "available":
-            continue
-        reclaim.append(video_id)
-    return reclaim
+    still_served = {str(row["video_id"]) for row in rows}
+    return [video_id for video_id in video_ids if video_id not in still_served]
 
 
 def _cursor_values(video: ViralVideo, sort: str, *, featured: bool = False) -> tuple[object, ...]:
@@ -460,35 +406,17 @@ def _page_boundary_sql(
     )
 
 
-def _recent_relevant_total(
-    conn: BusinessConnection, *, platform: str, cutoff: int, now: int, featured_only: bool = False
-) -> int:
-    rows = conn.execute(
-        f"""
-        SELECT title FROM viral_videos
-        WHERE platform = %s
-          AND (%s OR (collection_published=1
-              AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL))
-              OR {live_homepage_sql()})
-          AND (NOT %s OR {live_homepage_sql()})
-          {_PUBLISHED_SQL}
-          AND NOT EXISTS (
-              SELECT 1 FROM viral_video_visibility visibility
-              WHERE visibility.platform = viral_videos.platform
-                AND visibility.video_id = viral_videos.video_id
-                AND visibility.status != 'AVAILABLE'
-          )
-        """,
-        (platform, featured_only, cutoff, now, featured_only),
-    ).fetchall()
-    return sum(not is_irrelevant_viral_video(str(row["title"])) for row in rows)
-
-
 def _list_homepage_snapshot(
-    conn: BusinessConnection, *, platform: str, sort: str, limit: int, cursor: str | None
+    conn: BusinessConnection,
+    *,
+    platform: str,
+    sort: str,
+    limit: int,
+    cursor: str | None,
+    featured_only: bool = True,
 ) -> ViralVideoPage:
     # AuthReader已查询过数据库，不能中途切换隔离级别；版本、页和总数由同一SQL快照读取。
-    ranked = sort == "hot"
+    ranked = featured_only and sort == "hot"
     order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
     if ranked:
         order = f"homepage_rank ASC NULLS LAST, {order}"
@@ -501,32 +429,29 @@ def _list_homepage_snapshot(
         _page_boundary_sql(sort, boundary, featured=ranked) if boundary else ("", ())
     )
     result = conn.execute(
-        rf"""WITH homepage_snapshot AS MATERIALIZED (
-            SELECT * FROM viral_videos WHERE platform=%s
-                AND homepage_featured=1 AND deleted_at IS NULL
+        f"""WITH homepage_snapshot AS MATERIALIZED (
+            SELECT * FROM viral_videos WHERE platform=%s AND pushed_at IS NOT NULL
+                AND (NOT %s OR homepage_featured=1) AND deleted_at IS NULL
         ), eligible AS MATERIALIZED (
-            SELECT * FROM homepage_snapshot AS viral_videos WHERE {live_homepage_sql()}
-            {_PUBLISHED_SQL}
-            AND NOT EXISTS (SELECT 1 FROM viral_video_visibility visibility
-                WHERE visibility.platform=viral_videos.platform
-                    AND visibility.video_id=viral_videos.video_id
-                AND visibility.status!='AVAILABLE')
-            AND regexp_replace(title,'<em[^>]*>|</em>','','gi') !~* 'minecraft|我的世界|\mmc\M'
+            SELECT * FROM homepage_snapshot AS viral_videos WHERE TRUE {_PUBLISHED_SQL}
         ), revision AS (
             SELECT md5(COALESCE(jsonb_agg(jsonb_build_array(video_id,homepage_rank,
-                homepage_starts_at,homepage_ends_at,likes,published_at,title,
+                homepage_starts_at,homepage_ends_at,likes,published_at,title,pushed_at,
+                homepage_featured,updated_at,
                 EXISTS(SELECT 1 FROM eligible e WHERE e.video_id=homepage_snapshot.video_id))
-                ORDER BY video_id)::text,'[]')) AS value FROM homepage_snapshot
+                ORDER BY video_id)::text,'[]') || COALESCE((SELECT fetched_at::text
+                    FROM viral_fetch_state WHERE platform=%s AND sort=%s),'')) AS value
+            FROM homepage_snapshot
         ), page AS (
             SELECT * FROM eligible WHERE TRUE {boundary_sql} ORDER BY {order} LIMIT %s
         ) SELECT revision.value AS data_version,(SELECT count(*) FROM eligible) AS total,
             COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY {order})
                 FROM page),'[]'::jsonb) AS rows
         FROM revision""",
-        (platform, *params, limit + 1),
+        (platform, featured_only, platform, sort, *params, limit + 1),
     ).fetchone()
-    version = f"home-snapshot:{result['data_version']}"
-    if expected is not None and expected != version:
+    version = f"{'home' if featured_only else 'public'}-snapshot:{result['data_version']}"
+    if cursor is not None and expected != version:
         raise InvalidViralCursorError("viral video cursor data version changed")
     collected = [_row_to_video(row) for row in result["rows"]]
     items = collected[:limit]
@@ -535,6 +460,7 @@ def _list_homepage_snapshot(
         items=items,
         total=int(result["total"]),
         has_more=has_more,
+        data_version=version,
         next_cursor=_encode_cursor(
             items[-1], platform=platform, sort=sort, data_version=version, featured=ranked
         )
@@ -552,90 +478,14 @@ def list_viral_video_page(
     cursor: str | None = None,
     featured_only: bool = False,
 ) -> ViralVideoPage:
-    """Read one stable keyset page without loading all video rows into memory."""
-    if featured_only:
-        return _list_homepage_snapshot(
-            conn, platform=platform, sort=sort, limit=limit, cursor=cursor
-        )
-    order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
-    ranked_homepage = featured_only and sort == "hot"
-    if ranked_homepage:
-        # 编排顺序优先（NULLS LAST），同序内保持原排序，运营可控首页顺序。
-        order = f"homepage_rank ASC NULLS LAST, {order}"
-    now = _collection_window_end(conn, platform)
-    cutoff = now - int(timedelta(days=7).total_seconds())
-    data_version = viral_fetched_at(conn, platform=platform, sort=sort)
-    boundary = None
-    if cursor:
-        boundary, cursor_version = _decode_cursor(cursor, platform=platform, sort=sort)
-        if cursor_version != data_version:
-            raise InvalidViralCursorError("viral video cursor data version changed")
-        if ranked_homepage and len(boundary) != 4:
-            # 升级前的 v2 旧游标不含置顶序：静默回到第一页，避免分页死循环。
-            boundary = None
-        elif not ranked_homepage and len(boundary) != 3:
-            raise InvalidViralCursorError("viral video cursor belongs to another list")
-    collected: list[ViralVideo] = []
-    exhausted = False
-    chunk_size = max(32, min(100, limit * 2))
-
-    while len(collected) <= limit and not exhausted:
-        boundary_sql, boundary_params = (
-            _page_boundary_sql(sort, boundary, featured=ranked_homepage)
-            if boundary is not None
-            else ("", ())
-        )
-        rows = conn.execute(
-            f"""
-            SELECT * FROM viral_videos
-            WHERE platform = %s
-              AND (%s OR (collection_published=1
-                  AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL))
-              OR {live_homepage_sql()})
-              AND (NOT %s OR {live_homepage_sql()})
-              {_PUBLISHED_SQL}
-              AND NOT EXISTS (
-                  SELECT 1 FROM viral_video_visibility visibility
-                  WHERE visibility.platform = viral_videos.platform
-                    AND visibility.video_id = viral_videos.video_id
-                    AND visibility.status != 'AVAILABLE'
-              )
-            {boundary_sql}
-            ORDER BY {order}
-            LIMIT %s
-            """,
-            (platform, featured_only, cutoff, now, featured_only, *boundary_params, chunk_size),
-        ).fetchall()
-        exhausted = len(rows) < chunk_size
-        if not rows:
-            break
-        for row in rows:
-            video = _row_to_video(row)
-            if not is_irrelevant_viral_video(video.title):
-                collected.append(video)
-                if len(collected) > limit:
-                    break
-        boundary = _cursor_values(_row_to_video(rows[-1]), sort, featured=ranked_homepage)
-
-    items = collected[:limit]
-    has_more = len(collected) > limit
-    return ViralVideoPage(
-        items=items,
-        total=_recent_relevant_total(
-            conn, platform=platform, cutoff=cutoff, now=now, featured_only=featured_only
-        ),
-        has_more=has_more,
-        next_cursor=(
-            _encode_cursor(
-                items[-1],
-                platform=platform,
-                sort=sort,
-                data_version=data_version,
-                featured=ranked_homepage,
-            )
-            if has_more and items
-            else None
-        ),
+    """公共列表与首页用同一快照计算页、总数和版本，上传推送后旧游标失效。"""
+    return _list_homepage_snapshot(
+        conn,
+        platform=platform,
+        sort=sort,
+        limit=limit,
+        cursor=cursor,
+        featured_only=featured_only,
     )
 
 
@@ -653,14 +503,12 @@ def get_viral_video(conn: BusinessConnection, *, platform: str, video_id: str) -
 def viral_publication_clock(
     conn: BusinessConnection, *, platform: str, featured_only: bool
 ) -> tuple[str, str | None]:
-    # 只报告有效公共资产真实可见性改变的时刻，私有导入不会贡献边界。
-    # 秒级发布时间窗口包含端点，因此七天后的下一秒才真正移出列表。
+    # 只报告人工发布资产的排期边界，私有导入与源站发布时间不会改变公共可见性。
     visible_before = customer_visible_sql("v", at="(change.boundary - interval '1 microsecond')")
     visible_after = customer_visible_sql("v", at="change.boundary")
     row = conn.execute(
         "SELECT now(), (SELECT min(change.boundary) FROM viral_videos v "
-        "CROSS JOIN LATERAL (VALUES (v.homepage_starts_at), (v.homepage_ends_at), "
-        "(to_timestamp(v.published_at)), (to_timestamp(v.published_at + 604801))) "
+        "CROSS JOIN LATERAL (VALUES (v.homepage_starts_at), (v.homepage_ends_at)) "
         "change(boundary) WHERE v.platform=%s AND (NOT %s OR v.homepage_featured=1) "
         f"AND change.boundary>now() AND (({visible_before}) != ({visible_after})))",
         (platform, featured_only),
@@ -669,29 +517,43 @@ def viral_publication_clock(
 
 
 def is_customer_visible_viral_video(
-    conn: BusinessConnection, *, platform: str, video_id: str, user_id: str
+    conn: BusinessConnection,
+    *,
+    platform: str,
+    video_id: str,
+    user_id: str,
+    public_only: bool = False,
 ) -> bool:
+    predicate = customer_visible_sql("v") if public_only else customer_accessible_viral_sql("v")
+    params = (platform, video_id) if public_only else (platform, video_id, user_id)
     return (
         conn.execute(
-            "SELECT 1 FROM viral_videos v WHERE v.platform=%s AND v.video_id=%s AND "
-            + customer_accessible_viral_sql("v"),
-            (platform, video_id, user_id),
+            "SELECT 1 FROM viral_videos v WHERE v.platform=%s AND v.video_id=%s AND " + predicate,
+            params,
         ).fetchone()
         is not None
     )
 
 
 def customer_accessible_viral_sql(alias: str = "v") -> str:
-    # 私人导入只授予提交者访问；公开下架/软删除不会因导入记录而重新暴露。
+    # 私有素材凭本人解析回执或既有导入成果继续创作；已推送条目仍严格受公共排期约束。
     return (
-        f"({customer_visible_sql(alias)} OR ({alias}.deleted_at IS NULL AND NOT EXISTS "
+        f"({customer_visible_sql(alias)} OR ({alias}.pushed_at IS NULL "
+        f"AND {alias}.deleted_at IS NULL AND NOT EXISTS "
         "(SELECT 1 FROM viral_video_visibility access_vis "
         f"WHERE access_vis.platform={alias}.platform "
         f"AND access_vis.video_id={alias}.video_id AND access_vis.status!='AVAILABLE') "
-        "AND EXISTS (SELECT 1 FROM viral_import_tasks own_import "
-        "WHERE own_import.owner_user_id=%s "
-        f"AND own_import.platform={alias}.platform AND own_import.video_id={alias}.video_id "
-        "AND own_import.status='SUCCEEDED')))"
+        f"AND ({alias}.homepage_starts_at IS NULL OR {alias}.homepage_starts_at<=now()) "
+        f"AND ({alias}.homepage_ends_at IS NULL OR {alias}.homepage_ends_at>now()) "
+        "AND EXISTS (SELECT 1 FROM ("
+        "SELECT own_import.owner_user_id FROM viral_import_tasks own_import "
+        f"WHERE own_import.platform={alias}.platform AND own_import.video_id={alias}.video_id "
+        "AND own_import.status='SUCCEEDED' UNION ALL "
+        "SELECT own_receipt.owner_user_id FROM viral_link_resolution_receipts own_receipt "
+        "WHERE own_receipt.status='SUCCEEDED' "
+        f"AND own_receipt.response_json::jsonb->'item'->>'platform'={alias}.platform "
+        f"AND own_receipt.response_json::jsonb->'item'->>'videoId'={alias}.video_id"
+        ") private_owners WHERE private_owners.owner_user_id=%s)))"
     )
 
 
@@ -802,7 +664,7 @@ def list_favorite_viral_videos(
         f"""
         SELECT v.* FROM viral_video_favorites f
         JOIN viral_videos v ON v.platform = f.platform AND v.video_id = f.video_id
-        WHERE f.user_id = %s {platform_sql}
+        WHERE f.user_id = %s {platform_sql} AND {customer_visible_sql("v")}
         ORDER BY f.created_at DESC, f.platform, f.video_id
         """,
         params,
@@ -869,9 +731,9 @@ def list_favorite_viral_video_page(
         )
         boundary_sql = """
             AND (
-                f.created_at < %s
-                OR (f.created_at = %s AND f.platform > %s)
-                OR (f.created_at = %s AND f.platform = %s AND f.video_id > %s)
+                f.favorite_created_at < %s
+                OR (f.favorite_created_at = %s AND f.platform > %s)
+                OR (f.favorite_created_at = %s AND f.platform = %s AND f.video_id > %s)
             )
         """
         boundary_params = (
@@ -882,31 +744,29 @@ def list_favorite_viral_video_page(
             boundary_platform,
             video_id,
         )
-    rows = conn.execute(
-        f"""
-        SELECT v.*, f.created_at AS favorite_created_at
-        FROM viral_video_favorites f
-        JOIN viral_videos v ON v.platform = f.platform AND v.video_id = f.video_id
-        WHERE f.user_id = %s AND v.deleted_at IS NULL {platform_sql} {boundary_sql}
-        ORDER BY f.created_at DESC, f.platform, f.video_id
-        LIMIT %s
+    # 页和总数读取同一快照，避免下架恰好发生在两次查询之间造成口径错位。
+    result = conn.execute(
+        f"""WITH eligible AS MATERIALIZED (
+            SELECT v.*, f.created_at AS favorite_created_at
+            FROM viral_video_favorites f
+            JOIN viral_videos v ON v.platform=f.platform AND v.video_id=f.video_id
+            WHERE f.user_id=%s AND {customer_visible_sql("v")} {platform_sql}
+        ), page AS (
+            SELECT * FROM eligible f WHERE TRUE
+            {boundary_sql}
+            ORDER BY f.favorite_created_at DESC,f.platform,f.video_id LIMIT %s
+        ) SELECT (SELECT count(*) FROM eligible) AS total,
+            COALESCE((SELECT jsonb_agg(to_jsonb(page)
+                ORDER BY favorite_created_at DESC,platform,video_id) FROM page),'[]'::jsonb) AS rows
         """,
         (user_id, *platform_params, *boundary_params, limit + 1),
-    ).fetchall()
-    total_row = conn.execute(
-        f"""
-        SELECT COUNT(*) AS count
-        FROM viral_video_favorites f
-        JOIN viral_videos v ON v.platform = f.platform AND v.video_id = f.video_id
-        WHERE f.user_id = %s AND v.deleted_at IS NULL {platform_sql}
-        """,
-        (user_id, *platform_params),
     ).fetchone()
+    rows = result["rows"]
     has_more = len(rows) > limit
     page_rows = rows[:limit]
     return ViralVideoPage(
         items=[_row_to_video(row) for row in page_rows],
-        total=int(total_row["count"]) if total_row is not None else 0,
+        total=int(result["total"]),
         has_more=has_more,
         next_cursor=(
             _encode_favorite_cursor(

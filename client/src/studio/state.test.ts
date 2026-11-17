@@ -150,17 +150,43 @@ describe("V1.4 交接合同", () => {
 
   it("任务详情地址编码对象类型、后端 ID 与返回位置", () => {
     const route = studioRouteFromHash(
-      "#studio/task-detail/oral_task/oral%2F42?returnTo=analytics",
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=tasks",
     );
     expect(route).toMatchObject({
       page: "task-detail",
       selectedTaskKind: "oral_task",
       selectedTaskBackendId: "oral/42",
       selectedTaskId: "oral-oral/42",
-      returnTo: "analytics",
+      returnTo: "tasks",
     });
     expect(studioHashForState({ ...createState(), ...route })).toBe(
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=tasks",
+    );
+  });
+
+  it.each(["#analytics", "#studio/analytics"])(
+    "已取消的数据看板旧路径 %s 回到工作台",
+    (hash) => {
+      const route = studioRouteFromHash(hash);
+      expect(route.page).toBe("workbench");
+      expect(studioHashForState({ ...createState(), ...route })).toBe(
+        "#studio/workbench",
+      );
+    },
+  );
+
+  it("任务详情旧看板返回位置改为工作台，保留任务身份", () => {
+    const route = studioRouteFromHash(
       "#studio/task-detail/oral_task/oral%2F42?returnTo=analytics",
+    );
+    expect(route).toMatchObject({
+      page: "task-detail",
+      selectedTaskKind: "oral_task",
+      selectedTaskBackendId: "oral/42",
+      returnTo: "workbench",
+    });
+    expect(studioHashForState({ ...createState(), ...route })).toBe(
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=workbench",
     );
   });
 
@@ -308,7 +334,7 @@ describe("V1.4 交接合同", () => {
     expect(next.id).not.toBe(original.id);
     expect(next.sourceId).toBe("source-original");
     expect(next.audioId).toBe("speech-original");
-    expect(next.driverMode).toBe("audio");
+    expect(next.driverMode).toBe("text");
     expect(next.voiceId).toBeUndefined();
     expect(next.script.confirmed).toBe(false);
     expect(next.script.text).toBe("旧任务的脚本");
@@ -316,7 +342,7 @@ describe("V1.4 交接合同", () => {
   it("首页默认工作台，旧路由有确定映射", () => {
     expect(routeFromHash("")).toBe("workbench");
     expect(routeFromHash("#projects")).toBe("replica");
-    expect(routeFromHash("#studio/oral-audio")).toBe("oral-audio");
+    expect(routeFromHash("#studio/oral-audio")).toBe("oral");
     expect(routeFromHash("#settings")).toBe("settings");
     expect(routeFromHash("#admin")).toBe("workbench");
   });
@@ -363,67 +389,73 @@ describe("V1.4 交接合同", () => {
     expect(next.originalImageId).toBe("original");
     expect(next.selectedShotId).toBe("shot-2");
   });
-  it("音频驱动不携带文案/TTS/声音/模板字段", () => {
-    const draft = {
-      ...createDraft(),
-      audioId: "speech",
-      avatarId: "avatar",
-      voiceId: "voice",
-      ipId: "ip",
-    };
-    expect(buildOralInput(draft, "audio")).toEqual({
-      draftId: draft.id,
-      mode: "audio",
-      ipId: "ip",
-      avatarId: "avatar",
-      audioAssetId: "speech",
-    });
-  });
-  it("音频入口和返回保留草稿驱动模式，刷新路由不降为文字", () => {
+  it("旧音频入口、返回和刷新统一为文案驱动", () => {
     const initial = createState();
-    const audio = navigateStudioState(initial, "oral-audio");
-    expect(audio.draft.driverMode).toBe("audio");
-    expect(
-      createState(routeFromHash(studioHashForState(audio))).draft.driverMode,
-    ).toBe("audio");
-    const materials = navigateStudioState(audio, "materials");
+    initial.draft.driverMode = "audio";
+    const oral = navigateStudioState(initial, "oral-audio");
+    expect(oral.page).toBe("oral");
+    expect(oral.draft.driverMode).toBe("text");
+    expect(studioHashForState(oral)).toBe("#studio/oral");
+    expect(createState("oral-audio")).toMatchObject({
+      page: "oral",
+      draft: { driverMode: "text" },
+    });
+    const route = studioRouteFromHash(
+      "#studio/person-voices?person=ip&returnTo=oral-audio",
+    );
+    expect(route).toMatchObject({ page: "person-voices", returnTo: "oral" });
+    expect(studioHashForState({ ...oral, ...route })).toBe(
+      "#studio/person-voices?person=ip&returnTo=oral",
+    );
+    const materials = navigateStudioState(oral, "materials");
     expect(navigateStudioState(materials, "oral").draft.driverMode).toBe(
-      "audio",
+      "text",
     );
   });
-  it("音频草稿默认按音频构建，旧文字和声音不进入请求", () => {
+  it("旧音频草稿的修改和项目交接不能恢复音频模式", () => {
+    const legacy = {
+      ...createDraft(),
+      driverMode: "audio" as const,
+      audioId: "saved-audio",
+    };
+    expect(patchStudioDraft(legacy, { driverMode: "audio" }).driverMode).toBe(
+      "text",
+    );
+    expect(withImportedProject(createState(), legacy).draft).toMatchObject({
+      id: legacy.id,
+      driverMode: "text",
+      audioId: "saved-audio",
+    });
+    expect(legacy.driverMode).toBe("audio");
+  });
+  it("旧音频草稿提交时仍须有已确认终稿与声音，音频不进入请求", () => {
     const draft = {
       ...createDraft(),
       driverMode: "audio" as const,
       ipId: "ip",
       avatarId: "avatar",
       audioId: "audio",
-      voiceId: "old-voice",
+      voiceId: "voice",
     };
-    draft.script.text = "旧文字";
-    expect(buildOralInput(draft)).toMatchObject({
-      mode: "audio",
-      audioAssetId: "audio",
-    });
-    expect(buildOralInput(draft)).not.toHaveProperty("voiceId");
-    expect(() => buildOralInput({ ...draft, audioId: undefined })).toThrow(
-      "完整口播音频",
-    );
-  });
-  it("文案模式需要已确认终稿和声音，不提交音频", () => {
-    const draft = createDraft();
-    expect(() => buildOralInput(draft, "text")).toThrow("终稿");
+    draft.script.text = "待确认文案";
+    expect(() => buildOralInput(draft)).toThrow("终稿");
     const ready = {
       ...draft,
-      ipId: "ip",
-      avatarId: "avatar",
-      voiceId: "voice",
-      audioId: "irrelevant",
-      script: { ...draft.script, confirmed: true, text: "我是张工" },
+      script: { ...draft.script, confirmed: true },
     };
-    const input = buildOralInput(ready, "text");
+    expect(() => buildOralInput({ ...ready, voiceId: undefined })).toThrow(
+      "已确认声音",
+    );
+    expect(() =>
+      buildOralInput({ ...ready, script: { ...ready.script, text: "  " } }),
+    ).toThrow("终稿");
+    const input = buildOralInput(ready);
+    expect(input).toMatchObject({
+      mode: "text",
+      voiceId: "voice",
+      scriptVersion: ready.script.version,
+    });
     expect(input).not.toHaveProperty("audioAssetId");
-    expect(input).toHaveProperty("scriptVersion", ready.script.version);
   });
 });
 

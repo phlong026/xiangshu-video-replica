@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ViralVideoItem } from "../api";
 import { createReviewData, createReviewState, reviewUser } from "./fixtures";
 import {
   constrainReferenceVideoPrompt,
@@ -17,7 +18,17 @@ import {
 } from "./referencePrompt";
 import { StudioWorkspace } from "./StudioWorkspace";
 import { createState } from "./state";
-import type { StudioContextValue } from "./types";
+import type { StudioContextValue, StudioData, StudioState } from "./types";
+
+// 恢复爆款列表后会挂载滚动分页观察器，jsdom 需要提供浏览器边界替身。
+vi.stubGlobal(
+  "IntersectionObserver",
+  class {
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  },
+);
 
 const extractionProbe = vi.hoisted(() => ({
   current: null as StudioContextValue | null,
@@ -220,10 +231,10 @@ const api = vi.hoisted(() => ({
   uploadMaterial: vi.fn(),
   // 爆款列表：恢复/路由用例路过 ViralPage 时必须拿到数组，不能是 undefined。
   listViralVideos: vi.fn(async () => ({
-    items: [],
+    items: [] as ViralVideoItem[],
     total: 0,
     hasMore: false,
-    nextCursor: null,
+    nextCursor: null as string | null,
   })),
   getOralPrice: vi.fn(async () => ({
     unit_price_fen: 500,
@@ -663,16 +674,15 @@ describe("V1.4 workspace integration", () => {
     expect(main).toHaveClass("studio-route-workbench");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
 
-    // 2026-10-31：任务中心下沉为数据看板页签，导航项换成「数据看板」。
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
         "button",
-        { name: /数据看板/ },
+        { name: /任务列表/ },
       ),
     );
 
     expect(shell?.className).not.toContain("studio-route-");
-    expect(main).toHaveClass("studio-route-analytics");
+    expect(main).toHaveClass("studio-route-tasks");
     expect(sidebar?.closest("[class*='studio-route-']")).toBeNull();
   });
 
@@ -770,6 +780,12 @@ describe("V1.4 workspace integration", () => {
     live.loadLatestScriptFromUpload.mockResolvedValue(null);
     live.loadProjectDraft.mockReset();
     api.createViralImportTask.mockReset();
+    api.listViralVideos.mockReset().mockResolvedValue({
+      items: [],
+      total: 0,
+      hasMore: false,
+      nextCursor: null,
+    });
     live.loadViralVideos.mockResolvedValue({ videos: [], errors: [] });
     api.customerGetWallet.mockReset();
     api.getWallet.mockReset();
@@ -784,8 +800,6 @@ describe("V1.4 workspace integration", () => {
       errors: [],
       loading: false,
       stats: null,
-      analytics7: null,
-      analytics30: null,
     });
     live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
     api.listMaterials.mockResolvedValue({
@@ -886,10 +900,13 @@ describe("V1.4 workspace integration", () => {
       />,
     );
     const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
-    // 爆款数据功能已下线（2026-11-16 定价决策）：入口下架后导航不再含爆款视频。
-    expect(nav.getAllByRole("button").map((node) => node.textContent)).toEqual(
-      expect.arrayContaining(["文案工坊", "视频拆解"]),
-    );
+    const creationGroup = nav.getByText("创作").parentElement;
+    if (!creationGroup) throw new Error("未找到创作导航分组");
+    expect(
+      within(creationGroup)
+        .getAllByRole("button")
+        .map((node) => node.textContent),
+    ).toEqual(["爆款视频", "文案工坊", "视频拆解"]);
     // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
     expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
     expect(nav.queryByRole("button", { name: "长视频拆解" })).toBeNull();
@@ -907,9 +924,178 @@ describe("V1.4 workspace integration", () => {
   });
 
   it.each(["viral", "viral-detail"] as const)(
-    "旧书签的 %s 路由显示下线说明，且不读取爆款数据",
+    "旧书签的 %s 深链恢复对应爆款页面",
     (page) => {
-      window.history.replaceState(null, "", `/#studio/${page}?video=抖音-1`);
+      const reviewData = createReviewData();
+      window.history.replaceState(
+        null,
+        "",
+        `/#studio/${page}?video=${encodeURIComponent(reviewData.videos[0].id)}`,
+      );
+      render(
+        <StudioWorkspace currentUser={reviewUser} reviewData={reviewData} />,
+      );
+
+      expect(
+        screen.getByRole("heading", {
+          name: page === "viral" ? "爆款视频" : "爆款视频 / 视频详情",
+        }),
+      ).toBeInTheDocument();
+      if (page === "viral-detail") {
+        expect(
+          screen.getByRole("heading", { name: reviewData.videos[0].title }),
+        ).toBeInTheDocument();
+      }
+      expect(screen.queryByText("爆款数据功能已下线")).toBeNull();
+      expect(live.loadStudioData).not.toHaveBeenCalled();
+      expect(api.listViralVideos).not.toHaveBeenCalled();
+    },
+  );
+
+  it("侧栏爆款入口恢复列表，正式工作区启用独立首页精选加载", async () => {
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("workbench")}
+      />,
+    );
+    await waitFor(() =>
+      expect(live.loadStudioData).toHaveBeenCalledWith(reviewUser, {
+        includeViral: true,
+      }),
+    );
+    const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
+    fireEvent.click(nav.getByRole("button", { name: "爆款视频" }));
+
+    expect(window.location.hash).toBe("#studio/viral");
+    expect(
+      screen.getByRole("heading", { name: "爆款视频" }),
+    ).toBeInTheDocument();
+    expect(nav.getByRole("button", { name: "爆款视频" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await waitFor(() =>
+      expect(api.listViralVideos).toHaveBeenCalledWith("douyin", "hot", {
+        limit: 12,
+      }),
+    );
+  });
+
+  it("爆款首屏先于启动数据返回时保留完整目录并从同一游标接续", async () => {
+    const item = (index: number): ViralVideoItem => ({
+      platform: "douyin",
+      videoId: `published-${index}`,
+      title: `完整目录 ${index}`,
+      author: "管理员发布",
+      category: "乡墅",
+      authorAvatar: null,
+      verified: false,
+      coverUrl: null,
+      durationMs: 20_000,
+      likes: index,
+      comments: null,
+      shares: null,
+      collects: null,
+      publishedAt: null,
+      publishedDisplay: null,
+      likeDisplay: null,
+      tags: [],
+      hasPlayableAudio: true,
+      playUrl: null,
+      homepageFeatured: false,
+      pushedAt: "2026-11-16T12:00:00Z",
+      availability: "available",
+    });
+    const firstPage = Array.from({ length: 12 }, (_, index) => item(index + 1));
+    let resolveBootstrap!: (value: StudioData) => void;
+    live.loadStudioData.mockReturnValueOnce(
+      new Promise<StudioData>((resolve) => {
+        resolveBootstrap = resolve;
+      }),
+    );
+    api.listViralVideos
+      .mockResolvedValueOnce({
+        items: firstPage,
+        total: 13,
+        hasMore: true,
+        nextCursor: "catalog-after-12",
+      })
+      .mockResolvedValueOnce({
+        items: [item(13)],
+        total: 13,
+        hasMore: false,
+        nextCursor: null,
+      });
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("viral")}
+      />,
+    );
+    await screen.findByText("完整目录 1");
+    expect(currentExtractionContext().data.videos).toHaveLength(12);
+
+    const featured = { ...createReviewData().videos[0], title: "独立首页种子" };
+    await act(async () => {
+      resolveBootstrap({
+        people: [],
+        assets: [],
+        materials: [],
+        videos: [],
+        homepageVideos: [featured],
+        tasks: [],
+        projects: [],
+        errors: [],
+        loading: false,
+        stats: null,
+      });
+    });
+    expect(currentExtractionContext().data.homepageVideos).toEqual([featured]);
+    expect(currentExtractionContext().data.videos).toHaveLength(12);
+    expect(screen.getByText("完整目录 1")).toBeInTheDocument();
+    expect(screen.queryByText("独立首页种子")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "加载更多视频" }));
+    await screen.findByText("完整目录 13");
+    expect(api.listViralVideos).toHaveBeenNthCalledWith(2, "douyin", "hot", {
+      limit: 12,
+      cursor: "catalog-after-12",
+    });
+    expect(currentExtractionContext().data.videos).toHaveLength(13);
+    for (let index = 1; index <= 13; index += 1)
+      expect(screen.getByText(`完整目录 ${index}`)).toBeInTheDocument();
+  });
+
+  it("工作区搜索提供爆款列表入口且排除详情页和源站视频搜索", () => {
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={createReviewData()}
+        initialState={createReviewState("workbench")}
+      />,
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索工作区" }), {
+      target: { value: "爆款" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    const dialog = within(screen.getByRole("dialog", { name: "搜索工作区" }));
+
+    expect(
+      dialog.getByRole("button", { name: "爆款视频" }),
+    ).toBeInTheDocument();
+    expect(dialog.queryByRole("button", { name: "爆款视频详情" })).toBeNull();
+    expect(dialog.queryByRole("button", { name: "视频" })).toBeNull();
+    fireEvent.click(dialog.getByRole("button", { name: "爆款视频" }));
+    expect(screen.queryByRole("dialog", { name: "搜索工作区" })).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "爆款视频" }),
+    ).toBeInTheDocument();
+  });
+
+  it.each(["#analytics", "#studio/analytics"])(
+    "客户看板旧书签 %s 直接回到工作台并改写地址",
+    (hash) => {
+      window.history.replaceState(null, "", `/${hash}`);
       render(
         <StudioWorkspace
           currentUser={reviewUser}
@@ -918,27 +1104,66 @@ describe("V1.4 workspace integration", () => {
       );
 
       expect(
-        screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+        screen.getByRole("heading", { name: "工作台" }),
       ).toBeInTheDocument();
-      expect(api.listViralVideos).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
       expect(window.location.hash).toBe("#studio/workbench");
+      expect(screen.queryByRole("heading", { name: "数据看板" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "数据看板" })).toBeNull();
     },
   );
 
-  it("旧恢复状态不再渲染爆款页面", () => {
+  it("旧恢复状态中的看板页面和返回位置都改为工作台", () => {
+    const legacyState = {
+      ...createReviewState("workbench"),
+      page: "analytics",
+      returnTo: "analytics",
+    } as unknown as StudioState;
     render(
       <StudioWorkspace
         currentUser={reviewUser}
         reviewData={createReviewData()}
-        initialState={createReviewState("viral-detail")}
+        initialState={legacyState}
       />,
     );
 
+    expect(screen.getByRole("heading", { name: "工作台" })).toBeInTheDocument();
+    expect(currentExtractionContext().state).toMatchObject({
+      page: "workbench",
+      returnTo: "workbench",
+    });
+  });
+
+  it("历史返回位置在浏览器前进后退时回到工作台", async () => {
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={createReviewData()}
+        initialState={createReviewState("tasks")}
+      />,
+    );
+    act(() => {
+      window.history.pushState(null, "", "#studio/analytics");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
     expect(
-      screen.getByRole("heading", { name: "爆款数据功能已下线" }),
+      await screen.findByRole("heading", { name: "工作台" }),
     ).toBeInTheDocument();
-    expect(api.listViralVideos).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe("#studio/workbench");
+
+    act(() => {
+      window.history.pushState(
+        null,
+        "",
+        "#studio/task-detail/generation_batch/task-completed?returnTo=analytics",
+      );
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() =>
+      expect(window.location.hash).toBe(
+        "#studio/task-detail/generation_batch/task-completed?returnTo=workbench",
+      ),
+    );
+    expect(currentExtractionContext().state.returnTo).toBe("workbench");
   });
 
   it("侧边栏恢复任务列表，显示进行中数量并直接进入任务页面", () => {
@@ -956,9 +1181,10 @@ describe("V1.4 workspace integration", () => {
       ["running", "queued"].includes(task.status),
     ).length;
     expect(tasks.querySelector("small")).toHaveTextContent(String(activeCount));
-    expect(nav.getByRole("button", { name: "数据看板" })).not.toHaveAttribute(
-      "aria-current",
-    );
+    expect(nav.queryByRole("button", { name: "数据看板" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "快捷入口：数据看板" }),
+    ).toBeNull();
 
     fireEvent.click(tasks);
     expect(window.location.hash).toBe("#studio/tasks");
@@ -968,13 +1194,11 @@ describe("V1.4 workspace integration", () => {
     expect(tasks).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("tab", { name: "全部" })).toBeInTheDocument();
 
-    fireEvent.click(nav.getByRole("button", { name: "数据看板" }));
-    expect(window.location.hash).toBe("#studio/analytics");
-    expect(nav.getByRole("button", { name: "数据看板" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    expect(tasks).not.toHaveAttribute("aria-current");
+    fireEvent.click(nav.getByRole("button", { name: "工作台" }));
+    expect(window.location.hash).toBe("#studio/workbench");
+    fireEvent.click(screen.getByRole("button", { name: "快捷入口：任务列表" }));
+    expect(window.location.hash).toBe("#studio/tasks");
+    expect(tasks).toHaveAttribute("aria-current", "page");
   });
   it("任务详情与人物子页把对象和返回位置写入可恢复 URL", async () => {
     const reviewData = createReviewData();
@@ -1071,6 +1295,112 @@ describe("V1.4 workspace integration", () => {
     expect(api.getSettings).toHaveBeenCalledTimes(1);
     expect(window.location.hash).toBe("#studio/settings");
   });
+  it.each([
+    { entry: "选择发布成片", hasSelection: false },
+    { entry: "更换发布成片", hasSelection: true },
+    { entry: "去任务中心选择成片", hasSelection: false },
+  ])(
+    "发布页 $entry 通过任务详情交接新成片并更新发布预览",
+    ({ entry, hasSelection }) => {
+      const reviewData = createReviewData();
+      reviewData.assets = [
+        {
+          id: "publish-old-result",
+          name: "原发布成片.mp4",
+          kind: "video",
+          poster: "/studio/old-result.png",
+          group: "成片",
+          source: "任务中心",
+          saved: true,
+        },
+        {
+          id: "publish-new-result",
+          name: "新选择成片.mp4",
+          kind: "video",
+          poster: "/studio/new-result.png",
+          group: "成片",
+          source: "任务中心",
+          saved: true,
+        },
+      ];
+      reviewData.tasks = [
+        {
+          id: "publish-batch-old",
+          backendKind: "generation_batch",
+          backendId: "publish-batch-old",
+          title: "原发布成片",
+          type: "视频生成",
+          status: "completed",
+          submitted: "今天 09:25",
+          resultId: "publish-old-result",
+        },
+        {
+          id: "publish-batch-new",
+          backendKind: "generation_batch",
+          backendId: "publish-batch-new",
+          title: "新选择成片",
+          type: "视频生成",
+          status: "completed",
+          submitted: "今天 09:26",
+          resultId: "publish-new-result",
+        },
+      ];
+      const initialState = createState("publishing");
+      initialState.selectedAssetId = hasSelection
+        ? "publish-old-result"
+        : undefined;
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          reviewData={reviewData}
+          initialState={initialState}
+        />,
+      );
+      const manual = within(
+        screen.getByRole("region", { name: "快手手动发布" }),
+      );
+      expect(
+        manual.getByText(
+          hasSelection ? "已选择：原发布成片.mp4" : "尚未选择成片",
+        ),
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: entry }));
+      expect(window.location.hash).toBe("#studio/tasks");
+      expect(
+        screen.getByRole("heading", { name: "任务列表" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("region", { name: "模拟已有功能工作区" }),
+      ).toBeNull();
+      const selectedTask = within(
+        screen.getByRole("row", { name: /新选择成片/ }),
+      );
+      fireEvent.click(selectedTask.getByRole("button", { name: "查看结果" }));
+      expect(window.location.hash).toBe(
+        "#studio/task-detail/generation_batch/publish-batch-new?returnTo=tasks",
+      );
+      const handoff = screen.getByRole("button", { name: "去发布管理" });
+      expect(handoff).toBeEnabled();
+      fireEvent.click(handoff);
+
+      expect(window.location.hash).toBe("#studio/publishing");
+      expect(currentExtractionContext().state.selectedAssetId).toBe(
+        "publish-new-result",
+      );
+      expect(
+        within(screen.getByRole("region", { name: "快手手动发布" })).getByText(
+          "已选择：新选择成片.mp4",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByAltText("新选择成片.mp4 视频预览"),
+      ).toBeInTheDocument();
+      expect(screen.queryByAltText("原发布成片.mp4 视频预览")).toBeNull();
+      expect(screen.getByLabelText("发布标题")).toHaveValue("新选择成片.mp4");
+    },
+  );
+
   it("普通导航清除旧详情返回位置且每个详情入口写入当前来源", () => {
     const reviewData = createReviewData();
     reviewData.tasks = [
@@ -1095,16 +1425,18 @@ describe("V1.4 workspace integration", () => {
       <StudioWorkspace
         currentUser={reviewUser}
         reviewData={reviewData}
-        initialState={createReviewState("analytics")}
+        initialState={createReviewState("workbench")}
       />,
     );
 
-    fireEvent.click(screen.getAllByRole("button", { name: "查看视频" })[0]);
-    expect(window.location.hash).toContain("returnTo=analytics");
-    // 任务中心下沉后：详情页经导航「数据看板」回到看板，再切「任务中心」页签。
-    fireEvent.click(screen.getByRole("button", { name: "数据看板" }));
-    expect(window.location.hash).toBe("#studio/analytics");
-    fireEvent.click(screen.getByRole("tab", { name: "任务中心" }));
+    fireEvent.click(screen.getAllByRole("button", { name: /已完成/ })[0]);
+    expect(window.location.hash).toContain("returnTo=workbench");
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
+        "button",
+        { name: /任务列表/ },
+      ),
+    );
     expect(window.location.hash).toBe("#studio/tasks");
     fireEvent.click(screen.getAllByRole("button", { name: "查看结果" })[1]);
     expect(window.location.hash).toBe(
@@ -1154,8 +1486,6 @@ describe("V1.4 workspace integration", () => {
       errors: ["人物库暂不可用"],
       loading: false,
       stats: null,
-      analytics7: null,
-      analytics30: null,
     });
     render(<StudioWorkspace currentUser={reviewUser} />);
     await waitFor(() => expect(live.loadStudioData).toHaveBeenCalled());
@@ -1303,8 +1633,6 @@ describe("V1.4 workspace integration", () => {
       errors: [],
       loading: false,
       stats: null,
-      analytics7: null,
-      analytics30: null,
       tasks: [runningTask],
     });
     live.reloadTasks.mockResolvedValue([
@@ -1348,8 +1676,6 @@ describe("V1.4 workspace integration", () => {
       errors: [],
       loading: false,
       stats: null,
-      analytics7: null,
-      analytics30: null,
     };
 
     function restoredDraft() {
@@ -3416,8 +3742,6 @@ describe("视频生成（C2 独立创作）", () => {
     errors: [],
     loading: false,
     stats: null,
-    analytics7: null,
-    analytics30: null,
   };
 
   async function openVideoPage() {
@@ -4237,6 +4561,29 @@ describe("视频生成（C2 独立创作）", () => {
     expect(submit).toBeEnabled();
   });
 
+  it("口播确认弹窗可改作品名并随任务提交", async () => {
+    api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+
+    fireEvent.click(await findEnabledButton("生成口播视频"));
+    expect(await screen.findByText("5.00 元/秒")).toBeInTheDocument();
+    const titleInput = screen.getByRole("textbox", { name: "作品名称" });
+    expect(titleInput).toHaveValue("张工 · 建房预算");
+    fireEvent.change(titleInput, { target: { value: "乡墅口播 · 预算篇" } });
+    fireEvent.click(await findEnabledButton("确认费用并提交"));
+
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
+    expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ title: "乡墅口播 · 预算篇" }),
+    );
+  });
+
   it("口播报价失败时禁止提交并支持重试", async () => {
     api.getOralPrice
       .mockRejectedValueOnce(new Error("口播报价暂不可用"))
@@ -4315,28 +4662,31 @@ describe("视频生成（C2 独立创作）", () => {
     );
   });
 
-  it("音频历史路由和云端恢复均保留驱动方式", async () => {
-    const restored = createReviewState("oral-audio").draft;
+  it("旧音频深链和云端草稿恢复均回到文案口播，不能以音频绕过终稿校验", async () => {
+    window.history.replaceState(null, "", "#studio/oral-audio");
+    const restored = createReviewState("oral").draft;
+    restored.driverMode = "audio";
     restored.voiceId = undefined;
     restored.script.text = "";
     restored.script.confirmed = false;
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
-      // 必须用窗口内的相对时间：硬编码日期会随日历流逝跌出 7 天提示窗口。
       updatedAt: freshUpdatedAt(),
+      revision: 1,
     });
     live.loadStudioData.mockResolvedValue(createReviewData());
-    render(
-      <StudioWorkspace
-        currentUser={reviewUser}
-        initialState={createReviewState("oral")}
-      />,
-    );
+    render(<StudioWorkspace currentUser={reviewUser} />);
+
     fireEvent.click(await screen.findByRole("button", { name: RESTORE }));
     expect(
-      await screen.findByRole("heading", { name: "完整口播音频" }),
+      await screen.findByRole("heading", { name: "口播文案" }),
     ).toBeInTheDocument();
-    expect(window.location.hash).toBe("#studio/oral-audio");
+    expect(window.location.hash).toBe("#studio/oral");
+    expect(currentExtractionContext().state.draft.driverMode).toBe("text");
+    expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
+    act(() => currentExtractionContext().requestGeneration("数字人口播"));
+    expect(screen.getByText("请先在文案工坊确认终稿")).toBeInTheDocument();
+
     await act(async () => {
       window.history.pushState(null, "", "#studio/materials");
       window.dispatchEvent(new PopStateEvent("popstate"));
@@ -4345,43 +4695,50 @@ describe("视频生成（C2 独立创作）", () => {
       window.history.pushState(null, "", "#studio/oral-audio");
       window.dispatchEvent(new PopStateEvent("popstate"));
     });
-    expect(await findEnabledButton("生成口播视频")).toBeEnabled();
-    fireEvent.click(await findEnabledButton("生成口播视频"));
-    await waitFor(() =>
-      expect(api.getOralPrice).toHaveBeenCalledWith({
-        audio_asset_id: "speech",
-      }),
-    );
+    expect(currentExtractionContext().state.page).toBe("oral");
+    expect(currentExtractionContext().state.draft.driverMode).toBe("text");
+    expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
+    expect(api.getOralPrice).not.toHaveBeenCalled();
     expect(api.createOralTask).not.toHaveBeenCalled();
   });
 
-  it("音频页面按音频报价提交，不传旧文案声音字幕", async () => {
+  it("旧本地音频快照按文案报价，确认费用后仅提交 TTS", async () => {
     api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
     live.loadStudioData.mockResolvedValue(createReviewData());
-    const initial = createReviewState("oral-audio");
+    const initial = createReviewState("oral");
+    // 模拟旧版本持久化快照：活动页面类型已不再允许该入口。
+    initial.page = "oral-audio" as typeof initial.page;
+    initial.draft.driverMode = "audio";
     initial.draft.subtitles = true;
-    initial.draft.voiceId = undefined;
-    initial.draft.script.text = "";
-    initial.draft.script.confirmed = false;
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
-    expect(await findEnabledButton("生成口播视频")).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "添加" })).toBeNull();
     fireEvent.click(await findEnabledButton("生成口播视频"));
+    expect(currentExtractionContext().state).toMatchObject({
+      page: "oral",
+      draft: { driverMode: "text" },
+    });
+    expect(screen.queryByRole("button", { name: "已有音频" })).toBeNull();
     expect(await screen.findByText("5.00 元/秒")).toBeInTheDocument();
+    expect(api.getOralPrice).toHaveBeenCalledWith({
+      script_text: initial.draft.script.text,
+    });
+    expect(api.createOralTask).not.toHaveBeenCalled();
     fireEvent.click(await findEnabledButton("确认费用并提交"));
 
     await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
     expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        mode: "AUDIO",
-        audioAssetId: "speech",
+        mode: "TTS",
+        voiceId: initial.draft.voiceId,
+        scriptText: initial.draft.script.text,
+        subtitle: expect.any(Object),
+        quoteToken: "qo500",
+        maxCredits: 500,
       }),
     );
-    expect(api.getOralPrice).toHaveBeenCalledWith({ audio_asset_id: "speech" });
-    const submitted = api.createOralTask.mock.calls[0]?.[0];
-    for (const field of ["subtitle", "voiceId", "scriptText"])
-      expect(submitted).not.toHaveProperty(field);
+    expect(api.createOralTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "audioAssetId",
+    );
   });
 
   it("旧口播响应不会关闭后来重新打开的生成弹窗", async () => {

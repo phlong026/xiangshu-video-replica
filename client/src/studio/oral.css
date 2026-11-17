@@ -1257,9 +1257,3 @@
 .creation-panel-title-row.is-pending > span {
   color: #e5aa36;
 }
-
-.oral-missing {
-  color: #d9b44a;
-  font-size: var(--font-caption);
-  margin: 8px 0 0;
-}

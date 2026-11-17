@@ -164,8 +164,6 @@ export function WorkspaceSearch({
           .filter(
             ([id, title]) =>
               (!q || title.includes(q)) &&
-              // 下线路由保留兼容（旧书签仍能解析），但不再作为可见入口。
-              id !== "viral" &&
               id !== "viral-detail" &&
               (id !== "settings" || user.role === "admin"),
           )

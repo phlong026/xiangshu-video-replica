@@ -427,6 +427,7 @@ describe("CharacterLibrary", () => {
           costume_description: "深灰色西装和浅色衬衫",
         },
         expect.any(Function),
+        undefined,
       ),
     );
     expect(await screen.findByText("商务讲解")).toBeInTheDocument();
@@ -651,7 +652,9 @@ describe("CharacterLibrary", () => {
     ).toBeInTheDocument();
     expect(screen.getByAltText("林夏 授权原图")).toBeInTheDocument();
     expect(screen.getByLabelText("林夏 预计生成进度")).toHaveValue(8);
-    expect(screen.getByText(/可离开当前页面.*后台继续/)).toBeInTheDocument();
+    expect(
+      screen.getByText("任务进行中，完成后会自动更新。"),
+    ).toBeInTheDocument();
 
     finishGeneration({
       identity_id: entry.identity_id,

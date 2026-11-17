@@ -91,7 +91,7 @@ def test_homepage_http_returns_server_clock_and_next_window_boundary(gate_client
     with psycopg.connect(route_state) as raw:
         _seed_viral_video(raw, uid, video_id="clock-video")
         raw.execute(
-            "UPDATE viral_videos SET homepage_featured=1,"
+            "UPDATE viral_videos SET homepage_featured=1,collection_published=1,pushed_at=now(),"
             "homepage_ends_at=date_trunc('second',now()+interval '1 day')"
             "+interval '0.123450 seconds' "
             "WHERE video_id='clock-video'"

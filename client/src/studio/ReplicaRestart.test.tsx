@@ -103,8 +103,6 @@ function studio(overrides: Partial<StudioContextValue> = {}) {
       errors: [],
       loading: false,
       stats: null,
-      analytics7: null,
-      analytics30: null,
     },
     review: false,
     user: {

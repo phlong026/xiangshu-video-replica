@@ -792,52 +792,6 @@ export async function getStudioStats(): Promise<StudioStats> {
   return requestApiJson<StudioStats>("/api/studio/stats", "读取工作台统计失败");
 }
 
-export type StudioAnalyticsDay = {
-  day: string;
-  completed: number;
-  failed: number;
-};
-export type StudioAnalyticsKindCount = { kind: string; completed: number };
-export type StudioAnalyticsWorkItem = {
-  task_id: string;
-  task_kind: "generation" | "oral";
-  batch_id: string | null;
-  project_id: string | null;
-  title: string;
-  creation_kind: string;
-  completed_at: string;
-  /** 按秒计费实际消耗（秒=积分）；无计费记录（历史数据/未启计费）为 null。 */
-  cost_credits: number | null;
-};
-
-/** 平台侧真实成片聚合（C6 数据看板）：GET /api/studio/analytics。
- * 窗口内按北京日界分桶的普通生成/口播产出项，并单列去重普通生成批次；
- * 播放/互动等外部平台数据不在其中。 */
-export type StudioAnalytics = {
-  range_days: number;
-  generated_at: string;
-  today_completed: number;
-  range_completed: number;
-  total_completed: number;
-  today_generation_batches: number;
-  range_generation_batches: number;
-  total_generation_batches: number;
-  range_generation_outputs: number;
-  range_oral_outputs: number;
-  daily: StudioAnalyticsDay[];
-  kind_breakdown: StudioAnalyticsKindCount[];
-  recent_works: StudioAnalyticsWorkItem[];
-};
-
-export async function getStudioAnalytics(
-  days: 7 | 30,
-): Promise<StudioAnalytics> {
-  return requestApiJson<StudioAnalytics>(
-    `/api/studio/analytics?days=${days}`,
-    "读取数据看板统计失败",
-  );
-}
-
 export type StudioNotificationPreferences = { enabled: boolean };
 
 /** 通知偏好（C10b）：GET /api/studio/notification-preferences。
@@ -2518,14 +2472,21 @@ export async function openVideoDownloadFolder(
 }
 
 /**
- * 通用「选位置 → blob 传输 → 等完成」的桌面下载管线；爆款本地缓存下载
- * （viralCache.downloadViralVideoFile）复用同一条管线，Url 可以是任何
- * WebView 可取到字节的地址（含 asset 协议的本地缓存文件）。
+ * 网页使用浏览器下载；桌面走「选位置 → blob 传输 → 等完成」。
+ * 爆款本地缓存复用同一管线，地址可为 WebView 能读取的本地缓存文件。
  */
 export async function downloadVideoToFile(
   getUrl: () => Promise<string>,
   filename: string,
 ): Promise<VideoDownloadResult> {
+  if (!isTauri()) {
+    const blob = await fetchGenerationResultBlob(
+      await getUrl(),
+      "下载视频失败",
+    );
+    downloadBlob(blob, filename);
+    return { status: "started" };
+  }
   let destination: NativeVideoDownload | null;
   try {
     destination = await invoke<NativeVideoDownload | null>(
@@ -4226,36 +4187,72 @@ export class CharacterSheetTaskError extends Error {
     message: string,
     taskId: string | null,
     status: DurableImageTaskStatus | "UNKNOWN",
+    recoveryRequired = status !== "FAILED",
   ) {
     super(message);
     this.name = "CharacterSheetTaskError";
     this.taskId = taskId;
     this.status = status;
-    this.recoveryRequired = status !== "FAILED";
+    this.recoveryRequired = recoveryRequired;
   }
 }
+
+type CharacterTaskTerminalReceipt = {
+  id: string;
+  status: "FAILED" | "SUCCEEDED";
+};
 
 async function runCharacterOperation(
   parameters: unknown,
   submit: (key: string) => Promise<CharacterSheetTask>,
   onTask?: (task: CharacterSheetTask) => void,
+  newRoundAfterTask?: CharacterTaskTerminalReceipt,
 ): Promise<CharacterSheetTask> {
   const epoch = workspaceCredentialEpoch;
   const owner = await getCurrentUser();
-  const operation = await openCharacterOperation(
-    `${apiBaseUrl()}/${owner.id}`,
-    parameters,
-  );
+  const operationScope = `${apiBaseUrl()}/${owner.id}`;
+  let operation = await openCharacterOperation(operationScope, parameters);
   if (epoch !== workspaceCredentialEpoch)
     throw new Error("登录状态已变化，请重新读取人物任务。");
+  const submitSameOperation = async () => {
+    const task = await submit(operation.key);
+    if (epoch !== workspaceCredentialEpoch)
+      throw new Error("登录状态已变化，请重新读取人物任务。");
+    operation.taskId = task.id;
+    saveCharacterOperation(operation);
+    onTask?.(task);
+    return task.id;
+  };
   try {
-    if (!operation.taskId) {
-      const task = await submit(operation.key);
-      operation.taskId = task.id;
-      saveCharacterOperation(operation);
-      onTask?.(task);
+    if (newRoundAfterTask && operation.taskId === newRoundAfterTask.id) {
+      const previous = await getCharacterSheetTask(newRoundAfterTask.id);
+      if (epoch !== workspaceCredentialEpoch)
+        throw new Error("登录状态已变化，请重新读取人物任务。");
+      // 只有明确的新一轮场景提交才能结束旧操作；只读核对必须为其他恢复入口保留原 key。
+      if (previous.status === newRoundAfterTask.status) {
+        finishCharacterOperation(operation);
+        operation = await openCharacterOperation(operationScope, parameters);
+      } else onTask?.(previous);
     }
-    const completed = await waitForCharacterSheetTask(operation.taskId, onTask);
+    if (epoch !== workspaceCredentialEpoch)
+      throw new Error("登录状态已变化，请重新读取人物任务。");
+    const taskId = operation.taskId ?? (await submitSameOperation());
+    let completed: CharacterSheetTask;
+    try {
+      completed = await waitForCharacterSheetTask(taskId, onTask);
+    } catch (cause) {
+      const details = cause as RequestError;
+      if (
+        epoch !== workspaceCredentialEpoch ||
+        details?.status !== 404 ||
+        details.code !== "IMAGE_TASK_NOT_FOUND"
+      )
+        throw cause;
+      // 本地任务号可能过期；仅用原 key 回放一次，由服务端决定恢复哪一个任务。
+      // 网络错误或未知结果不能换 key 重提，否则可能重复预留额度。
+      const recoveredId = await submitSameOperation();
+      completed = await waitForCharacterSheetTask(recoveredId, onTask);
+    }
     if (epoch !== workspaceCredentialEpoch)
       throw new Error("登录状态已变化，请重新读取人物任务。");
     finishCharacterOperation(operation);
@@ -4265,10 +4262,21 @@ async function runCharacterOperation(
       if (cause.status === "FAILED") finishCharacterOperation(operation);
       throw cause;
     }
+    const details = cause as RequestError;
+    const rejected =
+      !operation.taskId &&
+      details?.status !== undefined &&
+      details.status >= 400 &&
+      details.status < 500 &&
+      details.status !== 408 &&
+      details.status !== 409;
+    const message =
+      cause instanceof Error ? cause.message : "读取人物任务失败。";
     throw new CharacterSheetTaskError(
-      `${cause instanceof Error ? cause.message : "读取人物任务失败。"} 请核对上次任务状态，不要另行重复生成。`,
+      rejected ? message : `${message} 请核对上次任务状态，不要另行重复生成。`,
       operation.taskId ?? null,
       "UNKNOWN",
+      !rejected,
     );
   }
 }
@@ -4627,6 +4635,7 @@ export async function createCharacterSceneLook(
     costume_description: string;
   },
   onTask?: (task: CharacterSheetTask) => void,
+  newRoundAfterTask?: CharacterTaskTerminalReceipt,
 ): Promise<SimpleSceneLook> {
   const completed = await runCharacterOperation(
     [
@@ -4649,6 +4658,7 @@ export async function createCharacterSceneLook(
         },
       ),
     onTask,
+    newRoundAfterTask,
   );
   if (!completed.result || !("scene_name" in completed.result)) {
     throw new Error("场景造型任务完成但结果不可用，请重新读取人物库。");
@@ -8448,6 +8458,8 @@ export type ViralVideoItem = {
   homepageRank?: number | null;
   homepageStartsAt?: string | null;
   homepageEndsAt?: string | null;
+  /** 已推送到客户前端的发布标记（管理员上传/手工推送后非空）。 */
+  pushedAt?: string | null;
   platform: ViralPlatform;
   videoId: string;
   category: string;
@@ -8576,7 +8588,7 @@ export type ViralImportTask = {
   retryable?: boolean;
 };
 
-/** 最近 7 天爆款列表（服务端按分类关键词聚合，带计费护栏缓存）。 */
+/** 管理员已推送且归档就绪的爆款目录；可单独读取首页推荐位。 */
 export function listViralVideos(
   platform: ViralPlatform,
   sort: ViralSort = "hot",

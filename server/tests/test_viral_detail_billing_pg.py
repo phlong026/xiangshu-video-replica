@@ -341,7 +341,7 @@ def _seed_featured_video(raw, *, video_id: str) -> None:
     )
     raw.execute(
         "UPDATE viral_videos SET published_at=%s, collection_published=1, "
-        "homepage_featured=1, cover_key='viral/covers/douyin/' || video_id "
+        "homepage_featured=1, pushed_at=now(), cover_key='viral/covers/douyin/' || video_id "
         "WHERE platform='douyin' AND video_id=%s",
         (int(datetime.now(UTC).timestamp()), video_id),
     )
@@ -431,6 +431,304 @@ def test_cache_reclaim_returns_server_side_truth(detail_client, route_state) -> 
         json={"platform": "douyin", "videoIds": []},
     )
     assert empty.status_code == 422
+    with psycopg.connect(route_state) as raw:
+        assert _wallet(raw, uid) == (50, 0)
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_operations WHERE user_id=%s", (uid,)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu"])
+def test_curated_catalog_favorites_and_cache_share_push_guard(
+    detail_client, route_state, monkeypatch, platform
+):
+    """历史首页/近期采集都不能代替推送，计数、分页、收藏与缓存回收口径一致。"""
+    from app import viral_routes
+    from app.viral_store import list_favorite_viral_videos, list_viral_videos
+
+    monkeypatch.setenv("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1")
+    headers, uid = account(detail_client, f"curated_{platform}")
+    states = [
+        "keep-a",
+        "keep-b",
+        "never-pushed",
+        "unpublished",
+        "hidden",
+        "deleted",
+        "future",
+        "expired",
+        "unready",
+        "missing-cover",
+    ]
+
+    def forbid_source():
+        raise AssertionError("客户只读目录不能构造上游客户端")
+
+    detail_client.app.dependency_overrides[viral_routes.get_viral_source_client] = forbid_source
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_videos")
+        for index, video_id in enumerate(states):
+            _seed_detail_video(raw, uid, platform=platform, video_id=video_id)
+            raw.execute(
+                "UPDATE viral_videos SET homepage_featured=1,homepage_rank=%s,likes=%s,"
+                "published_at=1,play_url='https://source.invalid/video.mp4',"
+                "native_json=%s WHERE platform=%s AND video_id=%s",
+                (
+                    index,
+                    100 - index,
+                    json.dumps({"decode_key": "private-source"}),
+                    platform,
+                    video_id,
+                ),
+            )
+            raw.execute(
+                "INSERT INTO viral_video_favorites(user_id,platform,video_id) VALUES(%s,%s,%s)",
+                (uid, platform, video_id),
+            )
+        changes = {
+            "never-pushed": "pushed_at=NULL,published_at=extract(epoch FROM now())::bigint",
+            "unpublished": "collection_published=0",
+            "deleted": "deleted_at=now()",
+            "future": "homepage_starts_at=now()+interval '1 day'",
+            "expired": "homepage_ends_at=now()-interval '1 day'",
+            "missing-cover": "cover_url='https://source.invalid/cover.jpg',cover_key=NULL",
+        }
+        for video_id, sql in changes.items():
+            raw.execute(
+                f"UPDATE viral_videos SET {sql} WHERE platform=%s AND video_id=%s",
+                (platform, video_id),
+            )
+        raw.execute(
+            "INSERT INTO viral_video_visibility(platform,video_id,status) "
+            "VALUES(%s,'hidden','HIDDEN')",
+            (platform,),
+        )
+        raw.execute(
+            "UPDATE viral_media_preparations SET status='PENDING' "
+            "WHERE platform=%s AND video_id='unready'",
+            (platform,),
+        )
+    for featured in (False, True):
+        for sort in ("hot", "latest"):
+            query = {"platform": platform, "sort": sort, "featured_only": featured, "limit": 1}
+            first = detail_client.get("/api/viral/videos", headers=headers, params=query)
+            assert first.status_code == 200, first.text
+            page = first.json()
+            assert page["total"] == 2 and page["hasMore"] is True
+            assert page["stale"] is False and page["refreshing"] is False
+            assert page["items"][0]["videoId"] == "keep-a"
+            assert page["items"][0]["pushedAt"]
+            assert page["items"][0]["playUrl"] is None and page["items"][0]["native"] == {}
+            second = detail_client.get(
+                "/api/viral/videos", headers=headers, params={**query, "cursor": page["nextCursor"]}
+            )
+            assert second.status_code == 200, second.text
+            assert [v["videoId"] for v in second.json()["items"]] == ["keep-b"]
+            assert second.json()["total"] == 2 and second.json()["hasMore"] is False
+    if platform == "wechat_channels":
+        statistics = detail_client.post(
+            "/api/viral/videos/statistics", headers=headers, json={"videoIds": states}
+        )
+        assert statistics.status_code == 200, statistics.text
+        assert [v["videoId"] for v in statistics.json()["items"]] == ["keep-a", "keep-b"]
+    favorites = detail_client.get(
+        "/api/viral/favorites", headers=headers, params={"platform": platform, "limit": 1}
+    )
+    assert favorites.status_code == 200, favorites.text
+    assert favorites.json()["total"] == 2 and favorites.json()["hasMore"] is True
+    second = detail_client.get(
+        "/api/viral/favorites",
+        headers=headers,
+        params={"platform": platform, "limit": 1, "cursor": favorites.json()["nextCursor"]},
+    )
+    assert second.status_code == 200, second.text
+    assert {favorites.json()["items"][0]["videoId"], second.json()["items"][0]["videoId"]} == {
+        "keep-a",
+        "keep-b",
+    }
+    assert second.json()["total"] == 2 and second.json()["hasMore"] is False
+    reclaim = detail_client.post(
+        "/api/viral/videos/cache-reclaim",
+        headers=headers,
+        json={"platform": platform, "videoIds": states},
+    )
+    assert reclaim.status_code == 200, reclaim.text
+    assert reclaim.json()["reclaim"] == states[2:]
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert {v.video_id for v in list_viral_videos(conn, platform=platform, sort="hot")} == {
+            "keep-a",
+            "keep-b",
+        }
+        assert {v.video_id for v in list_favorite_viral_videos(conn, user_id=uid)} == {
+            "keep-a",
+            "keep-b",
+        }
+        assert raw.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
+
+
+def test_favorite_rows_and_total_share_one_pg_snapshot(detail_client, route_state):
+    from typing import cast
+
+    from app.viral_store import list_favorite_viral_video_page
+
+    _, uid = account(detail_client, "favorite_snapshot")
+    with psycopg.connect(route_state) as raw:
+        for video_id in ("favorite-snapshot-a", "favorite-snapshot-b"):
+            _seed_detail_video(raw, uid, video_id=video_id)
+            raw.execute(
+                "INSERT INTO viral_video_favorites(user_id,platform,video_id) "
+                "VALUES(%s,'douyin',%s)",
+                (uid, video_id),
+            )
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        interleaved = False
+
+        class WithdrawAfterRead:
+            def execute(self, sql, params=()):
+                nonlocal interleaved
+                cursor = conn.execute(sql, params)
+                if not interleaved:
+                    interleaved = True
+                    with psycopg.connect(route_state) as writer:
+                        writer.execute(
+                            "INSERT INTO viral_video_visibility(platform,video_id,status) "
+                            "VALUES('douyin','favorite-snapshot-b','HIDDEN')"
+                        )
+                return cursor
+
+        page = list_favorite_viral_video_page(
+            cast(BusinessConnection, WithdrawAfterRead()),
+            user_id=uid,
+            limit=10,
+        )
+        assert len(page.items) == page.total == 2
+        current = list_favorite_viral_video_page(conn, user_id=uid, limit=10)
+        assert len(current.items) == current.total == 1
+
+
+@pytest.mark.parametrize("featured", [False, True])
+def test_push_and_withdraw_invalidate_customer_cursor(detail_client, route_state, featured):
+    headers, uid = account(detail_client, f"curated_cursor_{featured}")
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_videos")
+        for video_id in ("cursor-a", "cursor-b", "cursor-new"):
+            _seed_detail_video(raw, uid, video_id=video_id)
+        raw.execute("UPDATE viral_videos SET homepage_featured=1")
+        raw.execute("UPDATE viral_videos SET pushed_at=NULL WHERE video_id='cursor-new'")
+    params = {"platform": "douyin", "limit": 1, "featured_only": featured}
+    first = detail_client.get("/api/viral/videos", headers=headers, params=params).json()
+    assert first["total"] == 2 and first["nextCursor"]
+    with psycopg.connect(route_state) as raw:
+        raw.execute("UPDATE viral_videos SET pushed_at=now() WHERE video_id='cursor-new'")
+    stale = detail_client.get(
+        "/api/viral/videos", headers=headers, params={**params, "cursor": first["nextCursor"]}
+    )
+    assert stale.status_code == 400 and stale.json()["detail"]["code"] == "VIRAL_CURSOR_INVALID"
+    updated = detail_client.get("/api/viral/videos", headers=headers, params=params).json()
+    assert updated["total"] == 3 and updated["dataVersion"] != first["dataVersion"]
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO viral_video_visibility(platform,video_id,status) "
+            "VALUES('douyin','cursor-new','HIDDEN')"
+        )
+    withdrawn = detail_client.get(
+        "/api/viral/videos", headers=headers, params={**params, "cursor": updated["nextCursor"]}
+    )
+    assert withdrawn.status_code == 400
+
+
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu"])
+def test_archived_customer_media_works_with_collection_disabled_without_source(
+    detail_client, route_state, monkeypatch, platform
+):
+    from app import viral_routes
+    from app.storage import FakeStorageAdapter
+    from app.viral_media import UrlFetcher
+    from app.viral_media_preparation import ViralMediaPreparation
+
+    monkeypatch.setenv("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1")
+    headers, uid = account(detail_client, f"curated_media_{platform}")
+    storage = FakeStorageAdapter(provider="cos", bucket="curated-media")
+    monkeypatch.setattr(
+        storage, "_signed_url", lambda method, key, expires_at: f"https://archive.invalid/{key}"
+    )
+    with psycopg.connect(route_state) as raw:
+        _seed_detail_video(raw, uid, platform=platform, video_id="archived")
+        raw.execute("DELETE FROM viral_media_preparations WHERE platform=%s", (platform,))
+    stored, _ = ViralMediaPreparation(storage=storage).fetch(
+        platform=platform,
+        video_id="archived",
+        kind="video",
+        prepare=lambda key, check: storage.put_object(
+            key, b"archived-video", content_type="video/mp4"
+        ),
+    )
+    monkeypatch.setattr(viral_routes, "get_media_storage", lambda conn: storage)
+
+    def forbid_source(*args, **kwargs):
+        raise AssertionError("已归档播放不能触发上游或源站下载")
+
+    detail_client.app.dependency_overrides[viral_routes.get_viral_source_client] = forbid_source
+    monkeypatch.setattr(UrlFetcher, "iter_fetch", forbid_source)
+    monkeypatch.setattr(viral_routes, "_resolve_source_link", forbid_source)
+    response = detail_client.post(
+        "/api/viral/videos/media",
+        headers=headers,
+        json={"platform": platform, "videoId": "archived"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["cacheHit"] is True and response.json()["kind"] == "video"
+    assert stored.key in response.json()["url"]
+    assert response.json()["video"]["pushedAt"]
+    assert response.json()["video"]["playUrl"] is None
+    storage.delete_object(stored.key)
+    missing = detail_client.post(
+        "/api/viral/videos/media",
+        headers=headers,
+        json={"platform": platform, "videoId": "archived"},
+    )
+    assert missing.status_code == 503, missing.text
+
+
+def test_curated_restore_keeps_source_search_refresh_and_supplement_retired(
+    detail_client, route_state, monkeypatch
+):
+    from app.billing_viral_routes import router as billing_router
+    from app.viral_search_refresh_routes import router as refresh_router
+    from app.viral_search_routes import router as search_router
+    from app.viral_tikhub import ViralSourceClient
+
+    monkeypatch.setenv("VIDEO_REPLICA_VIRAL_CLIENT_DISABLED", "1")
+    for router in (billing_router, refresh_router, search_router):
+        detail_client.app.include_router(router)
+    headers, uid = account(detail_client, "retired_collection_calls")
+    headers = {**headers, "Idempotency-Key": "retired-call"}
+    with psycopg.connect(route_state) as raw:
+        _seed_detail_video(raw, uid, video_id="retired-source")
+
+    def forbid_source(*args, **kwargs):
+        raise AssertionError("恢复库内目录不能重开源站外呼")
+
+    monkeypatch.setattr(ViralSourceClient, "douyin_refresh", forbid_source)
+    monkeypatch.setattr(ViralSourceClient, "douyin_search", forbid_source)
+    monkeypatch.setattr(ViralSourceClient, "wechat_video_detail", forbid_source)
+    for path, payload in (
+        ("/api/viral/videos/source", {"platform": "douyin", "videoId": "retired-source"}),
+        ("/api/viral/search/refresh", {"platform": "douyin", "videoId": "retired-source"}),
+        ("/api/viral/videos/statistics/refresh", {"videoIds": ["retired-source"]}),
+    ):
+        result = detail_client.post(path, headers=headers, json=payload)
+        assert result.status_code == 410, result.text
+        assert result.json()["detail"]["code"] == "VIRAL_FEATURE_RETIRED"
+    search = detail_client.post(
+        "/api/viral/search", headers=headers, json={"platform": "douyin", "keyword": "庭院"}
+    )
+    assert search.status_code == 404 and search.json()["detail"]["code"] == "VIRAL_SEARCH_DISABLED"
     with psycopg.connect(route_state) as raw:
         assert _wallet(raw, uid) == (50, 0)
         assert (
@@ -534,6 +832,7 @@ def test_http_visibility_decisions_match_for_two_accounts(detail_client, route_s
         if state == "deleted":
             raw.execute("UPDATE viral_videos SET deleted_at=now() WHERE video_id=%s", (video_id,))
         if state == "private":
+            raw.execute("UPDATE viral_videos SET pushed_at=NULL WHERE video_id=%s", (video_id,))
             raw.execute(
                 "INSERT INTO viral_import_tasks(id,owner_user_id,platform,video_id,purpose,"
                 "idempotency_key,request_hash,request_json,status) VALUES"
@@ -570,12 +869,13 @@ def test_http_visibility_decisions_match_for_two_accounts(detail_client, route_s
             )
 
 
+@pytest.mark.parametrize("state", ["unpublished", "never_pushed"])
 @pytest.mark.parametrize(
     "endpoint",
     ["source", "media", "cover", "download", "favorite", "statistics"],
 )
 def test_http_known_id_cannot_bypass_unpublished_guard(
-    detail_client, route_state, monkeypatch, endpoint
+    detail_client, route_state, monkeypatch, endpoint, state
 ):
     """已知 videoId 不能绕过未发布守卫；claim/copy_status 端点已退役不再入列."""
     import time
@@ -607,10 +907,17 @@ def test_http_known_id_cannot_bypass_unpublished_guard(
     monkeypatch.setattr(viral_routes.ViralMediaPipeline, "fetch", forbidden_external)
     with psycopg.connect(route_state) as raw:
         _seed_copy_video(raw, uid_a, platform=platform, video_id=video_id)
-        raw.execute(
-            "UPDATE viral_videos SET collection_published=0,homepage_featured=0 WHERE video_id=%s",
-            (video_id,),
-        )
+        if state == "never_pushed":
+            raw.execute(
+                "UPDATE viral_videos SET pushed_at=NULL,homepage_featured=1 WHERE video_id=%s",
+                (video_id,),
+            )
+        else:
+            raw.execute(
+                "UPDATE viral_videos SET collection_published=0,homepage_featured=0 "
+                "WHERE video_id=%s",
+                (video_id,),
+            )
         before = {uid: _wallet(raw, uid) for uid in (uid_a, uid_b)}
     for headers, uid in ((headers_a, uid_a), (headers_b, uid_b)):
         headers = {**headers, "Idempotency-Key": f"known-{endpoint}-{uid}"}
@@ -715,7 +1022,8 @@ def test_http_signed_download_rechecks_current_visibility_and_cover_is_public_on
             )
         if state == "private":
             raw.execute(
-                "UPDATE viral_videos SET collection_published=0 WHERE video_id=%s", (video_id,)
+                "UPDATE viral_videos SET collection_published=0,pushed_at=NULL WHERE video_id=%s",
+                (video_id,),
             )
             raw.execute(
                 "INSERT INTO viral_import_tasks(id,owner_user_id,platform,video_id,purpose,"
