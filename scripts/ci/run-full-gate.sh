@@ -77,6 +77,20 @@ cleanup
 run_segment "Rust 单测（cargo test）" cargo test --manifest-path client/src-tauri/Cargo.toml --locked
 run_segment "客户前端构建" npm run build
 run_segment "管理端前端构建" npm run build:admin
-run_segment "依赖漏洞审计（npm audit）" npm audit --audit-level=high
+# 依赖审计与 ci.yml 同一豁免口径：无补丁版本的上游公告白名单
+# （见 ci.yml「Audit JavaScript dependencies」段 env 注释），其余照拦。
+run_segment "依赖漏洞审计（npm audit）" bash -c '
+  set -uo pipefail
+  status=0
+  output="$(npm audit --audit-level=high --json 2>&1)" || status=$?
+  if [ "$status" -eq 0 ]; then exit 0; fi
+  printf "%s\n" "$output"
+  remaining="$(printf "%s" "$output" | python3 scripts/ci/npm_audit_filter.py "GHSA-fc5q-39xc-vjpf")"
+  if [ "$remaining" = "__ONLY_WAIVED__" ]; then
+    echo "[full-gate] npm audit 仅剩已豁免的无补丁公告（GHSA-fc5q-39xc-vjpf picomatch ReDoS，Patched: None）。"
+    exit 0
+  fi
+  exit "$status"
+'
 
 printf '\n[full-gate] 全部通过。证据日志：%s\n' "${LOG_FILE}"
