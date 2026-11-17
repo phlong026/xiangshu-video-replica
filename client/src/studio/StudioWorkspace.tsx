@@ -37,7 +37,6 @@ import {
 } from "../rechargePackageDisplay";
 import { SettingsPanel } from "../SettingsPanel";
 import type { WorkspaceShellProps } from "../workspace-shell";
-import { AnalyticsPage } from "./AnalyticsPage";
 import {
   MaterialsPage,
   PublishPage,
@@ -236,8 +235,6 @@ const emptyData: StudioData = {
   errors: [],
   loading: true,
   stats: null,
-  analytics7: null,
-  analytics30: null,
 };
 const TASKS_POLL_INTERVAL_MS = 20_000;
 // 飞影 V2 文档：颜色为 #RRGGBB（旧版误用 0xRRGGBB），坐标字段为 st_pos_x/st_pos_y。
@@ -288,10 +285,7 @@ export const navGroups: {
   },
   {
     label: "分发",
-    pages: [
-      { id: "publishing", title: "发布管理", icon: "upload" },
-      { id: "analytics", title: "数据看板", icon: "chart" },
-    ],
+    pages: [{ id: "publishing", title: "发布管理", icon: "upload" }],
   },
 ];
 
@@ -352,6 +346,17 @@ export function StudioWorkspace({
     const route = studioRouteFromHash(window.location.hash);
     return { ...createState(route.page), ...route };
   });
+  useEffect(() => {
+    const [path, query = ""] = window.location.hash
+      .replace(/^#(?:studio\/)?/, "")
+      .split("?", 2);
+    if (
+      path === "analytics" ||
+      new URLSearchParams(query).get("returnTo") === "analytics"
+    ) {
+      window.history.replaceState(null, "", studioHashForState(state));
+    }
+  }, [state]);
   const studioPageRef = useRef(state.page);
   studioPageRef.current = state.page;
   const [data, setData] = useState<StudioData>(() =>
@@ -2703,8 +2708,6 @@ function StudioPageContent({
           <TasksPage />
         </>
       );
-    case "analytics":
-      return <AnalyticsPage />;
     case "task-detail":
       return <TaskDetailPage />;
     case "people":

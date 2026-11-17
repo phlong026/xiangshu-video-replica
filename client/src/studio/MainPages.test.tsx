@@ -211,8 +211,6 @@ function data(
     materials: [],
     loading: false,
     stats: null,
-    analytics7: null,
-    analytics30: null,
   };
 }
 
@@ -278,7 +276,7 @@ describe("V1.4 任务详情真实成片预览", () => {
         selectedTaskId: "oral-deep",
         selectedTaskKind: "oral_task",
         selectedTaskBackendId: "deep",
-        returnTo: "analytics",
+        returnTo: "workbench",
       },
       data: data([]),
       user: { id: "account-a" } as StudioContextValue["user"],
@@ -1320,6 +1318,21 @@ describe("V1.4 工作台对齐网格", () => {
     // 标题必须位于卡片内部（此前左栏 h2 悬在卡片外，行首高度受外部标题影响）
     const runningCell = grid.children[0] as HTMLElement;
     expect(runningCell.querySelector("h2")?.textContent).toBe("正在进行");
+  });
+
+  it("快捷入口改为任务列表并保持四个可用入口", () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    expect(screen.getAllByRole("button", { name: /^快捷入口：/ })).toHaveLength(
+      4,
+    );
+    expect(
+      screen.queryByRole("button", { name: "快捷入口：数据看板" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "快捷入口：任务列表" }));
+    expect(value.navigate).toHaveBeenCalledWith("tasks");
   });
 
   it("任务动态最多展示 4 条，超出时提供进入任务中心出口", () => {
@@ -2538,7 +2551,7 @@ describe("V1.4 任务中心列表", () => {
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "类型：全部类型" }));
-    // 标题已让给数据看板页签外壳，外部点击改用页面内其他元素验证下拉收起。
+    // 点击筛选器外的历史任务入口时，下拉菜单应收起。
     fireEvent.pointerDown(
       screen.getByRole("button", { name: "历史任务与下载" }),
     );

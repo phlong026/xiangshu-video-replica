@@ -792,52 +792,6 @@ export async function getStudioStats(): Promise<StudioStats> {
   return requestApiJson<StudioStats>("/api/studio/stats", "读取工作台统计失败");
 }
 
-export type StudioAnalyticsDay = {
-  day: string;
-  completed: number;
-  failed: number;
-};
-export type StudioAnalyticsKindCount = { kind: string; completed: number };
-export type StudioAnalyticsWorkItem = {
-  task_id: string;
-  task_kind: "generation" | "oral";
-  batch_id: string | null;
-  project_id: string | null;
-  title: string;
-  creation_kind: string;
-  completed_at: string;
-  /** 按秒计费实际消耗（秒=积分）；无计费记录（历史数据/未启计费）为 null。 */
-  cost_credits: number | null;
-};
-
-/** 平台侧真实成片聚合（C6 数据看板）：GET /api/studio/analytics。
- * 窗口内按北京日界分桶的普通生成/口播产出项，并单列去重普通生成批次；
- * 播放/互动等外部平台数据不在其中。 */
-export type StudioAnalytics = {
-  range_days: number;
-  generated_at: string;
-  today_completed: number;
-  range_completed: number;
-  total_completed: number;
-  today_generation_batches: number;
-  range_generation_batches: number;
-  total_generation_batches: number;
-  range_generation_outputs: number;
-  range_oral_outputs: number;
-  daily: StudioAnalyticsDay[];
-  kind_breakdown: StudioAnalyticsKindCount[];
-  recent_works: StudioAnalyticsWorkItem[];
-};
-
-export async function getStudioAnalytics(
-  days: 7 | 30,
-): Promise<StudioAnalytics> {
-  return requestApiJson<StudioAnalytics>(
-    `/api/studio/analytics?days=${days}`,
-    "读取数据看板统计失败",
-  );
-}
-
 export type StudioNotificationPreferences = { enabled: boolean };
 
 /** 通知偏好（C10b）：GET /api/studio/notification-preferences。

@@ -34,7 +34,6 @@ import {
   getLatestScriptVersion,
   getOralTask,
   getScriptFromAudioTask,
-  getStudioAnalytics,
   getStudioDraft,
   getStudioStats,
   listCharacterSceneLooksPage,
@@ -1368,8 +1367,6 @@ export async function loadStudioData(
     peopleResult,
     tasksResult,
     statsResult,
-    analytics7Result,
-    analytics30Result,
     oralResult,
     viralResult,
     materialsResult,
@@ -1378,8 +1375,6 @@ export async function loadStudioData(
     retryOnce(loadPeople),
     retryOnce(() => loadTasks(currentUser)),
     retryOnce(getStudioStats),
-    retryOnce(() => getStudioAnalytics(7)),
-    retryOnce(() => getStudioAnalytics(30)),
     retryOnce(loadOralTasks),
     options.includeViral === false
       ? Promise.resolve({ videos: [], errors: [] })
@@ -1401,11 +1396,6 @@ export async function loadStudioData(
   ];
   // 统计加载失败不打断工作区：指标卡回退为 "—"，重试路径会再次拉取。
   const stats = statsResult.status === "fulfilled" ? statsResult.value : null;
-  // 数据看板聚合同理：失败回退 null，看板页展示"尚未就绪"空态。
-  const analytics7 =
-    analytics7Result.status === "fulfilled" ? analytics7Result.value : null;
-  const analytics30 =
-    analytics30Result.status === "fulfilled" ? analytics30Result.value : null;
 
   if (projectsResult.status === "rejected") {
     errors.push(`读取项目失败：${errorText(projectsResult.reason)}`);
@@ -1442,8 +1432,6 @@ export async function loadStudioData(
     errors,
     loading: false,
     stats,
-    analytics7,
-    analytics30,
     pagination: {
       people: {
         nextCursor: peopleData.nextCursor,

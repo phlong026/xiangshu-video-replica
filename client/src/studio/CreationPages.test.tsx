@@ -286,8 +286,6 @@ function studio(
       materials: [],
       loading: false,
       stats: null,
-      analytics7: null,
-      analytics30: null,
     },
     review: true,
     user: {

@@ -1,4 +1,3 @@
-import type { StudioAnalytics } from "../api";
 import { createState } from "./state";
 import type {
   StudioAsset,
@@ -8,122 +7,6 @@ import type {
   StudioTask,
   StudioVideo,
 } from "./types";
-
-// 数据看板（C6）审核样例：只演示平台侧真实统计的呈现形态（成片趋势 /
-// 类型分布 / 最近成片），数值与指标卡示例同口径（今日 8、累计 156）；
-// 播放/互动等外部平台数据不在看板范畴。最近成片统一指向 task-completed，
-// 保证审核走查里"查看视频"总能落到真实存在的任务详情。
-const reviewWorks = [
-  {
-    title: "张工 · 建房预算",
-    kind: "replica",
-    completedAt: "2026-09-06 10:24:00",
-    costCredits: 12,
-  },
-  {
-    title: "新中式庭院的3个细节",
-    kind: "replica",
-    completedAt: "2026-09-04 15:40:00",
-    costCredits: 8,
-  },
-  {
-    title: "农村自建房户型避坑",
-    kind: "independent",
-    completedAt: "2026-09-02 09:12:00",
-    costCredits: null,
-  },
-  {
-    title: "三代同堂的家这样设计",
-    kind: "replacement",
-    completedAt: "2026-08-24 18:05:00",
-    costCredits: 6,
-  },
-];
-
-function analyticsSample(days: 7 | 30): StudioAnalytics {
-  const daily7 = [1, 2, 0, 3, 2, 4, 8];
-  const daily30 = [
-    0,
-    1,
-    2,
-    0,
-    1,
-    0,
-    2,
-    1,
-    0,
-    1,
-    2,
-    0,
-    1,
-    0,
-    0,
-    2,
-    1,
-    0,
-    1,
-    0,
-    2,
-    0,
-    1,
-    ...daily7,
-  ];
-  const counts = days === 7 ? daily7 : daily30;
-  const failedCounts =
-    days === 7
-      ? [0, 0, 1, 0, 0, 1, 0]
-      : [
-          0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0,
-          0, 0, 1, 0, 0, 1, 0,
-        ];
-  const daily = counts.map((completed, index, all) => {
-    // 固定锚定 2026-09-06 收口，避免样例随真实时钟漂移。
-    const day = new Date(Date.UTC(2026, 8, 6 - (all.length - 1 - index)));
-    return {
-      day: day.toISOString().slice(0, 10),
-      completed,
-      failed: failedCounts[index] ?? 0,
-    };
-  });
-  const kindBreakdown =
-    days === 7
-      ? [
-          { kind: "replica", completed: 11 },
-          { kind: "independent", completed: 6 },
-          { kind: "replacement", completed: 3 },
-        ]
-      : [
-          { kind: "replica", completed: 21 },
-          { kind: "independent", completed: 11 },
-          { kind: "replacement", completed: 6 },
-        ];
-  return {
-    range_days: days,
-    generated_at: "2026-09-06T12:00:00+00:00",
-    today_completed: 8,
-    range_completed: counts.reduce((sum, count) => sum + count, 0),
-    total_completed: 156,
-    today_generation_batches: 6,
-    range_generation_batches: days === 7 ? 15 : 29,
-    total_generation_batches: 120,
-    range_generation_outputs: counts.reduce((sum, count) => sum + count, 0),
-    range_oral_outputs: 0,
-    daily,
-    kind_breakdown: kindBreakdown,
-    recent_works: reviewWorks
-      .slice(0, days === 7 ? 3 : 4)
-      .map((work, index) => ({
-        task_id: "task-completed",
-        task_kind: "generation" as const,
-        batch_id: `batch-review-${index + 1}`,
-        project_id: `project-review-${index + 1}`,
-        title: work.title,
-        creation_kind: work.kind,
-        completed_at: work.completedAt,
-        cost_credits: work.costCredits,
-      })),
-  };
-}
 
 // Only imported by the explicit development review entry. Never a network-error fallback.
 const photo = (name: string) => `/studio/${name}.png`;
@@ -495,8 +378,6 @@ export function createReviewData(): StudioData {
       needs_attention: 1,
       total_completed: 156,
     },
-    analytics7: analyticsSample(7),
-    analytics30: analyticsSample(30),
   };
 }
 

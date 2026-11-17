@@ -38,15 +38,16 @@ export const pageTitles: Record<StudioPage, string> = {
   "person-voices": "人物详情",
   materials: "素材库",
   publishing: "发布管理",
-  analytics: "数据看板",
   settings: "系统设置",
   profile: "用户档案",
 };
 
 export function normalizeStudioPage(
-  page: StudioPage | "oral-audio",
+  page: StudioPage | "oral-audio" | "analytics",
 ): StudioPage {
-  return page === "oral-audio" ? "oral" : page;
+  if (page === "oral-audio") return "oral";
+  if (page === "analytics") return "workbench";
+  return page;
 }
 
 /** 旧草稿可能仍有音频模式；恢复与交接只保留文案驱动，素材引用不受影响。 */
@@ -90,6 +91,7 @@ export function studioRouteFromHash(hash: string): Pick<
     characters: "people",
     wallet: "profile",
     "oral-audio": "oral",
+    analytics: "workbench",
   };
   const params = new URLSearchParams(query);
   const result: ReturnType<typeof studioRouteFromHash> = {
@@ -122,8 +124,9 @@ export function studioRouteFromHash(hash: string): Pick<
   result.selectedAssetId = params.get("asset") ?? undefined;
   result.selectedPersonId = params.get("person") ?? undefined;
   const returnTo = params.get("returnTo");
-  if (returnTo === "oral-audio") result.returnTo = "oral";
-  else if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
+  if (returnTo === "oral-audio" || returnTo === "analytics") {
+    result.returnTo = normalizeStudioPage(returnTo);
+  } else if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
     result.returnTo = returnTo as StudioPage;
   }
   return result;
