@@ -299,7 +299,12 @@ def test_output_budget_rejected_by_upstream_falls_back_once() -> None:
 
 
 def test_input_token_limit_does_not_trigger_output_budget_fallback() -> None:
-    """输入超限降输出预算救不了：不得误触发回退（评审变更集 #5）。"""
+    """输入超限降输出预算救不了：不得误触发回退（评审变更集 #5）。
+
+    json_schema 400 会先走「降级 json_object 重发」分支（P0 结构化约束的
+    兼容路径），第二次仍 400 才按原语义失败；两次请求的 max_tokens 都保持
+    动态预算——回退通道未被误触发是本测试守护的语义。
+    """
     rejected = AnalysisProviderFailed(
         "视频拆解服务拒绝了请求（HTTP 400）：Input token limit exceeded: prompt is too long",
         http_status=400,
@@ -307,15 +312,17 @@ def test_input_token_limit_does_not_trigger_output_budget_fallback() -> None:
         upstream_diagnostic={"reason": "Input token limit exceeded: prompt is too long"},
     )
     provider, transport = _provider(
-        [rejected],
+        [rejected, rejected],
         video_call_budget=VideoCallBudget(attempt_deadline=float("inf")),
     )
 
     with pytest.raises(AnalysisProviderFailed):
         provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=15.0)
 
-    assert len(transport.requested_payloads) == 1
+    assert len(transport.requested_payloads) == 2
     assert transport.requested_payloads[0]["max_tokens"] == ANALYSIS_MIN_MAX_TOKENS + 15 * 800
+    assert transport.requested_payloads[1]["max_tokens"] == ANALYSIS_MIN_MAX_TOKENS + 15 * 800
+    assert transport.requested_payloads[1]["response_format"]["type"] == "json_object"
 
 
 def test_unrelated_http_400_does_not_touch_the_budget() -> None:
@@ -325,13 +332,14 @@ def test_unrelated_http_400_does_not_touch_the_budget() -> None:
         failure_phase=HTTP_FAILURE_PHASE,
         upstream_diagnostic={"reason": "invalid video URL"},
     )
-    provider, transport = _provider([rejected])
+    provider, transport = _provider([rejected, rejected])
 
     with pytest.raises(AnalysisProviderFailed):
         provider.analyze(video_uri="https://example.com/v.mp4", duration_seconds=30.0)
 
-    assert len(transport.requested_payloads) == 1
+    assert len(transport.requested_payloads) == 2
     assert transport.requested_payloads[0]["max_tokens"] == ANALYSIS_MAX_TOKENS_CAP
+    assert transport.requested_payloads[1]["max_tokens"] == ANALYSIS_MAX_TOKENS_CAP
 
 
 # ---------------------------------------------------------------------------

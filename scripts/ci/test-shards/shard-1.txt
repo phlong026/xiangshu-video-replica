@@ -3,6 +3,7 @@ server/tests/test_admin_audit_routes.py
 server/tests/test_admin_batch1_contracts.py
 server/tests/test_admin_refund_routes_pg.py
 server/tests/test_analysis_generation_records_pg.py
+server/tests/test_analysis_golden_samples.py
 server/tests/test_analysis_model_configuration.py
 server/tests/test_announcement_routes_pg.py
 server/tests/test_apilio_image_provider.py
