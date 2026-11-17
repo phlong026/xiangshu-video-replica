@@ -39,7 +39,6 @@ export const pageTitles: Record<StudioPage, string> = {
   "person-voices": "人物详情",
   materials: "素材库",
   publishing: "发布管理",
-  analytics: "数据看板",
   settings: "系统设置",
   profile: "用户档案",
 };
@@ -79,6 +78,7 @@ export function studioRouteFromHash(hash: string): Pick<
     projects: "replica",
     characters: "people",
     wallet: "profile",
+    analytics: "workbench",
   };
   const params = new URLSearchParams(query);
   const result: ReturnType<typeof studioRouteFromHash> = {
@@ -111,7 +111,9 @@ export function studioRouteFromHash(hash: string): Pick<
   result.selectedAssetId = params.get("asset") ?? undefined;
   result.selectedPersonId = params.get("person") ?? undefined;
   const returnTo = params.get("returnTo");
-  if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
+  if (returnTo === "analytics") {
+    result.returnTo = "workbench";
+  } else if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
     result.returnTo = returnTo as StudioPage;
   }
   return result;

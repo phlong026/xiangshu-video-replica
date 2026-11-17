@@ -12,6 +12,7 @@ import type {
   Project,
   SimpleLibraryEntry,
   SimpleSceneLook,
+  StudioStats,
   ViralVideoItem,
 } from "../api";
 import * as live from "./live";
@@ -48,7 +49,7 @@ const api = vi.hoisted(() => ({
   listStudioSavedScripts: vi.fn(),
   saveStudioSavedScript: vi.fn(),
   getStudioAnalytics: vi.fn(async () => null),
-  getStudioStats: vi.fn(async () => null),
+  getStudioStats: vi.fn<() => Promise<StudioStats | null>>(async () => null),
   getLatestScriptVersion: vi.fn(),
   listCharacterSceneLooks: vi.fn(),
   listCharacterSceneLooksPage: vi.fn(),
@@ -1117,16 +1118,31 @@ describe("真实 Studio 只读适配器", () => {
   });
 
   it("启动切片瞬时失败自动重试一次（P0-6）", async () => {
-    let analyticsCalls = 0;
-    // allSettled 依序发起 analytics7 → analytics30；第一次调用瞬时失败。
-    api.getStudioAnalytics.mockImplementation(async () => {
-      analyticsCalls += 1;
-      if (analyticsCalls === 1) throw new Error("瞬时超时");
-      return null;
-    });
-    api.getStudioStats.mockResolvedValue(null);
+    api.getStudioStats
+      .mockRejectedValueOnce(new Error("瞬时超时"))
+      .mockResolvedValue(null);
     const data = await loadStudioData(user);
+    expect(api.getStudioStats).toHaveBeenCalledTimes(2);
     expect(data.errors).toEqual([]);
+  });
+
+  it("启动保留工作台统计，不再请求客户看板的 7/30 天聚合", async () => {
+    const stats = {
+      today_completed: 2,
+      running: 1,
+      queued: 3,
+      needs_attention: 0,
+      total_completed: 8,
+    };
+    api.getStudioStats.mockResolvedValue(stats);
+
+    const data = await loadStudioData(user);
+
+    expect(api.getStudioStats).toHaveBeenCalledOnce();
+    expect(data.stats).toEqual(stats);
+    expect(api.getStudioAnalytics).not.toHaveBeenCalled();
+    expect(data).not.toHaveProperty("analytics7");
+    expect(data).not.toHaveProperty("analytics30");
   });
 
   it("映射项目、单张五视图合成图和真实批次进度", async () => {

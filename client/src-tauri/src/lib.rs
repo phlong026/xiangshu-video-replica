@@ -29,6 +29,7 @@ pub fn run() {
             publish_accounts::focus_local_publish_login,
             publish_accounts::cancel_local_publish_login,
             publish_accounts::open_local_publish_account,
+            publish_accounts::open_kuaishou_creator,
             publish_accounts::remove_local_publish_account,
             publish_accounts::export_local_publish_account_state,
             customer_credentials::customer_device_instance_id,

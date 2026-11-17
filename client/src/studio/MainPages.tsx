@@ -1138,12 +1138,12 @@ export function WorkbenchPage() {
               </button>
               <button
                 type="button"
-                aria-label="快捷入口：数据看板"
-                onClick={() => navigate("analytics")}
+                aria-label="快捷入口：任务列表"
+                onClick={() => navigate("tasks")}
               >
-                <Icon name="chart" size={28} />
+                <Icon name="tasks" size={28} />
                 <span>
-                  数据看板<small>查看创作数据</small>
+                  任务列表<small>查看进度与成片</small>
                 </span>
                 <Icon name="chevron" />
               </button>
@@ -1351,7 +1351,7 @@ export function TasksPage() {
   };
   return (
     <section className="studio-tasks-page">
-      {/* 独立任务列表与数据看板页签共用表格，标题由各自页面入口提供。
+      {/* 任务列表标题由页面入口提供。
           工具并轨一行（用户拍板 2026-11-15）：页签左、类型筛选与历史任务
           入口右，不再上下错位悬浮。 */}
       <div className="studio-filter-bar">

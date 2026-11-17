@@ -138,14 +138,12 @@ describe("App canonical replica entry", () => {
       screen.queryByRole("button", { name: "模拟一键生成完成" }),
     ).not.toBeInTheDocument();
 
-    // 2026-10-31：任务中心下沉为数据看板页签——侧边栏「数据看板」→「任务中心」页签。
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
         "button",
-        { name: /数据看板/ },
+        { name: /任务列表/ },
       ),
     );
-    fireEvent.click(screen.getByRole("tab", { name: "任务中心" }));
     fireEvent.click(await screen.findByRole("button", { name: "查看结果" }));
     expect(
       await screen.findByRole("heading", { name: "夏日咖啡馆复刻成片" }),
@@ -153,6 +151,11 @@ describe("App canonical replica entry", () => {
     expect(window.location.hash).toContain(
       `#studio/task-detail/generation_batch/${batch.id}`,
     );
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        url.includes("/api/studio/analytics"),
+      ),
+    ).toBe(false);
   });
 
   it.each(["生成视频", "查看流程"] as const)(

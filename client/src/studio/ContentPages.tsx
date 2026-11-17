@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -3668,6 +3669,27 @@ export function PublishPage() {
     }
   }
 
+  const downloadSelectedVideo = () =>
+    selectedAsset &&
+    perform(() =>
+      downloadMaterialAsset(
+        selectedAsset.materialId ?? selectedAsset.assetId ?? selectedAsset.id,
+        `${form.title || "发布视频"}.mp4`,
+      ),
+    );
+  const copyPublishText = () =>
+    perform(() =>
+      navigator.clipboard.writeText(
+        [
+          form.title,
+          form.description,
+          form.tags.map((tag) => `#${tag}`).join(" "),
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      ),
+    );
+
   async function removeCurrentDraft() {
     if (
       !savedDraftForAsset ||
@@ -3701,9 +3723,62 @@ export function PublishPage() {
       <header className="content-title">
         <div>
           <h1>发布管理</h1>
-          <p>选择成片与账号，立即发布或定时发布；发布结果在下方记录中回收</p>
+          <p>选择成片与账号发布，或前往快手创作者中心手动发布</p>
         </div>
       </header>
+      <section
+        aria-labelledby="kuaishou-manual-publish-title"
+        className="studio-panel content-publish-manual"
+      >
+        <div>
+          <h2 id="kuaishou-manual-publish-title">快手手动发布</h2>
+          <p>
+            下载所选成片、复制发布草稿的文案，再到快手创作者中心登录、手动上传并确认发布，结果以快手官方页面为准。
+          </p>
+          <span>
+            {selectedAsset ? `已选择：${selectedAsset.name}` : "尚未选择成片"}
+          </span>
+        </div>
+        <div className="content-publish-manual-actions">
+          <Button onClick={() => openLive("tasks")}>
+            {selectedAsset ? "更换发布成片" : "选择发布成片"}
+          </Button>
+          <Button
+            disabled={!selectedAsset || review || actionBusy}
+            onClick={() => void downloadSelectedVideo()}
+          >
+            下载所选成片
+          </Button>
+          <Button
+            disabled={!form.title.trim() || review || actionBusy}
+            onClick={() => void copyPublishText()}
+          >
+            复制快手发布文案
+          </Button>
+          <a
+            className="studio-button studio-button--primary"
+            href="https://cp.kuaishou.com/article/publish/video"
+            rel="noopener noreferrer"
+            target="_blank"
+            onClick={(event) => {
+              if (!isTauri()) return;
+              event.preventDefault();
+              setActionError("");
+              void invoke<void>("open_kuaishou_creator").catch((cause) => {
+                setActionError(
+                  cause instanceof Error
+                    ? cause.message
+                    : typeof cause === "string"
+                      ? cause
+                      : "无法打开快手创作者中心，请重试。",
+                );
+              });
+            }}
+          >
+            前往快手手动发布
+          </a>
+        </div>
+      </section>
       <section className="content-publish-layout">
         <Panel className="content-publish-drafts">
           <div className="content-publish-draft-tabs">
@@ -4216,17 +4291,7 @@ export function PublishPage() {
             </Button>
             <Button
               disabled={!selectedAsset || review || actionBusy}
-              onClick={() =>
-                selectedAsset &&
-                void perform(() =>
-                  downloadMaterialAsset(
-                    selectedAsset.materialId ??
-                      selectedAsset.assetId ??
-                      selectedAsset.id,
-                    `${form.title || "发布视频"}.mp4`,
-                  ),
-                )
-              }
+              onClick={() => void downloadSelectedVideo()}
             >
               下载视频
             </Button>
@@ -4248,19 +4313,7 @@ export function PublishPage() {
             </Button>
             <Button
               disabled={!form.title.trim() || review || actionBusy}
-              onClick={() =>
-                void perform(() =>
-                  navigator.clipboard.writeText(
-                    [
-                      form.title,
-                      form.description,
-                      form.tags.map((tag) => `#${tag}`).join(" "),
-                    ]
-                      .filter(Boolean)
-                      .join("\n"),
-                  ),
-                )
-              }
+              onClick={() => void copyPublishText()}
             >
               复制发布文案
             </Button>

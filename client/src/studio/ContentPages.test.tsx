@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useCallback, useLayoutEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -444,8 +445,6 @@ function studio(
       materials: [],
       loading: false,
       stats: null,
-      analytics7: null,
-      analytics30: null,
     },
     review: true,
     user: {} as StudioContextValue["user"],
@@ -3743,6 +3742,141 @@ describe("V1.4 内容与运营页面", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("快手手动入口无需绑定账号，草稿读取失败仍可打开官方页面", async () => {
+    createPublishRecord.mockClear();
+    getStudioDraft.mockRejectedValueOnce(new Error("云端草稿暂不可用"));
+    publishAccounts.listCloudPublishAccounts.mockResolvedValue([]);
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<PublishPage />);
+
+    const manual = within(screen.getByRole("region", { name: "快手手动发布" }));
+    const link = manual.getByRole("link", { name: "前往快手手动发布" });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://cp.kuaishou.com/article/publish/video",
+    );
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(manual.getByText(/手动上传并确认发布/)).toBeInTheDocument();
+    expect(manual.getByRole("button", { name: "下载所选成片" })).toBeDisabled();
+    fireEvent.click(manual.getByRole("button", { name: "选择发布成片" }));
+    expect(value.openLive).toHaveBeenCalledWith("tasks");
+    await screen.findByText("云端草稿暂不可用");
+    expect(link).not.toHaveAttribute("aria-disabled", "true");
+    expect(createPublishRecord).not.toHaveBeenCalled();
+  });
+
+  it("快手手动发布复用所选成片下载和草稿文案，不创建自动发布记录", async () => {
+    createPublishRecord.mockClear();
+    publishAccounts.listCloudPublishAccounts.mockResolvedValue([]);
+    downloadMaterialAsset.mockResolvedValue(undefined);
+    const writeText = vi.fn(async (_text: string) => {});
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "clipboard",
+    );
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const base = studio();
+    const value = studio({
+      review: false,
+      state: { ...base.state, selectedAssetId: "ready-video" },
+      data: {
+        ...base.data,
+        tasks: [],
+        assets: [
+          {
+            id: "ready-video",
+            assetId: "ready-video",
+            materialId: "asset:ready-video",
+            name: "庭院成片",
+            kind: "video",
+            group: "成片",
+            source: "任务中心",
+            saved: true,
+          },
+        ],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    try {
+      render(<PublishPage />);
+      await waitFor(() =>
+        expect(screen.getByLabelText("发布标题")).toBeEnabled(),
+      );
+      fireEvent.change(screen.getByLabelText("发布标题"), {
+        target: { value: "乡墅庭院设计" },
+      });
+      fireEvent.change(screen.getByLabelText("发布描述"), {
+        target: { value: "手动发布说明" },
+      });
+      fireEvent.change(screen.getByLabelText("添加标签"), {
+        target: { value: "庭院" },
+      });
+      fireEvent.keyDown(screen.getByLabelText("添加标签"), { key: "Enter" });
+      const manual = within(
+        screen.getByRole("region", { name: "快手手动发布" }),
+      );
+      expect(manual.getByText("已选择：庭院成片")).toBeInTheDocument();
+      fireEvent.click(manual.getByRole("button", { name: "下载所选成片" }));
+      await waitFor(() =>
+        expect(downloadMaterialAsset).toHaveBeenCalledWith(
+          "asset:ready-video",
+          "乡墅庭院设计.mp4",
+        ),
+      );
+      const copy = manual.getByRole("button", { name: "复制快手发布文案" });
+      await waitFor(() => expect(copy).toBeEnabled());
+      fireEvent.click(copy);
+      await waitFor(() =>
+        expect(writeText).toHaveBeenCalledWith(
+          "乡墅庭院设计\n手动发布说明\n#庭院",
+        ),
+      );
+      expect(createPublishRecord).not.toHaveBeenCalled();
+      expect(value.notify).not.toHaveBeenCalledWith(
+        expect.stringMatching(/已提交发布|已发布/),
+      );
+    } finally {
+      if (clipboardDescriptor)
+        Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("桌面快手链接调用固定官方页面命令且不自动发布", async () => {
+    createPublishRecord.mockClear();
+    tauriNative.isTauri.mockReturnValue(true);
+    tauriNative.invoke.mockClear();
+    useStudio.mockReturnValue(studio());
+    render(<PublishPage />);
+
+    fireEvent.click(screen.getByRole("link", { name: "前往快手手动发布" }));
+    await waitFor(() =>
+      expect(tauriNative.invoke).toHaveBeenCalledWith("open_kuaishou_creator"),
+    );
+    expect(createPublishRecord).not.toHaveBeenCalled();
+  });
+
+  it("桌面官方页面打开失败显示原因并允许再次打开", async () => {
+    tauriNative.isTauri.mockReturnValue(true);
+    tauriNative.invoke.mockClear();
+    tauriNative.invoke.mockRejectedValueOnce("无法打开快手创作者中心");
+    useStudio.mockReturnValue(studio());
+    render(<PublishPage />);
+
+    const link = screen.getByRole("link", { name: "前往快手手动发布" });
+    fireEvent.click(link);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "无法打开快手创作者中心",
+    );
+    fireEvent.click(link);
+    await waitFor(() => expect(tauriNative.invoke).toHaveBeenCalledTimes(2));
+  });
+
   it("审核示例发布草稿独立保存，不覆盖口播脚本", () => {
     const base = studio();
     const value = studio({
@@ -4049,9 +4183,7 @@ describe("V1.4 内容与运营页面", () => {
     render(<PublishPage />);
 
     expect(
-      screen.getByText(
-        "选择成片与账号，立即发布或定时发布；发布结果在下方记录中回收",
-      ),
+      screen.getByText("选择成片与账号发布，或前往快手创作者中心手动发布"),
     ).toBeInTheDocument();
     expect(screen.getByText("草稿保存在云端，可反复编辑")).toBeInTheDocument();
     expect(screen.queryByText(/待发布\s*0/)).not.toBeInTheDocument();

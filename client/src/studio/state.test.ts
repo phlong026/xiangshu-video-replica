@@ -150,17 +150,43 @@ describe("V1.4 交接合同", () => {
 
   it("任务详情地址编码对象类型、后端 ID 与返回位置", () => {
     const route = studioRouteFromHash(
-      "#studio/task-detail/oral_task/oral%2F42?returnTo=analytics",
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=tasks",
     );
     expect(route).toMatchObject({
       page: "task-detail",
       selectedTaskKind: "oral_task",
       selectedTaskBackendId: "oral/42",
       selectedTaskId: "oral-oral/42",
-      returnTo: "analytics",
+      returnTo: "tasks",
     });
     expect(studioHashForState({ ...createState(), ...route })).toBe(
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=tasks",
+    );
+  });
+
+  it.each(["#analytics", "#studio/analytics"])(
+    "已取消的数据看板旧路径 %s 回到工作台",
+    (hash) => {
+      const route = studioRouteFromHash(hash);
+      expect(route.page).toBe("workbench");
+      expect(studioHashForState({ ...createState(), ...route })).toBe(
+        "#studio/workbench",
+      );
+    },
+  );
+
+  it("任务详情旧看板返回位置改为工作台，保留任务身份", () => {
+    const route = studioRouteFromHash(
       "#studio/task-detail/oral_task/oral%2F42?returnTo=analytics",
+    );
+    expect(route).toMatchObject({
+      page: "task-detail",
+      selectedTaskKind: "oral_task",
+      selectedTaskBackendId: "oral/42",
+      returnTo: "workbench",
+    });
+    expect(studioHashForState({ ...createState(), ...route })).toBe(
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=workbench",
     );
   });
 

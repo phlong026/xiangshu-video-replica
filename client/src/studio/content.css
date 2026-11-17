@@ -1129,6 +1129,39 @@
 .content-material-manage input {
   width: 100%;
 }
+.content-publish-manual {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+  margin-top: 16px;
+  padding: 18px;
+}
+.content-publish-manual > div:first-child {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+.content-publish-manual h2 {
+  font-size: var(--font-section);
+  margin: 0 0 8px;
+}
+.content-publish-manual p {
+  color: #b4b5af;
+  line-height: 1.6;
+  margin: 0 0 8px;
+}
+.content-publish-manual span {
+  color: #deded9;
+  overflow-wrap: anywhere;
+}
+.content-publish-manual-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.content-publish-manual-actions a {
+  text-decoration: none;
+}
 .content-publish-layout {
   display: grid;
   gap: 18px;
