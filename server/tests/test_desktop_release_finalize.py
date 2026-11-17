@@ -488,7 +488,10 @@ def test_workflow_and_signing_driver_keep_private_material_local() -> None:
     workflow = (REPO / ".github/workflows/desktop-build.yml").read_text(encoding="utf-8")
     driver = (REPO / "scripts/release/finalize-customer-release.ps1").read_text(encoding="utf-8")
     assert "macos-overlay" in workflow
-    assert 'config_args=(--config "$RUNNER_TEMP/customer-macos-release.json")' in workflow
+    # macOS 配置通过覆写检出内平台文件进入构建（绕开 CLI 参数传递），不再用 --config。
+    cp_line = 'cp "$RUNNER_TEMP/customer-macos-release.json" client/src-tauri/tauri.macos.conf.json'
+    assert cp_line in workflow
+    assert 'config_args=(--config "$RUNNER_TEMP/customer-macos-release.json")' not in workflow
     assert "verify-macos-app" in workflow
     assert "TAURI_SIGNING_" not in workflow
     assert "Get-AuthenticodeSignature -LiteralPath $plan.windowsInstaller" in driver

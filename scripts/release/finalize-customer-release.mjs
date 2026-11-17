@@ -244,6 +244,12 @@ export async function verifyMacosApp(path, origin) {
   const endpoint = binary.includes(Buffer.from(config.endpoints[0]));
   const pubkey = binary.includes(Buffer.from(config.pubkey));
   const staging = binary.includes(Buffer.from("staging.example.invalid"));
+  // 先向 stderr 打印三项发现值再断言，任何 runner 上都能从日志定位失败层；
+  // stdout 保持给调用方解析配置。
+  console.error(
+    "verify-macos-app findings:",
+    JSON.stringify({ endpoint, pubkey, staging, size: binary.length }),
+  );
   // 三路独立诊断：缺端点 / 缺公钥 / 仍含占位端点，各自给出明确失败原因。
   assert(endpoint, "Mac 应用缺少生产更新端点（updater 配置未编译进二进制）");
   assert(pubkey, "Mac 应用缺少生产更新公钥");
