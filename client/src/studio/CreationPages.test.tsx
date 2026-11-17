@@ -4143,41 +4143,67 @@ describe("V1.4 创作页面", () => {
     expect(current.patchDraft).not.toHaveBeenCalled();
   });
 
-  it("音频口播只需完整音频和分身，不依赖文案与声音", () => {
+  it("旧音频草稿进入文案页且无模式切换，仍须终稿与已确认声音", () => {
     const value = studio();
-    value.state.page = "oral-audio";
+    value.state.page = "oral";
     value.state.draft.driverMode = "audio";
     value.state.draft.voiceId = undefined;
     value.state.draft.script.text = "";
     value.state.draft.script.confirmed = false;
-    value.data.assets.push({
-      id: "audio-1",
-      name: "完整讲解",
-      kind: "audio",
-      group: "素材",
-      source: "上传",
-      saved: true,
-      allowedUses: ["oral_audio"],
-    });
     useStudio.mockReturnValue(value);
     const view = render(<OralPage />);
+
+    expect(screen.queryByRole("button", { name: "文案驱动" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "已有音频" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择口播音频" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "完整口播音频" })).toBeNull();
     expect(
-      screen.getByRole("heading", { name: "完整口播音频" }),
+      screen.getByRole("heading", { name: "口播文案" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "口播文案" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "更换声音" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "更换声音" }),
+    ).toBeInTheDocument();
     const submit = screen.getByRole("button", { name: "生成口播视频" });
+    expect(submit).toBeDisabled();
+
+    value.state.draft.script.text = "新的文案";
+    value.state.draft.script.confirmed = true;
+    view.rerender(<OralPage />);
+    expect(submit).toBeDisabled();
+    value.state.draft.voiceId = "voice-1";
+    view.rerender(<OralPage />);
     expect(submit).toBeEnabled();
     fireEvent.click(submit);
     expect(value.requestGeneration).toHaveBeenCalledWith("数字人口播");
-    value.data.assets = value.data.assets.filter(
-      (asset) => asset.id !== "audio-1",
-    );
+  });
+
+  it("口播空态去除冗余文案，保留人物信息与选择、创建按钮", () => {
+    const value = studio();
+    value.state.page = "oral";
+    useStudio.mockReturnValue(value);
+    const view = render(<OralPage />);
+    expect(screen.getByText("张工 · 乡墅设计师")).toBeInTheDocument();
+
+    value.state.draft.ipId = undefined;
     view.rerender(<OralPage />);
-    expect(submit).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "选择口播音频" }));
-    expect(value.navigate).toHaveBeenCalledWith("materials", {
-      returnTo: "oral-audio",
+    for (const text of [
+      "人物 IP",
+      "未选择",
+      "还没有可用口播分身",
+      "请先上传当前人物的真人视频创建分身。",
+      /还差：|按上方标记逐项准备即可/,
+      "确认预计费用后提交，生成进度可在任务中心查看。",
+    ])
+      expect(screen.queryByText(text)).toBeNull();
+    expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "更换 IP" }));
+    expect(value.openPicker).toHaveBeenCalledWith("person");
+    fireEvent.click(
+      screen.getByRole("button", { name: "去人物库制作口播分身" }),
+    );
+    expect(value.navigate).toHaveBeenCalledWith("person-avatars", {
+      returnTo: "oral",
+      selectedPersonId: undefined,
     });
   });
 
@@ -4239,7 +4265,7 @@ describe("V1.4 创作页面", () => {
     expect(screen.queryByText("张工 · 张工 · 设计室讲解")).toBeNull();
   });
 
-  it("补充声音与分身时带入当前IP和当前口播模式", () => {
+  it("补充声音与分身时带入当前IP并返回文案口播", () => {
     const missingVoice = studio();
     missingVoice.state = {
       ...missingVoice.state,
@@ -4258,7 +4284,7 @@ describe("V1.4 创作页面", () => {
     const missingAvatar = studio();
     missingAvatar.state = {
       ...missingAvatar.state,
-      page: "oral-audio",
+      page: "oral",
       draft: { ...missingAvatar.state.draft, avatarId: undefined },
     };
     useStudio.mockReturnValue(missingAvatar);

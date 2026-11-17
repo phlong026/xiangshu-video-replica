@@ -755,10 +755,10 @@ describe("PeoplePages", () => {
 
   it("returns to the originating creation page and clears the return context", () => {
     currentPage = "person-voices";
-    returnTo = "oral-audio";
+    returnTo = "oral";
     render(<PersonPage />);
     screen.getByRole("button", { name: /返回创作/ }).click();
-    expect(navigate).toHaveBeenCalledWith("oral-audio", {
+    expect(navigate).toHaveBeenCalledWith("oral", {
       returnTo: undefined,
     });
   });

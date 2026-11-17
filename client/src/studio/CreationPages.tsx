@@ -5910,8 +5910,14 @@ function PersonIdentity({ person }: { person?: StudioPerson }) {
   const readOnly = user.role === "auditor";
   return (
     <div className="creation-identity-row">
-      <span>人物 IP</span>
-      <strong>{person ? `${person.name} · ${person.role}` : "未选择"}</strong>
+      {person ? (
+        <>
+          <span>人物 IP</span>
+          <strong>
+            {person.name} · {person.role}
+          </strong>
+        </>
+      ) : null}
       <Button
         variant="outline"
         disabled={readOnly}
@@ -5954,38 +5960,15 @@ export function OralPage() {
   const scriptReady = Boolean(
     state.draft.script.confirmed && state.draft.script.text.trim(),
   );
-  const audioMode =
-    state.draft.driverMode === "audio" || state.page === "oral-audio";
-  const audio = data.assets.find(
-    (asset) =>
-      asset.id === state.draft.audioId &&
-      asset.kind === "audio" &&
-      (!asset.allowedUses || asset.allowedUses.includes("oral_audio")),
-  );
-  const ready = Boolean(
-    person && avatar && (audioMode ? audio : voice && scriptReady),
-  );
-  // 平铺式简化（用户拍板 2026-11-15）：流程条按真实状态驱动——完成的打 ✓、
-  // 当前第一未完成项高亮，不再恒显「第 3 步」；分区标题同步标记，右栏重复
-  // 的就绪清单取消，未就绪原因收敛到生成按钮旁一行。
+  const ready = Boolean(person && avatar && voice && scriptReady);
   const avatarReady = Boolean(avatar);
   const voiceReady = Boolean(voice);
-  const audioReady = Boolean(audio);
-  const journeyDone: [boolean, boolean, boolean] = audioMode
-    ? [avatarReady, true, audioReady]
-    : [avatarReady, voiceReady, scriptReady];
+  const journeyDone: [boolean, boolean, boolean] = [
+    avatarReady,
+    voiceReady,
+    scriptReady,
+  ];
   const journeyStep: 1 | 2 | 3 = journeyDone[0] ? (journeyDone[1] ? 3 : 2) : 1;
-  const missing = audioMode
-    ? [avatarReady ? "" : "视频分身", audioReady ? "" : "完整口播音频"]
-        .filter(Boolean)
-        .join("、")
-    : [
-        avatarReady ? "" : "视频分身",
-        voiceReady ? "" : "克隆声音",
-        scriptReady ? "" : "文案终稿",
-      ]
-        .filter(Boolean)
-        .join("、");
   const manage = (page: "person-avatars" | "person-voices") =>
     navigate(page, { returnTo: "oral", selectedPersonId: state.draft.ipId });
   return (
@@ -5999,37 +5982,11 @@ export function OralPage() {
         </Button>
         <div>
           <h1>数字人口播</h1>
-          <p>
-            {audioMode
-              ? "选好视频分身，用已有完整音频制作口播。"
-              : "选好视频分身和自己的声音，让文案成为新口播。"}
-          </p>
+          <p>选好视频分身和自己的声音，让文案成为新口播。</p>
         </div>
       </header>
       <CreationNavigation />
-      <div className="creation-style-controls">
-        <Button
-          variant={!audioMode ? "outline" : "quiet"}
-          disabled={readOnly}
-          onClick={() => {
-            patchDraft({ driverMode: "text" });
-            navigate("oral");
-          }}
-        >
-          文案驱动
-        </Button>
-        <Button
-          variant={audioMode ? "outline" : "quiet"}
-          disabled={readOnly}
-          onClick={() => {
-            patchDraft({ driverMode: "audio" });
-            navigate("oral-audio");
-          }}
-        >
-          已有音频
-        </Button>
-      </div>
-      {!audioMode && <OralJourney step={journeyStep} done={journeyDone} />}
+      <OralJourney step={journeyStep} done={journeyDone} />
       <div className="oral-composer-grid">
         <Panel className="oral-source-panel">
           <PersonIdentity person={person} />
@@ -6060,145 +6017,92 @@ export function OralPage() {
                 <small>已就绪 · 真人视频创建</small>
               </div>
               <span className="oral-source-label">
-                {audioMode
-                  ? "分身来源预览，成片会按所选音频重新生成。"
-                  : "分身来源预览，成片会按文案和声音重新生成。"}
+                分身来源预览，成片会按文案和声音重新生成。
               </span>
               <Button variant="quiet" onClick={() => manage("person-avatars")}>
                 管理口播分身
               </Button>
             </>
           ) : (
-            <Empty
-              title="还没有可用口播分身"
-              description="请先上传当前人物的真人视频创建分身。"
-              action={
-                <Button
-                  variant="outline"
-                  onClick={() => manage("person-avatars")}
-                >
-                  去人物库制作口播分身
-                </Button>
-              }
-            />
+            <Button variant="outline" onClick={() => manage("person-avatars")}>
+              去人物库制作口播分身
+            </Button>
           )}
-          {!audioMode && (
-            <div className="oral-voice-choice">
-              <div
-                className={`creation-panel-title-row ${
-                  voiceReady ? "is-done" : "is-pending"
-                }`}
-              >
-                <span>{voiceReady ? "✓" : "○"} 克隆声音</span>
-                <Button
-                  variant="outline"
-                  disabled={readOnly}
-                  onClick={() => openPicker("voice")}
-                >
-                  更换声音
-                </Button>
-              </div>
-              <div className="creation-voice-row">
-                <strong>{voice?.name ?? "未选择已确认声音"}</strong>
-                <small>{voice ? "已试听确认" : "需在声音档案中试听确认"}</small>
-              </div>
-              {voice?.url ? (
-                <audio
-                  controls
-                  preload="none"
-                  src={voice.url}
-                  aria-label={`${voice.name}试听`}
-                >
-                  <track kind="captions" label="声音样本" />
-                </audio>
-              ) : null}
-              <Button variant="quiet" onClick={() => manage("person-voices")}>
-                管理声音
-              </Button>
-            </div>
-          )}
-        </Panel>
-        <Panel className="oral-script-panel">
-          {audioMode ? (
-            <>
-              <div className="oral-panel-heading">
-                <h2>完整口播音频</h2>
-              </div>
-              <p>{audio?.name ?? "请选择可用于口播的完整音频"}</p>
-              {audio?.url && (
-                <audio
-                  controls
-                  preload="none"
-                  src={audio.url}
-                  aria-label="口播音频预览"
-                >
-                  <track kind="captions" label="口播音频" />
-                </audio>
-              )}
+          <div className="oral-voice-choice">
+            <div
+              className={`creation-panel-title-row ${
+                voiceReady ? "is-done" : "is-pending"
+              }`}
+            >
+              <span>{voiceReady ? "✓" : "○"} 克隆声音</span>
               <Button
                 variant="outline"
                 disabled={readOnly}
-                onClick={() =>
-                  navigate("materials", { returnTo: "oral-audio" })
-                }
+                onClick={() => openPicker("voice")}
               >
-                选择口播音频
+                更换声音
               </Button>
-              <Hint>
-                直接使用所选音频，不生成配音，也不使用草稿中的文案或克隆声音。
-              </Hint>
-            </>
-          ) : (
-            <>
-              <div className="oral-panel-heading">
-                <h2>口播文案</h2>
-                {/* 文案从文案工坊带入后允许就地确认终稿，不再强迫用户跳回工坊。 */}
-                {!scriptReady && state.draft.script.text.trim() ? (
-                  <Button
-                    variant="outline"
-                    disabled={readOnly}
-                    onClick={() => confirmFinalDraft()}
-                  >
-                    确认终稿
-                  </Button>
-                ) : null}
-              </div>
-              <div className="creation-readonly-script">
-                <p>
-                  {state.draft.script.text || "去文案工坊填写并确认口播文案。"}
-                </p>
-                <button
-                  type="button"
-                  onClick={() => navigate("copy", { returnTo: "oral" })}
-                >
-                  去文案工坊修改
-                </button>
-              </div>
-              <div className="creation-style-controls">
-                <span>标准口播</span>
-                <span>字幕</span>
-                <Button
-                  disabled={readOnly}
-                  variant={!state.draft.subtitles ? "outline" : "quiet"}
-                  onClick={() => patchDraft({ subtitles: false })}
-                >
-                  不添加
-                </Button>
-                <Button
-                  disabled={readOnly}
-                  variant={state.draft.subtitles ? "outline" : "quiet"}
-                  onClick={() => patchDraft({ subtitles: true })}
-                >
-                  添加
-                </Button>
-              </div>
-            </>
-          )}
-          {missing ? (
-            <p className="oral-missing" role="status">
-              还差：{missing}——按上方标记逐项准备即可。
-            </p>
-          ) : null}
+            </div>
+            <div className="creation-voice-row">
+              <strong>{voice?.name ?? "未选择已确认声音"}</strong>
+              <small>{voice ? "已试听确认" : "需在声音档案中试听确认"}</small>
+            </div>
+            {voice?.url ? (
+              <audio
+                controls
+                preload="none"
+                src={voice.url}
+                aria-label={`${voice.name}试听`}
+              >
+                <track kind="captions" label="声音样本" />
+              </audio>
+            ) : null}
+            <Button variant="quiet" onClick={() => manage("person-voices")}>
+              管理声音
+            </Button>
+          </div>
+        </Panel>
+        <Panel className="oral-script-panel">
+          <div className="oral-panel-heading">
+            <h2>口播文案</h2>
+            {/* 文案从文案工坊带入后允许就地确认终稿，不再强迫用户跳回工坊。 */}
+            {!scriptReady && state.draft.script.text.trim() ? (
+              <Button
+                variant="outline"
+                disabled={readOnly}
+                onClick={() => confirmFinalDraft()}
+              >
+                确认终稿
+              </Button>
+            ) : null}
+          </div>
+          <div className="creation-readonly-script">
+            <p>{state.draft.script.text || "去文案工坊填写并确认口播文案。"}</p>
+            <button
+              type="button"
+              onClick={() => navigate("copy", { returnTo: "oral" })}
+            >
+              去文案工坊修改
+            </button>
+          </div>
+          <div className="creation-style-controls">
+            <span>标准口播</span>
+            <span>字幕</span>
+            <Button
+              disabled={readOnly}
+              variant={!state.draft.subtitles ? "outline" : "quiet"}
+              onClick={() => patchDraft({ subtitles: false })}
+            >
+              不添加
+            </Button>
+            <Button
+              disabled={readOnly}
+              variant={state.draft.subtitles ? "outline" : "quiet"}
+              onClick={() => patchDraft({ subtitles: true })}
+            >
+              添加
+            </Button>
+          </div>
           <footer className="creation-action-bar">
             <Button variant="outline" disabled={readOnly} onClick={saveDraft}>
               保存草稿
@@ -6211,7 +6115,6 @@ export function OralPage() {
               生成口播视频
             </Button>
           </footer>
-          <Hint>确认预计费用后提交，生成进度可在任务中心查看。</Hint>
         </Panel>
       </div>
     </section>
