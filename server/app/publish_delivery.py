@@ -1,14 +1,12 @@
-"""One delivery attempt: protocol adapter first, browser automation as fallback.
+"""One delivery attempt through the platform's supported channel.
 
-The worker hands this module a decrypted ``storage_state`` and the storage
-adapter; everything here runs with no database transaction open. Heavy
-vendor / Playwright imports stay inside the adapters so the FastAPI process
-never loads them.
+Kuaishou uses the browser channel directly; the protocol platforms retain
+API-first delivery with an optional browser fallback. The worker supplies a
+decrypted in-memory ``storage_state`` and runs adapters outside transactions.
+Heavy vendor / Playwright imports stay inside the adapters.
 
-Fallback policy: the browser path only runs when the protocol attempt failed
-for a reason that a real browser session could still overcome (signing
-environment missing, endpoint drift, risk-control block). A platform that
-rejected the login state (``account_invalid``) is terminal for both paths.
+A rejected login state or an unknown submission outcome is terminal for the
+attempt: falling back after either could repeat an irreversible publication.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,11 +155,25 @@ def deliver_via_browser(
     description: str,
     tags: list[str],
     options: dict[str, Any],
+    expected_platform_user_id: str | None = None,
+    submission_key: str | None = None,
+    before_submit: Callable[[], bool] | None = None,
 ) -> PublishResult:
-    """Browser-automation delivery; implemented by the follow-up fallback task.
+    if platform == "kuaishou":
+        from app.publishers import kuaishou_adapter
 
-    Kept as an explicit seam so the fallback decision matrix is testable now.
-    """
+        return kuaishou_adapter.publish_to_kuaishou(
+            storage_state=storage_state,
+            expected_platform_user_id=expected_platform_user_id,
+            video_path=video_path,
+            cover_path=cover_path,
+            title=title,
+            description=description,
+            tags=tags,
+            options=options,
+            submission_key=submission_key,
+            before_submit=before_submit,
+        )
     raise PublisherUnavailableError(platform, "浏览器兜底发布尚未启用")
 
 
@@ -176,8 +188,36 @@ def deliver(
     tags: list[str],
     options: dict[str, Any] | None = None,
     submission_key: str | None = None,
+    expected_platform_user_id: str | None = None,
+    before_submit: Callable[[], bool] | None = None,
 ) -> DeliveryOutcome:
     opts = options or {}
+    # 快手仅走浏览器渠道；协议凭据翻译不支持它，不能据此误判扫码账号失效。
+    if platform == "kuaishou":
+        try:
+            result = deliver_via_browser(
+                platform,
+                storage_state,
+                video_path=video_path,
+                cover_path=cover_path,
+                title=title,
+                description=description,
+                tags=tags,
+                options=opts,
+                expected_platform_user_id=expected_platform_user_id,
+                submission_key=submission_key,
+                before_submit=before_submit,
+            )
+        except PublisherUnavailableError as exc:
+            result = PublishResult(platform=platform, status="failed", message=exc.reason)
+        except Exception as exc:  # noqa: BLE001 - 无法判断浏览器是否已经提交，禁止重投
+            logger.warning("kuaishou browser delivery interrupted: %s", type(exc).__name__)
+            result = PublishResult(
+                platform=platform,
+                status="unknown",
+                message="快手发布结果无法确认，为避免重复发表已暂停自动重试，请人工核对",
+            )
+        return DeliveryOutcome(result, "browser")
     try:
         credentials = credentials_for_platform(platform, storage_state)
     except ValueError as exc:

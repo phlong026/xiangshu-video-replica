@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createState } from "./state";
 import type { StudioAsset, StudioContextValue } from "./types";
 
 const { useStudio } = vi.hoisted(() => ({
@@ -829,6 +830,9 @@ describe("V1.4 创作页面", () => {
         "true",
       );
       expect(
+        screen.getByText("请输入1至5000之间的整数文案字数。"),
+      ).toBeInTheDocument();
+      expect(
         screen.getByRole("button", { name: "生成二创文案" }),
       ).toBeDisabled();
       expect(replicaApi.rewriteProjectScript).not.toHaveBeenCalled();
@@ -1530,25 +1534,39 @@ describe("V1.4 创作页面", () => {
     );
   });
 
+  it("缺少来源项目时禁用二创并隐藏两条标记的提示", () => {
+    const value = studio({ review: false });
+    value.state.draft.projectId = undefined;
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+
+    const rewrite = screen.getByRole("button", { name: "生成二创文案" });
+    expect(rewrite).toBeDisabled();
+    expect(
+      screen.queryByText(/保留原文信息，生成后可继续编辑/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("当前文案缺少来源项目。"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(rewrite);
+    expect(replicaApi.rewriteProjectScript).not.toHaveBeenCalled();
+  });
+
   it.each([
-    ["缺少来源项目", { projectId: undefined }, /来源项目/],
-    ["缺少人物IP", { ipId: undefined }, /人物 IP/],
+    ["缺少人物 IP", { ipId: undefined }, "请先选择参与二创的人物 IP。"],
     [
       "正文为空",
       { script: { ...studio().state.draft.script, text: "", original: "" } },
-      /待改写正文/,
+      "请先提取待改写正文。",
     ],
   ])("%s时禁用二创并显示原因", (_name, draftPatch, message) => {
     const value = studio({ review: false });
-    value.state = {
-      ...value.state,
-      draft: { ...value.state.draft, ...draftPatch },
-    };
+    value.state.draft = { ...value.state.draft, ...draftPatch };
     useStudio.mockReturnValue(value);
     render(<CopyPage />);
 
     expect(screen.getByRole("button", { name: "生成二创文案" })).toBeDisabled();
-    expect(screen.getAllByText(message).length).toBeGreaterThan(0);
+    expect(screen.getByText(message)).toBeInTheDocument();
     expect(replicaApi.rewriteProjectScript).not.toHaveBeenCalled();
   });
 
@@ -1809,7 +1827,7 @@ describe("V1.4 创作页面", () => {
     useStudio.mockReturnValue(reviewValue);
     const view = render(<CopyPage />);
     expect(screen.getByRole("button", { name: "生成二创文案" })).toBeDisabled();
-    expect(screen.getByText(/审核示例/)).toBeInTheDocument();
+    expect(screen.getByText("审核示例不调用业务接口。")).toBeInTheDocument();
     view.unmount();
 
     const auditor = studio({
@@ -1828,7 +1846,9 @@ describe("V1.4 创作页面", () => {
     useStudio.mockReturnValue(auditor);
     render(<CopyPage />);
     expect(screen.getByRole("button", { name: "生成二创文案" })).toBeDisabled();
-    expect(screen.getByText(/只读权限/)).toBeInTheDocument();
+    expect(
+      screen.getByText("当前账号为只读权限，不能改写文案。"),
+    ).toBeInTheDocument();
     expect(replicaApi.rewriteProjectScript).not.toHaveBeenCalled();
   });
 
@@ -2735,7 +2755,20 @@ describe("V1.4 创作页面", () => {
     expect(screen.queryByRole("dialog", { name: "选择首帧来源" })).toBeNull();
   });
 
-  it("文图与参考空占位默认竖屏且不随输出比例变化", () => {
+  it.each(["video", "reference"] as const)(
+    "%s 新建草稿显示 15 秒，底栏隐藏提交说明",
+    (page) => {
+      useStudio.mockReturnValue(studio({ state: createState(page) }));
+      render(<VideoPage />);
+
+      expect(screen.getByRole("combobox", { name: "时长" })).toHaveValue("15");
+      expect(
+        screen.queryByText("提交前确认费用；生成结果进入任务中心。"),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("首帧与有素材的参考预览不随输出比例变化", () => {
     const value = studio({ state: { ...studio().state, page: "video" } });
     useStudio.mockReturnValue(value);
     const view = render(<VideoPage />);
@@ -2759,6 +2792,33 @@ describe("V1.4 创作页面", () => {
     }
   });
 
+  it("参考预览在选中素材后用实际画面替换空态", () => {
+    const value = studio({ state: createState("reference") });
+    useStudio.mockReturnValue(value);
+    const view = render(<VideoPage />);
+
+    const empty = screen.getByText("还没有参考素材");
+    expect(
+      empty.closest(".creation-reference-preview-empty"),
+    ).toHaveTextContent("上传本机文件或从素材库选择后，这里会实时预览画面");
+
+    const imageUrl = "https://assets.example/reference.jpg";
+    value.data.assets = value.data.assets.map((asset) =>
+      asset.id === "reference-1" ? { ...asset, url: imageUrl } : asset,
+    );
+    value.state.draft.referenceIds = ["reference-1"];
+    view.rerender(<VideoPage />);
+    expect(screen.getByAltText("参考画布")).toHaveAttribute("src", imageUrl);
+    expect(empty).not.toBeInTheDocument();
+
+    value.state = { ...value.state, page: "video" };
+    view.rerender(<VideoPage />);
+    expect(screen.getByText("当前为文生视频")).toBeInTheDocument();
+    expect(
+      view.container.querySelector(".creation-reference-preview-empty"),
+    ).toBeNull();
+  });
+
   it("文图与参考模式共用四个下拉参数并保留生成入口", () => {
     const value = studio({
       state: { ...studio().state, page: "video" },
@@ -2770,7 +2830,7 @@ describe("V1.4 创作页面", () => {
     expect(
       screen.getByRole("combobox", { name: "分辨率" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "时长" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "时长" })).toHaveValue("8");
     expect(
       screen.getByRole("combobox", { name: "画面比例" }),
     ).toBeInTheDocument();
@@ -2799,7 +2859,7 @@ describe("V1.4 创作页面", () => {
     expect(
       screen.getByRole("combobox", { name: "分辨率" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "时长" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "时长" })).toHaveValue("8");
     expect(
       screen.getByRole("combobox", { name: "画面比例" }),
     ).toBeInTheDocument();
@@ -2813,65 +2873,51 @@ describe("V1.4 创作页面", () => {
 
   // 供应商 ratio 契约（2026-09-19 真实付费核对）：图生比例由首帧决定，
   // 文生不支持自动。
-  it("长档开放时按独立价目提示计费；切 2K 上限钳回 15", () => {
-    const value = studio({
-      state: {
-        ...studio().state,
-        page: "video",
-        draft: { ...studio().state.draft, duration: 30 },
-      },
-    });
-    value.videoCapabilitiesStatus = "ready";
-    value.videoCapabilities = {
-      extended_modes_enabled: true,
-      t2v_enabled: true,
-      i2v_enabled: true,
-      r2v_enabled: true,
-      last_frame_enabled: true,
-      max_reference_images: 8,
-      max_reference_videos: 3,
-      max_reference_audios: 3,
-      max_quantity: 4,
-      max_output_duration_seconds: 30,
-    };
-    useStudio.mockReturnValue(value);
-    const view = render(<VideoPage />);
+  it.each(["video", "reference"] as const)(
+    "%s 长档开放时可选 30 秒，隐藏计费说明，切换 2K 时上限回到 15 秒",
+    (page) => {
+      const value = studio({
+        state: {
+          ...studio().state,
+          page,
+          draft: { ...studio().state.draft, duration: 30 },
+        },
+        videoCapabilitiesStatus: "ready",
+        videoCapabilities: {
+          ...referenceCapabilities,
+          max_output_duration_seconds: 30,
+        },
+      });
+      useStudio.mockReturnValue(value);
+      const view = render(<VideoPage />);
 
-    const duration = screen.getByRole("combobox", {
-      name: "时长",
-    }) as HTMLSelectElement;
-    const options = Array.from(duration.options).map((option) =>
-      Number(option.value),
-    );
-    expect(options[0]).toBe(4);
-    expect(options.at(-1)).toBe(30);
-    expect(options.some((seconds) => seconds > 15)).toBe(true);
-    expect(screen.getByText(/长视频档/)).toBeInTheDocument();
-    expect(screen.getByText(/长视频档独立定价/)).toBeInTheDocument();
-    expect(screen.getByText(/按输出秒数和生成数量计费/)).toBeInTheDocument();
-    expect(screen.queryByText(/2\s*倍/)).not.toBeInTheDocument();
+      const duration = screen.getByRole("combobox", {
+        name: "时长",
+      }) as HTMLSelectElement;
+      const options = Array.from(duration.options, (option) =>
+        Number(option.value),
+      );
+      expect(options[0]).toBe(4);
+      expect(options.at(-1)).toBe(30);
+      expect(duration).toHaveValue("30");
+      expect(
+        screen.queryByText(/长视频档|按输出秒数和生成数量计费/),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/2\s*倍/)).not.toBeInTheDocument();
 
-    // 切到 2K：上限回落 15，越界草稿被钳回，长档选项与备注一并消失。
-    fireEvent.change(screen.getByRole("combobox", { name: "分辨率" }), {
-      target: { value: "2K" },
-    });
-    // 工厂的 patchDraft 是 vi.fn，不落状态——手动落地分辨率后重渲染，
-    // 钳位 effect 才会看到 durationMax=15 vs draft.duration=30。
-    value.state = {
-      ...value.state,
-      draft: { ...value.state.draft, resolution: "2K" },
-    };
-    view.rerender(<VideoPage />);
-    expect(value.patchDraft).toHaveBeenCalledWith({ duration: 15 });
-    const twoKDuration = screen.getByRole("combobox", {
-      name: "时长",
-    }) as HTMLSelectElement;
-    const twoKOptions = Array.from(twoKDuration.options).map((option) =>
-      Number(option.value),
-    );
-    expect(twoKOptions.at(-1)).toBe(15);
-    expect(screen.queryByText(/长视频档/)).toBeNull();
-  });
+      fireEvent.change(screen.getByRole("combobox", { name: "分辨率" }), {
+        target: { value: "2K" },
+      });
+      // 模拟工作区应用分辨率变更，验证控件同时修正草稿时长。
+      value.state.draft = { ...value.state.draft, resolution: "2K" };
+      view.rerender(<VideoPage />);
+      expect(value.patchDraft).toHaveBeenCalledWith({ duration: 15 });
+      expect(Number(duration.options[duration.options.length - 1].value)).toBe(
+        15,
+      );
+      expect(screen.queryByText(/长视频档/)).not.toBeInTheDocument();
+    },
+  );
 
   it("图生视频画面比例选择器禁用并提示由首帧决定", () => {
     const value = studio({
@@ -3312,18 +3358,18 @@ describe("V1.4 创作页面", () => {
     const preview = screen.getByRole("button", { name: "预览 乡墅外观.jpg" });
     const counter = screen.getByText("参考图 1/8 · 视频 0/3 · 音频 0/3");
 
-    // 素材库入口与上传框同属一个合并上传区，素材列表在其下方
     expect(dropzone.parentElement?.contains(library)).toBe(true);
+    expect(dropzone.parentElement?.contains(counter)).toBe(true);
     expect(
-      dropzone.compareDocumentPosition(preview) &
+      dropzone.compareDocumentPosition(counter) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      counter.compareDocumentPosition(library) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
       library.compareDocumentPosition(preview) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(
-      preview.compareDocumentPosition(counter) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     // 计数不再挤在按钮文案里
@@ -3396,7 +3442,10 @@ describe("V1.4 创作页面", () => {
       screen.getByRole("button", { name: "AI 优化提示词" }),
     ).toBeDisabled();
     expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
-    expect(screen.getByText(/直接用一句话写需求即可/)).toBeInTheDocument();
+    expect(screen.queryByText("六段式（H3 Ref2VA）")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/直接用一句话写需求即可/),
+    ).not.toBeInTheDocument();
 
     value.state = {
       ...value.state,
@@ -3415,8 +3464,8 @@ describe("V1.4 创作页面", () => {
     };
     view.rerender(<VideoPage />);
     expect(
-      screen.getByText(/已识别为六段式（你手写或从提示词库导入）/),
-    ).toBeInTheDocument();
+      screen.queryByText(/已识别为六段式（你手写或从提示词库导入）/),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "AI 优化提示词" }),
     ).toHaveTextContent("AI 优化");
@@ -3885,23 +3934,34 @@ describe("V1.4 创作页面", () => {
     expect(replicaLive.uploadReferenceAudioMaterial).not.toHaveBeenCalled();
   });
 
-  it("参考素材上传器标注视频与音频的 2–15 秒区间", () => {
-    const value = studio({
-      review: false,
-      state: {
-        ...studio().state,
-        page: "reference",
-        draft: { ...studio().state.draft, referenceIds: [] },
-      },
-    });
+  it("参考素材上传区显示用量并隐藏重复的静态时长说明", () => {
+    const value = studio({ review: false, state: createState("reference") });
     useStudio.mockReturnValue(value);
-    render(<VideoPage />);
+    const view = render(<VideoPage />);
 
     expect(
-      screen.getByText(
-        "视频、音频单条 2–15 秒且各累计 ≤15 秒；参考合计 ≤12 项",
-      ),
+      screen.getByText("参考图 0/8 · 视频 0/3 · 音频 0/3"),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/视频、音频单条|参考合计/),
+    ).not.toBeInTheDocument();
+
+    value.videoCapabilities = {
+      ...referenceCapabilities,
+      max_reference_images: 1,
+      max_reference_videos: 0,
+      max_reference_audios: 0,
+    };
+    value.state.draft.referenceIds = ["reference-1"];
+    view.rerender(<VideoPage />);
+    expect(
+      screen.getByText("参考图 1/1 · 视频 0/0 · 音频 0/0"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("已达参考素材上限，需移除后才能继续添加。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上传文件" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "从素材库选择" })).toBeDisabled();
   });
 
   it("参考图上传完成时按最新草稿追加而不复活已移除引用", async () => {

@@ -5,6 +5,7 @@ import {
   canUseLocalPublishAccounts,
   checkLocalPublishLogin,
   focusLocalPublishLogin,
+  importCloudPublishAccount,
   listLocalPublishAccounts,
   removeLocalPublishAccount,
   startLocalPublishLogin,
@@ -49,7 +50,7 @@ it("Mac 桌面使用云端账号列表与解绑，不调用 Windows 专用命令
   expect(native.invoke).not.toHaveBeenCalled();
 });
 
-it.each(["douyin", "wechat_channels", "xiaohongshu"] as const)(
+it.each(["douyin", "wechat_channels", "xiaohongshu", "kuaishou"] as const)(
   "Mac 桌面通过云端 %s 扫码流接收二维码、账号与取消结果",
   async (platform) => {
     desktop("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
@@ -89,7 +90,10 @@ it.each(["douyin", "wechat_channels", "xiaohongshu"] as const)(
       "/api/studio/publish/browser/logins",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ platform, account_id: null }),
+        body: JSON.stringify({
+          platform,
+          account_id: platform === "kuaishou" ? undefined : null,
+        }),
       }),
     );
     expect(request).toHaveBeenCalledWith(
@@ -120,6 +124,70 @@ it("Windows 桌面保留原生账号与扫码路径", async () => {
     "cancel_local_publish_login",
     "remove_local_publish_account",
   ]);
+  expect(request).not.toHaveBeenCalled();
+});
+
+it("Windows 通过快手云端二维码重新登录，检测和取消均不调用原生窗口", async () => {
+  desktop("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+  const stream = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = stream.writable.getWriter();
+  request.mockImplementation(async (_path, init) =>
+    init.method === "DELETE"
+      ? new Response("{}")
+      : new Response(stream.readable),
+  );
+  const id = await startLocalPublishLogin("owner", "kuaishou", "ks-cloud");
+  const encode = new TextEncoder();
+  await writer.write(
+    encode.encode(
+      '{"phase":"qr_ready","image":"data:image/png;base64,cXI=","account":null,"login_id":"ks-server-login"}\n',
+    ),
+  );
+  expect(await checkLocalPublishLogin("owner", id)).toMatchObject({
+    phase: "qr_ready",
+    image: "data:image/png;base64,cXI=",
+  });
+  await writer.write(
+    encode.encode('{"phase":"confirming","image":null,"account":null}\n'),
+  );
+  expect(await checkLocalPublishLogin("owner", id)).toMatchObject({
+    phase: "confirming",
+  });
+  await writer.write(
+    encode.encode(
+      '{"phase":"connected","image":null,"account":{"id":"ks-cloud","source":"cloud","platform":"kuaishou"}}\n',
+    ),
+  );
+  await writer.close();
+  expect(await checkLocalPublishLogin("owner", id)).toMatchObject({
+    phase: "connected",
+    account: { id: "ks-cloud", platform: "kuaishou", source: "cloud" },
+  });
+  expect(request).toHaveBeenCalledWith(
+    "/api/studio/publish/browser/logins",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ platform: "kuaishou", account_id: "ks-cloud" }),
+    }),
+  );
+  await expect(focusLocalPublishLogin("owner", id)).rejects.toThrow("云端扫码");
+  await cancelLocalPublishLogin("owner", id);
+  expect(request).toHaveBeenCalledWith(
+    "/api/studio/publish/browser/logins/ks-server-login",
+    expect.objectContaining({ method: "DELETE" }),
+  );
+  expect(() => checkLocalPublishLogin("owner", id)).toThrow("扫码会话不存在");
+  expect(native.invoke).not.toHaveBeenCalled();
+});
+
+it("快手不能导入本机登录状态", async () => {
+  await expect(
+    importCloudPublishAccount(
+      "kuaishou",
+      { platform_user_id: "ks-user", username: "快手账号" },
+      { cookies: [{}], origins: [] },
+    ),
+  ).rejects.toThrow("快手账号请使用云端扫码登录");
   expect(request).not.toHaveBeenCalled();
 });
 

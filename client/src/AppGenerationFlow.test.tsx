@@ -101,7 +101,7 @@ async function openCanonicalReplica(
   // 入口是“开始复刻”。项目标题、生成和查看入口现在都汇入同一 Replica。
   await screen.findByRole("heading", {
     level: 1,
-    name: "粘贴一条爆款乡墅视频链接，快速生成它的原创视频",
+    name: "粘贴爆款链接，开始视频复刻",
   });
   fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
   fireEvent.click(await screen.findByRole("button", { name: entry }));

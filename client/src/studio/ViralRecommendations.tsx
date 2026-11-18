@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ViralCard } from "./ContentPages";
+import { VideoPreview } from "../VideoPreview";
+import { persistViralDetailUrl, ViralFavoriteButton } from "./ContentPages";
 import { useStudio } from "./context";
 import { loadViralVideos } from "./live";
 import type { StudioVideo, StudioViralTiming } from "./types";
-import { Button, Empty, Panel } from "./ui";
+import { Button, Icon, Panel } from "./ui";
 import { isPublishedViralVideo } from "./viralVisibility";
 
 type HomepageResult = Awaited<ReturnType<typeof loadViralVideos>>;
@@ -63,7 +64,6 @@ function HomepageRecommendations() {
   const [homepage, setHomepage] = useState<HomepageResult>();
   const [loading, setLoading] = useState(!review);
   const [now, setNow] = useState(Date.now);
-  const [activeVideoId, setActiveVideoId] = useState<string>();
   const [favorites, setFavorites] = useState<Record<string, boolean>>({});
   const [requestVersion, setRequestVersion] = useState(0);
   const requestVersionRef = useRef(0);
@@ -175,38 +175,62 @@ function HomepageRecommendations() {
 
   return (
     <Panel className="studio-home-recommendations">
-      <div className="studio-home-recommendations-heading">
+      <div className="studio-home-section-heading">
         <h2>爆款视频精选</h2>
         <Button variant="quiet" onClick={() => navigate("viral")}>
           查看全部爆款
         </Button>
       </div>
       {videos.length ? (
-        <div className="content-video-grid content-video-grid-viral">
+        <div className="studio-viral-compact-row">
           {videos.map((video) => (
-            <ViralCard
-              key={video.id}
-              video={video}
-              active={activeVideoId === video.id}
-              onActivate={() => setActiveVideoId(video.id)}
-              savedFromServer={
-                review ? undefined : (favorites[video.id] ?? video.isFavorite)
-              }
-              onFavoriteChange={(saved) =>
-                setFavorites((current) => ({ ...current, [video.id]: saved }))
-              }
-              availability={video.availability}
-            />
+            <article key={video.id} className="studio-viral-mini">
+              <button
+                type="button"
+                className="studio-viral-mini-open"
+                aria-label={`查看爆款：${video.title}`}
+                onClick={() => {
+                  navigate("viral-detail", {
+                    selectedVideoId: video.id,
+                    returnTo: "workbench",
+                  });
+                  persistViralDetailUrl(video);
+                }}
+              >
+                <VideoPreview
+                  fitContainer
+                  poster={video.poster}
+                  fallback={<Icon name="video" size={28} />}
+                />
+                <strong title={video.title}>{video.title}</strong>
+                {video.tags?.length ? (
+                  <span className="studio-viral-mini-tags">
+                    {video.tags
+                      .slice(0, 2)
+                      .map((tag) => `#${tag}`)
+                      .join(" ")}
+                  </span>
+                ) : null}
+              </button>
+              <ViralFavoriteButton
+                compact
+                video={video}
+                savedFromServer={
+                  review ? undefined : (favorites[video.id] ?? video.isFavorite)
+                }
+                onSavedChange={(saved) =>
+                  setFavorites((current) => ({ ...current, [video.id]: saved }))
+                }
+              />
+            </article>
           ))}
         </div>
       ) : (
-        <Empty
-          title={
-            loading || (review && data.loading)
-              ? "正在读取推荐视频"
-              : "暂无推荐视频"
-          }
-        />
+        <p className="studio-home-empty" role="status">
+          {loading || (review && data.loading)
+            ? "正在读取推荐视频"
+            : "暂无推荐视频"}
+        </p>
       )}
     </Panel>
   );

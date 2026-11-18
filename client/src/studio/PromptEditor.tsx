@@ -10,6 +10,7 @@ import {
   type PromptReferencePlanItem,
 } from "../api";
 import { anchorReplicaPromptToFirstFrame } from "./promptIdentity";
+import { hasRef2vaStructure } from "./referencePrompt";
 import { Button, Icon } from "./ui";
 import {
   type OptimizationReview,
@@ -453,14 +454,6 @@ export function ReplicaFinalPromptControls({
   );
 }
 
-/** 02 面板格式状态行：模式徽标 + 当前该说的一句说明。 */
-export type PromptFormatStatus = {
-  label: string;
-  title?: string;
-  hint: string;
-  ready: boolean;
-};
-
 // 音频用途快捷项：与服务端默认「音色参考」同口径，用户点选后按该用途重新生成。
 // 系统不分析音轨内容，所以这里只给「怎么说」，不给「听起来像什么」的判断。
 const AUDIO_PURPOSE_CHIPS = [
@@ -486,7 +479,7 @@ function planPurposeLine(
 function PromptReview({
   value,
   review,
-  formatStatus,
+  referenceStructured,
   actionLabel,
   assetNames,
   onPurposeChange,
@@ -497,7 +490,7 @@ function PromptReview({
 }: {
   value: string;
   review: OptimizationReview;
-  formatStatus?: PromptFormatStatus;
+  referenceStructured: boolean;
   actionLabel: string;
   assetNames?: Record<string, string>;
   onPurposeChange?: (assetId: string, purpose: string) => void;
@@ -516,7 +509,7 @@ function PromptReview({
   const shots = value.match(/\[Shot \d+\]/g)?.length ?? 0;
   const status = [
     "✓ 结构自检通过",
-    formatStatus?.ready ? "六段齐全" : null,
+    referenceStructured ? "六段齐全" : null,
     review.referencePlan.length ? "标签已绑定" : null,
     shots ? `${shots} 个镜头` : null,
   ]
@@ -659,8 +652,6 @@ type Props = {
   toolbarStart?: ReactNode;
   showToolbarLabel?: boolean;
   toolbarLabel?: ReactNode;
-  /** 参考生视频专用：六段式状态行与结构自检；其他模式不传，界面保持原样。 */
-  formatStatus?: PromptFormatStatus;
   /** 核对区素材文件名：asset_id → 名称。 */
   assetNames?: Record<string, string>;
   /** 核对区里改音频用途：写回草稿，重新生成时生效。 */
@@ -685,7 +676,6 @@ export function PromptEditor({
   toolbarStart,
   showToolbarLabel = false,
   toolbarLabel = "画面描述",
-  formatStatus,
   assetNames,
   onPurposeChange,
   onOptimizationBusyChange,
@@ -707,6 +697,8 @@ export function PromptEditor({
     runSignalSeen.current = runSignal;
     void runRef.current();
   }, [runSignal]);
+  const referenceStructured =
+    context.route === "reference" && hasRef2vaStructure(value);
   const review = optimization.review;
   const reviewFilled = Boolean(
     review &&
@@ -746,15 +738,6 @@ export function PromptEditor({
           </span>
         </button>
       </div>
-      {formatStatus && (
-        <p className="h3-prompt-meta">
-          <span className="h3-prompt-mode" title={formatStatus.title}>
-            <i className={formatStatus.ready ? "is-ready" : undefined} />
-            <span>{formatStatus.label}</span>
-          </span>
-          <span>{formatStatus.hint}</span>
-        </p>
-      )}
       {optimization.message && <p role="status">{optimization.message}</p>}
       <textarea
         ref={textarea}
@@ -773,7 +756,7 @@ export function PromptEditor({
         <PromptReview
           value={value}
           review={review}
-          formatStatus={formatStatus}
+          referenceStructured={referenceStructured}
           actionLabel={optimizationActionLabel}
           assetNames={assetNames}
           onPurposeChange={onPurposeChange}
@@ -782,7 +765,7 @@ export function PromptEditor({
           onRegenerate={() => void optimization.run()}
           onFocusEditor={() => textarea.current?.focus()}
         />
-      ) : formatStatus?.ready ? (
+      ) : referenceStructured ? (
         <PromptStructureCheck value={value} />
       ) : null}
       {optimization.pending && (

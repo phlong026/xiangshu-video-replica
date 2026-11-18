@@ -8,10 +8,12 @@ import {
   retryPublishRecord,
   syncPublishRecord,
 } from "../api";
-import { PlatformLogo, type PublishPlatform } from "./PlatformLogo";
+import { PlatformLogo } from "./PlatformLogo";
 import { Button, Empty, formatTaskTime } from "./ui";
 
 export const PUBLISH_RECORDS_POLL_MS = 15_000;
+export const KUAISHOU_VERIFICATION_MESSAGE =
+  "请到快手创作者中心核对作品，核对前请勿重新发布。";
 
 export const publishStatusNames: Record<PublishRecordStatus, string> = {
   queued: "排队中",
@@ -169,10 +171,7 @@ export function PublishRecordsPanel({
             key={record.id}
             data-status={record.status}
           >
-            <PlatformLogo
-              platform={record.platform as PublishPlatform}
-              size={28}
-            />
+            <PlatformLogo platform={record.platform} size={28} />
             <div className="content-publish-record-body">
               <strong>{record.title || "未命名发布"}</strong>
               <small>
@@ -213,6 +212,13 @@ export function PublishRecordsPanel({
               {record.error_message && (
                 <p role="alert">{record.error_message}</p>
               )}
+              {record.platform === "kuaishou" &&
+                record.status === "submission_unknown" && (
+                  <p>{KUAISHOU_VERIFICATION_MESSAGE}</p>
+                )}
+              {record.platform === "kuaishou" && record.status === "failed" && (
+                <p>请在发布表单重新确认成片和快手账号后提交。</p>
+              )}
             </div>
             <span
               className={`studio-status studio-status--${statusClass[record.status]}`}
@@ -229,7 +235,7 @@ export function PublishRecordsPanel({
                   取消
                 </Button>
               )}
-              {record.status === "failed" && (
+              {record.status === "failed" && record.platform !== "kuaishou" && (
                 <Button
                   disabled={busy}
                   onClick={() => void act(record, retryPublishRecord)}

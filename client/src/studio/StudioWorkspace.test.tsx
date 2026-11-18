@@ -9,7 +9,7 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ViralVideoItem } from "../api";
+import type { GenerationPriceQuote, ViralVideoItem } from "../api";
 import { createReviewData, createReviewState, reviewUser } from "./fixtures";
 import {
   constrainReferenceVideoPrompt,
@@ -151,8 +151,31 @@ vi.mock("./live", async (importOriginal) => ({
   ...live,
 }));
 
-// 视频生成（C2）：只覆盖新引入的四个 api 出口，其余保持原模块行为，
-// 避免既有用例（不触发这些函数）受 mock 影响。
+type QuoteRequest = Parameters<
+  typeof import("../api").getGenerationPriceQuote
+>[0];
+
+function videoQuote(
+  input: QuoteRequest,
+  unitPrice = 120,
+  quoteToken?: string,
+): GenerationPriceQuote {
+  const seconds = input.duration_seconds * input.quantity;
+  const total = seconds * unitPrice;
+  return {
+    ...input,
+    unit_price_fen_per_second: unitPrice,
+    estimated_seconds: seconds,
+    estimated_price_fen: total,
+    unit_credits: unitPrice,
+    estimated_credits: total,
+    quote_token: quoteToken ?? `qv${total}`,
+    quote_expires_at: Math.floor(Date.now() / 1000) + 300,
+    max_credits: total,
+  };
+}
+
+// 仅替换这些 API，其余保持原模块行为。
 const api = vi.hoisted(() => ({
   createViralImportTask: vi.fn(),
   completeMaterialUpload: vi.fn(),
@@ -184,32 +207,8 @@ const api = vi.hoisted(() => ({
   ),
   createPromptOptimization: vi.fn(),
   getPromptOptimization: vi.fn(),
-  getGenerationPriceQuote: vi.fn(
-    async (): Promise<{
-      resolution: string;
-      duration_seconds: number;
-      quantity: number;
-      unit_price_fen_per_second: number;
-      estimated_seconds: number;
-      estimated_price_fen: number;
-      unit_credits: number;
-      estimated_credits: number;
-      quote_token: string;
-      quote_expires_at: number;
-      max_credits: number;
-    }> => ({
-      resolution: "768P",
-      duration_seconds: 8,
-      quantity: 1,
-      unit_price_fen_per_second: 120,
-      estimated_seconds: 8,
-      estimated_price_fen: 960,
-      unit_credits: 120,
-      estimated_credits: 960,
-      quote_token: "qv960",
-      quote_expires_at: Math.floor(Date.now() / 1000) + 300,
-      max_credits: 960,
-    }),
+  getGenerationPriceQuote: vi.fn(async (input: QuoteRequest) =>
+    videoQuote(input),
   ),
   getSettings: vi.fn(async () => ({
     providers: {
@@ -910,8 +909,10 @@ describe("V1.4 workspace integration", () => {
     // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
     expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
     expect(nav.queryByRole("button", { name: "长视频拆解" })).toBeNull();
-    expect(screen.getByText("粘贴一条爆款乡墅视频链接，")).toBeInTheDocument();
-    expect(screen.getByText("快速生成它的原创视频")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "粘贴爆款链接，开始视频复刻" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始复刻" })).toBeEnabled();
     expect(
       screen.getByRole("button", { name: "用户档案，review" }),
     ).toBeInTheDocument();
@@ -1196,7 +1197,12 @@ describe("V1.4 workspace integration", () => {
 
     fireEvent.click(nav.getByRole("button", { name: "工作台" }));
     expect(window.location.hash).toBe("#studio/workbench");
-    fireEvent.click(screen.getByRole("button", { name: "快捷入口：任务列表" }));
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "我的成片" })).getByRole(
+        "button",
+        { name: "查看全部任务" },
+      ),
+    );
     expect(window.location.hash).toBe("#studio/tasks");
     expect(tasks).toHaveAttribute("aria-current", "page");
   });
@@ -1407,6 +1413,7 @@ describe("V1.4 workspace integration", () => {
       {
         ...reviewData.tasks[0],
         id: "batch-review-1",
+        title: "工作台成片",
         backendKind: "generation_batch",
         backendId: "batch-review-1",
         batchId: "batch-review-1",
@@ -1429,8 +1436,12 @@ describe("V1.4 workspace integration", () => {
       />,
     );
 
-    fireEvent.click(screen.getAllByRole("button", { name: /已完成/ })[0]);
-    expect(window.location.hash).toContain("returnTo=workbench");
+    fireEvent.click(
+      screen.getByRole("button", { name: "查看成片：工作台成片" }),
+    );
+    expect(window.location.hash).toBe(
+      "#studio/task-detail/generation_batch/batch-review-1?returnTo=workbench",
+    );
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要导航" })).getByRole(
         "button",
@@ -1595,23 +1606,18 @@ describe("V1.4 workspace integration", () => {
     expect(screen.getByDisplayValue("当前草稿")).toBeInTheDocument();
   });
 
-  it("workbench metric cards show real platform stats", async () => {
-    live.loadStudioData.mockResolvedValue({
-      ...createReviewData(),
-      loading: false,
-      stats: {
-        today_completed: 5,
-        running: 2,
-        queued: 1,
-        needs_attention: 4,
-        total_completed: 42,
-      },
-    });
+  it("工作台用已加载的进行中任务显示进度条，点击后进入任务列表", async () => {
+    live.loadStudioData.mockResolvedValue(createReviewData());
     render(<StudioWorkspace currentUser={reviewUser} />);
 
-    await waitFor(() => expect(screen.getByText("5")).toBeInTheDocument());
-    // 队列 = running + queued（3）；待处理来自统计而非 20 条切片。
-    expect(screen.getByText("4")).toBeInTheDocument();
+    const works = screen.getByRole("region", { name: "我的成片" });
+    const progress = await within(works).findByRole("button", {
+      name: /生成中 1 · 排队 1/,
+    });
+    expect(progress).toHaveTextContent("张工 · 建房预算");
+    expect(progress).toHaveTextContent("三层新中式乡墅");
+    fireEvent.click(progress);
+    expect(window.location.hash).toBe("#studio/tasks");
   });
 
   it("polls generation task progress silently while the workspace is open", async () => {
@@ -3465,7 +3471,7 @@ describe("视频生成（C2 独立创作）", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "生成确认 · 视频生成",
     });
-    await screen.findByText(/960 积分/);
+    await screen.findByText(/1800 积分/);
     fireEvent.click(
       within(dialog).getByRole("button", { name: "确认费用并提交" }),
     );
@@ -3495,7 +3501,7 @@ describe("视频生成（C2 独立创作）", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "生成确认 · 视频生成",
     });
-    await screen.findByText(/960 积分/);
+    await screen.findByText(/1800 积分/);
     fireEvent.click(
       within(dialog).getByRole("button", { name: "确认费用并提交" }),
     );
@@ -3574,7 +3580,7 @@ describe("视频生成（C2 独立创作）", () => {
         quote_token: `r2v-long-quote-${seconds}`,
         quote_expires_at: Math.floor(Date.now() / 1000) + 300,
         max_credits: seconds * 2,
-      };
+      } satisfies GenerationPriceQuote;
       api.getGenerationPriceQuote.mockResolvedValue(quote);
       api.createIndependentVideoTask.mockResolvedValue({
         id: `r2v-long-${seconds}`,
@@ -3677,11 +3683,11 @@ describe("视频生成（C2 独立创作）", () => {
         }
       | undefined;
     expect(call?.output_duration_seconds).toBe(15);
-    const quoteCalls = api.getGenerationPriceQuote.mock
-      .calls as unknown as Array<[{ duration_seconds?: number }]>;
-    expect(quoteCalls.some(([input]) => input.duration_seconds === 15)).toBe(
-      true,
-    );
+    expect(api.getGenerationPriceQuote).toHaveBeenCalledWith({
+      resolution: "768P",
+      duration_seconds: 15,
+      quantity: 1,
+    });
   });
   beforeEach(() => {
     vi.clearAllMocks();
@@ -3699,19 +3705,10 @@ describe("视频生成（C2 独立创作）", () => {
       max_reference_audios: 3,
       max_quantity: 4,
     });
-    api.getGenerationPriceQuote.mockResolvedValue({
-      resolution: "768P",
-      duration_seconds: 8,
-      quantity: 1,
-      unit_price_fen_per_second: 120,
-      estimated_seconds: 8,
-      estimated_price_fen: 960,
-      unit_credits: 120,
-      estimated_credits: 960,
-      quote_token: "qv960",
-      quote_expires_at: Math.floor(Date.now() / 1000) + 300,
-      max_credits: 960,
-    });
+    api.getGenerationPriceQuote.mockReset();
+    api.getGenerationPriceQuote.mockImplementation(async (input) =>
+      videoQuote(input),
+    );
     // vi.clearAllMocks() only clears call records; leftover mock*ValueOnce
     // queues from earlier tests would leak into the next one, so reset the
     // oral mocks before reinstalling their permanent defaults.
@@ -4314,19 +4311,9 @@ describe("视频生成（C2 独立创作）", () => {
       max_reference_audios: 3,
       max_quantity: 4,
     });
-    api.getGenerationPriceQuote.mockResolvedValue({
-      resolution: "768P",
-      duration_seconds: 8,
-      quantity: 1,
-      unit_price_fen_per_second: 120,
-      estimated_seconds: 8,
-      estimated_price_fen: 960,
-      unit_credits: 960,
-      estimated_credits: 960,
-      quote_token: "qa-1",
-      quote_expires_at: Math.floor(Date.now() / 1000) + 600,
-      max_credits: 960,
-    });
+    api.getGenerationPriceQuote.mockImplementation(async (input) =>
+      videoQuote(input, 120, "qa-1"),
+    );
     api.createIndependentVideoTask
       .mockRejectedValueOnce(
         Object.assign(new Error("提示词缺少当前模式的必要段落。"), {
@@ -4465,26 +4452,9 @@ describe("视频生成（C2 独立创作）", () => {
   });
 
   it("报价改变后必须重新确认，并提交新合同和总积分上限", async () => {
-    const quote = {
-      resolution: "768P",
-      duration_seconds: 8,
-      quantity: 1,
-      unit_price_fen_per_second: 120,
-      estimated_seconds: 8,
-      estimated_price_fen: 960,
-      unit_credits: 120,
-      estimated_credits: 960,
-      quote_token: "qold",
-      quote_expires_at: Math.floor(Date.now() / 1000) + 300,
-      max_credits: 960,
-    };
-    api.getGenerationPriceQuote.mockReset();
-    api.getGenerationPriceQuote.mockResolvedValueOnce(quote).mockResolvedValue({
-      ...quote,
-      estimated_credits: 1200,
-      max_credits: 1200,
-      quote_token: "qnew",
-    });
+    api.getGenerationPriceQuote
+      .mockImplementationOnce(async (input) => videoQuote(input, 120, "qold"))
+      .mockImplementation(async (input) => videoQuote(input, 150, "qnew"));
     api.createIndependentVideoTask.mockReset();
     api.createIndependentVideoTask
       .mockRejectedValueOnce(
@@ -4511,10 +4481,10 @@ describe("视频生成（C2 独立创作）", () => {
     const original = api.createIndependentVideoTask.mock.calls[0]?.[0];
     expect(original).toMatchObject({
       quote_token: "qold",
-      max_credits: 960,
+      max_credits: 1800,
     });
     fireEvent.click(refreshQuote);
-    expect(await screen.findByText(/1200 积分/)).toBeInTheDocument();
+    expect(await screen.findByText(/2250 积分/)).toBeInTheDocument();
     expect(api.createIndependentVideoTask).toHaveBeenCalledTimes(1);
     fireEvent.click(await findEnabledButton("确认费用并提交"));
     await waitFor(() =>
@@ -4522,27 +4492,15 @@ describe("视频生成（C2 独立创作）", () => {
     );
     expect(api.createIndependentVideoTask.mock.calls[1]?.[0]).toMatchObject({
       quote_token: "qnew",
-      max_credits: 1200,
+      max_credits: 2250,
       idempotency_key: original.idempotency_key,
     });
   });
 
   it("视频报价失败时确认按钮不可用并可重新获取报价", async () => {
-    api.getGenerationPriceQuote
-      .mockRejectedValueOnce(new Error("视频报价暂不可用"))
-      .mockResolvedValueOnce({
-        resolution: "768P",
-        duration_seconds: 8,
-        quantity: 1,
-        unit_price_fen_per_second: 120,
-        estimated_seconds: 8,
-        estimated_price_fen: 960,
-        unit_credits: 120,
-        estimated_credits: 960,
-        quote_token: "qv960",
-        quote_expires_at: Math.floor(Date.now() / 1000) + 300,
-        max_credits: 960,
-      });
+    api.getGenerationPriceQuote.mockRejectedValueOnce(
+      new Error("视频报价暂不可用"),
+    );
     live.loadStudioData.mockResolvedValue(emptyStudioData);
     render(<StudioWorkspace currentUser={reviewUser} />);
     await openVideoPage();
@@ -4557,7 +4515,7 @@ describe("视频生成（C2 独立创作）", () => {
     expect(api.createIndependentVideoTask).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "重新获取视频报价" }));
-    expect(await screen.findByText(/960 积分/)).toBeInTheDocument();
+    expect(await screen.findByText(/1800 积分/)).toBeInTheDocument();
     expect(submit).toBeEnabled();
   });
 
@@ -5080,8 +5038,8 @@ describe("视频生成（C2 独立创作）", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
 
-    // 报价按秒折算：120 分/秒 × 8 秒 = 9.60 元。
-    expect(await screen.findByText(/960 积分/)).toBeInTheDocument();
+    // 新草稿默认 15 秒，按每秒 120 积分报价。
+    expect(await screen.findByText(/1800 积分/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
     await waitFor(() =>
@@ -5091,9 +5049,11 @@ describe("视频生成（C2 独立创作）", () => {
       display_name: string;
       mode: string;
       prompt_text: string;
+      output_duration_seconds: number;
       idempotency_key: string;
     };
     expect(input.mode).toBe("t2v");
+    expect(input.output_duration_seconds).toBe(15);
     expect(input.display_name).toBe("未命名视频");
     expect(input.prompt_text).toBe("航拍乡墅庭院");
     expect(input.idempotency_key).toBeTruthy();
@@ -5186,7 +5146,7 @@ describe("视频生成（C2 独立创作）", () => {
     const firstDialog = await screen.findByRole("dialog", {
       name: "生成确认 · 视频生成",
     });
-    await screen.findByText(/960 积分/);
+    await screen.findByText(/1800 积分/);
     fireEvent.click(
       within(firstDialog).getByRole("button", { name: "确认费用并提交" }),
     );
@@ -5275,32 +5235,8 @@ describe("视频生成（C2 独立创作）", () => {
 
   it("视频结果未知后价格变化不换键，业务参数变化才换键", async () => {
     api.getGenerationPriceQuote
-      .mockResolvedValueOnce({
-        resolution: "768P",
-        duration_seconds: 8,
-        quantity: 1,
-        unit_price_fen_per_second: 120,
-        estimated_seconds: 8,
-        estimated_price_fen: 960,
-        unit_credits: 120,
-        estimated_credits: 960,
-        quote_token: "qv960",
-        quote_expires_at: Math.floor(Date.now() / 1000) + 300,
-        max_credits: 960,
-      })
-      .mockResolvedValue({
-        resolution: "768P",
-        duration_seconds: 8,
-        quantity: 1,
-        unit_price_fen_per_second: 150,
-        estimated_seconds: 8,
-        estimated_price_fen: 1200,
-        unit_credits: 150,
-        estimated_credits: 1200,
-        quote_token: "qv1200",
-        quote_expires_at: Math.floor(Date.now() / 1000) + 300,
-        max_credits: 1200,
-      });
+      .mockImplementationOnce(async (input) => videoQuote(input))
+      .mockImplementation(async (input) => videoQuote(input, 150));
     api.createIndependentVideoTask
       .mockRejectedValueOnce(new Error("提交结果未知，请安全重试。"))
       .mockRejectedValueOnce(new Error("提交结果仍未知，请继续安全重试。"))
@@ -5312,7 +5248,7 @@ describe("视频生成（C2 独立创作）", () => {
     const open = screen.getByRole("button", { name: "生成视频" });
     fireEvent.change(prompt, { target: { value: "航拍乡墅庭院" } });
     fireEvent.click(open);
-    expect(await screen.findByText(/960 积分/)).toBeInTheDocument();
+    expect(await screen.findByText(/1800 积分/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
     expect(
       await screen.findByText("提交结果未知，请安全重试。"),
@@ -5327,7 +5263,7 @@ describe("视频生成（C2 独立创作）", () => {
     );
 
     fireEvent.click(open);
-    expect(await screen.findByText(/1200 积分/)).toBeInTheDocument();
+    expect(await screen.findByText(/2250 积分/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
     expect(
       await screen.findByText("提交结果仍未知，请继续安全重试。"),
@@ -5336,8 +5272,8 @@ describe("视频生成（C2 独立创作）", () => {
     const secondRequest = api.createIndependentVideoTask.mock.calls[1]?.[0];
     expect(secondRequest).toEqual({
       ...firstRequest,
-      quote_token: "qv1200",
-      max_credits: 1200,
+      quote_token: "qv2250",
+      max_credits: 2250,
     });
 
     fireEvent.click(
@@ -5347,7 +5283,7 @@ describe("视频生成（C2 独立创作）", () => {
     );
     fireEvent.change(prompt, { target: { value: "夜景乡墅庭院" } });
     fireEvent.click(open);
-    expect(await screen.findByText(/1200 积分/)).toBeInTheDocument();
+    expect(await screen.findByText(/2250 积分/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
     await waitFor(() =>
       expect(api.createIndependentVideoTask).toHaveBeenCalledTimes(3),

@@ -141,7 +141,14 @@ def login(request: BrowserLoginRequest, db: BusinessDbDep) -> StreamingResponse:
         # Account-binding admission (Phase 3b): same gate as import; covers
         # first-time binds and re-logins of existing accounts alike.
         enforce_sub_account_publish_accounts(conn, actor_id=actor.id)
-        storage = existing_storage(conn, actor.id, request.account_id, fernet)
+        # 快手续绑也要由用户重新扫码，不能从已存登录态直接建立新会话。
+        storage = (
+            None
+            if request.platform == "kuaishou"
+            else existing_storage(
+                conn, actor.id, request.account_id, fernet, platform=request.platform
+            )
+        )
         login_id = start_login(conn, actor.id, request)
         owner = actor.id
 

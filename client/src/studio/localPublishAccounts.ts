@@ -45,8 +45,14 @@ export type LocalPublishLoginStatus = {
 };
 // Native profiles and cookie export are implemented with Windows WebView2.
 // Other desktop platforms use the existing encrypted cloud login flow.
-export const canUseLocalPublishAccounts = () =>
-  isTauri() && navigator.userAgent.includes("Windows");
+export const canUseLocalPublishAccounts = (platform?: PublishPlatform) =>
+  platform !== "kuaishou" &&
+  isTauri() &&
+  navigator.userAgent.includes("Windows");
+
+// 云端和本机扫码在 Windows 上并存，云端会话清理后也不能落到本机命令。
+const CLOUD_LOGIN_PREFIX = "cloud:";
+const isCloudLogin = (id: string) => id.startsWith(CLOUD_LOGIN_PREFIX);
 export const isPublishStorageState = (
   value: unknown,
 ): value is PublishStorageState =>
@@ -76,7 +82,7 @@ export const startLocalPublishLogin = (
   platform: PublishPlatform,
   accountId?: string,
 ) =>
-  canUseLocalPublishAccounts()
+  canUseLocalPublishAccounts(platform)
     ? command<string>("start_local_publish_login", {
         owner,
         platform,
@@ -84,18 +90,20 @@ export const startLocalPublishLogin = (
       })
     : startCloudLogin(owner, platform, accountId);
 export const checkLocalPublishLogin = (owner: string, loginId: string) =>
-  canUseLocalPublishAccounts()
-    ? command<LocalPublishLoginStatus>("check_local_publish_login", {
+  isCloudLogin(loginId) || !canUseLocalPublishAccounts()
+    ? Promise.resolve(cloudLogin(owner, loginId).status)
+    : command<LocalPublishLoginStatus>("check_local_publish_login", {
         owner,
         loginId,
-      })
-    : Promise.resolve(cloudLogin(owner, loginId).status);
+      });
 export const focusLocalPublishLogin = (owner: string, loginId: string) =>
-  command<void>("focus_local_publish_login", { owner, loginId });
+  isCloudLogin(loginId)
+    ? Promise.reject(new Error("云端扫码不支持打开本机登录窗口。"))
+    : command<void>("focus_local_publish_login", { owner, loginId });
 export const cancelLocalPublishLogin = (owner: string, loginId: string) =>
-  canUseLocalPublishAccounts()
-    ? command<void>("cancel_local_publish_login", { owner, loginId })
-    : cancelCloudLogin(owner, loginId);
+  isCloudLogin(loginId) || !canUseLocalPublishAccounts()
+    ? cancelCloudLogin(owner, loginId)
+    : command<void>("cancel_local_publish_login", { owner, loginId });
 export const removeLocalPublishAccount = (owner: string, accountId: string) =>
   canUseLocalPublishAccounts()
     ? command<void>("remove_local_publish_account", { owner, accountId })
@@ -114,12 +122,13 @@ export const exportLocalPublishAccountState = (
 
 /** Server-side accounts (cloud QR logins and imported desktop logins) — the delivery source. */
 export const listCloudPublishAccounts = (): Promise<CloudPublishAccount[]> =>
-  cloudAccounts() as Promise<CloudPublishAccount[]>;
+  cloudAccounts();
 export async function importCloudPublishAccount(
   platform: PublishPlatform,
   identity: PublishIdentity,
   storageState: PublishStorageState,
 ): Promise<CloudPublishAccount> {
+  if (platform === "kuaishou") throw new Error("快手账号请使用云端扫码登录。");
   const response = await publishBrowserRequest(`${cloudBase}/accounts/import`, {
     method: "POST",
     body: JSON.stringify({ platform, identity, storage_state: storageState }),
@@ -163,7 +172,7 @@ export async function disconnectPublishAccount(
   owner: string,
   account: LocalPublishAccount,
 ): Promise<void> {
-  const native = canUseLocalPublishAccounts();
+  const native = canUseLocalPublishAccounts(account.platform);
   const requireSession = captureWorkspaceCredentialContext();
   const cloudTargets = async () => {
     requireSession();
@@ -227,7 +236,7 @@ type CloudLogin = {
 };
 const cloudLogins = new Map<string, CloudLogin>();
 const cloudBase = "/api/studio/publish/browser";
-async function cloudAccounts(): Promise<LocalPublishAccount[]> {
+async function cloudAccounts(): Promise<CloudPublishAccount[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
@@ -257,7 +266,7 @@ async function startCloudLogin(
   platform: PublishPlatform,
   accountId?: string,
 ): Promise<string> {
-  const id = crypto.randomUUID();
+  const id = `${CLOUD_LOGIN_PREFIX}${crypto.randomUUID()}`;
   const login: CloudLogin = {
     owner,
     controller: new AbortController(),
@@ -277,7 +286,10 @@ async function consumeCloudLogin(
   try {
     const response = await publishBrowserRequest(`${cloudBase}/logins`, {
       method: "POST",
-      body: JSON.stringify({ platform, account_id: accountId ?? null }),
+      body: JSON.stringify({
+        platform,
+        account_id: accountId ?? (platform === "kuaishou" ? undefined : null),
+      }),
       signal: login.controller.signal,
     });
     if (!response.body)

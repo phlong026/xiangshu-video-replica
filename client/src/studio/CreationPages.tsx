@@ -110,7 +110,6 @@ import {
   DEFAULT_MAX_REFERENCE_IMAGES,
   DEFAULT_MAX_REFERENCE_VIDEOS,
   hasCopyResult,
-  MAX_REFERENCE_FILES,
   MAX_REFERENCE_MEDIA_SECONDS,
   MIN_REFERENCE_MEDIA_SECONDS,
   mergeStudioAssets,
@@ -801,6 +800,7 @@ export function CopyPage() {
     setTab("rewrite");
   };
 
+  const projectId = state.draft.projectId;
   const customWordCountInvalid =
     state.draft.rewriteLength === "custom" &&
     (!Number.isInteger(state.draft.rewriteWordCount) ||
@@ -812,8 +812,8 @@ export function CopyPage() {
       ? "审核示例不调用业务接口。"
       : readOnly
         ? "当前账号为只读权限，不能改写文案。"
-        : !state.draft.projectId
-          ? "当前文案缺少来源项目。"
+        : !projectId
+          ? ""
           : method === "ip" && !state.draft.ipId
             ? "请先选择参与二创的人物 IP。"
             : !copySource(state.draft)
@@ -827,18 +827,17 @@ export function CopyPage() {
                     ? "请填写本次改写要求，或选择一个快捷要求。"
                     : "";
 
+  const rewriteDisabled =
+    !projectId || Boolean(rewriteUnavailableReason) || rewriting;
   const rewrite = async () => {
-    if (rewriteUnavailableReason || rewriting || rewritePendingRef.current)
-      return;
+    if (rewriteDisabled || rewritePendingRef.current) return;
     const draft = state.draft;
-    const projectId = draft.projectId;
     const identityId = method === "custom" ? undefined : draft.ipId;
     // 来源视频 ID 只信当前项目记录：草稿可能残留旧项目的素材（跨项目切换），
     // 解析文案路径项目本就没有来源视频 → undefined，走纯文本二创。
     const sourceAssetId =
       data.projects.find((item) => item.id === projectId)?.reference_asset_id ??
       undefined;
-    if (!projectId) return;
     const operation = ++rewriteOperationRef.current;
     const expectedScope = activeScopeRef.current;
     const retryPending = resolvePendingRewrite(
@@ -1382,20 +1381,17 @@ export function CopyPage() {
                 )}
               </div>
               <div className="copy-generate-row">
-                <Hint>
-                  保留原文信息，生成后可继续编辑；发布前请核对事实、案例与承诺。
-                </Hint>
                 <Button
                   variant="primary"
                   onClick={() => void rewrite()}
-                  disabled={Boolean(rewriteUnavailableReason) || rewriting}
+                  disabled={rewriteDisabled}
                 >
                   {rewriting ? "正在生成…" : "生成二创文案"}
                 </Button>
               </div>
               {rewriteUnavailableReason ? (
                 <Hint>{rewriteUnavailableReason}</Hint>
-              ) : !state.draft.sourceId ? (
+              ) : projectId && !state.draft.sourceId ? (
                 <Hint>纯文本二创：该文案来自解析结果，直接基于正文改写。</Hint>
               ) : null}
               {rewriteError ? <p role="alert">{rewriteError}</p> : null}
@@ -4038,12 +4034,6 @@ function ParameterControls() {
             ),
           )}
         </select>
-        {durationMax > 15 ? (
-          <Hint>
-            16–30 秒为长视频档，长视频档独立定价，按输出秒数和生成数量计费，
-            实际以确认弹窗报价为准。
-          </Hint>
-        ) : null}
       </Field>
       <Field label="画面比例">
         {frameBased ? (
@@ -4537,13 +4527,6 @@ function VideoMaterialUpload({
         ref={inputRef}
         type="file"
       />
-      {acceptsMedia && (
-        <small className="creation-upload-hint">
-          视频、音频单条 2–
-          {MAX_REFERENCE_MEDIA_SECONDS} 秒且各累计 ≤
-          {MAX_REFERENCE_MEDIA_SECONDS} 秒；参考合计 ≤{MAX_REFERENCE_FILES} 项
-        </small>
-      )}
     </>
   );
 }
@@ -5260,6 +5243,13 @@ export function VideoPage() {
                   label="参考素材"
                   onUploaded={addReference}
                 />
+                <small className="creation-reference-counter">
+                  {[
+                    `参考图 ${referenceValidation.imageCount}/${referenceValidation.imageLimit}`,
+                    `视频 ${referenceValidation.videoCount}/${referenceValidation.videoLimit}`,
+                    `音频 ${referenceValidation.audioCount}/${referenceValidation.audioLimit}`,
+                  ].join(" · ")}
+                </small>
                 <Button
                   disabled={referenceAddingDisabled}
                   onClick={() => openPicker("reference")}
@@ -5452,14 +5442,11 @@ export function VideoPage() {
                   </p>
                 )}
               </div>
-              <p className="creation-reference-counter">
-                <span>{`参考图 ${referenceValidation.imageCount}/${referenceValidation.imageLimit} · 视频 ${referenceValidation.videoCount}/${referenceValidation.videoLimit} · 音频 ${referenceValidation.audioCount}/${referenceValidation.audioLimit}`}</span>
-                <small data-state={referenceAtLimit ? "limited" : undefined}>
-                  {referenceAtLimit
-                    ? "已达参考素材上限，需移除后才能继续添加。"
-                    : `视频、音频单条 ${MIN_REFERENCE_MEDIA_SECONDS}–${MAX_REFERENCE_MEDIA_SECONDS} 秒，各累计 ≤${MAX_REFERENCE_MEDIA_SECONDS} 秒`}
-                </small>
-              </p>
+              {referenceAtLimit ? (
+                <p className="creation-reference-limit">
+                  已达参考素材上限，需移除后才能继续添加。
+                </p>
+              ) : null}
               {referencePreviewDialogAsset ? (
                 <StudioDialog
                   title={`预览 ${referencePreviewDialogAsset.name}`}
@@ -5606,22 +5593,6 @@ export function VideoPage() {
                   : shotTableImported
                     ? "AI 优化"
                     : undefined
-            }
-            formatStatus={
-              referenceMode
-                ? {
-                    label: "六段式（H3 Ref2VA）",
-                    title: "参考生视频（H3 Ref2VA）官方六段式结构",
-                    ready: referenceStructured,
-                    hint: promptBusy
-                      ? "AI 正在按参考素材生成六段式提示词…通常 10–30 秒，生成完成前不建议提交。"
-                      : promptAlreadyOptimized
-                        ? "格式已就绪，请核对下方核对区再提交。"
-                        : referenceStructured
-                          ? "已识别为六段式（你手写或从提示词库导入）；AI 优化只改文风与措辞，不改结构、编号与引用规则。"
-                          : "直接用一句话写需求即可：六段结构、素材编号（<Picture 1>/<Video 1>/<Audio 1>）与排除规则由系统生成。",
-                  }
-                : undefined
             }
             assetNames={Object.fromEntries(
               references.map((asset) => [
@@ -5785,16 +5756,11 @@ export function VideoPage() {
                 presentation="video"
               />
             ) : (
-              <Media
-                alt="还没有参考素材"
-                className="creation-preview-media"
-                fallback={
-                  <Empty
-                    title="还没有参考素材"
-                    description="设置参考素材与参数后再生成视频。"
-                  />
-                }
-              />
+              <div className="creation-reference-preview-empty">
+                <Icon name="image" size={40} />
+                <p>还没有参考素材</p>
+                <small>上传本机文件或从素材库选择后，这里会实时预览画面</small>
+              </div>
             )
           ) : firstFrame ? (
             <Media
@@ -5848,7 +5814,6 @@ export function VideoPage() {
               return submitted === "adaptive" ? "自动" : submitted;
             })()}
           </strong>
-          <Hint>提交前确认费用；生成结果进入任务中心。</Hint>
         </div>
         {generationActions}
       </div>

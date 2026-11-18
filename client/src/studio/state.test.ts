@@ -24,6 +24,35 @@ describe("V1.4 交接合同", () => {
     expect(createDraft().ratio).toBe("9:16");
   });
 
+  it.each(["video", "reference"] as const)(
+    "从工作台或页面直达 %s 时，新视频草稿默认 15 秒",
+    (page) => {
+      expect(createState(page).draft.duration).toBe(15);
+
+      const initial = createState();
+      const replica = navigateStudioState(initial, "replica");
+      expect(replica.draft.duration).toBe(8);
+      expect(navigateStudioState(replica, page).draft).toMatchObject({
+        id: initial.draft.id,
+        duration: 15,
+      });
+    },
+  );
+
+  it.each([8, 24])("保留已选或已恢复的 %i 秒时长", (duration) => {
+    const initial = createState();
+    const edited = patchStudioDraft(initial.draft, { duration });
+    const restored = { ...initial.draft, duration };
+    const video = navigateStudioState({ ...initial, draft: edited }, "video");
+    expect(video.draft.duration).toBe(duration);
+    const reference = navigateStudioState(video, "reference");
+    expect(reference.draft.duration).toBe(duration);
+    expect(
+      navigateStudioState({ ...initial, draft: restored }, "reference").draft
+        .duration,
+    ).toBe(duration);
+  });
+
   // 供应商 ratio 契约（2026-09-19 对 MiniMax-H3 真实付费核对）。
   it("文生视频自动/无效比例回落 9:16，具体比例透传", () => {
     expect(resolveSubmittedRatio("t2v", "自动")).toBe("9:16");

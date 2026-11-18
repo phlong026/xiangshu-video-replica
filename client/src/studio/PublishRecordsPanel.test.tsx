@@ -102,6 +102,33 @@ describe("PublishRecordsPanel", () => {
     expect(screen.getAllByRole("button", { name: "删除记录" })).toHaveLength(3);
   });
 
+  it("快手发布结果未知时提示手动核对且不提供重试", async () => {
+    api.listPublishRecords.mockResolvedValue([
+      record({
+        platform: "kuaishou",
+        status: "submission_unknown",
+        delivery_mode: "browser",
+      }),
+    ]);
+    render(<PublishRecordsPanel />);
+    await screen.findByText("结果待核对");
+    expect(screen.getByText(/到快手创作者中心核对作品/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    expect(api.retryPublishRecord).not.toHaveBeenCalled();
+  });
+
+  it("快手发布失败后引导重新确认，不提供直接重试", async () => {
+    api.listPublishRecords.mockResolvedValue([
+      record({ platform: "kuaishou", status: "failed" }),
+    ]);
+    render(<PublishRecordsPanel />);
+    expect(
+      await screen.findByText(/重新确认成片和快手账号后提交/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    expect(screen.getByRole("button", { name: "删除记录" })).toBeEnabled();
+  });
+
   it("cancel / retry / delete update the list in place", async () => {
     api.listPublishRecords.mockResolvedValue([
       record({ id: "q", status: "queued" }),

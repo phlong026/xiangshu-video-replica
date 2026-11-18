@@ -8957,7 +8957,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels" | "xiaohongshu";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu" | "kuaishou";
       /** Platform User Id */
       platform_user_id: string;
       /** Username */
@@ -9012,7 +9012,7 @@ export interface components {
        * Platform
        * @enum {string}
        */
-      platform: "douyin" | "wechat_channels" | "xiaohongshu";
+      platform: "douyin" | "wechat_channels" | "xiaohongshu" | "kuaishou";
       /** Account Id */
       account_id?: string | null;
     };
@@ -12673,6 +12673,11 @@ export interface components {
       options?: {
         [key: string]: unknown;
       };
+      /**
+       * Publish Confirmed
+       * @default false
+       */
+      publish_confirmed: boolean;
     };
     /** PublishRecordDeleteResponse */
     PublishRecordDeleteResponse: {

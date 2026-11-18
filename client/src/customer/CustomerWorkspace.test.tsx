@@ -168,7 +168,7 @@ describe("CustomerWorkspace (T31)", () => {
 
     expect(
       await screen.findByRole("heading", {
-        name: "粘贴一条爆款乡墅视频链接，快速生成它的原创视频",
+        name: "粘贴爆款链接，开始视频复刻",
       }),
     ).toBeInTheDocument();
 

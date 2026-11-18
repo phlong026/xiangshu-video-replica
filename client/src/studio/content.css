@@ -165,7 +165,7 @@
   width: 100%;
 }
 .content-video-preview span,
-.content-player span {
+.content-player > span {
   position: absolute;
   right: 8px;
   bottom: 8px;
@@ -1646,28 +1646,6 @@
   overflow: hidden;
 }
 
-/* 爆款素材以竖屏为主，统一 9:16 视窗。 */
-.viral-card-cover-img {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.viral-card .viral-card-cover video,
-.viral-card-cover.is-playing video {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
 .viral-card-cover-trigger {
   position: relative;
   display: block;
@@ -1679,20 +1657,9 @@
   cursor: pointer;
 }
 
-.viral-card-cover-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #55564f;
-}
-
-.viral-card-cover-trigger .viral-card-cover-empty {
-  position: relative;
-  inset: auto;
-  aspect-ratio: 9 / 16;
-  max-height: 420px;
+/* 封面跟随卡片画幅，播放时保留原片比例和原生控件。 */
+.viral-poster.video-preview--fit.video-preview > img.video-preview__foreground {
+  object-fit: cover;
 }
 
 .viral-card-duration,
@@ -1968,6 +1935,7 @@
 }
 
 .viral-card-overlay .viral-card-stats {
+  flex-wrap: wrap;
   border-top: 0;
   padding-top: 0;
   color: #fff;
@@ -1977,16 +1945,6 @@
 
 .viral-card-overlay .viral-card-stats svg {
   color: #e6e7e2;
-}
-
-.viral-card-overlay-text .viral-card-tags span {
-  background: #080909e6;
-  border: 1px solid #4a4b45;
-  border-radius: 999px;
-  color: #e8e8e2;
-  font-size: 12px;
-  padding: 2px 10px;
-  white-space: nowrap;
 }
 
 .viral-card-overlay-author {
@@ -2152,26 +2110,14 @@
 }
 
 .viral-card-tags span {
-  padding: 2px 7px;
+  padding: 2px 10px;
+  max-width: 100%;
   border-radius: 999px;
-  border: 1px solid #292a27;
-  color: #999b95;
+  border: 1px solid #4a4b45;
+  background: #080909e6;
+  color: #e8e8e2;
   font-size: var(--font-caption);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 96px;
-}
-
-.viral-card-body > .viral-card-tags {
-  height: 74px;
-  flex: none;
-  align-content: flex-start;
-  overflow: hidden;
-}
-
-.viral-card-body > .viral-card-tags span {
-  line-height: 16px;
+  overflow-wrap: anywhere;
 }
 
 .viral-card-body > .content-card-actions {
@@ -2326,8 +2272,24 @@
 
 .content-player-viral > .viral-card-duration {
   right: 8px;
-  bottom: 8px;
-  top: auto;
+  top: 8px;
+  bottom: auto;
+}
+
+.content-player-viral .content-player-viral-play,
+.content-player-viral .viral-card-loading {
+  top: 34%;
+}
+
+.viral-detail-cover-overlay h2 {
+  margin: 0;
+  font-size: var(--font-body);
+  line-height: 1.4;
+  color: #f2f2ee;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .content-detail-author {
@@ -2337,8 +2299,8 @@
   margin-bottom: 12px;
 }
 
-.content-detail-author img,
-.content-detail-author i {
+.content-detail-author > img,
+.content-detail-author > i {
   width: 40px;
   height: 40px;
   border-radius: 50%;
@@ -2368,10 +2330,6 @@
   display: block;
   color: #999b95;
   font-size: var(--font-caption);
-}
-
-.viral-detail-tags {
-  margin: 10px 0 4px;
 }
 
 .viral-detail-metrics {
@@ -2491,22 +2449,6 @@
   color: #999b95;
 }
 
-.content-player-viral-trigger .content-player-viral-poster {
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-  object-fit: cover;
-  display: block;
-}
-
-span.viral-card-cover-empty.content-player-viral-poster {
-  position: relative;
-  inset: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
 @media (max-width: 1100px) {
   .content-detail-grid-viral {
     grid-template-columns: minmax(0, 1fr);
@@ -2566,6 +2508,7 @@ span.viral-card-cover-empty.content-player-viral-poster {
   margin-inline: auto;
 }
 .viral-card-cover > .video-preview,
+.viral-card-cover-trigger > .video-preview,
 .content-player-viral > .video-preview,
 .content-player-viral-trigger > .video-preview {
   height: 100%;

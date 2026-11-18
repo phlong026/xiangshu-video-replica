@@ -41,7 +41,7 @@ __all__ = ["_clear_dependency_overrides", "client", "cw068_dsn", "holder", "lane
 BASE = "/api/studio/publish/browser"
 
 
-@pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu"])
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu", "kuaishou"])
 def test_browser_scan_encrypts_state_and_never_streams_secrets(
     client: TestClient,
     pg: psycopg.Connection,
@@ -50,6 +50,8 @@ def test_browser_scan_encrypts_state_and_never_streams_secrets(
 ) -> None:
     secret = "temporary-" + uuid4().hex
     storage = {"cookies": [{"name": "session", "value": secret}], "origins": []}
+    if platform == "kuaishou":
+        storage["cookies"][0].update({"domain": ".kuaishou.com", "path": "/"})
 
     async def events(*_: Any) -> AsyncGenerator[BrowserEvent, None]:
         yield BrowserEvent("qr_ready", image="data:image/png;base64,cXI=")
@@ -99,25 +101,41 @@ def test_browser_cancel_prevents_late_account_persistence(
     assert pg.execute("SELECT count(*) FROM publish_browser_accounts").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("platform", ["xiaohongshu", "kuaishou"])
 def test_browser_accounts_and_relogin_are_owner_scoped(
     client: TestClient,
     holder: _PgBusinessDb,
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
     async def events(*_: Any) -> AsyncGenerator[BrowserEvent, None]:
         yield BrowserEvent(
-            "connected", identity={"platform_user_id": "mine", "username": "我的账号"}, storage={}
+            "connected",
+            identity={"platform_user_id": "mine", "username": "我的账号"},
+            storage={
+                "cookies": [
+                    {
+                        "name": "session",
+                        "value": "synthetic",
+                        "domain": ".kuaishou.com",
+                        "path": "/",
+                    }
+                ],
+                "origins": [],
+            }
+            if platform == "kuaishou"
+            else {},
         )
 
     monkeypatch.setattr(routes, "login_events", events)
-    client.post(BASE + "/logins", json={"platform": "xiaohongshu"})
+    client.post(BASE + "/logins", json={"platform": platform})
     account_id = client.get(BASE + "/accounts").json()[0]["id"]
     holder.current_actor = actor("employee_2")
     assert client.get(BASE + "/accounts").json() == []
     assert client.delete(BASE + "/accounts/" + account_id).status_code == 404
     assert (
         client.post(
-            BASE + "/logins", json={"platform": "xiaohongshu", "account_id": account_id}
+            BASE + "/logins", json={"platform": platform, "account_id": account_id}
         ).status_code
         == 404
     )
@@ -144,17 +162,19 @@ def test_browser_failure_is_redacted_and_releases_capacity(
     assert pg.execute("SELECT count(*) FROM publish_browser_logins").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("platform", ["douyin", "kuaishou"])
 def test_browser_qr_alone_never_marks_an_account_connected(
     client: TestClient,
     pg: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
     async def events(*_: Any) -> AsyncGenerator[BrowserEvent, None]:
         yield BrowserEvent("qr_ready", image="data:image/png;base64,cXI=")
         yield BrowserEvent("expired")
 
     monkeypatch.setattr(routes, "login_events", events)
-    response = client.post(BASE + "/logins", json={"platform": "douyin"})
+    response = client.post(BASE + "/logins", json={"platform": platform})
     assert json.loads(response.text.splitlines()[-1])["phase"] == "expired"
     assert pg.execute("SELECT count(*) FROM publish_browser_accounts").fetchone()[0] == 0
 
@@ -375,11 +395,12 @@ def test_douyin_probe_is_rate_limited_and_creator_backend_never_emits_qr(
 
 
 def test_login_paths_route_only_channels_to_platform() -> None:
-    # 抖音根路径已验证能直接出码，不能被改成 /platform；仅视频号走 /platform。
+    # 原三平台路径保持已验证行为；快手从发布页由官方脚本进入 passport 登录。
     assert engine.LOGIN_PATHS == {
         "douyin": "",
         "wechat_channels": "/platform",
         "xiaohongshu": "",
+        "kuaishou": "/article/publish/video",
     }
 
 

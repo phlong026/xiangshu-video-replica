@@ -30,9 +30,9 @@ from app.permissions import require_asset_access, require_not_auditor, write_aud
 from app.publish import PublishLeaseLostError
 from app.publishers.base import PublishResult
 
-PLATFORMS: tuple[str, ...] = ("douyin", "wechat_channels", "xiaohongshu")
+PLATFORMS: tuple[str, ...] = ("douyin", "wechat_channels", "xiaohongshu", "kuaishou")
 # 小红书没有协议发布器，本期只能扫码登录；记录表预留 platform 值。
-DELIVERABLE_PLATFORMS: frozenset[str] = frozenset({"douyin", "wechat_channels"})
+DELIVERABLE_PLATFORMS: frozenset[str] = frozenset({"douyin", "wechat_channels", "kuaishou"})
 
 RecordStatus = Literal[
     "queued", "publishing", "submission_unknown", "published", "failed", "cancelled"
@@ -49,6 +49,7 @@ STATUSES: tuple[str, ...] = (
 MAX_TITLE_LENGTH = 300
 MAX_DESCRIPTION_LENGTH = 5000
 MAX_TAGS = 20
+MAX_KUAISHOU_TAGS = 3
 MAX_TAG_LENGTH = 40
 MAX_LIST_LIMIT = 100
 SCHEDULE_MIN_LEAD = timedelta(minutes=2)
@@ -90,6 +91,8 @@ class PublishRecordCreateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
     scheduled_at: datetime | None = None
     options: dict[str, Any] = Field(default_factory=dict)
+    # 快手为单次即时发布，必须由用户确认该账号与成片。
+    publish_confirmed: bool = Field(default=False, strict=True)
 
 
 class PublishRecordResponse(BaseModel):
@@ -321,7 +324,7 @@ def create_record(
     )
     moment = now or _now()
     account = conn.execute(
-        "SELECT id, platform, status FROM publish_browser_accounts "
+        "SELECT id, platform, status, source FROM publish_browser_accounts "
         "WHERE id = %s AND user_id = %s FOR UPDATE",
         (request.account_id, actor.id),
     ).fetchone()
@@ -336,6 +339,16 @@ def create_record(
         )
     if str(account["status"]) != "connected":
         raise _error(409, "PUBLISH_ACCOUNT_INVALID", "发布账号登录态已失效，请重新扫码。")
+    title = request.title.strip()
+    if platform == "kuaishou":
+        if account["source"] != "cloud":
+            raise _error(422, "PUBLISH_CLOUD_LOGIN_REQUIRED", "请先在工作台扫码连接快手账号。")
+        if not request.publish_confirmed:
+            raise _error(422, "PUBLISH_CONFIRMATION_REQUIRED", "请先确认本次快手发布。")
+        if request.scheduled_at is not None or request.options:
+            raise _error(422, "PUBLISH_IMMEDIATE_ONLY", "快手目前仅支持立即发布。")
+        if not title:
+            raise _error(422, "PUBLISH_TITLE_REQUIRED", "请填写快手发布标题。")
 
     video_asset_id = _resolve_stored_asset(
         conn, actor=actor, material_id=request.video_material_id, expected_media="video"
@@ -349,16 +362,28 @@ def create_record(
     )
     scheduled_at = _normalize_schedule(request.scheduled_at, now=moment)
     tags = _normalize_tags(request.tags)
+    # 开源快手发布器只使用前三个标签，入口拒绝超限以免静默丢弃客户选择。
+    if platform == "kuaishou" and len(tags) > MAX_KUAISHOU_TAGS:
+        raise _error(422, "PUBLISH_TAGS_TOO_MANY", f"快手发布最多支持 {MAX_KUAISHOU_TAGS} 个标签。")
 
+    # 解绑会将记录的 account_id 置空。快手先核对这些在途或未知结果，再允许重发同一视频。
     duplicate = conn.execute(
         """
-        SELECT id FROM publish_records
-        WHERE user_id = %s AND account_id = %s AND video_asset_id = %s
-          AND status IN ('queued', 'publishing')
+        SELECT status FROM publish_records
+        WHERE user_id = %s AND video_asset_id = %s AND (
+          (account_id = %s AND status IN ('queued', 'publishing'))
+          OR (%s = 'kuaishou' AND platform = 'kuaishou' AND (
+            (account_id = %s AND status = 'submission_unknown')
+            OR (account_id IS NULL AND status IN ('publishing', 'submission_unknown'))
+          ))
+        )
+        ORDER BY (status = 'submission_unknown') DESC LIMIT 1
         """,
-        (actor.id, request.account_id, video_asset_id),
+        (actor.id, video_asset_id, request.account_id, platform, request.account_id),
     ).fetchone()
     if duplicate is not None:
+        if duplicate["status"] == "submission_unknown":
+            raise _error(409, "PUBLISH_SUBMISSION_UNKNOWN", "上次快手发布结果未知，请先核对。")
         raise _error(409, "PUBLISH_RECORD_DUPLICATE", "该视频已在此账号的发布队列中。")
 
     record_id = str(uuid4())
@@ -376,7 +401,7 @@ def create_record(
             platform,
             video_asset_id,
             cover_asset_id,
-            request.title.strip(),
+            title,
             request.description.strip(),
             json.dumps(tags, ensure_ascii=False),
             json.dumps(request.options, ensure_ascii=False),
@@ -478,6 +503,15 @@ def retry_record(
     conn: BusinessConnection, *, actor: CurrentUser, record_id: str
 ) -> PublishRecordResponse:
     record = _require_owned_record(conn, actor_id=actor.id, record_id=record_id)
+    if record["platform"] == "kuaishou" and record["status"] == "failed":
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="publish.record.retry",
+            entity_type="publish_record",
+            entity_id=record_id,
+        )
+        raise _error(409, "PUBLISH_CONFIRMATION_REQUIRED", "请重新确认并新建快手发布。")
     if str(record["status"]) == "failed" and record["account_id"] is not None:
         # 账号登录态失效导致的失败，重新入队只会立刻再失败一次：先让用户重新扫码。
         account = conn.execute(
@@ -607,10 +641,9 @@ def _quarantine_expired_publishes(conn: BusinessConnection) -> None:
     """超租约的 publishing 按提交标记分流（T23）。
 
     打过 submitted_at 标记：平台 I/O 已经发出，结果未知——转 submission_unknown
-    终态，只允许人工核对收敛，绝不自动重投（重复发表不可逆）。没打标记：
-    worker 死在平台调用之前，请求确定没发出去，安全重排 queued（重试预算由
-    候选 SQL 的 attempt_count 上限约束）。两条 UPDATE 先后执行，行级互斥由
-    status 条件保证（第一条改走后第二条不再命中）。
+    终态，只允许人工核对收敛，绝不自动重投（重复发表不可逆）。没打标记时，
+    快手以 failed 收口并等待用户重新确认，旧平台保留有预算的安全重排。
+    两条 UPDATE 先后执行，由 status 条件避免同一行被处理两次。
     """
     conn.execute(
         """
@@ -627,14 +660,16 @@ def _quarantine_expired_publishes(conn: BusinessConnection) -> None:
     conn.execute(
         """
         UPDATE publish_records
-        SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+        SET status = CASE WHEN platform = 'kuaishou' THEN 'failed' ELSE 'queued' END,
+            lease_owner = NULL, lease_expires_at = NULL,
             submitted_at = NULL, submission_key = NULL,
-            error_message = %s, updated_at = clock_timestamp()
+            error_message = CASE WHEN platform = 'kuaishou' THEN %s ELSE %s END,
+            updated_at = clock_timestamp()
         WHERE status = 'publishing' AND lease_expires_at IS NOT NULL
           AND lease_expires_at <= clock_timestamp()
           AND submitted_at IS NULL
         """,
-        (QUARANTINE_MESSAGE,),
+        ("快手发布在提交前中断，请重新确认并新建发布。", QUARANTINE_MESSAGE),
     )
 
 
@@ -660,8 +695,9 @@ def _fail_orphaned_queued(conn: BusinessConnection) -> None:
 
 
 _PUBLISH_CANDIDATE_SQL = """
-    SELECT r.*, a.storage_state_enc, a.platform_user_id, a.username AS account_username,
-           v.storage_uri AS video_uri, v.content_type AS video_content_type,
+    SELECT r.*, a.storage_state_enc, a.platform_user_id, a.source AS account_source,
+           a.username AS account_username, v.storage_uri AS video_uri,
+           v.content_type AS video_content_type,
            c.storage_uri AS cover_uri, c.content_type AS cover_content_type
     FROM publish_records r
     JOIN publish_browser_accounts a
@@ -758,6 +794,33 @@ def mark_record_submitted(conn: BusinessConnection, *, record_id: str, lease_tok
     return getattr(cursor, "rowcount", 0) == 1
 
 
+def mark_kuaishou_record_submitted(conn: BusinessConnection, *, work: PublishWork) -> bool:
+    """在实际点击前确认租约和扫码账号仍有效，独立事务提交后才允许点击。"""
+    cursor = conn.execute(
+        """
+        UPDATE publish_records r
+        SET submitted_at = clock_timestamp(), updated_at = clock_timestamp(),
+            lease_expires_at = clock_timestamp() + make_interval(secs => %s)
+        WHERE r.id = %s AND r.lease_owner = %s AND r.attempt_count = %s
+          AND r.platform = 'kuaishou' AND r.status = 'publishing' AND r.submitted_at IS NULL
+          AND r.lease_expires_at > clock_timestamp()
+          AND EXISTS (
+            SELECT 1 FROM publish_browser_accounts a
+            WHERE a.id = r.account_id AND a.user_id = r.user_id AND a.platform = r.platform
+              AND a.status = 'connected' AND a.source = 'cloud' AND a.storage_state_enc = %s
+          )
+        """,
+        (
+            PUBLISH_LEASE_SECONDS,
+            work.record_id,
+            work.lease_token,
+            work.attempt_count,
+            work.row.get("storage_state_enc"),
+        ),
+    )
+    return cursor.rowcount == 1
+
+
 def renew_publish_lease(
     conn: BusinessConnection,
     *,
@@ -846,14 +909,16 @@ def finalize_publish_work(
                     UPDATE publish_browser_accounts
                     SET status = 'invalid', error_message = %s
                     WHERE id = %s AND user_id = %s
+                      AND (platform <> 'kuaishou' OR storage_state_enc = %s)
                     """,
                     (
                         result.message or "平台拒绝了当前登录态，请重新扫码",
                         str(work.row["account_id"]),
                         str(work.row["user_id"]),
+                        work.row.get("storage_state_enc"),
                     ),
                 )
-        elif work.attempt_count < MAX_ATTEMPTS:
+        elif work.row["platform"] != "kuaishou" and work.attempt_count < MAX_ATTEMPTS:
             outcome = "queued"
             cursor = conn.execute(
                 f"""
