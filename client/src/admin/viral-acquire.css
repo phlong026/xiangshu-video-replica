@@ -498,24 +498,6 @@
   width: 100%;
 }
 
-.viral-card-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.viral-card-tags span {
-  border: 1px solid #292a27;
-  border-radius: 999px;
-  color: #999b95;
-  font-size: 12px;
-  max-width: 96px;
-  overflow: hidden;
-  padding: 2px 7px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .viral-card-caption {
   /* 方案C（用户拍板 2026-11-15）：日期行 + 按钮行两行式——日期不再与
      多按钮挤一行被硬折行；按钮行等宽撑满，多按钮（详情/补转存/上架/删除）

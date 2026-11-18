@@ -191,15 +191,6 @@ function AcquireVideoCard({
             {video.title || video.video_id}
           </span>
         </h3>
-        {video.tags && video.tags.length > 0 ? (
-          <div className="viral-card-tags">
-            {video.tags.slice(0, 6).map((tag) => (
-              <span key={tag} title={`#${tag}`}>
-                #{tag}
-              </span>
-            ))}
-          </div>
-        ) : null}
         <div className="viral-card-caption">
           <span>入库于 {formatAcquiredAt(video.created_at)}</span>
           <span className="viral-acquire-actions">
