@@ -93,6 +93,7 @@ def make_release(
     modern: bool = True,
     algorithm: bytes = b"ED",
     key: Ed25519PrivateKey | None = None,
+    platforms: tuple[str, ...] | None = None,
 ) -> tuple[Path, dict, dict, str]:
     generated_key, public_key = signing_key()
     key = key or generated_key
@@ -105,8 +106,11 @@ def make_release(
     release = root / version
     release.mkdir(parents=True)
     stable = {"version": version, "platforms": {}}
-    assets, platforms = [], {}
-    for platform in PLATFORMS if modern else PLATFORMS[:1]:
+    assets, platforms_meta = [], {}
+    # platforms=None 沿用默认集合（schema2 三平台 / legacy 仅 Windows）；显式传入
+    # 允许构造任意子集，包括触发"非空子集"拒绝的空集。
+    selected = platforms if platforms is not None else (PLATFORMS if modern else PLATFORMS[:1])
+    for platform in selected:
         update = (
             "setup.exe"
             if platform == "windows-x86_64"
@@ -123,7 +127,7 @@ def make_release(
             "url": f"{ORIGIN}/downloads/customer-cloud/{version}/{quote(update, safe='')}",
             "signature": signature,
         }
-        platforms[platform] = {
+        platforms_meta[platform] = {
             "artifact": installer,
             "sha256": _sha(release / installer),
             "updateArtifact": update,
@@ -143,17 +147,25 @@ def make_release(
         "version": version,
         "platform": "windows-x86_64",
         "artifact": "setup.exe",
-        "sha256": _sha(release / "setup.exe"),
+        # 空子集夹具不产生 Windows 文件；这些 legacy 字段在子集校验阶段即被
+        # 拒绝，占位哈希只为让夹具能构造出来。
+        "sha256": (_sha(release / "setup.exe") if (release / "setup.exe").exists() else "0" * 64),
         "signature": {"status": "Valid"},
         "updater": {
             "endpoint": ORIGIN + "/downloads/customer-cloud/stable.json",
             "signatureArtifact": "setup.exe.sig",
-            "signatureSha256": _sha(release / "setup.exe.sig"),
+            "signatureSha256": (
+                _sha(release / "setup.exe.sig")
+                if (release / "setup.exe.sig").exists()
+                else "0" * 64
+            ),
             "manifestArtifact": "stable.json",
         },
     }
     if modern:
-        manifest.update(schemaVersion=2, source_sha="a" * 40, platforms=platforms, assets=assets)
+        manifest.update(
+            schemaVersion=2, source_sha="a" * 40, platforms=platforms_meta, assets=assets
+        )
     save_bundle(release, stable, manifest)
     return release, stable, manifest, public_key
 
@@ -264,6 +276,49 @@ def test_explicit_channel_root_overrides_env_and_legacy_site(bundle, tmp_path: P
     assert (publisher.channel / "2.4.0").is_dir()
     assert not ignored.exists()
     assert not legacy_site.exists()
+
+
+def test_two_platform_subset_publishes_with_full_per_platform_contract(tmp_path: Path):
+    # 2.6.8 发行形态：windows-x86_64 + darwin-aarch64 子集（macOS x64 端点问题
+    # 未解）。子集放行绝不削弱单平台校验：每平台 update/signature 配对、URL
+    # 对应、Windows exe 唯一、Mac DMG+tar.gz 与资产计数全部照常执行。
+    release, _, _, key = make_release(
+        tmp_path / "release", platforms=("windows-x86_64", "darwin-aarch64")
+    )
+    publisher = Publisher(tmp_path / "publisher", key)
+    result = publisher.publish(release)
+    assert result.returncode == 0, result.stdout + result.stderr
+    target = publisher.channel / "2.4.0"
+    assert {p.name for p in target.iterdir()} == {p.name for p in release.iterdir()}
+    served_names = {p.name for p in target.iterdir()}
+    assert sum(1 for name in served_names if name.endswith(".exe.sig")) == 1
+    assert sum(1 for name in served_names if name.endswith(".dmg")) == 1
+    assert sum(1 for name in served_names if name.endswith(".app.tar.gz.sig")) == 1
+    assert not any("darwin-x86_64" in name for name in served_names)
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in target.iterdir()}
+    rerun = publisher.publish(release)
+    assert rerun.returncode == 0, rerun.stdout + rerun.stderr
+    assert "verified identical assets" in rerun.stdout
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in target.iterdir()} == before
+    assert len(publisher.calls.read_text().splitlines()) == 2
+    publisher.assert_clean()
+
+
+def test_empty_platform_subset_missing_updater_assets_is_rejected(tmp_path: Path):
+    # 空子集等于没有任何可升级路径：缺少全部 updater 资产时必须在切换前拒绝。
+    release, _, _, key = make_release(tmp_path / "release", platforms=())
+    publisher = Publisher(tmp_path / "publisher", key)
+    previous = b'{"version":"2.3.0"}\n'
+    (publisher.channel / "stable.json").write_bytes(previous)
+    result = publisher.publish(release)
+    assert result.returncode != 0, result.stdout + result.stderr
+    # 空集可能先触发 endpoint_of 的守卫、也可能触发 schema2 的子集守卫；
+    # 两者消息都以 "stable platforms" 开头，且都发生在切换之前。
+    assert "stable platforms" in result.stdout + result.stderr
+    assert (publisher.channel / "stable.json").read_bytes() == previous
+    assert not (publisher.channel / "2.4.0").exists()
+    assert not publisher.calls.exists()
+    publisher.assert_clean()
 
 
 @pytest.mark.parametrize(

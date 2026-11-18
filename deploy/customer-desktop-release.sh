@@ -182,9 +182,15 @@ def validate(folder, expected_version, public_key):
     modern = "schemaVersion" in manifest
     if modern:
         require(manifest["schemaVersion"] == 2, "不支持的 release manifest schemaVersion")
-        require(set(stable["platforms"]) == SUPPORTED, "schemaVersion=2 必须包含全部三平台")
+        # schemaVersion=2 允许受支持平台的非空子集（2.6.8 因 macOS x64 updater
+        # 端点问题先发两平台）；三个集合必须一致：stable.platforms、
+        # manifest.platforms、assets 覆盖的平台。assets 覆盖集与 stable 的相等
+        # 由两处共同强制：每条资产 platform 必须已列（下方循环），每个已列平台
+        # 必须配齐 update/signature（再下方循环）。
+        platforms = set(stable["platforms"])
+        require(platforms and platforms <= SUPPORTED, "stable platforms 必须是受支持平台的非空子集")
         require(isinstance(manifest.get("platforms"), dict)
-                and set(manifest["platforms"]) == SUPPORTED, "发行 manifest platforms 不一致")
+                and set(manifest["platforms"]) == platforms, "发行 manifest platforms 不一致")
         require(isinstance(manifest.get("source_sha"), str)
                 and re.fullmatch(r"[a-fA-F0-9]{40}|[a-fA-F0-9]{64}", manifest["source_sha"]),
                 "发行 source_sha 无效")
@@ -228,7 +234,9 @@ def validate(folder, expected_version, public_key):
             require(update.endswith(".tar.gz") and roles.get((platform, "installer"), "").endswith(".dmg"),
                     "Mac 平台必须包含 DMG 与 tar.gz updater")
     if modern:
-        require(len(allowed) == 8, "三平台必须恰好包含八个受控资产")
+        # 每平台资产数：Windows 2（exe+sig），Mac 3（DMG+tar.gz+sig）。
+        expected_assets = sum(2 if name == "windows-x86_64" else 3 for name in platforms)
+        require(len(allowed) == expected_assets, "受控资产数量与平台子集不一致")
         for platform, record in manifest["platforms"].items():
             update, signature = roles[platform, "update"], roles[platform, "signature"]
             installer = roles.get((platform, "installer"), update)
