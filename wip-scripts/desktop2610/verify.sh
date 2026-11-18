@@ -9,8 +9,8 @@ sha256sum "/www/wwwroot/video.zszhj.cn/$B" "$ROOT/releases/$SHA/client/dist/$B"
 sha256sum "/www/wwwroot/video.zszhj.cn-admin/$A" "$ROOT/releases/$SHA/client/dist-admin/$A"
 echo "== health =="
 curl -fsS --max-time 15 https://video.zszhj.cn/health; echo
-echo "== api version =="
-curl -fsS --max-time 15 https://video.zszhj.cn/openapi.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])'
+echo "== api version (in-container) =="
+docker exec -w /opt/video-replica/server video-replica-candidate-api-1 python -c "from app.main import app; print(app.version)"
 echo "== migration head + wallet after =="
 docker exec video-replica-candidate-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT version_num FROM alembic_version"'
 docker exec video-replica-candidate-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT COALESCE(SUM(available_credits),0),COALESCE(SUM(reserved_credits),0),COUNT(*) FROM wallets"'
