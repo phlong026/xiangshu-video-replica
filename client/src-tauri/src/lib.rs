@@ -17,6 +17,20 @@ fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "macos")]
+    let context = {
+        let mut context = context;
+        // Intel 交叉构建曾丢失平台配置中的更新地址。在插件初始化前应用发行配置，
+        // 让两种架构读取同一份经过构建流程校验的地址和公钥。
+        if let Some(config) = option_env!("VIDEO_REPLICA_MACOS_UPDATER_CONFIG") {
+            context.config_mut().plugins.0.insert(
+                "updater".into(),
+                serde_json::from_str(config).expect("invalid macOS release updater configuration"),
+            );
+        }
+        context
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(video_downloads::VideoDownloads::default())
@@ -70,7 +84,7 @@ pub fn run() {
                 .build()?;
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build desktop application")
         .run(|app, event| {
             if let tauri::RunEvent::WindowEvent {
