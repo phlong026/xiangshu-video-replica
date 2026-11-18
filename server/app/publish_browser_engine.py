@@ -387,7 +387,11 @@ async def qr_locator(page: Page, platform: Platform) -> Locator | None:
                 ).first
                 if await toggle.is_visible():
                     await toggle.click(timeout=1500)
-            candidates.append(frame.locator('main#login-form div.qr-login img[alt="qrcode"]').first)
+            qr = frame.locator('main#login-form div.qr-login img[alt="qrcode"]').first
+            if await qr.is_visible() and await qr.evaluate(
+                "image => image.complete && image.naturalWidth > 0", timeout=1500
+            ):
+                candidates.append(qr)
     else:
         # Both legacy and July-2026 qrconnect frames; screenshot resolves relative URLs.
         for frame in page.frames:
@@ -457,7 +461,7 @@ async def _kuaishou_login_events() -> AsyncGenerator[BrowserEvent, None]:
 
                     creator = _origin(page.url) == ORIGINS["kuaishou"]
                     generation = capture.navigation_generation
-                    event = BrowserEvent("confirming")
+                    event = BrowserEvent("confirming" if qr_shown else "loading")
                     try:
                         if not creator and not is_kuaishou_login_page(page.url):
                             event = BrowserEvent("action_required")
@@ -472,13 +476,19 @@ async def _kuaishou_login_events() -> AsyncGenerator[BrowserEvent, None]:
                                 else BrowserEvent("action_required")
                             )
                         elif creator and not (qr_shown or login_opened):
-                            button = page.get_by_role("button", name="立即登录", exact=True).first
+                            # 创作者首页当前使用链接，兼容仍用按钮的登录页版本。
+                            entry = page.get_by_role("link", name="立即登录", exact=True).first
+                            if not await entry.is_visible():
+                                entry = page.get_by_role(
+                                    "button", name="立即登录", exact=True
+                                ).first
                             if (
-                                await button.is_visible()
+                                await entry.is_visible()
                                 and generation == capture.navigation_generation
                             ):
+                                await entry.click(timeout=5000)
                                 login_opened = True
-                                await button.click(timeout=1500)
+                                continue
                     except Exception:
                         event = BrowserEvent("action_required")
                     if generation != capture.navigation_generation:

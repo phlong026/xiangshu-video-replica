@@ -58,8 +58,14 @@ class _Locator:
     async def bounding_box(self) -> dict[str, float] | None:
         return {"width": 200, "height": 200} if await self.is_visible() else None
 
+    async def evaluate(self, expression: str, **_: Any) -> bool:
+        assert self.selector == QR_IMAGE and "naturalWidth" in expression
+        return self.frame.page.qr_loaded
+
     async def click(self, **_: Any) -> None:
         self.frame.clicks.append(self.selector)
+        if self.selector in {"open-login-link", "open-login-button"}:
+            self.frame.page.navigate(LOGIN)
         self.frame.visible.update({QR_REGION, QR_IMAGE})
 
     async def screenshot(self, **_: Any) -> bytes:
@@ -132,6 +138,7 @@ class _Page:
         self.goto_calls: list[dict[str, Any]] = []
         self.closed = False
         self.screenshots = 0
+        self.qr_loaded = True
         self.image_hook: Callable[[], None] | None = None
 
     def on(self, event: str, handler: Callable[..., Any]) -> None:
@@ -157,8 +164,8 @@ class _Page:
             await self.on_goto(self)
 
     def get_by_role(self, role: str, *, name: str, exact: bool) -> _Locator:
-        assert (role, name, exact) == ("button", "立即登录", True)
-        return self.main_frame.locator("open-login")
+        assert role in {"link", "button"} and name == "立即登录" and exact
+        return self.main_frame.locator(f"open-login-{role}")
 
     def is_closed(self) -> bool:
         return self.closed
@@ -577,8 +584,40 @@ async def test_identity_without_scan_never_binds_account(
         events = [await anext(stream) for _ in range(6)]
     finally:
         await stream.aclose()
-    assert all(event.phase == "confirming" and event.image is None for event in events)
+    assert all(event.phase == "loading" and event.image is None for event in events)
     assert page.screenshots == 0 and browser.closed
+
+
+@pytest.mark.parametrize("role", ["link", "button"])
+async def test_follows_visible_creator_login_entry_to_official_qr(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    page = _Page()
+    page.main_frame.visible.add(f"open-login-{role}")
+    browser = _install_login(monkeypatch, page)
+    stream = engine.login_events("kuaishou")
+    try:
+        event = await anext(stream)
+    finally:
+        await stream.aclose()
+    assert page.url == LOGIN and page.main_frame.clicks == [f"open-login-{role}"]
+    assert event.phase == "qr_ready" and event.image and browser.closed
+
+
+async def test_waits_for_qr_image_to_finish_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = _Page(LOGIN)
+    page.main_frame.visible.update({QR_REGION, QR_IMAGE})
+    page.qr_loaded = False
+    browser = _install_login(monkeypatch, page)
+    stream = engine.login_events("kuaishou")
+    try:
+        loading = await anext(stream)
+        assert loading.phase == "loading" and not loading.image and not page.screenshots
+        page.qr_loaded = True
+        ready = await anext(stream)
+    finally:
+        await stream.aclose()
+    assert ready.phase == "qr_ready" and ready.image and browser.closed
 
 
 async def test_qr_switches_only_pc_mode_and_skips_untrusted_frames() -> None:
