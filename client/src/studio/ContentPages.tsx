@@ -178,33 +178,6 @@ function viralMetricLabel(value: number | null | undefined) {
   return value == null ? "—" : formatCount(value);
 }
 
-function ViralStatisticsNote({ video }: { video: StudioVideo }) {
-  const status = video.statisticsStatus;
-  const source =
-    video.statisticsSource === "platform_search"
-      ? "平台搜索"
-      : video.statisticsSource === "platform_detail"
-        ? "互动核验"
-        : "待核验";
-  if (!video.statisticsUpdatedAt && !video.statisticsCheckedAt && !status)
-    return null;
-  return (
-    <Hint>
-      统计来源：{source} · 统计时间：{video.statisticsUpdatedAt ?? "待核验"}
-      {video.statisticsCheckedAt
-        ? ` · 最近核验：${video.statisticsCheckedAt}`
-        : ""}
-      {status === "partial"
-        ? " · 本次部分指标未更新，保留已有数据"
-        : status === "failed"
-          ? " · 本次更新失败，保留已有数据"
-          : status === "unknown"
-            ? " · 指标待核验"
-            : ""}
-    </Hint>
-  );
-}
-
 function viralPublishLabel(video: StudioVideo) {
   if (video.publishedDisplay) return video.publishedDisplay;
   if (video.publishedAt) {
@@ -2316,7 +2289,6 @@ export function ViralDetailPage() {
             <span className="viral-detail-published">发布 {published}</span>
             <span>时长 {video.duration}</span>
           </div>
-          <ViralStatisticsNote video={video} />
           {detailError && (
             <p className="viral-media-status is-error" role="status">
               {detailError}
@@ -2327,9 +2299,6 @@ export function ViralDetailPage() {
               该视频已不可用，暂不能导入创作。
             </p>
           )}
-          <Field label="视频摘要（来源描述，非提取文案）">
-            <p className="content-source-copy">{video.description}</p>
-          </Field>
           {importState.status !== "idle" && (
             <p
               className={`viral-media-status is-${importState.status}`}

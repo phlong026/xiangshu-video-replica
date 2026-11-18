@@ -2622,8 +2622,10 @@ describe("V1.4 内容与运营页面", () => {
     "两平台卡片与详情逐字段区分未知、真零和已有统计：%s",
     (platformIndex) => {
       const base = studio();
+      const tag = "已上架样例";
       const video = {
         ...base.data.videos[platformIndex],
+        tags: [tag],
         likes: 1200,
         likeDisplay: null,
         comments: null,
@@ -2640,8 +2642,8 @@ describe("V1.4 内容与运营页面", () => {
       const view = render(<ViralPage />);
       if (platformIndex === 1)
         fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-      // 卡片取消统计来源元数据行（用户拍板 2026-11-15）：详情页仍保留。
       expect(screen.queryByText(/统计来源：/)).not.toBeInTheDocument();
+      expect(screen.getByText(`#${tag}`)).toBeInTheDocument();
       expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
       expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);
       expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
@@ -2660,8 +2662,11 @@ describe("V1.4 内容与运营页面", () => {
       expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);
       expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
       expect(
-        screen.getByText(/最近核验：2026-10-12T09:00:00Z/),
-      ).toBeInTheDocument();
+        screen.queryByText(/统计来源：|最近核验：/),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/视频摘要/)).not.toBeInTheDocument();
+      expect(screen.queryByText(video.description)).not.toBeInTheDocument();
+      expect(screen.getByText(`#${tag}`)).toBeInTheDocument();
     },
   );
 
@@ -2682,8 +2687,6 @@ describe("V1.4 内容与运营页面", () => {
       />,
     );
     fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
-    // 卡片取消统计来源元数据行（用户拍板 2026-11-15）：部分更新语义由详情
-    // 页同款组件承载，卡片只保留四项指标本身。
     expect(screen.queryByText(/本次部分指标未更新/)).not.toBeInTheDocument();
     expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
     expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);

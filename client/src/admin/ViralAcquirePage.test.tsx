@@ -162,6 +162,8 @@ it("挂载即读取最近入库并渲染卡片；转存中卡片可补转存+删
   expect(screen.getAllByText("小红书").length).toBeGreaterThan(0);
   expect(screen.getByText("已就绪")).toBeTruthy();
   expect(screen.getByText("转存中")).toBeTruthy();
+  expect(screen.queryByText("#探店")).toBeNull();
+  expect(screen.queryByText("#奶茶")).toBeNull();
   // 修复后：转存中的条目提供「补转存」（修复永远卡在转存中的死状态）
   // 与「删除」（软删出池，用户报告的"无法删除"）。
   expect(screen.getByRole("button", { name: "补转存" })).toBeTruthy();
