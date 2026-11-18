@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT=/opt/video-replica-candidate
-SHA=0d7f20fa8313218443fd6af4769e17ce7aea9b01
+SHA=0c089606422a8dc7e45ff293c927fe27419b5cd0
 echo "== release asset byte-compare (fixed paths) =="
 B=$(grep -o 'assets/index-[^"]*\.js' /www/wwwroot/video.zszhj.cn/index.html | head -1)
 A=$(grep -o 'assets/admin-[^"]*\.js' /www/wwwroot/video.zszhj.cn-admin/index.html | head -1)
