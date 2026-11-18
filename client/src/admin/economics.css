@@ -321,6 +321,9 @@
   display: grid;
   gap: 5px;
 }
+.dashboard-kpis .admin-summary-card {
+  min-width: 0;
+}
 .dashboard-kpis .admin-summary-card span {
   font-size: var(--font-label);
   letter-spacing: 0;
@@ -331,10 +334,16 @@
   color: #dfb85f;
   font-size: var(--font-lead);
   line-height: 1.05;
+  /* 金额保持单行，但窄卡片（994px 视口 5 列时每卡约 120px）下必须能收缩，
+     否则 nowrap 金额撑出卡片文本框（2026-11-18 用户复现"大量超出文本框"）。 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .dashboard-kpis .admin-summary-card small {
   font-size: var(--font-caption);
+  overflow-wrap: anywhere;
 }
 .dashboard-main-grid {
   display: grid;
@@ -346,6 +355,9 @@
 }
 .dashboard-main-grid > .admin-panel {
   min-height: 382px;
+  /* 柱顶成本标签绝对定位居中于柱子，最左/最右柱的标签会越出面板压到相邻
+     卡片上（2026-11-18 用户复现"内容跳出边框"）；面板内裁剪代替跨面板重叠。 */
+  overflow: hidden;
 }
 .dashboard-bottom-grid {
   display: grid;
