@@ -54,8 +54,15 @@ import {
   onPublishAccountsChanged,
   openLocalPublishAccount,
 } from "./localPublishAccounts";
-import { AccountAvatar, PlatformLogo } from "./PlatformLogo";
-import { PublishRecordsPanel } from "./PublishRecordsPanel";
+import {
+  AccountAvatar,
+  PlatformLogo,
+  publishPlatformNames,
+} from "./PlatformLogo";
+import {
+  KUAISHOU_VERIFICATION_MESSAGE,
+  PublishRecordsPanel,
+} from "./PublishRecordsPanel";
 import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioPublishDraft, StudioVideo } from "./types";
 import {
@@ -160,7 +167,7 @@ function viralDetailParams():
   return undefined;
 }
 
-function persistViralDetailUrl(video: StudioVideo) {
+export function persistViralDetailUrl(video: StudioVideo) {
   if (!video.platformKey || !video.nativeId) return;
   const url = new URL(window.location.href);
   url.searchParams.set("viralPlatform", video.platformKey);
@@ -189,20 +196,12 @@ function viralPublishLabel(video: StudioVideo) {
   return "";
 }
 
-function ViralPoster({
-  video,
-  className,
-  fitContainer = false,
-}: {
-  video: StudioVideo;
-  className?: string;
-  fitContainer?: boolean;
-}) {
+function ViralPoster({ video }: { video: StudioVideo }) {
   return (
     <VideoPreview
       poster={video.poster}
-      className={className}
-      fitContainer={fitContainer}
+      className="viral-poster"
+      fitContainer
       fallback={<Icon name="video" />}
     />
   );
@@ -2232,11 +2231,7 @@ export function ViralDetailPage() {
               aria-label={`${playback.status === "error" ? "重试播放" : "播放"} ${video.title}`}
               disabled={playback.status === "loading"}
             >
-              <ViralPoster
-                video={video}
-                className="content-player-viral-poster"
-                fitContainer
-              />
+              <ViralPoster video={video} />
               {playback.status === "loading" ? (
                 <span className="viral-card-loading">素材准备中…</span>
               ) : playback.status === "error" ? (
@@ -2252,8 +2247,8 @@ export function ViralDetailPage() {
           {/* 封面浮层（对齐后台采集卡片 2026-11-18）：标题/标签/互动统计压图，
               右侧面板只留作者、发布信息与操作按钮。 */}
           {playback.status !== "playing" && (
-            <div className="viral-detail-cover-overlay">
-              <h3>{video.title}</h3>
+            <div className="viral-card-overlay viral-detail-cover-overlay">
+              <h2>{video.title}</h2>
               {video.tags && video.tags.length > 0 && (
                 <div className="viral-card-tags">
                   {video.tags.slice(0, 6).map((tag) => (
@@ -2861,13 +2856,9 @@ export function MaterialsPage() {
   );
 }
 
-function publishPlatformLabel(platform: string) {
-  return platform === "douyin"
-    ? "抖音"
-    : platform === "wechat_channels"
-      ? "视频号"
-      : "小红书";
-}
+const PUBLISH_PLATFORM_LABELS = ["抖音", "视频号", "小红书", "快手"] as const;
+const KUAISHOU_TAG_LIMIT = 3;
+
 function formCoverId(
   drafts: StudioPublishDraft[] | undefined,
   assetId: string | undefined,
@@ -2886,7 +2877,7 @@ export function parsePublishDrafts(value: unknown): StudioPublishDraft[] {
       typeof item.title !== "string" ||
       typeof item.description !== "string" ||
       typeof item.account !== "string" ||
-      !["抖音", "视频号", "小红书"].includes(item.platform) ||
+      !PUBLISH_PLATFORM_LABELS.includes(item.platform) ||
       !Array.isArray(item.tags) ||
       item.tags.some((tag: unknown) => typeof tag !== "string") ||
       (item.coverId !== undefined && typeof item.coverId !== "string") ||
@@ -3162,31 +3153,45 @@ export function PublishPage() {
   const [tagInput, setTagInput] = useState("");
   const [saveNotice, setSaveNotice] = useState(false);
   const draftCount = visibleDrafts.length;
-  const selectedAccount = accounts.find(
-    (account) =>
-      account.id === form.account &&
-      publishPlatformLabel(account.platform) === form.platform,
-  );
+  const kuaishou = form.platform === "快手";
+  const isScheduled = !kuaishou && scheduleMode === "later";
+  const tagLimit = kuaishou ? KUAISHOU_TAG_LIMIT : 10;
   const platformAccounts = accounts.filter(
-    (account) => publishPlatformLabel(account.platform) === form.platform,
+    (account) =>
+      publishPlatformNames[account.platform] === form.platform &&
+      (!kuaishou || account.source === "cloud"),
   );
-  const selectedLocalProfile = selectedAccount
-    ? localProfiles.find(
-        (profile) =>
-          profile.platform === selectedAccount.platform &&
-          profile.platform_user_id === selectedAccount.platform_user_id,
-      )
-    : undefined;
+  const selectedAccount = platformAccounts.find(
+    (account) => account.id === form.account,
+  );
+  const selectedLocalProfile =
+    selectedAccount && !kuaishou
+      ? localProfiles.find(
+          (profile) =>
+            profile.platform === selectedAccount.platform &&
+            profile.platform_user_id === selectedAccount.platform_user_id,
+        )
+      : undefined;
   const platformDeliverable = form.platform !== "小红书";
+  const publishBlocked =
+    selectedAccount?.status !== "connected" ||
+    !selectedAsset ||
+    !platformDeliverable ||
+    review ||
+    actionBusy ||
+    cloudRevision === null ||
+    user.role === "auditor" ||
+    (kuaishou && (!form.title.trim() || form.tags.length > tagLimit));
   const selectedCover =
     coverCandidates.find((asset) => asset.id === form.coverId) ??
     coverCandidates[0];
 
   useEffect(() => {
     const next = savedDraftForAsset ?? newPublishDraft(selectedAsset, review);
+    const scheduledAt = next.platform === "快手" ? undefined : next.scheduledAt;
     setForm(next);
-    setScheduleMode(next.scheduledAt ? "later" : "now");
-    setScheduleInput(localDateTimeInputFromIso(next.scheduledAt));
+    setScheduleMode(scheduledAt ? "later" : "now");
+    setScheduleInput(localDateTimeInputFromIso(scheduledAt));
     setSaveNotice(false);
   }, [review, savedDraftForAsset, selectedAsset]);
 
@@ -3200,7 +3205,7 @@ export function PublishPage() {
     if (
       !tag ||
       tag.length > 50 ||
-      form.tags.length >= 10 ||
+      form.tags.length >= tagLimit ||
       form.tags.includes(tag)
     ) {
       setTagInput("");
@@ -3213,13 +3218,12 @@ export function PublishPage() {
   const savePublishDraft = async () => {
     if (!selectedAsset || mutationPending.current || cloudRevision === null)
       return;
-    const scheduledAt =
-      scheduleMode === "later"
-        ? (isoFromLocalDateTimeInput(scheduleInput) ?? undefined)
-        : undefined;
+    const scheduledAt = isScheduled
+      ? (isoFromLocalDateTimeInput(scheduleInput) ?? undefined)
+      : undefined;
     const savedDraft = {
       ...form,
-      ...(scheduledAt ? { scheduledAt } : {}),
+      scheduledAt,
       id: savedDraftForAsset?.id ?? `publish-${selectedAsset.id}`,
       assetId: selectedAsset.id,
       coverId: selectedCover?.id,
@@ -3264,12 +3268,17 @@ export function PublishPage() {
   };
 
   async function submitPublish() {
-    if (!selectedAsset || !selectedAccount || mutationPending.current) return;
-    const scheduledAt =
-      scheduleMode === "later"
-        ? isoFromLocalDateTimeInput(scheduleInput)
-        : null;
-    if (scheduleMode === "later" && scheduledAt === null) {
+    if (
+      publishBlocked ||
+      !selectedAsset ||
+      !selectedAccount ||
+      mutationPending.current
+    )
+      return;
+    const scheduledAt = isScheduled
+      ? isoFromLocalDateTimeInput(scheduleInput)
+      : null;
+    if (isScheduled && scheduledAt === null) {
       setActionError("请填写定时发布时间。");
       return;
     }
@@ -3278,32 +3287,49 @@ export function PublishPage() {
       setActionError(scheduleError);
       return;
     }
-    if (!platformDeliverable) {
-      setActionError("小红书自动发布正在开发中，请先前往官方页面发布。");
+    const title = form.title.trim();
+    if (
+      kuaishou &&
+      !window.confirm(
+        `确认立即将成片「${selectedAsset.name}」发布到快手账号「${selectedAccount.username}」（${selectedAccount.platform_user_id}）？\n发布标题：${title}`,
+      )
+    )
       return;
-    }
     await perform(async () => {
-      const record = await createPublishRecord({
-        account_id: selectedAccount.id,
-        video_material_id:
-          selectedAsset.materialId ??
-          `asset:${selectedAsset.assetId ?? selectedAsset.id}`,
-        cover_material_id:
-          selectedCover && selectedCover.kind === "image"
-            ? (selectedCover.materialId ??
-              `asset:${selectedCover.assetId ?? selectedCover.id}`)
-            : null,
-        title: form.title.trim(),
-        description: form.description.trim(),
-        tags: form.tags,
-        scheduled_at: scheduledAt,
-      });
-      setRecordsToken((value) => value + 1);
-      notifyRef.current(
-        record.scheduled_at
-          ? `已加入定时发布队列 · ${publishPlatformLabel(record.platform)}`
-          : `已提交发布 · ${publishPlatformLabel(record.platform)}`,
-      );
+      try {
+        const record = await createPublishRecord({
+          account_id: selectedAccount.id,
+          video_material_id:
+            selectedAsset.materialId ??
+            `asset:${selectedAsset.assetId ?? selectedAsset.id}`,
+          cover_material_id:
+            selectedCover && selectedCover.kind === "image"
+              ? (selectedCover.materialId ??
+                `asset:${selectedCover.assetId ?? selectedCover.id}`)
+              : null,
+          title,
+          description: form.description.trim(),
+          tags: form.tags,
+          scheduled_at: scheduledAt,
+          ...(kuaishou ? { options: {}, publish_confirmed: true } : {}),
+        });
+        setRecordsToken((value) => value + 1);
+        if (kuaishou && record.status === "submission_unknown") {
+          setActionError(KUAISHOU_VERIFICATION_MESSAGE);
+          return;
+        }
+        const platformName = publishPlatformNames[record.platform];
+        notifyRef.current(
+          record.scheduled_at
+            ? `已加入定时发布队列 · ${platformName}`
+            : `已提交发布 · ${platformName}`,
+        );
+      } catch (cause) {
+        if (!kuaishou || apiErrorCode(cause) !== "PUBLISH_SUBMISSION_UNKNOWN")
+          throw cause;
+        setRecordsToken((value) => value + 1);
+        setActionError(KUAISHOU_VERIFICATION_MESSAGE);
+      }
     });
   }
 
@@ -3760,7 +3786,7 @@ export function PublishPage() {
           <div className="content-publish-fields">
             <Field label="发布平台">
               <div className="content-platform-options">
-                {(["抖音", "视频号", "小红书"] as const).map((platform) => (
+                {PUBLISH_PLATFORM_LABELS.map((platform) => (
                   <Button
                     disabled={actionBusy || cloudRevision === null}
                     aria-pressed={form.platform === platform}
@@ -3773,6 +3799,10 @@ export function PublishPage() {
                           "小红书自动发布正在开发中，敬请期待。",
                         );
                         return;
+                      }
+                      if (platform === "快手") {
+                        setScheduleMode("now");
+                        setScheduleInput("");
                       }
                       updateForm({ platform, account: "" });
                     }}
@@ -3838,49 +3868,53 @@ export function PublishPage() {
                 </p>
               )}
             </Field>
-            <Field label="发布时间">
-              <div className="content-publish-schedule">
-                <Button
-                  disabled={actionBusy || cloudRevision === null}
-                  aria-pressed={scheduleMode === "now"}
-                  variant={scheduleMode === "now" ? "primary" : "outline"}
-                  onClick={() => {
-                    setScheduleMode("now");
-                    setSaveNotice(false);
-                  }}
-                >
-                  立即
-                </Button>
-                <Button
-                  disabled={actionBusy || cloudRevision === null}
-                  aria-pressed={scheduleMode === "later"}
-                  variant={scheduleMode === "later" ? "primary" : "outline"}
-                  onClick={() => {
-                    setScheduleMode("later");
-                    setSaveNotice(false);
-                  }}
-                >
-                  定时
-                </Button>
-                {scheduleMode === "later" && (
-                  <input
-                    type="datetime-local"
-                    aria-label="定时发布时间"
+            {kuaishou ? (
+              <Hint>快手目前仅支持立即发布。</Hint>
+            ) : (
+              <Field label="发布时间">
+                <div className="content-publish-schedule">
+                  <Button
                     disabled={actionBusy || cloudRevision === null}
-                    min={localDateTimeInputFromIso(
-                      new Date(
-                        Date.now() + PUBLISH_SCHEDULE_MIN_LEAD_MS,
-                      ).toISOString(),
-                    )}
-                    value={scheduleInput}
-                    onChange={(event) => {
-                      setScheduleInput(event.target.value);
+                    aria-pressed={!isScheduled}
+                    variant={isScheduled ? "outline" : "primary"}
+                    onClick={() => {
+                      setScheduleMode("now");
                       setSaveNotice(false);
                     }}
-                  />
-                )}
-              </div>
-            </Field>
+                  >
+                    立即
+                  </Button>
+                  <Button
+                    disabled={actionBusy || cloudRevision === null}
+                    aria-pressed={isScheduled}
+                    variant={isScheduled ? "primary" : "outline"}
+                    onClick={() => {
+                      setScheduleMode("later");
+                      setSaveNotice(false);
+                    }}
+                  >
+                    定时
+                  </Button>
+                  {isScheduled && (
+                    <input
+                      type="datetime-local"
+                      aria-label="定时发布时间"
+                      disabled={actionBusy || cloudRevision === null}
+                      min={localDateTimeInputFromIso(
+                        new Date(
+                          Date.now() + PUBLISH_SCHEDULE_MIN_LEAD_MS,
+                        ).toISOString(),
+                      )}
+                      value={scheduleInput}
+                      onChange={(event) => {
+                        setScheduleInput(event.target.value);
+                        setSaveNotice(false);
+                      }}
+                    />
+                  )}
+                </div>
+              </Field>
+            )}
             <Field label="发布标题">
               <input
                 disabled={actionBusy || cloudRevision === null}
@@ -3888,8 +3922,12 @@ export function PublishPage() {
                 placeholder="填写发布标题"
                 value={form.title}
                 maxLength={300}
+                required={kuaishou}
               />
             </Field>
+            {kuaishou && !form.title.trim() && (
+              <Hint>请填写快手发布标题。</Hint>
+            )}
             <Field label="发布描述">
               <textarea
                 disabled={actionBusy || cloudRevision === null}
@@ -3918,7 +3956,11 @@ export function PublishPage() {
                   </Button>
                 ))}
                 <input
-                  disabled={actionBusy || cloudRevision === null}
+                  disabled={
+                    actionBusy ||
+                    cloudRevision === null ||
+                    (kuaishou && form.tags.length >= tagLimit)
+                  }
                   aria-label="添加标签"
                   onChange={(event) => setTagInput(event.target.value)}
                   onKeyDown={(event) => {
@@ -3931,6 +3973,12 @@ export function PublishPage() {
                 />
               </div>
             </Field>
+            {kuaishou && (
+              <Hint>
+                快手最多支持 {KUAISHOU_TAG_LIMIT} 个标签。
+                {form.tags.length > KUAISHOU_TAG_LIMIT && "请先移除多余标签。"}
+              </Hint>
+            )}
           </div>
           {saveNotice && (
             <p className="content-publish-save-notice">
@@ -3953,7 +4001,9 @@ export function PublishPage() {
             </Button>
           )}
           <p>
-            点击「立即发布」或「定时发布」后，服务端会用所选账号的登录态自动上传并创建作品；桌面端仍可打开官方页面手动发布。
+            {kuaishou
+              ? "确认后，服务端会用所选快手账号上传并发布这条成片。"
+              : "点击「立即发布」或「定时发布」后，服务端会用所选账号的登录态自动上传并创建作品；桌面端仍可打开官方页面手动发布。"}
           </p>
           <div className="content-publish-actions">
             <Button
@@ -4008,22 +4058,13 @@ export function PublishPage() {
               复制发布文案
             </Button>
             <Button
-              disabled={
-                !selectedAccount ||
-                selectedAccount.status === "invalid" ||
-                !selectedAsset ||
-                !platformDeliverable ||
-                review ||
-                actionBusy ||
-                cloudRevision === null ||
-                user.role === "auditor"
-              }
+              disabled={publishBlocked}
               variant="primary"
               onClick={() => void submitPublish()}
             >
-              {scheduleMode === "later" ? "定时发布" : "立即发布"}
+              {isScheduled ? "定时发布" : "立即发布"}
             </Button>
-            {canUseLocalPublishAccounts() && (
+            {!kuaishou && canUseLocalPublishAccounts() && (
               <Button
                 disabled={
                   !selectedLocalProfile ||

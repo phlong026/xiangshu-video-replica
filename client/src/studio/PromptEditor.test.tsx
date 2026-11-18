@@ -42,7 +42,6 @@ function Harness({
   scope = "user:project",
   rows,
   optimizationActionLabel,
-  formatStatus,
   onPurposeChange,
   onOptimizationBusyChange,
   route = "text_image",
@@ -51,7 +50,6 @@ function Harness({
   scope?: string;
   rows?: number;
   optimizationActionLabel?: string;
-  formatStatus?: { label: string; hint: string; ready: boolean };
   onPurposeChange?: (assetId: string, purpose: string) => void;
   onOptimizationBusyChange?: (busy: boolean) => void;
   route?: "text_image" | "reference" | "replica";
@@ -66,7 +64,6 @@ function Harness({
       context={{ route, duration_seconds: 8 }}
       rows={rows}
       optimizationActionLabel={optimizationActionLabel}
-      formatStatus={formatStatus}
       assetNames={{ "asset-audio": "设计师音色样本.mp3" }}
       onPurposeChange={onPurposeChange}
       onOptimizationBusyChange={onOptimizationBusyChange}
@@ -550,11 +547,6 @@ describe("PromptEditor", () => {
 });
 
 describe("参考生视频生成后核对区", () => {
-  const ready = {
-    label: "六段式（H3 Ref2VA）",
-    hint: "格式已就绪，请核对下方核对区再提交。",
-    ready: true,
-  };
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
@@ -563,12 +555,7 @@ describe("参考生视频生成后核对区", () => {
   });
   async function generate(props: Parameters<typeof Harness>[0] = {}) {
     const view = render(
-      <Harness
-        scope="ref-review:project"
-        route="reference"
-        formatStatus={ready}
-        {...props}
-      />,
+      <Harness scope="ref-review:project" route="reference" {...props} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "AI 优化提示词" }));
     const review = await screen.findByRole("region", { name: "生成结果核对" });
@@ -644,15 +631,12 @@ describe("参考生视频生成后核对区", () => {
     ).toBeInTheDocument();
   });
 
-  it("已是六段式但没有生成回执时只显示结构自检", () => {
-    render(
-      <Harness
-        scope="ref-plain:project"
-        route="reference"
-        formatStatus={ready}
-      />,
-    );
-    expect(screen.getByText("六段式（H3 Ref2VA）")).toBeInTheDocument();
+  it("手写的六段式提示词显示结构自检", () => {
+    render(<Harness scope="ref-plain:project" route="reference" />);
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: REF2VA_PROMPT },
+    });
+    expect(screen.queryByText("六段式（H3 Ref2VA）")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "结构自检" })).toHaveTextContent(
       "✓ 已识别为六段式",
     );
@@ -671,7 +655,6 @@ describe("参考生视频生成后核对区", () => {
       <Harness
         scope="ref-busy:project"
         route="reference"
-        formatStatus={ready}
         onOptimizationBusyChange={onOptimizationBusyChange}
       />,
     );
@@ -688,22 +671,12 @@ describe("参考生视频生成后核对区", () => {
 
   it("父组件递增信号时直接发起生成，供素材变化后的直达入口复用", async () => {
     const view = render(
-      <Harness
-        scope="ref-signal:project"
-        route="reference"
-        formatStatus={ready}
-        runSignal={0}
-      />,
+      <Harness scope="ref-signal:project" route="reference" runSignal={0} />,
     );
     expect(api.create).not.toHaveBeenCalled();
 
     view.rerender(
-      <Harness
-        scope="ref-signal:project"
-        route="reference"
-        formatStatus={ready}
-        runSignal={1}
-      />,
+      <Harness scope="ref-signal:project" route="reference" runSignal={1} />,
     );
     await waitFor(() => expect(api.create).toHaveBeenCalledOnce());
   });

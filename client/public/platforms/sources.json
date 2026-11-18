@@ -25,5 +25,14 @@
     "sha256": "33b25a8e2b0a67d2fc58eb6739a608211af9e62b3fdd935e7ce7e1ce12963372",
     "bytes": 4286,
     "modified": false
+  },
+  {
+    "platform": "kuaishou",
+    "official_page": "https://cp.kuaishou.com/article/publish/video",
+    "asset_url": "https://p66-plat.wskwai.com/udata/pkg/fe/favicon.70ff1fcc.ico",
+    "retrieved": "2026-11-17",
+    "sha256": "bf5395b95b48de26617dcc05a1cd826f0e29e643ef862569285127992c1e26f1",
+    "bytes": 15086,
+    "modified": false
   }
 ]

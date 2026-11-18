@@ -75,6 +75,26 @@ describe("云端优先解绑", () => {
       "delete-local",
     ]);
   });
+  it("Windows 上解绑快手只清除对应的云端账号", async () => {
+    const kuaishou = {
+      ...account,
+      id: "ks-cloud",
+      platform: "kuaishou" as const,
+    };
+    vi.mocked(publishBrowserRequest)
+      .mockResolvedValueOnce(Response.json([kuaishou, cloud]))
+      .mockResolvedValueOnce(Response.json({ deleted: true }))
+      .mockResolvedValueOnce(Response.json([cloud]));
+
+    await disconnectPublishAccount("owner", kuaishou);
+
+    expect(publishBrowserRequest).toHaveBeenCalledWith(
+      "/api/studio/publish/browser/accounts/ks-cloud",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(publishBrowserRequest).toHaveBeenCalledTimes(3);
+    expect(invoke).not.toHaveBeenCalled();
+  });
   it("云端已无时仍可清理本机", async () => {
     vi.mocked(publishBrowserRequest).mockResolvedValue(Response.json([]));
     await disconnectPublishAccount("owner", account);

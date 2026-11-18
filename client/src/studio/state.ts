@@ -152,6 +152,23 @@ export function studioHashForState(state: StudioState): string {
   return `#studio/${path}${query ? `?${query}` : ""}`;
 }
 
+const DEFAULT_DRAFT_DURATION = 8;
+const blankDrafts = new WeakSet<StudioDraft>();
+
+function withVideoDurationDefault(
+  draft: StudioDraft,
+  page: StudioPage,
+): StudioDraft {
+  // 本机空稿在首次进入独立创作时设置默认值，恢复草稿时以已保存的时长为准。
+  return (page === "video" || page === "reference") &&
+    blankDrafts.has(draft) &&
+    !draft.projectId &&
+    !draft.sourceId &&
+    draft.duration === DEFAULT_DRAFT_DURATION
+    ? { ...draft, duration: 15 }
+    : draft;
+}
+
 export function navigateStudioState(
   state: StudioState,
   page: StudioPage | "oral-audio",
@@ -175,13 +192,15 @@ export function navigateStudioState(
     selectedPersonId: keepPersonContext ? state.selectedPersonId : undefined,
     ...patch,
     returnTo: patch.returnTo ? normalizeStudioPage(patch.returnTo) : undefined,
-    draft: normalizeOralDraft(patch.draft ?? state.draft),
+    draft: normalizeOralDraft(
+      patch.draft ?? withVideoDurationDefault(state.draft, nextPage),
+    ),
     page: nextPage,
   };
 }
 
 export function createDraft(): StudioDraft {
-  return {
+  const draft: StudioDraft = {
     id: `draft-${crypto.randomUUID()}`,
     videoName: "未命名视频",
     driverMode: "text",
@@ -201,21 +220,24 @@ export function createDraft(): StudioDraft {
     referenceIds: [],
     resolution: "768P",
     ratio: "9:16",
-    duration: 8,
+    duration: DEFAULT_DRAFT_DURATION,
     count: 1,
     frameConfirmed: false,
     style: "standard",
     subtitles: false,
     quoteRevision: 0,
   };
+  blankDrafts.add(draft);
+  return draft;
 }
 
 export function createState(
   page: StudioPage | "oral-audio" = "workbench",
 ): StudioState {
+  const normalizedPage = normalizeStudioPage(page);
   return {
-    page: normalizeStudioPage(page),
-    draft: createDraft(),
+    page: normalizedPage,
+    draft: withVideoDurationDefault(createDraft(), normalizedPage),
     savedScripts: [],
     favorites: [],
   };

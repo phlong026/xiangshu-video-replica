@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useStudio } from "./context";
 import {
   type CloudPublishAccount,
@@ -75,6 +75,7 @@ export function LocalPublishAccountsPanel({
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [syncing, setSyncing] = useState<string | null>(null);
   const [cloudLoadError, setCloudLoadError] = useState("");
+  const [cloudLoading, setCloudLoading] = useState(false);
   const currentLogin = useRef<string | null>(null);
   const cloudWrites = useRef(new Set<string>());
   const loginAccount = useRef<LocalPublishAccount | undefined>(undefined);
@@ -91,6 +92,16 @@ export function LocalPublishAccountsPanel({
   currentOwner.current = user.id;
   const pending = useRef(false);
   const native = canUseLocalPublishAccounts();
+  const usesNativeProfile = native && platform !== "kuaishou";
+  const accountsFor = (selected: PublishPlatform) =>
+    (native && selected === "kuaishou"
+      ? Object.values(cloudAccounts)
+      : accounts
+    ).filter((account) => account.platform === selected);
+  const isLoading = (selected: PublishPlatform) =>
+    native && selected === "kuaishou" ? cloudLoading : loading;
+  const platformAccounts = accountsFor(platform);
+  const platformLoading = isLoading(platform);
   useEffect(
     () => onPublishAccountsChanged(() => setRefresh((value) => value + 1)),
     [],
@@ -100,11 +111,11 @@ export function LocalPublishAccountsPanel({
     const current = ++generation.current;
     setError("");
     setAccounts([]);
-    setLoading(true);
-    if (review) {
-      setLoading(false);
-      return;
-    }
+    setCloudAccounts({});
+    setCloudLoadError("");
+    setLoading(!review);
+    setCloudLoading(native && !review);
+    if (review) return;
     void listLocalPublishAccounts(user.id)
       .then((value) => {
         if (generation.current === current) setAccounts(value);
@@ -119,7 +130,6 @@ export function LocalPublishAccountsPanel({
       void listCloudPublishAccounts()
         .then((value) => {
           if (generation.current !== current) return;
-          setCloudLoadError("");
           setCloudAccounts(
             Object.fromEntries(value.map((item) => [cloudKey(item), item])),
           );
@@ -129,12 +139,15 @@ export function LocalPublishAccountsPanel({
             setCloudLoadError(
               `云端账号状态暂时无法确认。${errorMessage(cause)}`,
             );
+        })
+        .finally(() => {
+          if (generation.current === current) setCloudLoading(false);
         });
     return () => {
       generation.current += 1;
     };
   }, [user.id, review, refresh, native]);
-  const rememberCloud = (account: CloudPublishAccount) => {
+  const rememberCloud = useCallback((account: CloudPublishAccount) => {
     setCloudAccounts((previous) => ({
       ...previous,
       [cloudKey(account)]: account,
@@ -143,7 +156,7 @@ export function LocalPublishAccountsPanel({
       const { [cloudKey(account)]: _dropped, ...rest } = previous;
       return rest;
     });
-  };
+  }, []);
   const uploadLoginState = async (
     account: LocalPublishAccount,
     storageState: unknown,
@@ -166,7 +179,12 @@ export function LocalPublishAccountsPanel({
     storageState?: unknown,
   ) {
     const key = cloudKey(account);
-    if (pending.current || cloudWrites.current.has(key)) return;
+    if (
+      account.platform === "kuaishou" ||
+      pending.current ||
+      cloudWrites.current.has(key)
+    )
+      return;
     cloudWrites.current.add(key);
     setSyncing(key);
     try {
@@ -224,20 +242,29 @@ export function LocalPublishAccountsPanel({
           currentLogin.current = null;
           setLoginId(null);
           setPlatform(account.platform);
-          setAccounts((previous) => [
-            account,
-            ...previous.filter((item) => item.id !== account.id),
-          ]);
+          if (native && account.platform === "kuaishou") {
+            rememberCloud({
+              ...account,
+              status: "connected",
+              source: "cloud",
+              error_message: null,
+            });
+          } else {
+            setAccounts((previous) => [
+              account,
+              ...previous.filter((item) => item.id !== account.id),
+            ]);
+          }
           notifyRef.current(
             `已连接 ${publishPlatformNames[account.platform]} · ${account.username}`,
           );
-          if (canUseLocalPublishAccounts())
+          if (usesNativeProfile)
             void syncToCloudRef.current(account, status.storage_state ?? null);
         } else {
           // 源码取码失败才降级：需要额外验证，或预算内始终拿不到二维码。
           // confirming 说明用户已在扫码，不弹可见窗口打断。
           if (
-            canUseLocalPublishAccounts() &&
+            usesNativeProfile &&
             !autoOpened &&
             (status.phase === "action_required" ||
               (status.phase === "loading" &&
@@ -265,7 +292,7 @@ export function LocalPublishAccountsPanel({
       active = false;
       clearTimeout(timer);
     };
-  }, [loginId, user.id, retryPoll]);
+  }, [loginId, user.id, retryPoll, native, usesNativeProfile, rememberCloud]);
   async function start(
     account?: LocalPublishAccount,
     selectedPlatform = platform,
@@ -308,7 +335,10 @@ export function LocalPublishAccountsPanel({
     setPlatform(selected);
     setError("");
     setRemoving(null);
-    if (!accounts.some((account) => account.platform === selected)) {
+    if (
+      !accountsFor(selected).length &&
+      !(native && selected === "kuaishou" && cloudLoadError)
+    ) {
       void start(undefined, selected);
     }
   }
@@ -376,7 +406,7 @@ export function LocalPublishAccountsPanel({
       setRemoving(null);
       setRefresh((value) => value + 1);
       notify(
-        `已确认清除该账号的${native ? "本机与云端" : "云端"}登录状态。在途发布仍需核对发布记录。`,
+        `已确认清除该账号的${usesNativeProfile ? "本机与云端" : "云端"}登录状态。在途发布仍需核对发布记录。`,
       );
     } catch (cause) {
       if (currentOwner.current === owner) setError(errorMessage(cause));
@@ -389,7 +419,7 @@ export function LocalPublishAccountsPanel({
     <Panel>
       <h2>发布账号管理</h2>
       <p>选择平台，在下方扫描官方二维码，确认后账号将显示在对应标签下。</p>
-      {!native && !review && (
+      {!usesNativeProfile && !review && (
         <p role="status">账号的登录状态加密保存在服务器，可在个人中心解绑。</p>
       )}
       {review && <p>审核预览：扫码和账号操作需登录工作台后使用。</p>}
@@ -399,7 +429,7 @@ export function LocalPublishAccountsPanel({
             <Button
               key={value}
               aria-pressed={platform === value}
-              disabled={loading || busy || Boolean(loginId)}
+              disabled={isLoading(value) || busy || Boolean(loginId)}
               onClick={() => selectPlatform(value)}
             >
               <PlatformLogo platform={value} />
@@ -418,89 +448,93 @@ export function LocalPublishAccountsPanel({
           )}
         </p>
       )}
-      {cloudLoadError && <p role="alert">{cloudLoadError}</p>}
-      {native && (
+      {cloudLoadError && (
+        <p role="alert">
+          {cloudLoadError}
+          {platform === "kuaishou" && !loginId && !error && (
+            <Button onClick={() => setRefresh((value) => value + 1)}>
+              刷新账号
+            </Button>
+          )}
+        </p>
+      )}
+      {usesNativeProfile && (
         <p>
           桌面端账号的登录状态保存在本机，并在连接时加密同步一份到服务端用于自动发布。
         </p>
       )}
-      {loading && <p role="status">正在读取发布账号…</p>}
-      {!loading &&
-        !loginId &&
-        !busy &&
-        !accounts.some((account) => account.platform === platform) && (
-          <p>
-            尚未连接{publishPlatformNames[platform]}
-            账号，点击平台或扫码添加账号。
-          </p>
-        )}
-      {accounts
-        .filter((account) => account.platform === platform)
-        .map((account) => (
-          <div
-            className="studio-publish-account publish-account"
-            key={account.id}
-          >
-            <AccountAvatar account={account} size={32} />
-            <span>
-              {publishPlatformNames[account.platform]} · {account.username}
-              <small>账号 ID：{account.platform_user_id}</small>
-            </span>
-            <small>
-              {native ? "本机已连接" : "云端已连接"} · 最后验证{" "}
-              {new Date(account.verified_at * 1000).toLocaleString("zh-CN")}
-              {native && cloudLoadError ? " · 云端状态待核对" : null}
-              {native &&
-                !cloudLoadError &&
-                (syncErrors[cloudKey(account)]
-                  ? " · 服务端未同步"
-                  : cloudAccounts[cloudKey(account)]
-                    ? cloudAccounts[cloudKey(account)].status === "invalid"
-                      ? " · 服务端登录态失效，请重新登录"
-                      : " · 已同步服务端，可自动发布"
-                    : "")}
-              {!native &&
-                (account as Partial<CloudPublishAccount>).status ===
-                  "invalid" &&
-                " · 登录态失效，请重新登录"}
-            </small>
-            {native && syncErrors[cloudKey(account)] && (
-              <p role="alert">{syncErrors[cloudKey(account)]}</p>
+      {platformLoading && <p role="status">正在读取发布账号…</p>}
+      {!platformLoading && !loginId && !busy && !platformAccounts.length && (
+        <p>
+          尚未连接{publishPlatformNames[platform]}
+          账号，点击平台或扫码添加账号。
+        </p>
+      )}
+      {platformAccounts.map((account) => (
+        <div
+          className="studio-publish-account publish-account"
+          key={account.id}
+        >
+          <AccountAvatar account={account} size={32} />
+          <span>
+            {publishPlatformNames[account.platform]} · {account.username}
+            <small>账号 ID：{account.platform_user_id}</small>
+          </span>
+          <small>
+            {usesNativeProfile ? "本机已连接" : "云端已连接"} · 最后验证{" "}
+            {new Date(account.verified_at * 1000).toLocaleString("zh-CN")}
+            {usesNativeProfile && cloudLoadError ? " · 云端状态待核对" : null}
+            {usesNativeProfile &&
+              !cloudLoadError &&
+              (syncErrors[cloudKey(account)]
+                ? " · 服务端未同步"
+                : cloudAccounts[cloudKey(account)]
+                  ? cloudAccounts[cloudKey(account)].status === "invalid"
+                    ? " · 服务端登录态失效，请重新登录"
+                    : " · 已同步服务端，可自动发布"
+                  : "")}
+            {!usesNativeProfile &&
+              "status" in account &&
+              account.status === "invalid" &&
+              " · 登录态失效，请重新登录"}
+          </small>
+          {usesNativeProfile && syncErrors[cloudKey(account)] && (
+            <p role="alert">{syncErrors[cloudKey(account)]}</p>
+          )}
+          {usesNativeProfile &&
+            (syncErrors[cloudKey(account)] ||
+              !cloudAccounts[cloudKey(account)]) && (
+              <Button
+                disabled={
+                  busy ||
+                  Boolean(loginId) ||
+                  syncing === cloudKey(account) ||
+                  user.role === "auditor"
+                }
+                onClick={() => void syncToCloud(account)}
+              >
+                {syncing === cloudKey(account) ? "同步中…" : "同步到服务端"}
+              </Button>
             )}
-            {native &&
-              (syncErrors[cloudKey(account)] ||
-                !cloudAccounts[cloudKey(account)]) && (
-                <Button
-                  disabled={
-                    busy ||
-                    Boolean(loginId) ||
-                    syncing === cloudKey(account) ||
-                    user.role === "auditor"
-                  }
-                  onClick={() => void syncToCloud(account)}
-                >
-                  {syncing === cloudKey(account) ? "同步中…" : "同步到服务端"}
-                </Button>
-              )}
-            <Button
-              disabled={busy || Boolean(loginId) || user.role === "auditor"}
-              onClick={() => void start(account)}
-            >
-              验证或重新登录
-            </Button>
-            <Button
-              disabled={
-                busy ||
-                Boolean(loginId) ||
-                syncing === cloudKey(account) ||
-                user.role === "auditor"
-              }
-              onClick={() => setRemoving(account)}
-            >
-              解绑
-            </Button>
-          </div>
-        ))}
+          <Button
+            disabled={busy || Boolean(loginId) || user.role === "auditor"}
+            onClick={() => void start(account)}
+          >
+            验证或重新登录
+          </Button>
+          <Button
+            disabled={
+              busy ||
+              Boolean(loginId) ||
+              syncing === cloudKey(account) ||
+              user.role === "auditor"
+            }
+            onClick={() => setRemoving(account)}
+          >
+            解绑
+          </Button>
+        </div>
+      ))}
       {loginId ? (
         <section
           className="publish-login"
@@ -527,7 +561,7 @@ export function LocalPublishAccountsPanel({
               : (loginStatus.message ?? loginMessages[loginStatus.phase])}
           </p>
           <div className="publish-login__actions">
-            {native &&
+            {usesNativeProfile &&
               (loginStatus.phase === "action_required" || pollPaused) && (
                 <Button
                   disabled={busy || loginStatus.phase === "closed"}
@@ -554,7 +588,9 @@ export function LocalPublishAccountsPanel({
         </section>
       ) : (
         <Button
-          disabled={review || loading || busy || user.role === "auditor"}
+          disabled={
+            review || platformLoading || busy || user.role === "auditor"
+          }
           onClick={() => void start()}
         >
           扫码添加账号
@@ -565,7 +601,7 @@ export function LocalPublishAccountsPanel({
           <legend>确认解绑账号</legend>
           <p>
             确认解绑 {removing.username} 并清除该账号的
-            {native ? "本机与云端" : "云端"}
+            {usesNativeProfile ? "本机与云端" : "云端"}
             登录状态？尚未开始的云端发布将停止；已经在途的发布可能继续，请核对发布记录。
           </p>
           <Button

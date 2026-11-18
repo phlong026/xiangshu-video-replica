@@ -5,7 +5,7 @@ import {
   createViralImportTask,
   customerVisibleErrorMessage,
   DIRECT_RESULT_RETENTION_HINT,
-  getPublishSummary,
+  getMaterialBatchPreviews,
   getStudioNotificationPreferences,
   getViralImportTask,
   isResultUrlExpired,
@@ -32,7 +32,6 @@ import {
   uploadWorkbenchSourceVideo,
 } from "./live";
 import { handOffLongReplicaSource } from "./longReplicaSession";
-import { readPageCache, writePageCache } from "./pageCache";
 import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
 import type { StudioAsset, StudioData, StudioTask, StudioVideo } from "./types";
@@ -124,79 +123,168 @@ function StatusCell({ task }: { task: StudioTask }) {
   );
 }
 
-/** Per-row overflow menu on the workbench "正在进行" list. Every action is
- * real: jump to the task center, or copy the server batch id for support. */
-function RunningRowMenu({ task }: { task: StudioTask }) {
-  const { navigate, notify } = useStudio();
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
+function WorkbenchWorks() {
+  const { data, navigate, notify, review, updateData, user } = useStudio();
+  const work = data.tasks
+    .filter(taskHasDeliverable)
+    .sort(
+      (left, right) =>
+        (Date.parse(right.submitted) || 0) - (Date.parse(left.submitted) || 0),
+    )
+    .slice(0, 6);
+  const active = data.tasks.filter((task) =>
+    ["running", "queued", "uncertain"].includes(task.status),
+  );
+  const thumbnailIds = work
+    .flatMap((task) => (task.resultId && !task.poster ? [task.resultId] : []))
+    .sort()
+    .join(",");
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   useEffect(() => {
-    if (!open) return;
-    const close = (event: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", close);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", close);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+    if (review || !user.id || !thumbnailIds) return;
+    const controller = new AbortController();
+    void getMaterialBatchPreviews(
+      user.id,
+      thumbnailIds.split(",").map((id) => ({ id, populate: false })),
+      { signal: controller.signal },
+    )
+      .then((result) => {
+        if (!controller.signal.aborted) setThumbnails(result.thumbnails);
+      })
+      .catch(() => {
+        // 封面缺失时仍可从任务详情查看成片。
+      });
+    return () => controller.abort();
+  }, [review, thumbnailIds, user.id]);
 
-  const copyTaskId = async () => {
+  const publishRequest = useRef(0);
+  const publishPending = useRef(false);
+  const [publishingTaskId, setPublishingTaskId] = useState<string>();
+  useEffect(
+    () => () => {
+      publishRequest.current += 1;
+    },
+    [],
+  );
+  const preparePublish = async (task: StudioTask) => {
+    if (publishPending.current || review || user.role === "auditor") return;
+    publishPending.current = true;
+    const request = ++publishRequest.current;
+    setPublishingTaskId(task.id);
     try {
-      await navigator.clipboard.writeText(
-        task.backendId || task.batchId || task.id,
-      );
-      notify("任务编号已复制");
-    } catch {
-      notify("复制失败，请手动复制任务编号。");
+      const asset = await loadTaskPreview(task);
+      if (request !== publishRequest.current) return;
+      if (!asset?.saved) {
+        notify("请先在任务详情保存成片，再前往发布。");
+        return;
+      }
+      updateData((current) => ({
+        ...current,
+        assets: [
+          asset,
+          ...current.assets.filter((item) => item.id !== asset.id),
+        ],
+        tasks: current.tasks.map((item) =>
+          item.id === task.id ? { ...item, resultId: asset.id } : item,
+        ),
+      }));
+      navigate("publishing", { selectedAssetId: asset.id });
+    } catch (error) {
+      if (request === publishRequest.current)
+        notify(
+          customerVisibleErrorMessage(
+            error,
+            "成片暂不可用，请从任务详情重试。",
+          ),
+        );
+    } finally {
+      if (request === publishRequest.current) {
+        publishPending.current = false;
+        setPublishingTaskId(undefined);
+      }
     }
   };
 
   return (
-    <div className="studio-row-menu" ref={rootRef}>
-      <button
-        type="button"
-        className="studio-row-menu-trigger"
-        aria-label={`更多操作：${task.title}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <Icon name="more" size={20} />
-      </button>
-      {open && (
-        <div className="studio-row-menu-list" role="menu">
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpen(false);
-              navigate("tasks");
-            }}
-          >
-            打开任务中心
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpen(false);
-              void copyTaskId();
-            }}
-          >
-            复制任务编号
-          </button>
+    <section
+      className="studio-home-works"
+      aria-labelledby="studio-home-works-title"
+    >
+      <div className="studio-home-section-heading">
+        <h2 id="studio-home-works-title">我的成片</h2>
+        <Button variant="quiet" onClick={() => navigate("tasks")}>
+          查看全部任务
+        </Button>
+      </div>
+      {work.length ? (
+        <div className="studio-works-row">
+          {work.map((task) => {
+            const poster =
+              task.poster || (task.resultId && thumbnails[task.resultId]);
+            return (
+              <article className="studio-work-card" key={task.id}>
+                <button
+                  type="button"
+                  className="studio-work-open"
+                  aria-label={`查看成片：${task.title}`}
+                  onClick={() =>
+                    navigate("task-detail", taskDetailPatch(task, "workbench"))
+                  }
+                >
+                  <VideoPreview
+                    fitContainer
+                    poster={poster || undefined}
+                    fallback={<Icon name="video" size={28} />}
+                  />
+                  <strong title={task.title}>{task.title}</strong>
+                </button>
+                <div className="studio-work-actions">
+                  <Status task={task} />
+                  {!review && user.role !== "auditor" && task.resultId ? (
+                    <Button
+                      aria-label={`发布成片：${task.title}`}
+                      disabled={publishingTaskId !== undefined}
+                      onClick={() => void preparePublish(task)}
+                      variant="quiet"
+                    >
+                      {publishingTaskId === task.id ? "读取成片…" : "去发布"}
+                    </Button>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
         </div>
+      ) : (
+        <p className="studio-home-empty" role="status">
+          {data.loading
+            ? "正在读取成片…"
+            : "还没有成片。粘贴链接或上传视频，开始第一支创作。"}
+        </p>
       )}
-    </div>
+      {active.length ? (
+        <button
+          type="button"
+          className="studio-home-progress"
+          onClick={() => navigate("tasks")}
+        >
+          <span>
+            生成中 {active.filter((task) => task.status === "running").length}
+            {" · "}
+            排队 {active.filter((task) => task.status === "queued").length}
+            {active.some((task) => task.status === "uncertain") &&
+              " · 有任务待核对"}
+          </span>
+          {active.slice(0, 2).map((task) => (
+            <span key={task.id} className="studio-home-progress-item">
+              <span title={task.title}>{task.title}</span>
+              <Status task={task} />
+            </span>
+          ))}
+          <Icon name="chevron" />
+        </button>
+      ) : null}
+    </section>
   );
 }
 
@@ -226,29 +314,6 @@ export function WorkbenchPage() {
     };
   }
   const accountContextKey = `${accountId}:${accountGenerationRef.current.generation}`;
-  // PUBLISH-DELIVERY-20260917: the home metric reads real publish records;
-  // null keeps the honest "—" until the summary arrives (or fails).
-  const [publishedTotal, setPublishedTotal] = useState<number | null>(null);
-  useEffect(() => {
-    let active = true;
-    setPublishedTotal(null);
-    if (review || !user.id) return;
-    void (async () => {
-      // MATERIAL-PERF-C（P1-1）：先回放上次摘要（切页立即出数），再后台刷新。
-      const cached = readPageCache<number>(`publish-summary:${user.id}`);
-      if (cached !== undefined && active) setPublishedTotal(cached);
-      try {
-        const summary = await getPublishSummary();
-        writePageCache(`publish-summary:${user.id}`, summary.published_total);
-        if (active) setPublishedTotal(summary.published_total);
-      } catch {
-        if (active && cached === undefined) setPublishedTotal(null);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [review, user.id]);
   const [sourceLinkState, setSourceLinkState] = useState({
     accountContextKey,
     value: "",
@@ -303,9 +368,6 @@ export function WorkbenchPage() {
       uploadAbortRef.current?.abort();
     },
     [],
-  );
-  const active = data.tasks.filter((task) =>
-    ["running", "queued", "uncertain"].includes(task.status),
   );
   const beginViralCreation = async (
     video: StudioVideo,
@@ -804,355 +866,139 @@ export function WorkbenchPage() {
   return (
     <section className="studio-home">
       <h2 className="studio-home-page-title">工作台</h2>
-      <header className="studio-hero">
-        <h1>
-          粘贴一条爆款乡墅视频链接，
-          <strong>快速生成它的原创视频</strong>
-        </h1>
-      </header>
-      <div className="studio-start">
-        <div className="studio-source-input">
-          <button
-            type="button"
-            className="studio-upload-icon"
-            aria-label="上传视频"
-            onClick={() => {
-              if (requireLogin) {
-                requireLogin();
-                return;
-              }
-              if (review) {
-                notify("审核示例不执行真实上传。");
-                return;
-              }
-              fileInputRef.current?.click();
-            }}
-          >
-            <Icon name="upload" />
-          </button>
-          <input
-            aria-label="视频链接"
-            placeholder="粘贴抖音 / 小红书 / 视频号分享链接"
-            value={sourceLink}
-            onChange={(event) => {
-              linkOperationRef.current += 1;
-              viralOperationRef.current += 1;
-              setSourceLinkState({
-                accountContextKey,
-                value: event.target.value,
-              });
-              setLinkState({ accountContextKey, status: "idle" });
-            }}
-          />
-          <input
-            ref={fileInputRef}
-            type="file"
-            aria-label="选择视频文件"
-            accept=".mp4,.mov,video/mp4,video/quicktime"
-            hidden
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) handleUploadFile(file);
-              event.target.value = "";
-            }}
-          />
-          <Button
-            disabled={linkState.status === "loading"}
-            variant="primary"
-            onClick={() => void begin("copy")}
-          >
-            <Icon name="pen" />
-            提取文案
-          </Button>
-          <Button
-            disabled={linkState.status === "loading"}
-            onClick={() => void begin("replica")}
-          >
-            <Icon name="play" />
-            {linkState.status === "loading" ? "正在解析链接…" : "开始复刻"}
-          </Button>
-        </div>
-        {upload && (
-          <p className="studio-upload-status" role="status">
-            {upload.error
-              ? `上传失败：${upload.error}`
-              : upload.completed
-                ? `已上传：${upload.name}`
-                : `正在上传 ${upload.name}… ${upload.progress}%`}
-          </p>
-        )}
-        <p className="studio-start-helper">
-          支持抖音、小红书的分享链接，其他平台请上传 MP4文件；
-        </p>
-        {linkState.status === "loading" && (
-          <p className="studio-upload-status" role="status">
-            {linkState.stage === "import"
-              ? "链接解析成功，正在导入视频素材并建立项目，请稍候…"
-              : "正在解析链接并转存视频素材，通常十几秒内完成…"}
-          </p>
-        )}
-        {linkState.status === "error" && (
-          <p className="viral-media-status is-error" role="alert">
-            {linkState.message}
-          </p>
-        )}
-        {pendingViralSource && (
-          <p className="studio-upload-status" role="status">
-            已选参考：{pendingViralSource.title}。请上传该视频的 MP4 或 MOV
-            文件， 上传完成后点击“提取文案”。
-          </p>
-        )}
-      </div>
-      {/* 原侧边栏「新建创作」弹窗的四个创作方式迁到这里（2026-10-31 信息架构
-          精简）；空白创作 = 回到干净草稿并放弃云端「上次内容」，否则旧草稿会
-          在下次进创作页时反复弹恢复提示。欢迎页（未登录访客）不再展示创作入口
-          （2026-11-01 拍板与侧边栏按钮同删），访客的转化路径以登录为先。 */}
-      {!requireLogin && (
-        <div className="studio-create-row">
-          <span className="studio-create-row-label">开始创作</span>
-          <div className="studio-create-row-items">
-            {(
-              [
-                ["replica", "视频拆解", "video"],
-                ["replacement", "人物置换", "person"],
-                ["video", "视频生成", "sparkles"],
-                ["oral", "数字人口播", "audio"],
-              ] as const
-            ).map(([page, title, icon]) => (
-              <Button key={page} onClick={() => navigate(page)}>
-                <Icon name={icon} size={18} />
-                {title}
-              </Button>
-            ))}
-            <Button
-              variant="quiet"
+      <div className="studio-home-creation">
+        <header className="studio-hero">
+          <h1>
+            粘贴爆款链接，<strong>开始视频复刻</strong>
+          </h1>
+        </header>
+        <div className="studio-start">
+          <div className="studio-source-input">
+            <button
+              type="button"
+              className="studio-upload-icon"
+              aria-label="上传视频"
               onClick={() => {
-                patchState({ draft: createDraft() });
-                discardSavedDraft();
+                if (requireLogin) {
+                  requireLogin();
+                  return;
+                }
+                if (review) {
+                  notify("审核示例不执行真实上传。");
+                  return;
+                }
+                fileInputRef.current?.click();
               }}
             >
-              <Icon name="plus" size={18} />
-              空白创作
+              <Icon name="upload" />
+            </button>
+            <input
+              aria-label="视频链接"
+              placeholder="粘贴抖音 / 小红书 / 视频号分享链接"
+              value={sourceLink}
+              onChange={(event) => {
+                linkOperationRef.current += 1;
+                viralOperationRef.current += 1;
+                setSourceLinkState({
+                  accountContextKey,
+                  value: event.target.value,
+                });
+                setLinkState({ accountContextKey, status: "idle" });
+              }}
+            />
+            <input
+              ref={fileInputRef}
+              type="file"
+              aria-label="选择视频文件"
+              accept=".mp4,.mov,video/mp4,video/quicktime"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) handleUploadFile(file);
+                event.target.value = "";
+              }}
+            />
+            <Button
+              disabled={linkState.status === "loading"}
+              onClick={() => void begin("copy")}
+            >
+              <Icon name="pen" />
+              提取文案
+            </Button>
+            <Button
+              disabled={linkState.status === "loading"}
+              variant="primary"
+              onClick={() => void begin("replica")}
+            >
+              <Icon name="play" />
+              {linkState.status === "loading" ? "正在解析链接…" : "开始复刻"}
             </Button>
           </div>
+          {upload && (
+            <p className="studio-upload-status" role="status">
+              {upload.error
+                ? `上传失败：${upload.error}`
+                : upload.completed
+                  ? `已上传：${upload.name}`
+                  : `正在上传 ${upload.name}… ${upload.progress}%`}
+            </p>
+          )}
+          <p className="studio-start-helper">
+            支持抖音、小红书的分享链接，其他平台请上传 MP4文件；
+          </p>
+          {linkState.status === "loading" && (
+            <p className="studio-upload-status" role="status">
+              {linkState.stage === "import"
+                ? "链接解析成功，正在导入视频素材并建立项目，请稍候…"
+                : "正在解析链接并转存视频素材，通常十几秒内完成…"}
+            </p>
+          )}
+          {linkState.status === "error" && (
+            <p className="viral-media-status is-error" role="alert">
+              {linkState.message}
+            </p>
+          )}
+          {pendingViralSource && (
+            <p className="studio-upload-status" role="status">
+              已选参考：{pendingViralSource.title}。请上传该视频的 MP4 或 MOV
+              文件， 上传完成后点击“提取文案”。
+            </p>
+          )}
         </div>
-      )}
-      <div className="studio-home-metrics">
-        {[
-          {
-            label: "今日成片",
-            value: data.stats ? String(data.stats.today_completed) : "—",
-            hint: review ? "较昨日 +3" : "今日已完成",
-            tone: "success",
-            icon: "video",
-            page: "tasks" as const,
-          },
-          {
-            label: "成片队列",
-            value: data.stats
-              ? String(data.stats.running + data.stats.queued)
-              : data.loading
-                ? "—"
-                : String(active.length),
-            hint: "等待中",
-            tone: "muted",
-            icon: "tasks",
-            page: "tasks" as const,
-          },
-          {
-            label: "累计已发布",
-            value: review
-              ? "156"
-              : publishedTotal === null
-                ? "—"
-                : String(publishedTotal),
-            hint: review
-              ? "本周 +21"
-              : publishedTotal === null
-                ? "等待发布统计"
-                : "已发布作品",
-            tone: "success",
-            icon: "upload",
-            page: "publishing" as const,
-          },
-          {
-            label: "待处理",
-            value: data.stats
-              ? String(data.stats.needs_attention)
-              : data.loading
-                ? "—"
-                : String(
-                    data.tasks.filter((task) =>
-                      ["failed", "uncertain"].includes(task.status),
-                    ).length,
-                  ),
-            hint: "需要您处理",
-            tone: "danger",
-            icon: "warning",
-            page: "tasks" as const,
-          },
-        ].map((metric) => (
-          <button
-            key={metric.label}
-            type="button"
-            className="studio-panel"
-            onClick={() => navigate(metric.page)}
-          >
-            <span>
-              <Icon name={metric.icon} />
-              {metric.label}
-            </span>
-            <strong>{metric.value}</strong>
-            <small className={`studio-metric-hint is-${metric.tone}`}>
-              {metric.hint}
-            </small>
-          </button>
-        ))}
-      </div>
-      <ViralRecommendations />
-      <div className="studio-home-grid">
-        <div className="studio-home-cell" data-area="running">
-          <Panel className="studio-running-list">
-            <h2>正在进行</h2>
-            {active.length ? (
-              active.slice(0, 2).map((task) => (
-                <div className="studio-running-row" key={task.id}>
-                  {task.poster ? (
-                    <VideoPreview poster={task.poster} alt={task.title} />
-                  ) : (
-                    <Icon name="video" size={46} />
-                  )}
-                  <div>
-                    <h3>{task.title}</h3>
-                    <p>{task.type}</p>
-                  </div>
-                  <div className="studio-running-progress">
-                    <span
-                      className={`studio-status studio-status--${task.status}`}
-                    >
-                      {statusNames[task.status]}
-                    </span>
-                    {task.progress !== undefined &&
-                      task.status === "running" && (
-                        <>
-                          <progress value={task.progress} max={100} />
-                          <span className="studio-running-percent">
-                            {task.progress}%
-                          </span>
-                        </>
-                      )}
-                  </div>
-                  <Button
-                    onClick={() =>
-                      navigate(
-                        "task-detail",
-                        taskDetailPatch(task, "workbench"),
-                      )
-                    }
-                  >
-                    查看详情
-                  </Button>
-                  <RunningRowMenu task={task} />
-                </div>
-              ))
-            ) : (
-              <Empty
-                title={data.loading ? "正在读取任务" : "还没有进行中的任务"}
-                description="从上传视频或选择素材开始创作"
-                action={
-                  data.loading ? undefined : (
-                    <Button onClick={() => fileInputRef.current?.click()}>
-                      上传视频，开始第一支创作
-                    </Button>
-                  )
-                }
-              />
-            )}
-          </Panel>
-        </div>
-        <div className="studio-home-cell" data-area="activity">
-          <Panel className="studio-activity">
-            <h2>任务动态</h2>
-            {data.tasks.slice(0, 4).map((task) => (
-              <button
-                type="button"
-                key={task.id}
-                onClick={() =>
-                  navigate("task-detail", taskDetailPatch(task, "workbench"))
-                }
+        {/* 空白创作同时放弃云端旧草稿，避免再次进入时弹出恢复提示。 */}
+        {!requireLogin && (
+          <div className="studio-create-row">
+            <span className="studio-create-row-label">开始创作</span>
+            <div className="studio-create-row-items">
+              {(
+                [
+                  ["replica", "视频拆解", "video"],
+                  ["replacement", "人物置换", "person"],
+                  ["video", "视频生成", "sparkles"],
+                  ["oral", "数字人口播", "audio"],
+                ] as const
+              ).map(([page, title, icon]) => (
+                <Button key={page} onClick={() => navigate(page)}>
+                  <Icon name={icon} size={18} />
+                  {title}
+                </Button>
+              ))}
+              <Button
+                variant="quiet"
+                onClick={() => {
+                  patchState({ draft: createDraft() });
+                  discardSavedDraft();
+                }}
               >
-                <i className={`studio-dot studio-dot--${task.status}`} />
-                <span>
-                  “{task.title}” {statusNames[task.status]}
-                  <small>{formatTaskTime(task.submitted)}</small>
-                </span>
-              </button>
-            ))}
-            {!data.tasks.length && (
-              <Empty
-                title={data.loading ? "正在读取任务" : "暂无任务动态"}
-                description="任务提交后这里会实时更新"
-              />
-            )}
-            {data.tasks.length > 4 && (
-              <Button variant="quiet" onClick={() => navigate("tasks")}>
-                进入任务中心
+                <Icon name="plus" size={18} />
+                空白创作
               </Button>
-            )}
-          </Panel>
-        </div>
-        <div className="studio-home-cell" data-area="shortcuts">
-          <Panel className="studio-shortcuts">
-            <h2>快捷入口</h2>
-            <div className="studio-shortcuts-grid">
-              <button
-                type="button"
-                aria-label="快捷入口：文案工坊"
-                onClick={() => navigate("copy")}
-              >
-                <Icon name="pen" size={28} />
-                <span>
-                  文案工坊<small>创作视频文案</small>
-                </span>
-                <Icon name="chevron" />
-              </button>
-              <button
-                type="button"
-                aria-label="快捷入口：人物库"
-                onClick={() => navigate("people")}
-              >
-                <Icon name="person" size={28} />
-                <span>
-                  人物库<small>管理数字人</small>
-                </span>
-                <Icon name="chevron" />
-              </button>
-              <button
-                type="button"
-                aria-label="快捷入口：素材库"
-                onClick={() => navigate("materials")}
-              >
-                <Icon name="folder" size={28} />
-                <span>
-                  素材库<small>管理我的素材</small>
-                </span>
-                <Icon name="chevron" />
-              </button>
-              <button
-                type="button"
-                aria-label="快捷入口：任务列表"
-                onClick={() => navigate("tasks")}
-              >
-                <Icon name="tasks" size={28} />
-                <span>
-                  任务列表<small>查看进度与成片</small>
-                </span>
-                <Icon name="chevron" />
-              </button>
             </div>
-          </Panel>
-        </div>
+          </div>
+        )}
       </div>
+      {!requireLogin && <WorkbenchWorks key={`${review}:${accountId}`} />}
+      <ViralRecommendations />
     </section>
   );
 }

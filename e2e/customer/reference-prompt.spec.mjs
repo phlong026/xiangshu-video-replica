@@ -34,21 +34,18 @@ test("一句话需求按生成口径引导，六段式才切到优化口径", as
     `e2e_ref_prompt_${Date.now().toString(36)}`,
   );
 
-  await expect(page.getByText("六段式（H3 Ref2VA）")).toBeVisible();
+  await expect(page.getByText("六段式（H3 Ref2VA）")).toHaveCount(0);
+  await expect(page.getByRole("combobox", { name: "时长" })).toHaveValue("15");
   await expect(
     page.getByRole("button", { name: "AI 优化提示词" }),
   ).toContainText("生成标准提示词");
   await prompt.fill("把画面里的人物换成长发女主，镜头缓慢推进");
-  await expect(page.getByText(/直接用一句话写需求即可/)).toBeVisible();
   await expect(page.getByRole("region", { name: "结构自检" })).toHaveCount(0);
 
   await prompt.fill(SIX_SECTION_PROMPT);
   await expect(
     page.getByRole("button", { name: "AI 优化提示词" }),
   ).toContainText("AI 优化");
-  await expect(
-    page.getByText(/已识别为六段式（你手写或从提示词库导入）/),
-  ).toBeVisible();
   await expect(page.getByRole("region", { name: "结构自检" })).toContainText(
     "1 个镜头",
   );

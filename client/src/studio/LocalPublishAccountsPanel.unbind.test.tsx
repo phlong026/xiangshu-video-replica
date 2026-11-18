@@ -14,6 +14,9 @@ vi.mock("./localPublishAccounts", async (original) => ({
   disconnectPublishAccount: vi.fn(),
   exportLocalPublishAccountState: vi.fn(),
   importCloudPublishAccount: vi.fn(),
+  startLocalPublishLogin: vi.fn(),
+  checkLocalPublishLogin: vi.fn(),
+  cancelLocalPublishLogin: vi.fn(),
 }));
 const account = {
   id: "local",
@@ -52,6 +55,53 @@ describe("解绑分项失败界面", () => {
       ["owner", account],
       ["owner", account],
     ]);
+  });
+  it("Windows 上展示快手云端账号并重新扫码，登录后无需同步", async () => {
+    const kuaishou: accountsApi.CloudPublishAccount = {
+      ...account,
+      id: "ks-cloud",
+      platform: "kuaishou",
+      username: "快手账号",
+      status: "invalid",
+      source: "cloud",
+      error_message: null,
+    };
+    vi.mocked(accountsApi.listCloudPublishAccounts).mockResolvedValue([
+      kuaishou,
+    ]);
+    vi.mocked(accountsApi.startLocalPublishLogin).mockResolvedValue("ks-login");
+    vi.mocked(accountsApi.checkLocalPublishLogin).mockResolvedValue({
+      phase: "connected",
+      image: null,
+      account: {
+        ...kuaishou,
+        status: "connected",
+      } as accountsApi.CloudPublishAccount,
+    });
+    const notify = vi.fn();
+    render(<LocalPublishAccountsPanel notify={notify} />);
+    const platform = screen.getByRole("button", { name: "快手" });
+    await waitFor(() => expect(platform).toBeEnabled());
+    fireEvent.click(platform);
+    expect(screen.getByText("快手 · 快手账号")).toBeInTheDocument();
+    expect(screen.getByText(/云端已连接.*登录态失效/)).toBeInTheDocument();
+    expect(screen.queryByText(/本机已连接/)).toBeNull();
+    expect(accountsApi.startLocalPublishLogin).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "验证或重新登录" }));
+    expect(accountsApi.startLocalPublishLogin).toHaveBeenCalledWith(
+      "owner",
+      "kuaishou",
+      "ks-cloud",
+    );
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith("已连接 快手 · 快手账号"),
+    );
+    expect(screen.queryByText(/登录态失效/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "同步到服务端" })).toBeNull();
+    expect(accountsApi.exportLocalPublishAccountState).not.toHaveBeenCalled();
+    expect(accountsApi.importCloudPublishAccount).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "解绑" }));
+    expect(screen.getByText(/清除该账号的云端登录状态/)).toBeInTheDocument();
   });
   it("云端同步尚未完成时阻止同时解绑", async () => {
     let complete!: (account: accountsApi.CloudPublishAccount) => void;

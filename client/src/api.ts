@@ -9464,7 +9464,7 @@ export type PublishRecordStatus =
 
 export type PublishRecordItem = {
   id: string;
-  platform: "douyin" | "wechat_channels" | "xiaohongshu";
+  platform: components["schemas"]["BrowserAccount"]["platform"];
   account_id: string | null;
   account_username: string | null;
   video_asset_id: string;
@@ -9509,6 +9509,7 @@ export type PublishRecordCreateInput = {
   tags: string[];
   scheduled_at?: string | null;
   options?: Record<string, unknown>;
+  publish_confirmed?: components["schemas"]["PublishRecordCreateRequest"]["publish_confirmed"];
 };
 
 const PUBLISH_RECORDS_BASE = "/api/studio/publish/records";

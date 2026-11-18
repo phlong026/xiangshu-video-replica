@@ -1,5 +1,6 @@
 import { useState } from "react";
 import douyinLogo from "../assets/platforms/douyin.ico?inline";
+import kuaishouLogo from "../assets/platforms/kuaishou.ico?inline";
 import wechatChannelsLogo from "../assets/platforms/wechat_channels.ico?inline";
 import xiaohongshuLogo from "../assets/platforms/xiaohongshu.ico?inline";
 
@@ -9,6 +10,7 @@ const platforms = {
   douyin: { name: "抖音", logo: douyinLogo },
   wechat_channels: { name: "视频号", logo: wechatChannelsLogo },
   xiaohongshu: { name: "小红书", logo: xiaohongshuLogo },
+  kuaishou: { name: "快手", logo: kuaishouLogo },
 };
 
 export type PublishPlatform = keyof typeof platforms;

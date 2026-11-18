@@ -114,8 +114,9 @@ REPO_ROOT = SERVER_DIR.parent
 # created_at/paid_at 同列型，timestamptz 计数不变；附一个 partial 查询索引
 # status='CLOSED' AND closed_at IS NOT NULL 上的 provider+closed_at），故
 # columns +1、partial_indexes +1，表名集与其余计数不变；digest 在空库→新
-# head 的 PG16 探针库重算。链尾为该值。
-HEAD_REVISION = "20261116T1000_recharge_orders_closed_at"
+# head 的 PG16 探针库重算；20261117T1000_kuaishou_publish_platform 再追加
+# 发布域三表平台 CHECK 的快手值，计数不变，digest 随约束定义重算。
+HEAD_REVISION = "20261117T1000_kuaishou_publish_platform"
 
 
 @pytest.mark.pg
@@ -452,6 +453,8 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 2026-11-16 漏账缺口修复 F3：recharge_orders 追加 closed_at（Text 可空，与本表
 # created_at/paid_at 同列型，timestamptz 计数不变）+ 一个 partial 查询索引，
 # 故 columns +1、partial_indexes +1；digest 在空库→新 head 的 PG16 探针库重算。
+# 2026-11-17 快手发布：仅替换 publish_browser_accounts / publish_browser_logins /
+# publish_records 的平台 CHECK，约束名和计数均不变，digest 随定义重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "check_constraints": 409,
     "columns": 1586,
@@ -732,7 +735,9 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 2026-11-16 F3 追加 recharge_orders.closed_at 与 CLOSED 扫描部分索引后，
 # 在空库→新 head 的 PG16 探针库（本机 16.15 dev 容器 cw056_head_matrix_test）
 # 重算（实测计数与上方 HEAD_SCHEMA_COUNTS 完全一致）。
-HEAD_SCHEMA_DIGEST = "6ada62c50aad235245136d77beb11b0e10fee9c4f231ea64cd09c2273451ccd1"
+# 2026-11-17 快手发布：隔离 PG 探针先验证上一 head 的冻结摘要，再追加本迁移
+# 重算；表名集与计数完全相同，仅三条平台 CHECK 的定义变化。
+HEAD_SCHEMA_DIGEST = "a0f0924aa9ca36388698e8a8d7565301fc11537a362bcc548813031397ca1bf8"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

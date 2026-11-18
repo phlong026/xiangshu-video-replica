@@ -46,9 +46,9 @@ const {
   createViralImportTask,
   resolveViralLink,
   getViralImportTask,
+  getMaterialBatchPreviews,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
-  getPublishSummary,
   PUBLISH_PLATFORM_LABELS,
   connectPublishAccount,
   loadPublishAccounts,
@@ -100,9 +100,12 @@ const {
   createViralImportTask: vi.fn(),
   resolveViralLink: vi.fn(),
   getViralImportTask: vi.fn(),
+  getMaterialBatchPreviews: vi.fn(async () => ({
+    previews: {},
+    thumbnails: {},
+  })),
   getStudioNotificationPreferences: vi.fn(),
   updateStudioNotificationPreferences: vi.fn(),
-  getPublishSummary: vi.fn(),
   // C5 发布账号（第一阶段）：live.ts 的这几个导出在测试里由替身接管。
   // PUBLISH_PLATFORM_LABELS 是常量映射而非函数，给出同形状字面量即可。
   PUBLISH_PLATFORM_LABELS: { douyin: "抖音", wechat_channels: "视频号" },
@@ -134,9 +137,9 @@ vi.mock("../api", async (importOriginal) => ({
   createViralImportTask,
   resolveViralLink,
   getViralImportTask,
+  getMaterialBatchPreviews,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
-  getPublishSummary,
   publishBrowserRequest,
   saveViralFavorite,
   removeViralFavorite,
@@ -846,65 +849,6 @@ describe("V1.4 工作台正在进行行", () => {
       screen.getByText(/请上传该视频的 MP4 或 MOV 文件/),
     ).toBeInTheDocument();
   });
-
-  it("每行提供更多操作菜单：打开任务中心与复制任务编号", async () => {
-    const value = workbench();
-    useStudio.mockReturnValue(value);
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      value: { writeText },
-      configurable: true,
-    });
-    render(<WorkbenchPage />);
-
-    const trigger = screen.getByRole("button", {
-      name: "更多操作：张工 · 建房预算",
-    });
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-
-    fireEvent.click(trigger);
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-
-    fireEvent.click(screen.getByRole("menuitem", { name: "打开任务中心" }));
-    expect(value.navigate).toHaveBeenCalledWith("tasks");
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("menuitem", { name: "复制任务编号" }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("batch-9"));
-    expect(value.notify).toHaveBeenCalledWith("任务编号已复制");
-  });
-
-  it("复制失败时给出可感知的失败提示", async () => {
-    const value = workbench();
-    useStudio.mockReturnValue(value);
-    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
-    Object.defineProperty(navigator, "clipboard", {
-      value: { writeText },
-      configurable: true,
-    });
-    render(<WorkbenchPage />);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "更多操作：张工 · 建房预算" }),
-    );
-    fireEvent.click(screen.getByRole("menuitem", { name: "复制任务编号" }));
-    await waitFor(() =>
-      expect(value.notify).toHaveBeenCalledWith(
-        "复制失败，请手动复制任务编号。",
-      ),
-    );
-    expect(writeText).toHaveBeenCalledWith("batch-9");
-  });
-
-  it("任务动态与正在进行行不显示原始 ISO 时间", () => {
-    useStudio.mockReturnValue(workbench());
-    render(<WorkbenchPage />);
-
-    expect(screen.queryByText("2026-09-06T09:30:00")).not.toBeInTheDocument();
-    expect(screen.getByText("今天 09:30")).toBeInTheDocument();
-    expect(screen.getByText("68%")).toBeInTheDocument();
-  });
 });
 
 describe("V1.4 工作台首页爆款精选", () => {
@@ -949,7 +893,7 @@ describe("V1.4 工作台首页爆款精选", () => {
     };
   }
 
-  it("首页精选位于指标与网格之间，按置顶顺序和推送时间展示四条", () => {
+  it("首页精选位于我的成片之后，按置顶顺序和推送时间展示四张小卡", () => {
     const videos = [
       homepageVideo(1, { homepageRank: 20, likes: 999999 }),
       homepageVideo(2, { homepageRank: 1, likes: 1 }),
@@ -972,21 +916,22 @@ describe("V1.4 工作台首页爆款精选", () => {
     expect(
       within(panel).getByRole("heading", { name: "爆款视频精选" }),
     ).toBeInTheDocument();
-    expect(panel.previousElementSibling).toHaveClass("studio-home-metrics");
-    expect(panel.nextElementSibling).toHaveClass("studio-home-grid");
+    expect(panel.previousElementSibling).toHaveClass("studio-home-works");
+    expect(panel.nextElementSibling).toBeNull();
     expect(
       within(panel)
         .getAllByText(/^精选视频 \d$/)
         .map((node) => node.textContent),
     ).toEqual(["精选视频 2", "精选视频 4", "精选视频 3", "精选视频 1"]);
-    expect(panel.querySelectorAll(".viral-card")).toHaveLength(4);
+    expect(panel.querySelectorAll(".studio-viral-mini")).toHaveLength(4);
     expect(within(panel).queryByText("精选视频 5")).toBeNull();
-    expect(
-      within(panel).getAllByRole("button", { name: "查看详情" }),
-    ).toHaveLength(4);
-    expect(
-      within(panel).getByRole("button", { name: "下载视频 精选视频 2" }),
-    ).toBeEnabled();
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "查看爆款：精选视频 2" }),
+    );
+    expect(value.navigate).toHaveBeenCalledWith("viral-detail", {
+      selectedVideoId: videos[1].id,
+      returnTo: "workbench",
+    });
     fireEvent.click(
       within(panel).getByRole("button", { name: "查看全部爆款" }),
     );
@@ -1321,99 +1266,81 @@ describe("V1.4 工作台首页爆款精选", () => {
   );
 });
 
-describe("V1.4 工作台对齐网格", () => {
-  const clock = new Date("2026-09-06T10:00:00");
-
-  beforeEach(() => {
-    useStudio.mockReset();
-    vi.useFakeTimers({ now: clock, toFake: ["Date"] });
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  function workbench(
-    overrides: Partial<StudioContextValue> = {},
-  ): StudioContextValue {
-    return studio(undefined, {
-      state: { ...createState("workbench") },
-      data: data([runningTask]),
-      ...overrides,
+describe("工作台我的成片", () => {
+  it("按时间展示已完成和可交付的部分成片，封面缺失时也可查看", () => {
+    const older: StudioTask = {
+      ...taskA,
+      status: "partial",
+      backendKind: "generation_batch",
+      deliverableCount: 1,
+    };
+    const recent: StudioTask = {
+      ...taskB,
+      submitted: "2026-09-07T12:00:00Z",
+      poster: "/b.jpg",
+    };
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([older, runningTask, recent]),
     });
-  }
-
-  it("三区块按两行布局，标题收进卡片内部", () => {
-    useStudio.mockReturnValue(workbench());
-    const { container } = render(<WorkbenchPage />);
-
-    const grid = container.querySelector<HTMLElement>(".studio-home-grid");
-    if (!grid) throw new Error("未找到 .studio-home-grid 网格容器");
-    const areas = Array.from(grid.children).map(
-      (cell) => (cell as HTMLElement).dataset.area,
-    );
-    // 首页精选独立于此网格，网格仍保留任务、动态与快捷入口。
-    expect(areas).toEqual(["running", "activity", "shortcuts"]);
-
-    // 标题必须位于卡片内部（此前左栏 h2 悬在卡片外，行首高度受外部标题影响）
-    const runningCell = grid.children[0] as HTMLElement;
-    expect(runningCell.querySelector("h2")?.textContent).toBe("正在进行");
-  });
-
-  it("快捷入口改为任务列表并保持四个可用入口", () => {
-    const value = workbench();
     useStudio.mockReturnValue(value);
     render(<WorkbenchPage />);
-
-    expect(screen.getAllByRole("button", { name: /^快捷入口：/ })).toHaveLength(
-      4,
-    );
+    const section = screen.getByRole("region", { name: "我的成片" });
     expect(
-      screen.queryByRole("button", { name: "快捷入口：数据看板" }),
-    ).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "快捷入口：任务列表" }));
+      within(section)
+        .getAllByRole("button", { name: /^查看成片：/ })
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual([`查看成片：${recent.title}`, `查看成片：${older.title}`]);
+    fireEvent.click(
+      within(section).getByRole("button", { name: `查看成片：${older.title}` }),
+    );
+    expect(value.navigate).toHaveBeenCalledWith(
+      "task-detail",
+      expect.objectContaining({
+        selectedTaskId: older.id,
+        returnTo: "workbench",
+      }),
+    );
+    fireEvent.click(
+      within(section).getByRole("button", { name: /生成中 1 · 排队 0/ }),
+    );
     expect(value.navigate).toHaveBeenCalledWith("tasks");
   });
 
-  it("任务动态最多展示 4 条，超出时提供进入任务中心出口", () => {
-    const extraA = { ...taskA, id: "t-extra-1", title: "王宅庭院巡检" };
-    const extraB = { ...taskA, id: "t-extra-2", title: "赵宅封顶记录" };
-    const extraC = { ...taskA, id: "t-extra-3", title: "钱宅交付回访" };
-    useStudio.mockReturnValue(
-      workbench({
-        data: data([runningTask, taskA, taskB, extraA, extraB, extraC]),
+  it("从成片卡进入发布页并选中已保存的成片", async () => {
+    const task = { ...taskA, resultId: "result-1" };
+    loadTaskPreview.mockResolvedValueOnce({
+      id: "result-1",
+      kind: "video",
+      saved: true,
+    });
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([task]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+    fireEvent.click(
+      screen.getByRole("button", { name: `发布成片：${task.title}` }),
+    );
+    await waitFor(() =>
+      expect(value.navigate).toHaveBeenCalledWith("publishing", {
+        selectedAssetId: "result-1",
       }),
     );
-    render(<WorkbenchPage />);
-
-    expect(screen.getByText(/王宅庭院巡检/)).toBeInTheDocument();
-    expect(screen.queryByText(/赵宅封顶记录/)).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "进入任务中心" }),
-    ).toBeInTheDocument();
+    expect(loadTaskPreview).toHaveBeenCalledWith(task);
   });
 
-  it("正在进行为空时保留空态卡片并给出上传入口", () => {
-    const clickSpy = vi
-      .spyOn(HTMLInputElement.prototype, "click")
-      .mockImplementation(() => {});
-    useStudio.mockReturnValue(workbench({ data: data([]) }));
-    render(<WorkbenchPage />);
-
-    const cta = screen.getByRole("button", {
-      name: "上传视频，开始第一支创作",
+  it("访客欢迎页隐藏成片和精选", () => {
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([taskA]),
+      requireLogin: vi.fn(),
     });
-    fireEvent.click(cta);
-    expect(clickSpy).toHaveBeenCalled();
-    clickSpy.mockRestore();
-  });
-
-  it("任务动态为空时渲染带说明的空态", () => {
-    useStudio.mockReturnValue(workbench({ data: data([]) }));
+    useStudio.mockReturnValue(value);
     render(<WorkbenchPage />);
-
-    expect(screen.getByText("暂无任务动态")).toBeInTheDocument();
-    expect(screen.getByText(/任务提交后这里会实时更新/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "我的成片" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "爆款视频精选" })).toBeNull();
   });
 });
 

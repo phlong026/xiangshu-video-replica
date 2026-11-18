@@ -44,6 +44,7 @@ from app.publish_browser import (
     BrowserProbeLease,
     BrowserProbeLeaseLostError,
     claim_browser_probe_work,
+    defer_browser_probe_work,
     finalize_browser_probe,
 )
 from app.publish_records import (
@@ -51,6 +52,7 @@ from app.publish_records import (
     PublishWork,
     claim_publish_work,
     finalize_publish_work,
+    mark_kuaishou_record_submitted,
     mark_record_submitted,
     renew_publish_lease,
 )
@@ -90,6 +92,21 @@ def _perform_publish(
 
     row = work.row
     platform = str(row["platform"])
+    is_kuaishou = platform == "kuaishou"
+    if is_kuaishou and (
+        row.get("account_source") != "cloud" or row.get("scheduled_at") is not None
+    ):
+        return (
+            PublishResult(
+                platform=platform, status="failed", message="请扫码连接快手账号并确认立即发布"
+            ),
+            None,
+        )
+
+    def before_submit() -> bool:
+        with open_txn() as conn:
+            return mark_kuaishou_record_submitted(conn, work=work)
+
     try:
         storage_state = json.loads(key.decrypt(str(row["storage_state_enc"]).encode("ascii")))
         if not isinstance(storage_state, dict):
@@ -112,7 +129,9 @@ def _perform_publish(
         logger.warning("publish storage resolution failed: %s", type(exc).__name__)
         return (
             PublishResult(
-                platform=platform, status="failed", message="存储服务暂不可用，稍后自动重试"
+                platform=platform,
+                status="failed",
+                message="存储服务暂不可用" if is_kuaishou else "存储服务暂不可用，稍后自动重试",
             ),
             None,
         )
@@ -120,6 +139,13 @@ def _perform_publish(
     tags = [str(tag) for tag in tags_value] if isinstance(tags_value, list) else []
     options_value = row.get("options")
     options = dict(options_value) if isinstance(options_value, dict) else {}
+    kuaishou_args: dict[str, Any] = {}
+    if is_kuaishou:
+        kuaishou_args = {
+            "expected_platform_user_id": row.get("platform_user_id"),
+            "before_submit": before_submit,
+        }
+    outcome: publish_delivery.DeliveryOutcome | None = None
     try:
         with publish_delivery.materialized_media(
             storage,
@@ -138,18 +164,27 @@ def _perform_publish(
                 tags=tags,
                 options=options,
                 submission_key=(str(row["submission_key"]) if row.get("submission_key") else None),
+                **kuaishou_args,
             )
     except Exception as exc:  # noqa: BLE001 - delivery boundary
+        if outcome is not None:
+            # 临时素材清理失败不能推翻已取得的成功或 unknown，否则 worker 会重复发表。
+            logger.warning("publish media cleanup failed: %s", type(exc).__name__)
+            return outcome.result, outcome.mode
         logger.warning("publish delivery preparation failed: %s", type(exc).__name__)
         return (
-            PublishResult(platform=platform, status="failed", message="发布准备失败，稍后自动重试"),
+            PublishResult(
+                platform=platform,
+                status="failed",
+                message="发布准备失败" if is_kuaishou else "发布准备失败，稍后自动重试",
+            ),
             None,
         )
     return outcome.result, outcome.mode
 
 
-def _perform_browser_probe(lease: BrowserProbeLease, key: Any) -> tuple[bool, str | None]:
-    """Decrypt a QR-login account's state and probe its cookie; never raises."""
+def _perform_browser_probe(lease: BrowserProbeLease, key: Any) -> tuple[bool | None, str | None]:
+    """解密并探测扫码账号；None 表示尚不能确认，不能据此使账号失效。"""
     import json
 
     from app.publish_credentials import credentials_for_platform
@@ -161,6 +196,12 @@ def _perform_browser_probe(lease: BrowserProbeLease, key: Any) -> tuple[bool, st
     except Exception as exc:  # noqa: BLE001 - credential boundary
         logger.warning("browser probe credential decode failed: %s", type(exc).__name__)
         return False, "登录态材料无法读取，请重新扫码连接账号"
+    if lease.platform == "kuaishou":
+        from app.publishers import kuaishou_adapter
+
+        return kuaishou_adapter.probe_kuaishou(
+            storage, expected_platform_user_id=lease.platform_user_id
+        )
     credentials = credentials_for_platform(lease.platform, storage)
     if not credentials.cookie:
         return False, "登录态材料无法读取，请重新扫码连接账号"
@@ -213,38 +254,50 @@ def run_publish_round(
         probe_lease = claim_browser_probe_work(conn, worker_id=worker_id)
     if probe_lease is not None:
         processed += 1
-        ok, message = _perform_browser_probe(probe_lease, key)
-        try:
+        probe_ok, probe_message = _perform_browser_probe(probe_lease, key)
+        # 未知结果推进到期时间后释放租约；只等旧租约过期会让慢账号反复占队首。
+        if probe_ok is None:
             with open_txn() as conn:
-                finalize_browser_probe(conn, lease=probe_lease, ok=ok, message=message)
-        except BrowserProbeLeaseLostError:
-            logger.warning("browser probe finalize lost lease: %s", probe_lease.record_id)
+                deferred = defer_browser_probe_work(conn, lease=probe_lease)
+            if deferred:
+                logger.info("browser probe deferred: %s", probe_lease.record_id)
+            else:
+                logger.warning("browser probe defer lost lease: %s", probe_lease.record_id)
+        else:
+            try:
+                with open_txn() as conn:
+                    finalize_browser_probe(
+                        conn, lease=probe_lease, ok=probe_ok, message=probe_message
+                    )
+            except BrowserProbeLeaseLostError:
+                logger.warning("browser probe finalize lost lease: %s", probe_lease.record_id)
 
     with open_txn() as conn:
         work = claim_publish_work(conn, worker_id=worker_id)
     if work is not None:
         processed += 1
-        # T23：平台 I/O 起跳前先打提交标记并续租（独立短事务）。标记是
-        # 「提交前可安全重排 / 提交后只能人工核对」的分界；续租避免大文件
-        # 慢投递被误判超租约。标记丢失（租约已被隔离）就放弃本次投递。
-        try:
-            with open_txn() as conn:
-                marked = mark_record_submitted(
-                    conn, record_id=work.record_id, lease_token=work.lease_token
-                )
-                if marked:
-                    renew_publish_lease(
-                        conn,
-                        record_id=work.record_id,
-                        lease_token=work.lease_token,
-                        lease_seconds=PUBLISH_LEASE_SECONDS,
+        if work.row["platform"] != "kuaishou":
+            # T23：平台 I/O 起跳前先打提交标记并续租（独立短事务）。标记是
+            # 「提交前可安全重排 / 提交后只能人工核对」的分界；续租避免大文件
+            # 慢投递被误判超租约。标记丢失（租约已被隔离）就放弃本次投递。
+            try:
+                with open_txn() as conn:
+                    marked = mark_record_submitted(
+                        conn, record_id=work.record_id, lease_token=work.lease_token
                     )
-        except Exception as exc:  # noqa: BLE001 - 标记失败按未提交处理（安全侧）
-            logger.warning("publish submit marker failed: %s", type(exc).__name__)
-            marked = False
-        if not marked:
-            logger.warning("publish lease lost before submission: %s", work.record_id)
-            return processed
+                    if marked:
+                        renew_publish_lease(
+                            conn,
+                            record_id=work.record_id,
+                            lease_token=work.lease_token,
+                            lease_seconds=PUBLISH_LEASE_SECONDS,
+                        )
+            except Exception as exc:  # noqa: BLE001 - 标记失败按未提交处理（安全侧）
+                logger.warning("publish submit marker failed: %s", type(exc).__name__)
+                marked = False
+            if not marked:
+                logger.warning("publish lease lost before submission: %s", work.record_id)
+                return processed
         result, mode = _perform_publish(open_txn, work=work, key=key)
         try:
             with open_txn() as conn:

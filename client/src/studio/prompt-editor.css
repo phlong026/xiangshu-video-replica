@@ -44,40 +44,6 @@
   font-size: var(--font-caption, 13px);
 }
 
-/* 格式状态行：模式徽标 + 一行说明。参考生视频的两套提示词实现（复刻稿 / 六段式）
-   在界面上必须一眼可辨，用户才知道按钮会重写还是微调。 */
-.h3-prompt-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin: 2px 0 6px;
-  color: var(--studio-muted);
-  font-size: var(--font-caption);
-  line-height: 1.6;
-}
-.h3-prompt-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border: 1px solid #3a3527;
-  border-radius: 999px;
-  color: #cbbf9c;
-  background: #16150f;
-  font-size: var(--font-caption);
-  white-space: nowrap;
-}
-.h3-prompt-mode i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #6b6a63;
-}
-.h3-prompt-mode i.is-ready {
-  background: #79dda9;
-}
-
 /* 生成结果核对区 */
 .h3-prompt-review {
   display: grid;

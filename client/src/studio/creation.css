@@ -842,6 +842,31 @@
   grid-template-columns: 1fr;
 }
 
+.creation-reference-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 280px;
+  border: 1px dashed #3a3b36;
+  border-radius: 12px;
+  background: #131413;
+  color: #55564f;
+  text-align: center;
+  padding: 20px;
+}
+.creation-reference-preview-empty p {
+  margin: 0;
+  color: #b9bab4;
+  font-size: var(--font-body);
+}
+.creation-reference-preview-empty small {
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+  max-width: 220px;
+  line-height: 1.5;
+}
 .creation-preview-media {
   aspect-ratio: 16 / 9;
   min-height: 0;
@@ -1549,9 +1574,11 @@
   flex-wrap: wrap;
   margin: 16px 0;
 }
-.copy-person-summary > div,
-.copy-generate-row > :first-child {
+.copy-person-summary > div {
   flex: 1;
+}
+.copy-generate-row {
+  justify-content: flex-end;
 }
 .copy-person-summary p {
   color: #b9bbb3;
@@ -2229,8 +2256,7 @@
 .creation-video-grid.reference .creation-video-form > .studio-field {
   position: relative;
 }
-/* 合并上传区（REFERENCE-MATERIAL-PREVIEW）：上传框在上、素材库入口紧随其下，
-   参考素材列表整体落在上传框下方，不再挤在右上角或多列小卡片里。 */
+/* 上传框、用量计数和素材库入口归在同一个区域，素材列表展在该区域下方。 */
 .creation-reference-upload {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -2239,9 +2265,6 @@
 .creation-reference-upload .creation-upload-dropzone {
   margin: 0;
   min-height: 152px;
-}
-.creation-reference-upload .creation-upload-hint {
-  margin: 0;
 }
 .creation-reference-upload > .studio-button {
   width: 100%;
@@ -2278,17 +2301,13 @@
   margin: 0;
 }
 .creation-reference-counter {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  margin: 12px 0 0;
+  color: var(--studio-muted);
   font-size: var(--font-caption);
 }
-.creation-reference-counter small {
-  color: var(--studio-muted);
-}
-.creation-reference-counter small[data-state="limited"] {
+.creation-reference-limit {
+  margin: 12px 0 0;
   color: var(--studio-gold);
+  font-size: var(--font-caption);
 }
 .creation-reference-placeholder {
   display: flex;

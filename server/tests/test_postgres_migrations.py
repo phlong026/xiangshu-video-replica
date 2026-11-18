@@ -63,7 +63,8 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
 # 20261116T1000_recharge_orders_closed_at（2026-11-16 漏账缺口修复 F3）追加
 # recharge_orders.closed_at 与 CLOSED 扫描部分索引，链尾随之前移。
-HEAD_REVISION = "20261116T1000_recharge_orders_closed_at"
+# 20261117T1000_kuaishou_publish_platform 仅扩发布域三张表的平台 CHECK。
+HEAD_REVISION = "20261117T1000_kuaishou_publish_platform"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

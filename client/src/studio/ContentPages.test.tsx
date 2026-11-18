@@ -1342,7 +1342,7 @@ describe("V1.4 内容与运营页面", () => {
     const overlay = view.container.querySelector(".viral-detail-cover-overlay");
     expect(overlay).not.toBeNull();
     if (!overlay) return;
-    expect(overlay.querySelector("h3")?.textContent).toBe(
+    expect(overlay.querySelector("h2")?.textContent).toBe(
       "农村建房预算，别只盯着主体",
     );
     const overlayTags = [...overlay.querySelectorAll(".viral-card-tags span")];
@@ -4599,6 +4599,7 @@ describe("V1.4 内容与运营页面", () => {
   });
 
   it("选择服务端账号后可立即发布或按时区换算的定时发布", async () => {
+    const confirm = vi.spyOn(window, "confirm");
     createPublishRecord.mockReset();
     const base = studio();
     const value = studio({
@@ -4704,6 +4705,141 @@ describe("V1.4 内容与运营页面", () => {
       future.toISOString(),
     );
     expect(value.notify).toHaveBeenCalledWith("已加入定时发布队列 · 抖音");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("快手仅立即发布，确认前保留草稿且不发送发布请求", async () => {
+    const confirm = vi
+      .spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    createPublishRecord.mockReset();
+    createPublishRecord.mockResolvedValueOnce({
+      id: "ks-record",
+      platform: "kuaishou",
+      scheduled_at: null,
+      status: "queued",
+    });
+    publishAccounts.listCloudPublishAccounts.mockResolvedValueOnce([
+      {
+        id: "ks-cloud",
+        platform: "kuaishou",
+        platform_user_id: "ks-user",
+        username: "庭院设计账号",
+        verified_at: 1,
+        status: "connected",
+        error_message: null,
+        source: "cloud",
+      },
+      {
+        id: "other-account",
+        platform: "douyin",
+        platform_user_id: "dy-user",
+        username: "抖音账号",
+        status: "connected",
+        source: "cloud",
+      },
+    ]);
+    const base = studio();
+    const value = studio({
+      review: false,
+      state: { ...base.state, selectedAssetId: "ks-video" },
+      data: {
+        ...base.data,
+        tasks: [],
+        assets: [
+          {
+            id: "ks-video",
+            materialId: "asset:ks-video",
+            name: "庭院成片",
+            kind: "video",
+            group: "成片",
+            source: "任务中心",
+            saved: true,
+          },
+          {
+            id: "ks-cover",
+            materialId: "asset:ks-cover",
+            name: "庭院封面",
+            kind: "image",
+            group: "发布封面",
+            source: "素材库",
+            saved: true,
+          },
+        ],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<PublishPage />);
+    const platform = screen.getByRole("button", { name: "快手" });
+    await waitFor(() => expect(platform).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "定时" }));
+    fireEvent.change(screen.getByLabelText("定时发布时间"), {
+      target: { value: "2026-12-01T12:00" },
+    });
+    const tagInput = screen.getByLabelText("添加标签");
+    for (const tag of ["庭院", "设计", "自建房", "排水"]) {
+      fireEvent.change(tagInput, { target: { value: tag } });
+      fireEvent.keyDown(tagInput, { key: "Enter" });
+    }
+    fireEvent.click(platform);
+    expect(platform).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("快手目前仅支持立即发布。")).toBeInTheDocument();
+    expect(screen.queryByLabelText("定时发布时间")).toBeNull();
+    expect(screen.queryByRole("button", { name: "定时" })).toBeNull();
+    const accountSelect = await screen.findByLabelText("选择发布账号");
+    expect(within(accountSelect).queryByText(/抖音账号/)).toBeNull();
+    fireEvent.change(accountSelect, { target: { value: "ks-cloud" } });
+    const submit = screen.getByRole("button", { name: "立即发布" });
+    expect(submit).toBeDisabled();
+    expect(screen.getByText(/请先移除多余标签/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "移除标签 排水" }));
+    expect(tagInput).toBeDisabled();
+    const title = screen.getByLabelText("发布标题");
+    fireEvent.change(title, { target: { value: "  " } });
+    expect(submit).toBeDisabled();
+    expect(screen.getByText("请填写快手发布标题。")).toBeInTheDocument();
+    fireEvent.change(title, { target: { value: " 庭院设计 " } });
+    fireEvent.click(screen.getByRole("button", { name: "选择封面 庭院封面" }));
+    saveStudioDraft.mockResolvedValueOnce({ revision: 2 });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await screen.findByText("已保存到云端，可在刷新后继续编辑。");
+    expect(saveStudioDraft.mock.lastCall?.[1]).toEqual({
+      drafts: [
+        expect.objectContaining({
+          platform: "快手",
+          account: "ks-cloud",
+          title: " 庭院设计 ",
+          scheduledAt: undefined,
+        }),
+      ],
+    });
+    expect(saveStudioDraft.mock.lastCall?.[1].drafts[0]).not.toHaveProperty(
+      "publish_confirmed",
+    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(createPublishRecord).not.toHaveBeenCalled();
+    fireEvent.click(submit);
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("庭院设计账号"),
+    );
+    expect(createPublishRecord).not.toHaveBeenCalled();
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(createPublishRecord).toHaveBeenCalledWith({
+        account_id: "ks-cloud",
+        video_material_id: "asset:ks-video",
+        cover_material_id: "asset:ks-cover",
+        title: "庭院设计",
+        description: "",
+        tags: ["庭院", "设计", "自建房"],
+        scheduled_at: null,
+        options: {},
+        publish_confirmed: true,
+      }),
+    );
+    expect(createPublishRecord).toHaveBeenCalledOnce();
+    expect(value.notify).toHaveBeenCalledWith("已提交发布 · 快手");
   });
 
   it("小红书自动发布暂缓：选择时弹出正在开发中且不切换平台", async () => {
