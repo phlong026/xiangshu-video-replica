@@ -3,10 +3,10 @@
 # 长操作全部在 setsid 子进程内，TAT 只负责写入与启动（<60s 超时约束）。
 set -Eeuo pipefail
 ROOT=/opt/video-replica-candidate
-SHA=0d7f20fa8313218443fd6af4769e17ce7aea9b01
-EXPECTED_TREE=5fc0949aa5a9022f39915478fddd7b0171570dee
-BASE=79c13ff5df48aa9cbdc0a72f903e007189963f5d
-EXPECTED_BASE_IMAGE='video-replica-rehearsal-app:79c13ff-git'
+SHA=21e837cbe2b3ca942194ee21e37f29fae934056a
+EXPECTED_TREE=cb48219c01270c34c37996b181437e1d88ca232c
+BASE=0d7f20fa8313218443fd6af4769e17ce7aea9b01
+EXPECTED_BASE_IMAGE='video-replica-rehearsal-app:0d7f20f-git'
 EVIDENCE="$ROOT/acceptance-desktop2610-$SHA"
 MIRROR="$ROOT/source-mirrors/$SHA.git"
 STATE="$EVIDENCE/run.state"
