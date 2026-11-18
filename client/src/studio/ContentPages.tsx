@@ -192,14 +192,17 @@ function viralPublishLabel(video: StudioVideo) {
 function ViralPoster({
   video,
   className,
+  fitContainer = false,
 }: {
   video: StudioVideo;
   className?: string;
+  fitContainer?: boolean;
 }) {
   return (
     <VideoPreview
       poster={video.poster}
       className={className}
+      fitContainer={fitContainer}
       fallback={<Icon name="video" />}
     />
   );
@@ -2141,12 +2144,6 @@ export function ViralDetailPage() {
     (video.publishedAt
       ? new Date(video.publishedAt * 1000).toLocaleDateString("zh-CN")
       : "—");
-  const metrics: Array<[string, string, string]> = [
-    ["heart", "点赞", viralLikesLabel(video)],
-    ["comment", "评论", viralMetricLabel(video.comments)],
-    ["share", "转发", viralMetricLabel(video.shares)],
-    ["star", "收藏", viralMetricLabel(video.collections)],
-  ];
   const goExtract = (task: ViralImportTask) => {
     if (!task.canTranscribe || !task.projectId || !task.sourceAssetId) {
       notify("该来源暂不支持提取文案");
@@ -2238,6 +2235,7 @@ export function ViralDetailPage() {
               <ViralPoster
                 video={video}
                 className="content-player-viral-poster"
+                fitContainer
               />
               {playback.status === "loading" ? (
                 <span className="viral-card-loading">素材准备中…</span>
@@ -2251,6 +2249,21 @@ export function ViralDetailPage() {
             </button>
           )}
           <span className="viral-card-duration">{video.duration}</span>
+          {/* 封面浮层（对齐后台采集卡片 2026-11-18）：标题/标签/互动统计压图，
+              右侧面板只留作者、发布信息与操作按钮。 */}
+          {playback.status !== "playing" && (
+            <div className="viral-detail-cover-overlay">
+              <h3>{video.title}</h3>
+              {video.tags && video.tags.length > 0 && (
+                <div className="viral-card-tags">
+                  {video.tags.slice(0, 6).map((tag) => (
+                    <span key={tag}>#{tag}</span>
+                  ))}
+                </div>
+              )}
+              <ViralStatsRow video={video} />
+            </div>
+          )}
         </div>
         <Panel className="content-detail-info">
           <div className="content-detail-author">
@@ -2271,21 +2284,7 @@ export function ViralDetailPage() {
               </span>
             </div>
           </div>
-          <h2>{video.title}</h2>
-          {video.tags && video.tags.length > 0 && (
-            <div className="viral-card-tags viral-detail-tags">
-              {video.tags.slice(0, 6).map((tag) => (
-                <span key={tag}>#{tag}</span>
-              ))}
-            </div>
-          )}
           <div className="viral-detail-metrics">
-            {metrics.map(([icon, label, value]) => (
-              <span key={label} title={label}>
-                <Icon name={icon} size={14} />
-                {value}
-              </span>
-            ))}
             <span className="viral-detail-published">发布 {published}</span>
             <span>时长 {video.duration}</span>
           </div>

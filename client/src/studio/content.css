@@ -1987,6 +1987,9 @@
   font-size: 12px;
   padding: 2px 10px;
   white-space: nowrap;
+  /* 浮层标签按内容自适应宽度（2026-11-18）：继承的 96px 上限会把
+     5–6 字话题截成省略号，与后台采集卡片的完整胶囊不一致。 */
+  max-width: none;
 }
 
 .viral-card-overlay-author {
@@ -2330,6 +2333,75 @@
   top: auto;
 }
 
+/* 详情封面铺满（2026-11-18，对齐后台采集卡片）：fitContainer 解除
+   VideoPreview 内联 180px 宽度钳制后，前景封面按 cover 裁切填充，
+   不再显示源封面自带的虚化边（卡片页同款观感）。播放中的视频与卡片
+   一致按 cover 裁切。 */
+.content-player-viral
+  .video-preview.video-preview
+  > .video-preview__foreground {
+  object-fit: cover;
+}
+
+/* 播放胶囊上移避开封面浮层文字（标题/标签/统计压在封面下部）。 */
+.content-player-viral .content-player-viral-play,
+.content-player-viral .viral-card-loading {
+  top: 34%;
+}
+
+/* 详情封面浮层：标题/标签/互动统计压图（用户拍板 2026-11-18）。 */
+.viral-detail-cover-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 46px 12px 10px;
+  background: linear-gradient(to top, #080909f2, #080909a6 62%, transparent);
+  pointer-events: none;
+}
+
+.viral-detail-cover-overlay h3 {
+  margin: 0;
+  font-size: var(--font-body);
+  line-height: 1.4;
+  color: #f2f2ee;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.viral-detail-cover-overlay .viral-card-tags {
+  pointer-events: none;
+}
+
+.viral-detail-cover-overlay .viral-card-tags span {
+  background: #080909e6;
+  border: 1px solid #4a4b45;
+  border-radius: 999px;
+  color: #e8e8e2;
+  font-size: 12px;
+  padding: 2px 10px;
+  white-space: nowrap;
+  max-width: none;
+}
+
+.viral-detail-cover-overlay .viral-card-stats {
+  border-top: 0;
+  padding-top: 0;
+  color: #fff;
+  font-size: var(--font-caption);
+  gap: 9px;
+}
+
+.viral-detail-cover-overlay .viral-card-stats svg {
+  color: #e6e7e2;
+}
+
 .content-detail-author {
   display: flex;
   align-items: center;
@@ -2368,10 +2440,6 @@
   display: block;
   color: #999b95;
   font-size: var(--font-caption);
-}
-
-.viral-detail-tags {
-  margin: 10px 0 4px;
 }
 
 .viral-detail-metrics {

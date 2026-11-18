@@ -1327,6 +1327,49 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.getByText("参考素材已导入")).toBeInTheDocument();
   });
 
+  it("详情封面浮层承载标题/标签/互动统计，封面盒解除内联宽度钳制", () => {
+    const value = studio({
+      state: {
+        ...studio().state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    const view = render(<ViralDetailPage />);
+
+    // 封面浮层（对齐后台采集卡片）：标题/标签/统计压图，右侧面板不再重复。
+    const overlay = view.container.querySelector(".viral-detail-cover-overlay");
+    expect(overlay).not.toBeNull();
+    if (!overlay) return;
+    expect(overlay.querySelector("h3")?.textContent).toBe(
+      "农村建房预算，别只盯着主体",
+    );
+    const overlayTags = [...overlay.querySelectorAll(".viral-card-tags span")];
+    expect(overlayTags.map((tag) => tag.textContent)).toEqual([
+      "#农村自建房",
+      "#建房预算",
+    ]);
+    expect(overlay.querySelectorAll(".viral-card-stats span")).toHaveLength(4);
+    expect(within(overlay as HTMLElement).queryByText("发布")).toBeNull();
+
+    // 面板只保留发布时间/时长，不再渲染标题与标签。
+    expect(view.container.querySelector(".viral-detail-tags")).toBeNull();
+    const metrics = view.container.querySelector(".viral-detail-metrics");
+    expect(metrics?.textContent).toContain("时长 01:28");
+    expect(metrics?.querySelector(".viral-card-stats")).toBeNull();
+
+    // 封面盒使用 fitContainer：无内联宽度钳制，前景按 cover 裁切填充。
+    const wrapper = view.container.querySelector(
+      ".content-player-viral-trigger > .video-preview",
+    );
+    expect(wrapper).toHaveClass("video-preview--fit");
+    const foreground = view.container.querySelector(
+      ".content-player-viral .video-preview__foreground",
+    );
+    expect(foreground).not.toBeNull();
+  });
+
   it("同一爆款重挂载后复用幂等键，避免重复创建项目和任务", async () => {
     const value = studio({
       state: {
