@@ -149,6 +149,10 @@ if (fault === "windows-fake-signature") {
 await writeFile(join(windows, "release-manifest.json"), JSON.stringify(win));
 const pins = {};
 for (const [ci, config] of Object.entries(core.macPlatforms)) {
+  // 子集路径：arm64-only 正例与 mac-empty 负例控制 x64/arm64 目录是否创建，
+  // 对应 pin 随之缺省，验证 1-2 个 Mac 平台子集行为。
+  if (ci === "macos-arm64" && fault === "mac-empty") continue;
+  if (ci === "macos-x86_64" && (fault === "arm64-only" || fault === "mac-empty")) continue;
   const folder = join(mac, "desktop-" + ci);
   await mkdir(folder);
   const dmg = "VideoReplica_" + version + "_" + ci + ".dmg",
@@ -309,6 +313,45 @@ def test_three_platform_finalize_checks_all_assets(tmp_path: Path, algorithm: st
         assert hashlib.sha256((stage / name).read_bytes()).hexdigest() == digest
 
 
+def test_finalize_accepts_arm64_only_subset(tmp_path: Path) -> None:
+    """x64 macOS 编译层问题未解时只发 arm64：清单仅含实际提供的平台。"""
+    result = run_node(FIXTURE, str(tmp_path), "arm64-only", "ED")
+    assert result.returncode == 0, result.stderr
+    stage = tmp_path / "stage"
+    manifest = json.loads((stage / "release-manifest.json").read_text(encoding="utf-8"))
+    stable = json.loads((stage / "stable.json").read_text(encoding="utf-8"))
+    assert manifest["schemaVersion"] == 2
+    assert set(stable["platforms"]) == {"windows-x86_64", "darwin-aarch64"}
+    assert set(manifest["platforms"]) == {"windows-x86_64", "darwin-aarch64"}
+    # Windows: exe(update) + exe.sig(signature)；arm64: dmg+tar.gz+sig 各一。
+    assert len(manifest["assets"]) == 5
+    assert not any(asset["platform"] == "darwin-x86_64" for asset in manifest["assets"])
+    assert not any("macos-x86_64" in asset["path"] for asset in manifest["assets"])
+    arm64 = manifest["platforms"]["darwin-aarch64"]
+    assert arm64["artifact"].endswith(".dmg")
+    assert arm64["updateArtifact"].endswith(".app.tar.gz")
+    assert stable["platforms"]["darwin-aarch64"]["url"].endswith(".app.tar.gz")
+    assert (stage / arm64["artifact"]).is_file()
+    assert (stage / arm64["updateArtifact"]).is_file()
+    assert (stage / arm64["signatureArtifact"]).is_file()
+    sums = dict(
+        (name, digest)
+        for digest, name in (
+            line.split("  ", 1)
+            for line in (stage / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines()
+        )
+    )
+    # 5 资产 + stable.json + release-manifest.json。
+    assert len(sums) == 7
+    assert set(sums) == {asset["path"] for asset in manifest["assets"]} | {
+        "stable.json",
+        "release-manifest.json",
+    }
+    assert set(path.name for path in stage.iterdir()) == set(sums) | {"SHA256SUMS.txt"}
+    for name, digest in sums.items():
+        assert hashlib.sha256((stage / name).read_bytes()).hexdigest() == digest
+
+
 @pytest.mark.parametrize(
     ("fault", "error"),
     [
@@ -328,6 +371,7 @@ def test_three_platform_finalize_checks_all_assets(tmp_path: Path, algorithm: st
         ("mac-missing", "未知或缺失制品"),
         ("mac-extra-script", "未知或缺失制品"),
         ("mac-pin", "可信 SHA256 pin"),
+        ("mac-empty", "1-2 个隔离的 Mac CI 制品目录"),
         ("stage-payload", "暂存制品被修改"),
         ("stage-win-payload", "暂存制品被修改"),
         ("stage-extra-script", "未知或缺失制品"),

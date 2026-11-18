@@ -369,13 +369,20 @@ export async function prepareRelease(options, publicKey) {
   verifyMinisign(await regular(join(windowsReleaseDir, exe)), winSignature, publicKey);
 
   const macFolders = Object.keys(macPlatforms).map((platform) => `desktop-${platform}`);
+  // 2026-11-18：x64 macOS 编译层丢配置问题未解，2.6.8 允许提供 1-2 个 Mac 平台
+  // 的任意非空子集；实际提供的每个平台仍逐一走全部 pin/出处/哈希校验，绝不削弱。
+  const macInput = await directory(macArtifactsDir);
   assert(
-    (await directory(macArtifactsDir)).length === 2 &&
-      (await directory(macArtifactsDir)).every((name) => macFolders.includes(name)),
-    "必须提供隔离的两个 Mac CI 制品目录",
+    macInput.length >= 1 &&
+      macInput.length <= macFolders.length &&
+      macInput.every((name) => macFolders.includes(name)),
+    "必须提供 1-2 个隔离的 Mac CI 制品目录（desktop-macos-arm64 与/或 desktop-macos-x86_64）",
   );
+  const providedMac = new Set(macInput);
   const records = [];
   for (const [ciPlatform, config] of Object.entries(macPlatforms)) {
+    // 缺席的平台不进清单，其 pin 也不参与校验（必填 arm64 pin 在 x64-only 时被忽略）。
+    if (!providedMac.has(`desktop-${ciPlatform}`)) continue;
     const folder = join(macArtifactsDir, `desktop-${ciPlatform}`);
     const manifestBytes = await regular(join(folder, "manifest.json"));
     const pin =
