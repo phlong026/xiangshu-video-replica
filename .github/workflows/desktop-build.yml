@@ -130,10 +130,13 @@ jobs:
           # 合并的数组字段，而主配置文件的字段全部正常进入二进制（CSP/devUrl 实证）。
           node scripts/release/finalize-customer-release.mjs bake-base-config \
             --overlay "$RUNNER_TEMP/customer-macos-release.json"
+          # 从同一发行配置生成 Rust 初始化所用的 updater 数据。
+          updater_config=$(node -p 'JSON.stringify(require(process.argv[1]).plugins.updater)' "$RUNNER_TEMP/customer-macos-release.json")
           {
             echo "TAURI_CONFIG<<TAURI_CONFIG_EOF"
             cat "$RUNNER_TEMP/customer-macos-release.json"
             echo "TAURI_CONFIG_EOF"
+            printf 'VIDEO_REPLICA_MACOS_UPDATER_CONFIG=%s\n' "$updater_config"
           } >> "$GITHUB_ENV"
           cat client/src-tauri/tauri.conf.json
       - name: Build desktop installer

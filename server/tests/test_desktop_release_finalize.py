@@ -545,6 +545,14 @@ def test_workflow_and_signing_driver_keep_private_material_local() -> None:
     assert cp_line in workflow
     assert "bake-base-config" in workflow
     assert "TAURI_CONFIG<<TAURI_CONFIG_EOF" in workflow
+    runtime = (REPO / "client/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+    assert "VIDEO_REPLICA_MACOS_UPDATER_CONFIG=%s" in workflow
+    assert "JSON.stringify(require(process.argv[1]).plugins.updater)" in workflow
+    assert 'option_env!("VIDEO_REPLICA_MACOS_UPDATER_CONFIG")' in runtime
+    assert runtime.index("context.config_mut().plugins.0.insert") < runtime.index(
+        ".plugin(tauri_plugin_updater::Builder::new().build())"
+    )
+    assert ".build(context)" in runtime
     assert 'config_args=(--config "$RUNNER_TEMP/customer-macos-release.json")' not in workflow
     assert "verify-macos-app" in workflow
     assert "TAURI_SIGNING_" not in workflow
