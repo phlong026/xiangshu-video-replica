@@ -126,12 +126,16 @@ jobs:
         run: |
           node scripts/release/finalize-customer-release.mjs macos-overlay --output "$RUNNER_TEMP/customer-macos-release.json"
           cp "$RUNNER_TEMP/customer-macos-release.json" client/src-tauri/tauri.macos.conf.json
+          # 终极通道：updater 段直接写入主配置文件。x86_64 目标实测会丢失平台
+          # 合并的数组字段，而主配置文件的字段全部正常进入二进制（CSP/devUrl 实证）。
+          node scripts/release/finalize-customer-release.mjs bake-base-config \
+            --overlay "$RUNNER_TEMP/customer-macos-release.json"
           {
             echo "TAURI_CONFIG<<TAURI_CONFIG_EOF"
             cat "$RUNNER_TEMP/customer-macos-release.json"
             echo "TAURI_CONFIG_EOF"
           } >> "$GITHUB_ENV"
-          cat client/src-tauri/tauri.macos.conf.json
+          cat client/src-tauri/tauri.conf.json
       - name: Build desktop installer
         run: |
           sign_args=()
