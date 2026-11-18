@@ -28,11 +28,13 @@ on:
 permissions:
   contents: read
 
-# 运维备忘（2026-11-18 2.6.10 发布实测）：hosted macOS runner 偶发在任何 step
-# 开始前把单个 build job 标记为 cancelled（无 steps 记录、远早于 timeout），属
-# 基础设施抖动。细粒度 PAT 无 actions:write 时 rerun/dispatch 均返回 403，已
-# 验证的恢复路径＝往 main 重推一个触碰本文件的小提交（如下方注释块），即可
-# 重新触发三平台构建；同 SHA 的其余平台制品保留不动。
+# 运维备忘（2026-11-18/19 2.6.10 发布实测）：hosted macOS runner 会成批把
+# build job 在任何 step 开始前标记为 cancelled（无 steps 记录、约 13-15 分钟
+# 后集中取消、远早于 timeout），属基础设施抖动；同轮 Windows/Linux 不受影响。
+# 细粒度 PAT 无 actions:write 时 rerun/dispatch 均返回 403。已验证的两条恢复
+# 路径：①往 main 重推一个触碰本文件的小提交（如下方注释块）重新触发三平台
+# 构建；②把执行脚本推 wip/ 分支后经服务器 deploy key 拉取执行（见
+# wip/desktop2610-release-run）。同一 SHA 的其余平台制品保留不动。
 
 concurrency:
   group: desktop-installers-${{ github.ref }}
