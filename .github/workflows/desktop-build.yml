@@ -28,6 +28,12 @@ on:
 permissions:
   contents: read
 
+# 运维备忘（2026-11-18 2.6.10 发布实测）：hosted macOS runner 偶发在任何 step
+# 开始前把单个 build job 标记为 cancelled（无 steps 记录、远早于 timeout），属
+# 基础设施抖动。细粒度 PAT 无 actions:write 时 rerun/dispatch 均返回 403，已
+# 验证的恢复路径＝往 main 重推一个触碰本文件的小提交（如下方注释块），即可
+# 重新触发三平台构建；同 SHA 的其余平台制品保留不动。
+
 concurrency:
   group: desktop-installers-${{ github.ref }}
   cancel-in-progress: true
