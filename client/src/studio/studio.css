@@ -765,15 +765,25 @@ html:has(.studio-shell) {
   text-align: left;
   color: #ecece8;
 }
+/* 覆盖全局主按钮的悬停底色和按下缩放，保持缩略图与文字位置稳定。 */
+.studio-viral-mini-open:not(:disabled):is(:hover, :active) {
+  background: transparent;
+  transform: none;
+}
+.studio-viral-mini:hover,
+.studio-viral-mini:focus-within {
+  border-color: #75602d;
+}
 .studio-work-open > .video-preview {
   aspect-ratio: 16 / 9;
 }
-.studio-viral-mini-open > .video-preview {
-  width: 72px;
-  align-self: center;
+.studio-viral-mini-open
+  > .video-preview.video-preview--fit
+  > img.video-preview__foreground {
+  object-fit: cover;
 }
 .studio-work-open strong,
-.studio-viral-mini-open strong,
+.studio-viral-mini-title,
 .studio-viral-mini-tags {
   min-width: 0;
   max-width: 100%;
@@ -782,6 +792,13 @@ html:has(.studio-shell) {
   text-overflow: ellipsis;
   font-size: var(--font-caption);
   font-weight: 500;
+}
+.studio-viral-mini-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .studio-viral-mini-tags {
   color: #a9aca4;

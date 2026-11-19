@@ -46,6 +46,7 @@ from app.simple_character import (
     SIMPLE_UPLOAD_ALLOWED_TYPES,
     SIMPLE_UPLOAD_MAX_BYTES,
     PreparedSimpleCharacterPublication,
+    archive_simple_character_identity,
     cleanup_deleted_character_objects,
     create_simple_character,
     delete_simple_character_identity,
@@ -783,6 +784,17 @@ def read_latest_character_sheet_task(
 ) -> CharacterSheetTaskResponse | None:
     row = latest_base_character_sheet_task(conn, owner_id=actor.id)
     return None if row is None else character_sheet_task_response(row)
+
+
+@router.post("/identities/{identity_id}/archive", status_code=status.HTTP_204_NO_CONTENT)
+def archive_identity(
+    identity_id: str,
+    db: BusinessDbDep,
+) -> Response:
+    """把本人人物归档，从人物库隐藏但保留账务/素材/历史供对账。"""
+    with db.write() as (conn, actor):
+        archive_simple_character_identity(conn, actor=actor, identity_id=identity_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete("/identities/{identity_id}", status_code=status.HTTP_204_NO_CONTENT)

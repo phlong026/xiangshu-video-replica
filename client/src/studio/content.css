@@ -2123,8 +2123,15 @@
 .viral-card-body > .content-card-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
   margin-top: auto;
   order: 1;
+}
+/* 卡片操作按钮不再抢占封面：收紧内边距与行高，与缩略卡片比例一致。 */
+.viral-card-body > .content-card-actions .studio-button {
+  min-height: 30px;
+  padding: 4px 6px;
+  font-size: var(--font-caption);
 }
 
 .viral-card > .viral-card-favorite {

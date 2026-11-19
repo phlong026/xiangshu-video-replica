@@ -1327,7 +1327,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.getByText("参考素材已导入")).toBeInTheDocument();
   });
 
-  it("详情封面浮层承载标题/标签/互动统计，封面盒解除内联宽度钳制", () => {
+  it("详情封面浮层承载标题/互动统计，标签不显示在封面上", () => {
     const value = studio({
       state: {
         ...studio().state,
@@ -1338,18 +1338,14 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     const view = render(<ViralDetailPage />);
 
-    // 封面浮层（对齐后台采集卡片）：标题/标签/统计压图，右侧面板不再重复。
+    // 封面浮层：标题与统计压图；标签已从卡片移除，不再出现在浮层里。
     const overlay = view.container.querySelector(".viral-detail-cover-overlay");
     expect(overlay).not.toBeNull();
     if (!overlay) return;
     expect(overlay.querySelector("h2")?.textContent).toBe(
       "农村建房预算，别只盯着主体",
     );
-    const overlayTags = [...overlay.querySelectorAll(".viral-card-tags span")];
-    expect(overlayTags.map((tag) => tag.textContent)).toEqual([
-      "#农村自建房",
-      "#建房预算",
-    ]);
+    expect(overlay.querySelectorAll(".viral-card-tags span")).toHaveLength(0);
     expect(overlay.querySelectorAll(".viral-card-stats span")).toHaveLength(4);
     expect(within(overlay as HTMLElement).queryByText("发布")).toBeNull();
 
@@ -2686,7 +2682,8 @@ describe("V1.4 内容与运营页面", () => {
       if (platformIndex === 1)
         fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
       expect(screen.queryByText(/统计来源：/)).not.toBeInTheDocument();
-      expect(screen.getByText(`#${tag}`)).toBeInTheDocument();
+      // 标签已从卡片浮层移除，统计仍逐字段保留。
+      expect(screen.queryByText(`#${tag}`)).not.toBeInTheDocument();
       expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
       expect(screen.getByTitle("评论")).toHaveTextContent(/^—$/);
       expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
@@ -2709,7 +2706,8 @@ describe("V1.4 内容与运营页面", () => {
       ).not.toBeInTheDocument();
       expect(screen.queryByText(/视频摘要/)).not.toBeInTheDocument();
       expect(screen.queryByText(video.description)).not.toBeInTheDocument();
-      expect(screen.getByText(`#${tag}`)).toBeInTheDocument();
+      // 详情封面同样不再渲染标签浮层。
+      expect(screen.queryByText(`#${tag}`)).not.toBeInTheDocument();
     },
   );
 

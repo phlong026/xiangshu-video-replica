@@ -13,6 +13,7 @@ import { PeoplePage, PersonPage } from "./PeoplePages";
 import type { StudioData } from "./types";
 
 const api = vi.hoisted(() => ({
+  archiveSimpleCharacterIdentity: vi.fn(),
   capturePromptSession: vi.fn<() => () => boolean>(() => () => true),
   customerVisibleErrorMessage: vi.fn(
     (_cause: unknown, fallback: string) => fallback,
@@ -660,16 +661,15 @@ describe("PeoplePages", () => {
     );
   });
 
-  it("人物有账务历史时删除失败，原样展示后端给出的中文原因", async () => {
-    // 三种 409（账务历史 / 进行中任务 / 已被项目选用）后端返回的 message
-    // 本身就是可直接展示的中文，前端不要再包一层含糊的兜底文案。
+  it("人物有账务历史时删除失败，原因留在对话框内而非被遮罩盖住的 toast", async () => {
+    // 删除失败原因必须在模态框内显示：全局 toast 会被原生 dialog 的遮罩盖住，
+    // 用户会误以为点击没有反应。后端中文原因原样透出。
     review = false;
-    api.deleteSimpleCharacterIdentity.mockRejectedValue(
-      new Error("人物已产生口播账务历史，为保留对账记录不可删除。"),
-    );
-    // 文件级 mock 恒返回 fallback；这里只为本次调用还原真实行为
-    // （真函数在 error.message 非空时原样返回），以验证组件确实把 cause 透传
-    // 出去，而不是写死一句兜底文案。
+    const failure = new Error(
+      "人物已产生口播账务历史，为保留对账记录不可删除。",
+    ) as Error & { code?: string };
+    failure.code = "IDENTITY_DELETE_HAS_BILLING_HISTORY";
+    api.deleteSimpleCharacterIdentity.mockRejectedValue(failure);
     api.customerVisibleErrorMessage.mockImplementationOnce(
       (cause: unknown, fallback: string) =>
         cause instanceof Error && cause.message.trim()
@@ -685,11 +685,49 @@ describe("PeoplePages", () => {
     fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
 
     await waitFor(() =>
-      expect(notify).toHaveBeenCalledWith(
+      expect(screen.getByTestId("person-delete-error")).toHaveTextContent(
         "人物已产生口播账务历史，为保留对账记录不可删除。",
       ),
     );
+    // 有账务历史时给出归档替代入口，并且失败不走全局提示。
+    expect(
+      screen.getByRole("button", { name: "改为归档人物" }),
+    ).toBeInTheDocument();
+    expect(notify).not.toHaveBeenCalled();
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("有账务历史时可改为归档，归档后刷新列表从人物库移除", async () => {
+    review = false;
+    const failure = new Error(
+      "人物已产生口播账务历史，为保留对账记录不可删除。",
+    ) as Error & { code?: string };
+    failure.code = "IDENTITY_DELETE_HAS_BILLING_HISTORY";
+    api.deleteSimpleCharacterIdentity.mockRejectedValue(failure);
+    api.customerVisibleErrorMessage.mockImplementationOnce(
+      (cause: unknown, fallback: string) =>
+        cause instanceof Error && cause.message.trim()
+          ? cause.message.trim()
+          : fallback,
+    );
+    api.archiveSimpleCharacterIdentity.mockResolvedValue(undefined);
+    render(<PeoplePage />);
+
+    const card = screen.getByText("测试人物").closest("article");
+    fireEvent.click(
+      within(card as HTMLElement).getByRole("button", { name: "删除" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    const archiveButton = await screen.findByRole("button", {
+      name: "改为归档人物",
+    });
+    fireEvent.click(archiveButton);
+
+    await waitFor(() =>
+      expect(api.archiveSimpleCharacterIdentity).toHaveBeenCalledWith("p1"),
+    );
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("已归档"));
   });
 
   it("审核模式删除人物不调用后端", async () => {
