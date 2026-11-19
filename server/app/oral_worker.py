@@ -350,7 +350,7 @@ def claim_oral_work(
             task_expires = expires
             if (
                 kind == "task_archive"
-                and _archive_normalize_timeout(row["duration_sec"]) > FFMPEG_TIMEOUT_SECONDS
+                and _archive_normalize_timeout(row.get("duration_sec")) > FFMPEG_TIMEOUT_SECONDS
             ):
                 archive_lease_seconds = max(lease_seconds, _ORAL_LONG_ARCHIVE_LEASE_SECONDS)
                 task_expires = _iso(now + timedelta(seconds=archive_lease_seconds))
@@ -622,7 +622,7 @@ def _perform_oral_work(
                 # Archive validation must not invent a duration limit after
                 # the task has already been accepted and reserved.
                 max_duration_seconds=float("inf"),
-                timeout_seconds=_archive_normalize_timeout(row["duration_sec"]),
+                timeout_seconds=_archive_normalize_timeout(row.get("duration_sec")),
             )
             stored = storage.put_object(
                 f"generation-results/oral/{lease.record_id}/attempt-{lease.attempt_count}-"
