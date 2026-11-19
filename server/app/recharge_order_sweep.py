@@ -67,6 +67,11 @@ logger = logging.getLogger(__name__)
 WeChatQuery = Callable[[str], WeChatOrderQueryResult]
 ZpayQuery = Callable[[str], ZPayOrderQueryResult]
 
+# 生产查单在短时间内完成 7 笔后触发限流。给关单后的补账段各留一次查询，
+# 让待支付积压与早期关单都能继续轮转，同时控制一轮的总外呼量。
+_ZPAY_QUERY_BUDGET = 5
+_ZPAY_CLOSED_PAGE_SIZE = 1
+
 
 @dataclass(frozen=True)
 class RechargeSweepOutcome:
@@ -150,14 +155,16 @@ def sweep_pending_recharge_orders(
     else:
         native = noop
     if zpay_query_order is not None:
+        closed_segments = 2 if long_tail else 1
+        pending_limit = min(limit, _ZPAY_QUERY_BUDGET - closed_segments * _ZPAY_CLOSED_PAGE_SIZE)
         zpay_total = count_stale_pending_zpay_orders(conn, grace_seconds=reconcile_grace_seconds)
-        zpay_pages = max(1, math.ceil(zpay_total / limit))
-        zpay_offset = (max(0, rotation_index) % zpay_pages) * limit
+        zpay_pages = max(1, math.ceil(zpay_total / pending_limit))
+        zpay_offset = (max(0, rotation_index) % zpay_pages) * pending_limit
         zpay = reconcile_stale_pending_zpay_orders(
             conn,
             query_order=zpay_query_order,
             grace_seconds=reconcile_grace_seconds,
-            limit=limit,
+            limit=pending_limit,
             allowed_channels=zpay_allowed_channels,
             offset=zpay_offset,
         )
@@ -193,17 +200,17 @@ def sweep_pending_recharge_orders(
         )
     else:
         closed_native = noop_outcome
-    if zpay_query_order is not None:
+    if zpay_query_order is not None and not zpay.rate_limited:
         closed_zpay_total = count_recently_closed_zpay_orders(
             conn, window_seconds=closed_zpay_window_seconds
         )
-        closed_zpay_pages = max(1, math.ceil(closed_zpay_total / limit))
-        closed_zpay_offset = (max(0, rotation_index) % closed_zpay_pages) * limit
+        closed_zpay_pages = max(1, math.ceil(closed_zpay_total / _ZPAY_CLOSED_PAGE_SIZE))
+        closed_zpay_offset = (max(0, rotation_index) % closed_zpay_pages) * _ZPAY_CLOSED_PAGE_SIZE
         closed_zpay = reconcile_recently_closed_zpay_orders(
             conn,
             query_order=zpay_query_order,
             window_seconds=closed_zpay_window_seconds,
-            limit=limit,
+            limit=_ZPAY_CLOSED_PAGE_SIZE,
             allowed_channels=zpay_allowed_channels,
             offset=closed_zpay_offset,
         )
@@ -224,14 +231,19 @@ def sweep_pending_recharge_orders(
         )
     else:
         tail_native = noop_outcome
-    if long_tail and zpay_query_order is not None:
+    if (
+        long_tail
+        and zpay_query_order is not None
+        and not zpay.rate_limited
+        and not closed_zpay.rate_limited
+    ):
         tail_zpay_total = count_closed_zpay_long_tail(conn)
-        tail_zpay_pages = max(1, math.ceil(tail_zpay_total / limit))
-        tail_zpay_offset = (max(0, rotation_index) % tail_zpay_pages) * limit
+        tail_zpay_pages = max(1, math.ceil(tail_zpay_total / _ZPAY_CLOSED_PAGE_SIZE))
+        tail_zpay_offset = (max(0, rotation_index) % tail_zpay_pages) * _ZPAY_CLOSED_PAGE_SIZE
         tail_zpay = reconcile_closed_zpay_long_tail(
             conn,
             query_order=zpay_query_order,
-            limit=limit,
+            limit=_ZPAY_CLOSED_PAGE_SIZE,
             allowed_channels=zpay_allowed_channels,
             offset=tail_zpay_offset,
         )

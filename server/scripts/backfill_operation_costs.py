@@ -51,10 +51,12 @@ def _candidates(conn: BusinessConnection, *, service: str, limit: int) -> dict[s
     row = conn.execute(
         """
         SELECT
-          count(*) FILTER (WHERE o.state <> 'PENDING' AND a.cost_fen IS NULL
-                             AND e.attempt_id IS NULL AND a.usage IS NOT NULL) AS backfillable,
-          count(*) FILTER (WHERE o.state <> 'PENDING' AND a.cost_fen IS NULL
-                             AND e.attempt_id IS NULL AND a.usage IS NULL) AS unmetered,
+          count(*) FILTER (WHERE o.state <> 'PENDING' AND a.state = 'UNKNOWN'
+                             AND a.cost_fen IS NULL AND e.attempt_id IS NULL
+                             AND a.usage IS NOT NULL) AS backfillable,
+          count(*) FILTER (WHERE o.state <> 'PENDING' AND a.state = 'UNKNOWN'
+                             AND a.cost_fen IS NULL AND e.attempt_id IS NULL
+                             AND a.usage IS NULL) AS unmetered,
           count(*) FILTER (WHERE o.state = 'PENDING') AS pending,
           count(*) FILTER (WHERE o.state <> 'PENDING') AS total_finished
         FROM billing_attempts a

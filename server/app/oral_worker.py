@@ -37,6 +37,7 @@ from app.hifly import (
 from app.internal_billing import finalize_oral_billing, release_oral_queue_slot
 from app.media import storage_key_from_uri
 from app.media_tools import (
+    FFMPEG_TIMEOUT_SECONDS,
     MediaToolFailed,
     MediaToolUnavailable,
     MediaValidationFailed,
@@ -49,6 +50,11 @@ from app.storage import StorageAdapter, StoredObject
 
 logger = logging.getLogger(__name__)
 ORAL_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024
+# 长成片的全解码校验会撞上短视频的 600 秒预算。租约还要覆盖下载、探测和上传，
+# 否则其它 worker 会在媒体处理中途把本次归档隔离。缺时长时先按长成片留足时间。
+_ORAL_LONG_ARCHIVE_AFTER_SECONDS = 120
+_ORAL_LONG_ARCHIVE_NORMALIZE_SECONDS = 30 * 60
+_ORAL_LONG_ARCHIVE_LEASE_SECONDS = 60 * 60
 
 # 与 generation 侧的 GENERATION_MAX_POLL_AGE_SECONDS 同款看播：供应商任务停在
 # 非终态超过该窗口即转入 SUBMISSION_UNCERTAIN 并释放队列槽。口播 RUNNING 占住
@@ -264,6 +270,12 @@ def _pg_oral_submit_candidate(
     return None if task is None else dict(task)
 
 
+def _archive_normalize_timeout(duration_sec: Any) -> int:
+    if duration_sec is None or float(duration_sec) > _ORAL_LONG_ARCHIVE_AFTER_SECONDS:
+        return _ORAL_LONG_ARCHIVE_NORMALIZE_SECONDS
+    return FFMPEG_TIMEOUT_SECONDS
+
+
 def claim_oral_work(
     conn: BusinessConnection,
     *,
@@ -335,6 +347,13 @@ def claim_oral_work(
                 if status == "QUEUED"
                 else "status = status"
             )
+            task_expires = expires
+            if (
+                kind == "task_archive"
+                and _archive_normalize_timeout(row.get("duration_sec")) > FFMPEG_TIMEOUT_SECONDS
+            ):
+                archive_lease_seconds = max(lease_seconds, _ORAL_LONG_ARCHIVE_LEASE_SECONDS)
+                task_expires = _iso(now + timedelta(seconds=archive_lease_seconds))
             lease_token = uuid4().hex
             attempt_count = _claim_row(
                 conn,
@@ -344,7 +363,7 @@ def claim_oral_work(
                 current_state_sql="status = %s",
                 current_state_params=(status,),
                 assignments=assignments,
-                lease_expires_at=expires,
+                lease_expires_at=task_expires,
             )
             if attempt_count is not None:
                 if status == "QUEUED" and conn.is_postgres:
@@ -603,6 +622,7 @@ def _perform_oral_work(
                 # Archive validation must not invent a duration limit after
                 # the task has already been accepted and reserved.
                 max_duration_seconds=float("inf"),
+                timeout_seconds=_archive_normalize_timeout(row.get("duration_sec")),
             )
             stored = storage.put_object(
                 f"generation-results/oral/{lease.record_id}/attempt-{lease.attempt_count}-"

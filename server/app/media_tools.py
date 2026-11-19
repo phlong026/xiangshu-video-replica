@@ -139,6 +139,7 @@ def normalize_generated_video(
     max_duration_seconds: float | None = GENERATED_VIDEO_MAX_SECONDS,
     allow_mov: bool = False,
     target_duration_seconds: int | None = None,
+    timeout_seconds: float = FFMPEG_TIMEOUT_SECONDS,
 ) -> NormalizedGeneratedVideo:
     """Fit existing MP4 display pixels into a square-pixel canvas without cropping.
 
@@ -153,7 +154,12 @@ def normalize_generated_video(
         for value in (target_width, target_height)
     ):
         raise MediaValidationFailed("目标视频尺寸必须为有效的偶数尺寸")
-    if max_bytes <= 0 or (max_duration_seconds is not None and max_duration_seconds <= 0):
+    if (
+        max_bytes <= 0
+        or (max_duration_seconds is not None and max_duration_seconds <= 0)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
         raise MediaValidationFailed("视频规范化资源限制无效")
     if target_duration_seconds is not None and (
         isinstance(target_duration_seconds, bool)
@@ -176,7 +182,7 @@ def normalize_generated_video(
         raise MediaValidationFailed("成片不是可识别的 MP4 容器")
     ffprobe = resolve_media_binary("ffprobe")
     ffmpeg = resolve_media_binary("ffmpeg")
-    deadline = time.monotonic() + FFMPEG_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout_seconds
     try:
         with tempfile.TemporaryDirectory(prefix="video-replica-normalize-") as directory:
             source_path = Path(directory) / "source.mp4"

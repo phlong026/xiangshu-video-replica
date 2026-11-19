@@ -7,6 +7,7 @@ from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
+from app.payment_provider import OrderQueryError
 from app.recharge_packages import grant_discount_from_snapshot, parse_package_snapshot
 from app.wechat_native_client import (
     NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS,
@@ -14,7 +15,7 @@ from app.wechat_native_client import (
     NATIVE_RECONCILIATION_GRACE_SECONDS,
     WeChatOrderQueryResult,
 )
-from app.zpay import ALLOWED_ZPAY_CHANNELS, ZPayOrderQueryResult
+from app.zpay import ALLOWED_ZPAY_CHANNELS, ZPayOrderQueryError, ZPayOrderQueryResult
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +310,7 @@ class NativeReconciliationOutcome:
     unpaid: int
     skipped: int
     unpaid_order_nos: tuple[str, ...] = ()
+    rate_limited: bool = False
 
 
 def settle_wechat_order_from_verified_query(
@@ -523,16 +525,21 @@ def reconcile_stale_pending_zpay_orders(
     )
     queried = settled = unpaid = skipped = 0
     unpaid_order_nos: list[str] = []
+    rate_limited = False
     for order_no in order_nos:
         try:
             answer = query_order(order_no)
         except Exception as exc:  # noqa: BLE001 - one dead order must not strand the rest
-            logger.warning(
-                "zpay reconciliation query for order %s failed (%s); it stays PENDING",
-                order_no,
-                exc,
-            )
             skipped += 1
+            if isinstance(exc, (OrderQueryError, ZPayOrderQueryError)) and exc.status_code == 429:
+                logger.warning("Recharge query rate limited; deferring remaining channel queries.")
+                rate_limited = True
+                break
+            logger.warning(
+                "Recharge reconciliation query for order %s failed (%s); it stays PENDING",
+                order_no,
+                type(exc).__name__,
+            )
             continue
         queried += 1
         if answer.merchant_order_no != order_no:
@@ -580,6 +587,7 @@ def reconcile_stale_pending_zpay_orders(
         unpaid=unpaid,
         skipped=skipped,
         unpaid_order_nos=tuple(unpaid_order_nos),
+        rate_limited=rate_limited,
     )
 
 
@@ -902,16 +910,21 @@ def _reconcile_closed_zpay_order_nos(
 ) -> NativeReconciliationOutcome:
     queried = settled = unpaid = skipped = 0
     unpaid_order_nos: list[str] = []
+    rate_limited = False
     for order_no in order_nos:
         try:
             answer = query_order(order_no)
         except Exception as exc:  # noqa: BLE001 — 一笔坏单不能拖垮整轮
-            logger.warning(
-                "zpay closed-order query for %s failed (%s); it stays CLOSED",
-                order_no,
-                exc,
-            )
             skipped += 1
+            if isinstance(exc, (OrderQueryError, ZPayOrderQueryError)) and exc.status_code == 429:
+                logger.warning("Recharge query rate limited; deferring remaining channel queries.")
+                rate_limited = True
+                break
+            logger.warning(
+                "Recharge reconciliation query for order %s failed (%s); it stays CLOSED",
+                order_no,
+                type(exc).__name__,
+            )
             continue
         queried += 1
         if answer.merchant_order_no != order_no:
@@ -959,6 +972,7 @@ def _reconcile_closed_zpay_order_nos(
         unpaid=unpaid,
         skipped=skipped,
         unpaid_order_nos=tuple(unpaid_order_nos),
+        rate_limited=rate_limited,
     )
 
 

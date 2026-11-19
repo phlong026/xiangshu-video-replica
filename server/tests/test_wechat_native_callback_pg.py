@@ -62,6 +62,7 @@ from pg_test_kit import (
 
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
+from app.payment_provider import OrderQueryError
 from app.payment_routes import get_wechat_provider, get_zpay_provider, router
 from app.recharge_order_sweep import sweep_pending_recharge_orders
 from app.wechat_native_client import WeChatNativeError, WeChatOrderQueryResult
@@ -1181,6 +1182,52 @@ def test_sweep_never_closes_an_order_it_did_not_confirm_unpaid(wechat_db: str) -
     assert _status(wechat_db, "q_unpaid") == "CLOSED"
     assert _status(wechat_db, "q_fail") == "PENDING"
     assert _status(wechat_db, "q_beyond") == "PENDING"
+
+
+@pytest.mark.parametrize("rate_limited", [False, True])
+def test_zpay_sweep_limits_requests_across_pending_and_closed(
+    wechat_db: str, rate_limited: bool
+) -> None:
+    for index in range(6):
+        order_no = f"sweep-limit-{index}"
+        _seed_order(
+            wechat_db,
+            order_id=order_no,
+            merchant_order_no=order_no,
+            wechat=False,
+            created_at=f"2026-01-01 0{index}:00:00+00",
+        )
+    _mark_closed(wechat_db, "sweep-limit-4")
+    _mark_closed(wechat_db, "sweep-limit-5")
+    queried: list[str] = []
+
+    def query(order_no: str) -> ZPayOrderQueryResult:
+        queried.append(order_no)
+        if rate_limited and len(queried) == 2:
+            raise OrderQueryError("rate limited", status_code=429)
+        return _zpay_unpaid_query(order_no)
+
+    with _autocommit(wechat_db) as raw:
+        outcome = sweep_pending_recharge_orders(
+            BusinessConnection.postgres(raw),
+            wechat_query_order=None,
+            zpay_query_order=query,
+            long_tail=True,
+            rotation_index=0,
+        )
+
+    assert _status(wechat_db, "sweep-limit-0") == "CLOSED"
+    assert _status(wechat_db, "sweep-limit-3") == "PENDING"
+    if rate_limited:
+        assert queried == ["sweep-limit-0", "sweep-limit-1"]
+        assert outcome.zpay.rate_limited
+        assert outcome.zpay.skipped == 1
+        assert outcome.closed == 1
+        assert _status(wechat_db, "sweep-limit-1") == "PENDING"
+    else:
+        assert len(queried) == 5
+        assert outcome.zpay.queried == 3
+        assert outcome.closed_zpay.queried == outcome.tail_zpay.queried == 1
 
 
 def test_zpay_reconciliation_settles_cross_channel_within_merchant_whitelist(

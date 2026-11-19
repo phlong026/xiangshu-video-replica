@@ -2361,6 +2361,10 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
             service="quality_inspection",
         )
         finish_operation(conn, operation_id=op2, units=1, succeeded=True)
+        # 业务已交付时，辅助质检仍可能在途，等待调用结束后才能核对成本。
+        begin_attempt(
+            conn, operation_id=op2, attempt_key="insp-in-flight", service="quality_inspection"
+        )
         # 在途请求：质检 attempt 挂在未完成的 operation 上，统计应单独计数。
         op3 = accept_operation(
             conn, user_id=uid, service="first_frame", source_id="bfill-3", units=1
@@ -2390,7 +2394,7 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
     assert "backfillable=1" in captured.out
     assert "unmetered=1" in captured.out
     assert "pending=1" in captured.out
-    assert "total_finished=3" in captured.out
+    assert "total_finished=4" in captured.out
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0
 

@@ -4435,16 +4435,33 @@ def test_oral_worker_rejects_invalid_provider_video_without_settlement(
     )
 
 
+@pytest.mark.parametrize(
+    ("provider_duration", "normalize_seconds", "lease_seconds"),
+    [(30, 600, 900), (384, 1800, 3600)],
+)
 def test_oral_archive_retry_reuses_result_without_resubmit_or_rereserve(
-    scene: str, fake_source_storage: FakeSourceStorage
+    scene: str,
+    fake_source_storage: FakeSourceStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_duration: int,
+    normalize_seconds: int,
+    lease_seconds: int,
 ) -> None:
+    from app import oral_worker
+
     avatar_id, voice_id = _seed_ready_assets()
     vendor, transport = make_vendor()
     transport.on("POST", "/api/v2/hifly/video/create_by_tts", envelope({"task_id": "oral-vt-2"}))
     transport.on(
         "GET",
         "/api/v2/hifly/video/task",
-        envelope({"status": 3, "video_url": "https://tmp.example/retry.mp4"}),
+        envelope(
+            {
+                "status": 3,
+                "video_url": "https://tmp.example/retry.mp4",
+                "duration": provider_duration,
+            }
+        ),
     )
     transport.on(
         "GET",
@@ -4467,6 +4484,20 @@ def test_oral_archive_retry_reuses_result_without_resubmit_or_rereserve(
     _exec("UPDATE oral_tasks SET next_attempt_at = NULL WHERE id = %s", (created.task_id,))
     _run_oral_worker_step(vendor=vendor, storage=fake_source_storage)
 
+    normalize = oral_worker.normalize_generated_video
+
+    def check_archive_budget(content: bytes, **kwargs: Any):
+        assert kwargs["timeout_seconds"] == normalize_seconds
+        row = _fetch(
+            "SELECT extract(epoch FROM (lease_expires_at::timestamptz - now())) AS remaining "
+            "FROM oral_tasks WHERE id = %s",
+            (created.task_id,),
+        )
+        assert row is not None
+        assert lease_seconds - 30 < float(row["remaining"]) <= lease_seconds
+        return normalize(content, **kwargs)
+
+    monkeypatch.setattr(oral_worker, "normalize_generated_video", check_archive_budget)
     original_put = fake_source_storage.put_object
     failures = 0
 
