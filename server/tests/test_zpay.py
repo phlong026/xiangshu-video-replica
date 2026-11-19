@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import re
+from urllib.error import HTTPError
 
 import pytest
 
 from app.payment_provider import MerchantConfig, OrderCloseUnsupported
 from app.zpay import (
+    ZPayDeploymentConfig,
+    ZPayMerchantConfig,
+    ZPayOrderQueryClient,
+    ZPayOrderQueryError,
     generate_merchant_order_no,
     parse_zpay_money_to_fen,
     sign_zpay_params,
@@ -78,3 +83,23 @@ def test_zpay_provider_close_order_is_explicitly_unsupported() -> None:
     merchant = MerchantConfig(provider="zpay", raw={}, allowed_channels=("alipay",))
     with pytest.raises(OrderCloseUnsupported):
         ZPayProvider().close_order(merchant=merchant, merchant_order_no="ZP-CLOSE-1")
+
+
+def test_zpay_query_distinguishes_rate_limit_from_gateway_error() -> None:
+    deployment = ZPayDeploymentConfig(
+        gateway_url="https://pay.example.test/submit",
+        query_url="https://pay.example.test/api",
+        notify_url="https://video.example.test/notify",
+        return_url="https://video.example.test/return",
+    )
+    merchant = ZPayMerchantConfig(pid="test-merchant", key="fixture", channel="alipay")
+
+    def rate_limited(*args, **kwargs):
+        raise HTTPError(deployment.query_url, 429, "Too Many Requests", None, None)
+
+    with pytest.raises(ZPayOrderQueryError) as error:
+        ZPayOrderQueryClient(opener=rate_limited).query_order(
+            merchant=merchant, deployment=deployment, merchant_order_no="TEST-ORDER"
+        )
+
+    assert error.value.status_code == 429

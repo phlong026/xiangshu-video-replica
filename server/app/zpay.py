@@ -246,7 +246,11 @@ class ZPayOrderQueryClient:
                     read_limit=MAX_ZPAY_QUERY_RESPONSE_BYTES + 1,
                 )
         except HTTPError as exc:
-            logger.warning("ZPay order query returned HTTP %s", exc.code)
+            logger.warning("Payment order query returned HTTP %s", exc.code)
+            if exc.code == 429:
+                raise ZPayOrderQueryError(
+                    "Payment order query rate limited", status_code=429
+                ) from exc
             raise ZPayOrderQueryError("ZPay order query failed") from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("ZPay order query failed: %s", type(exc).__name__)
