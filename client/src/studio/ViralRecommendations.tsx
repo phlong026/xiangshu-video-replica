@@ -202,7 +202,9 @@ function HomepageRecommendations() {
                   poster={video.poster}
                   fallback={<Icon name="video" size={28} />}
                 />
-                <strong title={video.title}>{video.title}</strong>
+                <strong className="studio-viral-mini-title" title={video.title}>
+                  {video.title}
+                </strong>
                 {video.tags?.length ? (
                   <span className="studio-viral-mini-tags">
                     {video.tags

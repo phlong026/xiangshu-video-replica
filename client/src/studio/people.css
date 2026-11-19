@@ -490,3 +490,27 @@
   font-size: var(--font-label);
   line-height: 1.9;
 }
+
+/* 删除失败原因必须留在对话框内：原生模态遮罩会盖住全局 toast。 */
+.person-delete-error {
+  margin: 12px 0;
+  padding: 9px 12px;
+  border: 1px solid #7a3b3b;
+  border-radius: 7px;
+  background: #2a1616;
+  color: #f0b4b4;
+  font-size: var(--font-label);
+  line-height: 1.6;
+}
+
+/* 有账务历史时给出归档替代入口，避免用户卡在无法删除的死胡同。 */
+.person-delete-archive {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  color: #c9cac4;
+  font-size: var(--font-label);
+  line-height: 1.6;
+}

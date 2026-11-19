@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  archiveSimpleCharacterIdentity,
   capturePromptSession,
   confirmOralVoice,
   createMaterialUploadIntent,
@@ -394,6 +395,11 @@ function PersonCard({
   const [deleting, setDeleting] = useState(false);
   const [deleteMode, setDeleteMode] = useState<"purge" | "keep">("purge");
   const [removeProjectRefs, setRemoveProjectRefs] = useState(false);
+  // 删除失败原因留在对话框内：全局 toast 会被原生模态框的遮罩盖住，用户
+  // 误以为点击没反应。有账务历史时另外提供「归档」替代入口。
+  const [deleteError, setDeleteError] = useState("");
+  const [archivable, setArchivable] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   // 删除是级联硬删：oral_avatars / oral_voices 对 person_identities 的外键是
   // ON DELETE CASCADE，口播成片与声音试听样例的 asset 行也在删除清单内，最后
   // 还会清理对象存储。逐条列出，别让用户以为只是「从列表移除」。
@@ -404,8 +410,10 @@ function PersonCard({
     "已生成的口播成片与声音试听样例",
   ];
   const deletePerson = async () => {
-    if (deleting) return;
+    if (deleting || archiving) return;
     setDeleting(true);
+    setDeleteError("");
+    setArchivable(false);
     try {
       // 审核示例没有真实身份可删，只做本地移除。
       if (!review) {
@@ -427,11 +435,37 @@ function PersonCard({
           : `人物「${person.name}」已删除。`,
       );
     } catch (cause) {
-      // 三种 409（账务历史 / 进行中任务 / 已被项目选用）后端返回的 message
-      // 本身就是可直接展示的中文原因，原样透出比再包一层兜底更有用。
-      notify(customerVisibleErrorMessage(cause, "删除人物失败，请稍后重试。"));
+      // 错误原因直接留在对话框里，不被模态遮罩吞掉。有账务历史的人物不能
+      // 硬删，改为提示可归档；其余 409 原样展示后端的中文原因。
+      const code = (cause as { code?: unknown })?.code;
+      setArchivable(
+        code === "IDENTITY_DELETE_HAS_BILLING_HISTORY" ||
+          code === "IDENTITY_DELETE_HAS_UNSETTLED_BILLING",
+      );
+      setDeleteError(
+        customerVisibleErrorMessage(cause, "删除人物失败，请稍后重试。"),
+      );
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const archivePerson = async () => {
+    if (archiving || deleting || review) return;
+    setArchiving(true);
+    setDeleteError("");
+    try {
+      await archiveSimpleCharacterIdentity(person.id);
+      refresh();
+      setConfirmingDelete(false);
+      setArchivable(false);
+      notify(`人物「${person.name}」已归档，可从人物库重新导入。`);
+    } catch (cause) {
+      setDeleteError(
+        customerVisibleErrorMessage(cause, "归档人物失败，请稍后重试。"),
+      );
+    } finally {
+      setArchiving(false);
     }
   };
   return (
@@ -581,6 +615,27 @@ function PersonCard({
             <p className="oral-dialog-intro">
               若该人物已产生口播账务或存在进行中的任务，后端会拒绝删除并说明原因。
             </p>
+            {deleteError ? (
+              <p
+                className="person-delete-error"
+                data-testid="person-delete-error"
+              >
+                {deleteError}
+              </p>
+            ) : null}
+            {archivable && !review ? (
+              <p className="person-delete-archive">
+                该人物有账务记录不能删除，可改为归档：保留素材与账务供对账，
+                人物从人物库与新创作中隐藏。
+                <Button
+                  variant="outline"
+                  disabled={archiving || deleting}
+                  onClick={() => void archivePerson()}
+                >
+                  {archiving ? "归档中…" : "改为归档人物"}
+                </Button>
+              </p>
+            ) : null}
             <div className="oral-dialog-actions">
               <Button
                 variant="quiet"
@@ -590,7 +645,7 @@ function PersonCard({
               </Button>
               <Button
                 variant="primary"
-                disabled={deleting}
+                disabled={deleting || archiving}
                 onClick={() => void deletePerson()}
               >
                 {deleting ? "删除中…" : "确认删除"}

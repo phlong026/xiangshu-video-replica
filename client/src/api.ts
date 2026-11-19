@@ -4392,9 +4392,34 @@ export async function deleteSimpleCharacterIdentity(
     { method: "DELETE" },
   );
   if (!response.ok) {
-    throw new Error(
-      await responseErrorMessage(response, "删除人物失败，请稍后重试。"),
+    // 保留后端机器可读的错误码：人物库据此判断能否提供「归档」替代入口。
+    const details = await responseErrorDetails(
+      response,
+      "删除人物失败，请稍后重试。",
     );
+    const error = new Error(details.message) as RequestError;
+    error.code = details.code;
+    throw error;
+  }
+}
+
+/** 归档本人人物：保留口播账务、素材与历史任务供对账，从人物库及新创作
+ * 选择器隐藏。有账务历史的人物不能硬删，归档是唯一的移除入口。 */
+export async function archiveSimpleCharacterIdentity(
+  identityId: string,
+): Promise<void> {
+  const response = await requestApi(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/archive`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const details = await responseErrorDetails(
+      response,
+      "归档人物失败，请稍后重试。",
+    );
+    const error = new Error(details.message) as RequestError;
+    error.code = details.code;
+    throw error;
   }
 }
 

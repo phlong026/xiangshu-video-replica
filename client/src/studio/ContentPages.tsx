@@ -401,15 +401,6 @@ function ViralCover({
                 {video.title}
               </button>
             </h3>
-            {video.tags?.length ? (
-              <div className="viral-card-tags">
-                {video.tags.slice(0, 6).map((tag) => (
-                  <span key={tag} title={`#${tag}`}>
-                    #{tag}
-                  </span>
-                ))}
-              </div>
-            ) : null}
           </div>
           <ViralStatsRow video={video} />
           <div className="viral-card-overlay-author">
@@ -421,9 +412,6 @@ function ViralCover({
             <span>{video.author}</span>
             {video.verified && <em title="认证作者">✓</em>}
             {publish && <time>{publish}</time>}
-            {video.category && (
-              <em className="viral-card-cat">{video.category}</em>
-            )}
           </div>
         </div>
       )}
@@ -860,9 +848,11 @@ export function ViralFavoriteButton({
   );
 }
 
-/** 缓存占用与清理入口（决策 #16 下载管理面板的轻量版）。非桌面端不渲染。 */
+/** 缓存占用与清理入口（决策 #16 下载管理面板的轻量版）。非桌面端不渲染。
+ * 占用信息会挤占爆款列表的视觉主线，默认折叠，只留一个安静的入口。 */
 function ViralCacheUsage({ revision }: { revision: number }) {
   const [items, setItems] = useState<ViralCachedItem[] | null>(null);
+  const [expanded, setExpanded] = useState(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision 是刻意的重载触发器——缓存完成数变化时重新读一次占用，effect 体内不需要用到它。
   useEffect(() => {
     if (!cacheAvailable()) return;
@@ -879,6 +869,15 @@ function ViralCacheUsage({ revision }: { revision: number }) {
     };
   }, [revision]);
   if (!cacheAvailable() || items === null) return null;
+  if (!expanded) {
+    return (
+      <div className="viral-cache-usage">
+        <Button variant="quiet" onClick={() => setExpanded(true)}>
+          缓存管理
+        </Button>
+      </div>
+    );
+  }
   const totalBytes = items.reduce((sum, item) => sum + item.bytes, 0);
   return (
     <div className="viral-cache-usage" role="status">
@@ -891,12 +890,15 @@ function ViralCacheUsage({ revision }: { revision: number }) {
       <Button
         variant="quiet"
         disabled={items.length === 0}
-        title="只删除本地缓存文件，需要时可以重新缓存"
+        title="只删除本地缓存文件，需要时才重新缓存"
         onClick={() => {
           void clearViralCache("all").then(() => setItems([]));
         }}
       >
         清空本地缓存
+      </Button>
+      <Button variant="quiet" onClick={() => setExpanded(false)}>
+        收起
       </Button>
     </div>
   );
@@ -2244,18 +2246,11 @@ export function ViralDetailPage() {
             </button>
           )}
           <span className="viral-card-duration">{video.duration}</span>
-          {/* 封面浮层（对齐后台采集卡片 2026-11-18）：标题/标签/互动统计压图，
+          {/* 封面浮层：标题与互动统计压图；标签已从卡片移除，不再显示。
               右侧面板只留作者、发布信息与操作按钮。 */}
           {playback.status !== "playing" && (
             <div className="viral-card-overlay viral-detail-cover-overlay">
               <h2>{video.title}</h2>
-              {video.tags && video.tags.length > 0 && (
-                <div className="viral-card-tags">
-                  {video.tags.slice(0, 6).map((tag) => (
-                    <span key={tag}>#{tag}</span>
-                  ))}
-                </div>
-              )}
               <ViralStatsRow video={video} />
             </div>
           )}

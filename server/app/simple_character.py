@@ -704,11 +704,14 @@ def list_simple_library(
     actor: CurrentUser,
 ) -> list[SimpleLibraryEntry]:
     """List the complete scoped library for internal compatibility callers."""
+    # 归档人物已从人物库移除（账务/素材留档供对账），不进入兼容视图。
+    owner_clause = "" if actor.role in {"admin", "auditor"} else "AND identity.owner_user_id = %s"
     identity_rows = conn.execute(
         f"""
         SELECT identity.id
         FROM person_identities AS identity
-        {_simple_library_owner_clause(actor)}
+        WHERE identity.status <> 'ARCHIVED'
+        {owner_clause}
         ORDER BY identity.created_at DESC, identity.id DESC
         """,
         () if actor.role in {"admin", "auditor"} else (actor.id,),
@@ -739,6 +742,8 @@ def list_simple_library_page(
     )
     clauses: list[str] = []
     parameters: list[object] = []
+    # 归档人物已从人物库移除（账务/素材留档供对账），不参与分页与计数。
+    clauses.append("identity.status <> 'ARCHIVED'")
     if actor.role not in {"admin", "auditor"}:
         clauses.append("identity.owner_user_id = %s")
         parameters.append(actor.id)
@@ -1836,6 +1841,51 @@ def _project_list_message(project_names: list[str], template: str) -> str:
     if len(project_names) > 3:
         shown += f"等 {len(project_names)} 个项目"
     return template.format(names=shown)
+
+
+def archive_simple_character_identity(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+) -> None:
+    """把本人人物归档：只改状态，保留全部资产与账务记录供对账。
+
+    有口播账务历史的人物不能硬删（见 delete_simple_character_identity），
+    但用户仍需要把它从人物库移出。归档是可逆的留档入口：数据库行、素材与
+    历史任务原样保留，仅让列表查询跳过该身份。非拥有者不可归档他人人物。
+    """
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="simple_character.archive",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
+    row = read_identity_row(conn, identity_id)
+    if actor.role != "admin" and str(row["owner_user_id"]) != actor.id:
+        raise character_error(
+            404,
+            "PERSON_IDENTITY_NOT_FOUND",
+            "人物身份不存在或不可用。",
+        )
+    if str(row["status"]) == "ARCHIVED":
+        # 幂等：重复归档不报错，避免前端重试时给出误导性的失败。
+        return
+    with conn:
+        conn.execute(
+            "UPDATE person_identities SET status = 'ARCHIVED', "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (identity_id,),
+        )
+    write_audit(
+        conn,
+        actor=actor,
+        action="simple_character.archive",
+        entity_type="person_identity",
+        entity_id=identity_id,
+        metadata={"previous_status": str(row["status"])},
+    )
 
 
 def delete_simple_character_identity(
