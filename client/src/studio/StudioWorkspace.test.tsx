@@ -905,7 +905,7 @@ describe("V1.4 workspace integration", () => {
       within(creationGroup)
         .getAllByRole("button")
         .map((node) => node.textContent),
-    ).toEqual(["爆款视频", "文案工坊", "视频拆解"]);
+    ).toEqual(["爆款视频", "账号诊断", "文案工坊", "视频拆解"]);
     // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
     expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
     expect(nav.queryByRole("button", { name: "长视频拆解" })).toBeNull();

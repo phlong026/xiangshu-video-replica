@@ -8472,6 +8472,121 @@ const VIRAL_STATISTICS_TIMEOUT_MS = 150_000;
 // 关键词搜索除上游检索外，还要并发归档命中视频的封面（8 路，单封面上限 10MB），
 // 比纯读列表慢一个量级；给足余量，避免在归档中途被客户端超时中断。
 const VIRAL_SEARCH_TIMEOUT_MS = 240_000;
+// 账号诊断在请求内同步完成 2~3 次上游调用；比普通读接口慢，但远快于视频拆解。
+const ACCOUNT_DIAGNOSIS_TIMEOUT_MS = 120_000;
+
+export type AccountDiagnosisAvailability = {
+  enabled: boolean;
+  freeQuota: boolean;
+  member: boolean;
+  priceCredits: number | null;
+};
+
+export type AccountDiagnosisSubScore = {
+  key: string;
+  label: string;
+  score: number;
+  full: number;
+  counted: boolean;
+  detail: string;
+};
+
+export type AccountDiagnosisDimension = {
+  key: string;
+  label: string;
+  weight: number;
+  score: number;
+  effective_full: number;
+  full: number;
+  comment: string;
+  sub_scores: AccountDiagnosisSubScore[];
+};
+
+export type AccountDiagnosisRisk = {
+  kind: string;
+  label: string;
+  level: "high" | "medium" | "low";
+  evidence: string;
+};
+
+export type AccountDiagnosisWork = {
+  awemeId: string;
+  title: string;
+  createdAt: string | null;
+  digg: number;
+  comment: number;
+  share: number;
+  collect: number;
+  interaction: number;
+  playCount: number | null;
+  recommended: boolean;
+};
+
+export type AccountDiagnosisAccount = {
+  secUserId: string;
+  uniqueId: string | null;
+  nickname: string;
+  avatarUrl: string | null;
+  followerCount: number;
+  awemeCount: number;
+};
+
+/** 服务端打分引擎的原样输出；字段保持 snake_case，避免前端再做一次映射。 */
+export type AccountDiagnosisDocument = {
+  score: number;
+  tier: string;
+  tier_label: string;
+  rating: "优质" | "正常" | "待优化" | "风险";
+  sample_size: number;
+  low_confidence: boolean;
+  data_level: "L1" | "L2";
+  metrics: Record<string, number | null>;
+  risks: AccountDiagnosisRisk[];
+  dimensions: AccountDiagnosisDimension[];
+  platform: string;
+  account: AccountDiagnosisAccount;
+  collectedAt: string;
+  works: AccountDiagnosisWork[];
+};
+
+export type AccountDiagnosisNarrative = {
+  summary: string;
+  strengths: { dimension: string; score: number }[];
+  weaknesses: { dimension: string; score: number; comment: string }[];
+  actions: {
+    dimension: string;
+    title: string;
+    evidence: string;
+    suggestion: string;
+  }[];
+  generatedBy: string;
+};
+
+export type AccountDiagnosisResult = {
+  id: string;
+  status: string;
+  platform: string;
+  isFree: boolean;
+  cached: boolean;
+  dataLevel: "L1" | "L2" | null;
+  createdAt: string | null;
+  completedAt: string | null;
+  account: AccountDiagnosisAccount | null;
+  report: AccountDiagnosisDocument | null;
+  narrative: AccountDiagnosisNarrative | null;
+  error: { code: string; message: string } | null;
+};
+
+export type AccountDiagnosisHistoryItem = {
+  id: string;
+  status: string;
+  score: number | null;
+  tier: string | null;
+  rating: string | null;
+  isFree: boolean;
+  createdAt: string | null;
+  account: AccountDiagnosisAccount | null;
+};
 
 export type ViralPlatform = "douyin" | "wechat_channels" | "xiaohongshu";
 export type ViralSort = "hot" | "latest";
@@ -8629,6 +8744,64 @@ export function listViralVideos(
     "爆款视频列表暂不可用",
     {},
     VIRAL_LIST_TIMEOUT_MS,
+  );
+}
+
+/** 账号诊断的可用状态：免费额度是否还在、是否付费会员、单次价格。 */
+export function getAccountDiagnosisAvailability(): Promise<AccountDiagnosisAvailability> {
+  return requestApiJson<AccountDiagnosisAvailability>(
+    "/api/account-diagnosis/availability",
+    "账号诊断状态读取失败",
+    {},
+    10_000,
+  );
+}
+
+/**
+ * 发起一次账号诊断。
+ *
+ * 服务端在请求内完成取数与打分，所以这里用较长超时；同一 `Idempotency-Key`
+ * 复用同一轮受理，网络重试不会重复扣积分。第二次使用若被会员门禁拦截，
+ * 服务端返回 402 + `ACCOUNT_DIAGNOSIS_MEMBER_REQUIRED`，由页面弹充值对话框。
+ */
+export function createAccountDiagnosis(
+  input: string,
+  idempotencyKey?: string,
+): Promise<AccountDiagnosisResult> {
+  return requestApiJson<AccountDiagnosisResult>(
+    "/api/account-diagnosis",
+    "账号诊断失败",
+    {
+      method: "POST",
+      headers: {
+        "Idempotency-Key":
+          idempotencyKey ?? createRequestKey("account-diagnosis"),
+      },
+      body: JSON.stringify({ input, platform: "douyin" }),
+    },
+    ACCOUNT_DIAGNOSIS_TIMEOUT_MS,
+  );
+}
+
+export function listAccountDiagnoses(
+  limit = 20,
+): Promise<{ items: AccountDiagnosisHistoryItem[] }> {
+  return requestApiJson<{ items: AccountDiagnosisHistoryItem[] }>(
+    `/api/account-diagnosis?limit=${limit}`,
+    "诊断历史读取失败",
+    {},
+    10_000,
+  );
+}
+
+export function getAccountDiagnosis(
+  reportId: string,
+): Promise<AccountDiagnosisResult> {
+  return requestApiJson<AccountDiagnosisResult>(
+    `/api/account-diagnosis/${encodeURIComponent(reportId)}`,
+    "诊断报告读取失败",
+    {},
+    10_000,
   );
 }
 

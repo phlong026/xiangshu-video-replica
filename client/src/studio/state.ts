@@ -22,6 +22,7 @@ export const pageTitles: Record<StudioPage, string> = {
   workbench: "工作台",
   viral: "爆款视频",
   "viral-detail": "爆款视频详情",
+  "account-diagnosis": "账号诊断",
   copy: "文案工坊",
   replica: "视频拆解",
   "long-replica": "长视频拆解",
