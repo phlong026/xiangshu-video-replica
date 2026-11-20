@@ -23,9 +23,8 @@ function clockOffset(
     : 0;
 }
 
-// 工作台两列布局下卡片按二级页尺寸渲染，一行两张即可保持左右列高度协调；
-// 更多精选通过「查看全部爆款」进入列表页。
-const HOMEPAGE_CARD_LIMIT = 2;
+// 工作台左列按 3 列铺排，两整行共 6 张；更多精选通过「查看全部爆款」进列表页。
+const HOMEPAGE_CARD_LIMIT = 6;
 
 function selectHomepageVideos(videos: StudioVideo[]) {
   // 各平台的置顶序号独立分配；队首按推送时间合并，避免新平台上传被旧负序号挤走。

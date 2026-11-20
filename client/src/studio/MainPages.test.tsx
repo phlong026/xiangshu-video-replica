@@ -921,14 +921,19 @@ describe("V1.4 工作台首页爆款精选", () => {
     // 左爆款在 DOM 中位于右成片之前（两列布局）。
     expect(panel.previousElementSibling).toBeNull();
     expect(panel.nextElementSibling).toHaveClass("studio-home-works");
-    // 卡片复用二级页 ViralCard 结构；工作台一行两张，保持左右列高度协调。
-    expect(panel.querySelectorAll(".viral-card")).toHaveLength(2);
+    // 卡片复用二级页 ViralCard 结构；工作台按 3 列铺排，最多两整行共 6 张。
+    expect(panel.querySelectorAll(".viral-card")).toHaveLength(5);
     expect(
       [...panel.querySelectorAll(".viral-card-title")].map(
         (node) => node.textContent,
       ),
-    ).toEqual(["精选视频 2", "精选视频 4"]);
-    expect(within(panel).queryByText("精选视频 5")).toBeNull();
+    ).toEqual([
+      "精选视频 2",
+      "精选视频 4",
+      "精选视频 3",
+      "精选视频 1",
+      "精选视频 5",
+    ]);
     // 点标题进详情，返回目标为工作台。
     fireEvent.click(within(panel).getByRole("button", { name: "精选视频 2" }));
     expect(value.navigate).toHaveBeenCalledWith("viral-detail", {
@@ -972,8 +977,13 @@ describe("V1.4 工作台首页爆款精选", () => {
     await screen.findByText("跨平台推荐 小红书新上传");
     expect(
       screen.getAllByText(/^跨平台推荐 /).map((node) => node.textContent),
-    ).toEqual(["跨平台推荐 小红书新上传", "跨平台推荐 人工置首"]);
-    expect(screen.queryByText("跨平台推荐 第五张")).toBeNull();
+    ).toEqual([
+      "跨平台推荐 小红书新上传",
+      "跨平台推荐 人工置首",
+      "跨平台推荐 同平台次位",
+      "跨平台推荐 同平台第三",
+      "跨平台推荐 第五张",
+    ]);
   });
 
   it.each([true, false])(

@@ -766,14 +766,19 @@ html:has(.studio-shell) {
   font-weight: 500;
   font-size: var(--font-body);
 }
-/* 爆款精选：复用二级页 ViralCard，2 列网格自然等比缩小。 */
+/* 爆款精选：复用二级页 ViralCard；工作台按 3 列铺排并把封面压到 3:4，
+   让一屏能同时看到两排卡片（9:16 会让单卡高近 600px，一屏放不下一排半）。 */
 .studio-home-viral-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
 .studio-home-viral-grid .viral-card {
   font-size: var(--font-caption);
+}
+.studio-home-viral-grid .viral-card-cover,
+.studio-home-viral-grid .viral-card-cover-trigger {
+  aspect-ratio: 3 / 4;
 }
 .studio-home-viral-grid .viral-card-body {
   padding: 8px;
@@ -788,6 +793,15 @@ html:has(.studio-shell) {
   min-height: 26px;
   padding: 2px 4px;
   font-size: var(--font-caption);
+}
+.studio-home-viral-grid .viral-card-stats {
+  gap: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.studio-home-viral-grid .viral-card-stats svg {
+  width: 11px;
+  height: 11px;
 }
 /* 我的成片：左封面、右信息的横向列表卡，条目少时也不会留大片空白。 */
 .studio-works-summary {
