@@ -1243,15 +1243,24 @@ def test_notification_preferences_upsert_keeps_single_row_on_pg(
 
         default = client.get(url, headers=headers)
         assert default.status_code == 200
-        assert default.json() == {"enabled": True}
+        default_shape = {
+            "enabled": True,
+            "muted": [],
+            "billing_style": "per_item",
+            "balance_threshold": 50,
+        }
+        assert default.json() == default_shape
 
         assert client.put(url, json={"enabled": False}, headers=headers).status_code == 200
-        assert client.get(url, headers=headers).json() == {"enabled": False}
+        assert client.get(url, headers=headers).json() == {
+            **default_shape,
+            "enabled": False,
+        }
         assert client.put(url, json={"enabled": True}, headers=headers).status_code == 200
-        assert client.get(url, headers=headers).json() == {"enabled": True}
+        assert client.get(url, headers=headers).json() == default_shape
 
         other = client.get(url, headers={"X-Dev-User-Id": "employee_2"})
-        assert other.json() == {"enabled": True}
+        assert other.json() == default_shape
 
         rejected = client.put(url, json={"enabled": True, "marketing": True}, headers=headers)
         assert rejected.status_code == 422

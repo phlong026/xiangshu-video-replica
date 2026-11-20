@@ -12,11 +12,12 @@ capability lands (C5 发布 / C6 外部数据源).
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, CurrentUser, Database, ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
@@ -442,33 +443,107 @@ def read_studio_analytics(
 
 
 # ---------------------------------------------------------------------------
-# C10b 通知偏好：按用户一行 JSON 偏好（迁移 076），当前唯一键 enabled
+# C10b 通知偏好：按用户一行 JSON 偏好（迁移 076）
+#
+# 最初只有 enabled；消息中心上线后扩展为「四类开关 + 扣费粒度 + 余额阈值」。
+# JSON 只存显式提交的键（exclude_unset），老客户端 PUT {"enabled": false}
+# 不会把用户已有的 muted / billing_style 冲回默认值。
 # ---------------------------------------------------------------------------
+
+MessageCategory = Literal["task", "billing", "announcement", "security"]
+MESSAGE_CATEGORIES: tuple[str, ...] = ("task", "billing", "announcement", "security")
+BillingStyle = Literal["per_item", "daily", "off"]
+BILLING_STYLES: tuple[str, ...] = ("per_item", "daily", "off")
 
 
 class StudioNotificationPreferences(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    muted: list[MessageCategory] = Field(default_factory=list)
+    billing_style: BillingStyle = "per_item"
+    balance_threshold: int = Field(default=50, ge=0, le=1_000_000)
 
 
-def _read_notification_preferences(
+@dataclass(frozen=True)
+class NotificationPreferenceState:
+    """生效偏好 + 已读水位 + 逐条已读回执。
+
+    - ``watermarks``：分类级「全部已读」水位（read_before 兼容旧的单值形态）；
+    - ``receipts``：message_key → 已读时间，与水位同存一行 JSON——消息中心
+      不新增表，避免把逐条回执做成又一张需要冻结 schema 的业务表。
+    """
+
+    preferences: StudioNotificationPreferences
+    watermarks: dict[str, str]
+    receipts: dict[str, str]
+
+
+_EPOCH_WATERMARK = "1970-01-01T00:00:00+00:00"
+
+
+def load_notification_preferences(
     conn: BusinessConnection,
     user_id: str,
-) -> StudioNotificationPreferences:
+) -> NotificationPreferenceState:
     row = conn.execute(
         "SELECT prefs_json FROM studio_notification_preferences WHERE user_id = %s",
         (user_id,),
     ).fetchone()
+    defaults = StudioNotificationPreferences()
+    empty = NotificationPreferenceState(preferences=defaults, watermarks={}, receipts={})
     if row is None:
-        return StudioNotificationPreferences()
+        return empty
     try:
         payload = json.loads(str(row["prefs_json"]))
     except json.JSONDecodeError:
-        return StudioNotificationPreferences()
+        return empty
     if not isinstance(payload, dict):
-        return StudioNotificationPreferences()
-    return StudioNotificationPreferences(enabled=bool(payload.get("enabled", True)))
+        return empty
+
+    muted: list[MessageCategory] = []
+    raw_muted = payload.get("muted")
+    if isinstance(raw_muted, list):
+        for value in raw_muted:
+            if isinstance(value, str) and value in MESSAGE_CATEGORIES and value not in muted:
+                muted.append(cast(MessageCategory, value))
+    billing_style = payload.get("billing_style")
+    if billing_style not in BILLING_STYLES:
+        billing_style = defaults.billing_style
+    threshold = payload.get("balance_threshold")
+    if not isinstance(threshold, int) or isinstance(threshold, bool):
+        threshold = defaults.balance_threshold
+    threshold = max(0, min(1_000_000, threshold))
+    try:
+        preferences = StudioNotificationPreferences(
+            enabled=bool(payload.get("enabled", True)),
+            muted=muted,
+            billing_style=billing_style,
+            balance_threshold=threshold,
+        )
+    except ValueError:
+        preferences = defaults
+
+    receipts: dict[str, str] = {}
+    raw_receipts = payload.get("receipts")
+    if isinstance(raw_receipts, dict):
+        for key, value in raw_receipts.items():
+            if isinstance(key, str) and key and isinstance(value, str) and value:
+                receipts[key] = value
+
+    watermarks: dict[str, str] = {}
+    raw_cutoff = payload.get("read_before")
+    if isinstance(raw_cutoff, str) and raw_cutoff:
+        # 旧形态：一条全局水位。新形态：按分类各一条。
+        watermarks["all"] = raw_cutoff
+    elif isinstance(raw_cutoff, dict):
+        for key in ("all", *MESSAGE_CATEGORIES):
+            value = raw_cutoff.get(key)
+            if isinstance(value, str) and value:
+                watermarks[key] = value
+    return NotificationPreferenceState(
+        preferences=preferences, watermarks=watermarks, receipts=receipts
+    )
 
 
 @router.get(
@@ -479,7 +554,7 @@ def read_studio_notification_preferences(
     conn: ReadDatabase,
     actor: ShortAuthUser,
 ) -> StudioNotificationPreferences:
-    return _read_notification_preferences(conn, actor.id)
+    return load_notification_preferences(conn, actor.id).preferences
 
 
 @router.put(
@@ -499,10 +574,10 @@ def update_studio_notification_preferences(
         SET prefs_json = (studio_notification_preferences.prefs_json::jsonb
             || excluded.prefs_json::jsonb)::text, updated_at = CURRENT_TIMESTAMP
         """,
-        (actor.id, payload.model_dump_json()),
+        (actor.id, payload.model_dump_json(exclude_unset=True)),
     )
     conn.commit()
-    return payload
+    return load_notification_preferences(conn, actor.id).preferences
 
 
 class StudioNotificationItem(BaseModel):
@@ -530,22 +605,11 @@ def studio_notifications(
     *,
     actor: CurrentUser,
 ) -> StudioNotificationsResponse:
-    preferences = _read_notification_preferences(conn, actor.id)
-    if not preferences.enabled:
+    state = load_notification_preferences(conn, actor.id)
+    if not state.preferences.enabled:
         return StudioNotificationsResponse(items=[], unread_count=0, enabled=False)
-    row = conn.execute(
-        "SELECT prefs_json FROM studio_notification_preferences WHERE user_id = %s",
-        (actor.id,),
-    ).fetchone()
-    read_before = "1970-01-01T00:00:00+00:00"
-    if row:
-        try:
-            payload = json.loads(str(row["prefs_json"]))
-            timestamp = payload.get("read_before") if isinstance(payload, dict) else None
-            if isinstance(timestamp, str) and datetime.fromisoformat(timestamp).tzinfo:
-                read_before = timestamp
-        except (ValueError, TypeError):
-            pass
+    # 旧接口只有一条全局水位：新形态按分类写时取 all（没有则取最早）。
+    read_before = state.watermarks.get("all", _EPOCH_WATERMARK)
     # Events derive from durable task states; no polling request writes fake events.
     # Archive changes get a new event time, while hidden/superseded results stay absent.
     rows = conn.execute(
