@@ -36,9 +36,24 @@ logger = logging.getLogger(__name__)
 
 Outcome = Literal["SUCCEEDED", "PROVIDER_ERROR", "TIMEOUT", "NETWORK_ERROR", "PARSE_ERROR"]
 
-# 失败正文超过 64 KB 外存全文；成功正文只保留 4 KB 摘要。
+# 失败正文超过 64 KB 外存全文；成功正文默认只保留 4 KB 摘要。
 FAILED_BODY_LIMIT = 64 * 1024
 SUCCEEDED_BODY_LIMIT = 4 * 1024
+# 内容类链路（拆解 / 复刻提示词）的成功响应本身就是业务产出：4 KB 摘要会把
+# analysis.shots 从中间截断，事后无法复盘「内容类」故障。2026-11-20 的空壳
+# 事故能定性，靠的只是 830 B 的完整正文；同批正常调用的分镜（3–20 KB）全被
+# 截成不可解析的片段，反过来无法证明「正常长什么样」。这类调用与失败同口径
+# 留全文；其余链路保持 4 KB，避免日志表被无关大响应撑大。
+CONTENT_TASK_TYPES = frozenset({"ANALYSIS", "REPLICA_PROMPT"})
+
+
+def succeeded_body_limit(context: CallContext | None) -> int:
+    """成功正文的留存上限：内容类链路按失败口径，其余按摘要口径。"""
+    if context is not None and context.task_type in CONTENT_TASK_TYPES:
+        return FAILED_BODY_LIMIT
+    return SUCCEEDED_BODY_LIMIT
+
+
 PROVIDER_MESSAGE_LIMIT = 500
 # 取日志连接最多等 2 秒：池子忙时宁可丢一条诊断日志，也不能拖住生成任务。
 LOG_CONNECTION_TIMEOUT_SECONDS = 2.0
@@ -554,6 +569,8 @@ def prepare_external_call(
     raw_bytes: int | None = None
     body_text: str | None = None
     truncated = False
+    # 先取上下文：成功正文的留存上限按链路类型决定（内容类留全文）。
+    context = current_call_context()
     if response_body is not None:
         raw_bytes = (
             len(response_body)
@@ -563,8 +580,9 @@ def prepare_external_call(
         if not binary_response:
             body_text = redact_text(_decode(response_body) or "")
             if outcome == "SUCCEEDED":
-                truncated = len(body_text.encode("utf-8")) > SUCCEEDED_BODY_LIMIT
-                body_text = _utf8_excerpt(body_text, SUCCEEDED_BODY_LIMIT)
+                limit = succeeded_body_limit(context)
+                truncated = len(body_text.encode("utf-8")) > limit
+                body_text = _utf8_excerpt(body_text, limit)
     code, message = (None, None)
     if outcome != "SUCCEEDED" and not binary_response:
         code, message = parse_provider_error(response_body, provider=provider)
@@ -593,7 +611,7 @@ def prepare_external_call(
         error_message=_clean_message(error_message) if error_message else None,
         exception_type=exception_type,
         model=model or _MODEL.get(),
-        context=current_call_context(),
+        context=context,
         request_id=_request_id(),
     )
 
