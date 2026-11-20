@@ -2803,3 +2803,146 @@
   color: #b9bab2;
   font-size: 13px;
 }
+
+/* 成片就地消费面板（2026-11-20）：创作页直接播放 + 下载，不再把用户推去
+   任务中心。生成期用首帧做压暗背景，避免整块面板只剩一行进度显得空。 */
+.creation-field-note {
+  color: #8d8f88;
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 6px;
+}
+
+.creation-progress.creation-progress--stage {
+  /* 覆盖 .creation-progress 的 grid：高度给了 min-height 后，行会被拉高，
+     阶段胶囊会被撑成椭圆。内容按自然高度从上排。 */
+  align-content: start;
+  border: 1px solid #262823;
+  border-radius: 12px;
+  isolation: isolate;
+  min-height: 300px;
+  overflow: hidden;
+  padding: 18px;
+  position: relative;
+}
+
+.creation-progress-poster {
+  inset: 0;
+  position: absolute;
+  z-index: 0;
+}
+
+.creation-progress-poster .studio-media,
+.creation-progress-poster img,
+.creation-progress-poster video {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.creation-progress-scrim {
+  background: linear-gradient(
+    180deg,
+    rgba(9, 11, 10, 0.55),
+    rgba(9, 11, 10, 0.9)
+  );
+  inset: 0;
+  position: absolute;
+}
+
+.creation-progress--stage > *:not(.creation-progress-poster) {
+  position: relative;
+  z-index: 1;
+}
+
+.creation-result {
+  display: grid;
+  gap: 12px;
+}
+
+.creation-result .video-preview,
+.creation-result-player {
+  background: #000;
+  border-radius: 12px;
+  /* 竖屏成片按比例会把面板撑得很高：封顶后由 contain 出黑边，而不是裁画面。 */
+  max-height: 380px;
+  overflow: hidden;
+}
+
+.creation-result-poster {
+  align-items: center;
+  background: #0d0f0e;
+  border-radius: 12px;
+  display: flex;
+  justify-content: center;
+  /* 与播放器同高，避免「获取中 → 可播放」时面板高度跳变。 */
+  max-height: 380px;
+  min-height: 380px;
+  overflow: hidden;
+  position: relative;
+}
+
+.creation-result-poster .studio-media,
+.creation-result-poster img,
+.creation-result-poster video,
+.creation-preview-poster-media {
+  height: 100%;
+  inset: 0;
+  object-fit: cover;
+  opacity: 0.55;
+  position: absolute;
+  width: 100%;
+}
+
+.creation-result-overlay {
+  align-items: center;
+  color: #e7e9e2;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  position: relative;
+  text-align: center;
+  z-index: 1;
+}
+
+.creation-result-overlay p {
+  color: #dfe1da;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.creation-result-spinner {
+  animation: creation-result-spin 0.9s linear infinite;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  border-top-color: var(--accent-strong, #c6a45f);
+  height: 22px;
+  width: 22px;
+}
+
+@keyframes creation-result-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.creation-result-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+/* 四列参数格里放不下整句说明：单独占一行，替代原先的黄色提示块。 */
+.creation-field-note--row {
+  grid-column: 1 / -1;
+  margin-top: -6px;
+}
+
+/* 原生 progress 默认是浏览器蓝，与界面的金/绿强调色不搭。 */
+.creation-progress-bar {
+  accent-color: #c6a45f;
+}
