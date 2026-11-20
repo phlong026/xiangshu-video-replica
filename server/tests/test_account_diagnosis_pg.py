@@ -12,6 +12,8 @@ import pytest
 from test_customer_center import account, client, route_state  # noqa: F401
 from test_customer_registration import (  # noqa: F401
     client as registration_client,
+)
+from test_customer_registration import (
     registration_dsn,
 )
 
