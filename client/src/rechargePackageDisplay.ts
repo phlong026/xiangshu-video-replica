@@ -15,6 +15,7 @@ export const DISCOUNT_INTERFACE_LABELS: Record<string, string> = {
   oral: "数字人口播",
   asr: "语音转写",
   viral_extract: "爆款提取",
+  account_diagnosis: "账号诊断",
   link_resolution: "链接解析",
   prompt_optimize: "提示词优化",
 };

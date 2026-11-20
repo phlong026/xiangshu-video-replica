@@ -47,6 +47,9 @@ SERVICES: dict[str, Service] = {
     # 文案获取同样是零售科目：文案已在共享缓存里，复用别人的转写结果没有按次
     # 供应商成本，只有生产那一次付过转写费，所以 provider 记 platform。
     "viral_copy": Service("爆款视频文案", "call", "platform", "viral"),
+    # 售价由管理员在「价格与套餐 → 逐项成本与售价」填写；默认 8 积分的种子见
+    # 定价页初始值，代码里不写死价格。
+    "account_diagnosis": Service("账号诊断", "call", "tikhub", "account"),
     "link_resolution": Service("链接解析", "call", "douyidou", "workbench"),
     "prompt_optimize": Service("提示词 AI 优化", "call", "apilio", "workbench"),
     "avatar_clone": Service("口播分身创建", "call", "hifly", "people"),
@@ -81,6 +84,7 @@ INTERFACE_KEYS: tuple[str, ...] = (
     "oral",
     "asr",
     "viral_extract",
+    "account_diagnosis",
     "link_resolution",
     "prompt_optimize",
 )
@@ -105,6 +109,7 @@ SERVICE_INTERFACE: dict[str, str] = {
     "viral_statistics": "viral_extract",
     "viral_detail": "viral_extract",
     "viral_copy": "viral_extract",
+    "account_diagnosis": "account_diagnosis",
     "link_resolution": "link_resolution",
     "prompt_optimize": "prompt_optimize",
     "avatar_clone": "oral",

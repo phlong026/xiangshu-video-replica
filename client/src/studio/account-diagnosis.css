@@ -1,0 +1,375 @@
+/* 账号诊断：报告页沿用 studio 的深色面板与金色强调，不引入新的设计语言。 */
+.studio-shell .diag-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1180px;
+}
+
+.studio-shell .diag-intro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  color: var(--studio-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.studio-shell .diag-intro p {
+  margin: 0;
+  flex: 1 1 520px;
+  min-width: 0;
+}
+.studio-shell .diag-intro strong {
+  color: var(--studio-text);
+  font-weight: 600;
+}
+.studio-shell .diag-availability {
+  padding: 4px 10px;
+  border: 1px solid var(--studio-border);
+  border-radius: 999px;
+  color: var(--studio-gold);
+  white-space: nowrap;
+}
+
+.studio-shell .diag-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+.studio-shell .diag-input-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 11px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--studio-border);
+  background: var(--studio-panel);
+  color: var(--studio-text);
+  font-size: 14px;
+}
+.studio-shell .diag-input-row input:focus {
+  outline: none;
+  border-color: var(--studio-gold);
+}
+
+.studio-shell .diag-status,
+.studio-shell .diag-error {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.studio-shell .diag-status {
+  background: rgba(229, 170, 54, 0.08);
+  color: var(--studio-gold);
+}
+.studio-shell .diag-error {
+  background: rgba(224, 92, 92, 0.1);
+  color: #e88b8b;
+}
+
+.studio-shell .diag-report {
+  border: 1px solid var(--studio-border);
+  border-radius: 14px;
+  background: var(--studio-panel);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.studio-shell .diag-report-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+.studio-shell .diag-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.studio-shell .diag-account img,
+.studio-shell .diag-account-fallback {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: none;
+  border: 1px solid var(--studio-border);
+}
+.studio-shell .diag-account-fallback {
+  display: grid;
+  place-items: center;
+  background: var(--studio-bg);
+  color: var(--studio-gold);
+  font-size: 20px;
+}
+.studio-shell .diag-account h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+.studio-shell .diag-account p {
+  margin: 0;
+  color: var(--studio-muted);
+  font-size: 12px;
+}
+
+.studio-shell .diag-score {
+  text-align: right;
+  flex: none;
+}
+.studio-shell .diag-score strong {
+  display: block;
+  font-size: 40px;
+  line-height: 1;
+  color: var(--studio-text);
+}
+.studio-shell .diag-score span {
+  font-size: 12px;
+  color: var(--studio-muted);
+}
+.studio-shell .diag-score.is-excellent strong {
+  color: #63c07d;
+}
+.studio-shell .diag-score.is-normal strong {
+  color: var(--studio-gold);
+}
+.studio-shell .diag-score.is-warning strong {
+  color: #e2a24d;
+}
+.studio-shell .diag-score.is-risk strong {
+  color: #e06c6c;
+}
+
+.studio-shell .diag-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--studio-muted);
+}
+.studio-shell .diag-meta span {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--studio-bg);
+  border: 1px solid var(--studio-border);
+}
+.studio-shell .diag-low-confidence {
+  color: #e2a24d;
+}
+
+.studio-shell .diag-dimensions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+.studio-shell .diag-dimension {
+  border: 1px solid var(--studio-border);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--studio-bg);
+  min-width: 0;
+}
+.studio-shell .diag-dimension-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+}
+.studio-shell .diag-dimension-head strong {
+  color: var(--studio-gold);
+  font-size: 18px;
+}
+.studio-shell .diag-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: #1f201d;
+  margin: 8px 0;
+  overflow: hidden;
+}
+.studio-shell .diag-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #8c6a24, var(--studio-gold));
+}
+.studio-shell .diag-dimension-comment {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--studio-muted);
+}
+.studio-shell .diag-dimension ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.studio-shell .diag-dimension li {
+  display: grid;
+  grid-template-columns: minmax(0, auto) auto;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+.studio-shell .diag-dimension li em {
+  font-style: normal;
+  color: var(--studio-gold);
+  justify-self: end;
+}
+.studio-shell .diag-dimension li small {
+  grid-column: 1 / -1;
+  color: var(--studio-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.studio-shell .diag-risks h4,
+.studio-shell .diag-narrative h4,
+.studio-shell .diag-works h4,
+.studio-shell .diag-history h4 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+.studio-shell .diag-risks ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.studio-shell .diag-risks li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--studio-border);
+  font-size: 12px;
+  color: var(--studio-muted);
+}
+.studio-shell .diag-risks li strong {
+  color: var(--studio-text);
+}
+.studio-shell .diag-risks li.is-high {
+  border-color: rgba(224, 92, 92, 0.45);
+}
+.studio-shell .diag-risks li.is-medium {
+  border-color: rgba(226, 162, 77, 0.4);
+}
+.studio-shell .diag-risks li.is-low {
+  border-color: rgba(229, 170, 54, 0.25);
+}
+
+.studio-shell .diag-narrative p {
+  margin: 0;
+  color: var(--studio-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.studio-shell .diag-actions {
+  margin: 12px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.studio-shell .diag-actions li {
+  font-size: 13px;
+}
+.studio-shell .diag-actions li strong {
+  margin-right: 8px;
+}
+.studio-shell .diag-actions li span {
+  color: var(--studio-muted);
+  font-size: 12px;
+}
+.studio-shell .diag-actions li p {
+  margin: 4px 0 0;
+}
+
+.studio-shell .diag-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.studio-shell .diag-works table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.studio-shell .diag-works th,
+.studio-shell .diag-works td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--studio-border);
+  vertical-align: middle;
+}
+.studio-shell .diag-works th {
+  color: var(--studio-muted);
+  font-weight: 500;
+}
+.studio-shell .diag-works td:first-child {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.studio-shell .diag-recommend {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(229, 170, 54, 0.14);
+  color: var(--studio-gold);
+  font-size: 11px;
+}
+
+.studio-shell .diag-history ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.studio-shell .diag-history button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--studio-border);
+  background: var(--studio-panel);
+  color: var(--studio-text);
+  cursor: pointer;
+  font-size: 12px;
+}
+.studio-shell .diag-history button em {
+  font-style: normal;
+  color: var(--studio-gold);
+}
+.studio-shell .diag-history button small {
+  color: var(--studio-muted);
+}
+.studio-shell .diag-history button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 720px) {
+  .studio-shell .diag-input-row {
+    flex-direction: column;
+  }
+  .studio-shell .diag-report-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .studio-shell .diag-works td:first-child {
+    max-width: 180px;
+  }
+}

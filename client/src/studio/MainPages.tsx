@@ -863,6 +863,10 @@ export function WorkbenchPage() {
         );
       });
   };
+  // 账号主页链接粘进"视频复刻"输入框时，直接引导到账号诊断，避免"没有可用视频"的报错。
+  const accountLinkInInput = /douyin\.com\/user\/[A-Za-z0-9_-]{20,}/.test(
+    sourceLink,
+  );
   return (
     <section className="studio-home">
       <h2 className="studio-home-page-title">工作台</h2>
@@ -946,6 +950,33 @@ export function WorkbenchPage() {
           <p className="studio-start-helper">
             支持抖音、小红书的分享链接，其他平台请上传 MP4文件；
           </p>
+          {accountLinkInInput ? (
+            <p className="studio-start-helper">
+              这是账号主页链接，不是单条视频。
+              <button
+                type="button"
+                className="studio-link-action"
+                onClick={() =>
+                  navigate("account-diagnosis", {
+                    accountDiagnosisInput: sourceLink,
+                  })
+                }
+              >
+                去做账号诊断 →
+              </button>
+            </p>
+          ) : (
+            <p className="studio-start-helper">
+              已有账号？
+              <button
+                type="button"
+                className="studio-link-action"
+                onClick={() => navigate("account-diagnosis")}
+              >
+                诊断我的账号 →
+              </button>
+            </p>
+          )}
           {linkState.status === "loading" && (
             <p className="studio-upload-status" role="status">
               {linkState.stage === "import"

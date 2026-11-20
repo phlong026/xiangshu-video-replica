@@ -198,7 +198,9 @@ def test_dashboard_requires_admin_session(client: TestClient) -> None:
     assert client.get("/api/control/dashboard/summary").status_code == 401
 
 
-def test_dashboard_summary_counts(admin_headers: dict[str, str], client: TestClient) -> None:
+def test_dashboard_summary_counts(
+    admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
+) -> None:
     response = client.get("/api/control/dashboard/summary", headers=admin_headers)
     assert response.status_code == 200, response.text
     payload = response.json()
@@ -218,7 +220,18 @@ def test_dashboard_summary_counts(admin_headers: dict[str, str], client: TestCli
     assert todos["reconciliation_problems"] == 0
     from app.billing_catalog import SERVICES
 
-    assert todos["unconfigured_rates"] == sum(s.customer_charge_allowed for s in SERVICES.values())
+    # 未配置价目数 = 可计费科目数 − 已有价目行数。迁移链从
+    # 20261120T1000_account_diagnosis 起自带种子价目，不能再假设新库是零价目。
+    with psycopg.connect(dashboard_pg_dsn) as conn:
+        configured = int(
+            conn.execute(
+                "SELECT count(*) FROM billing_tariffs WHERE service = ANY(%s)",
+                (sorted(SERVICES),),
+            ).fetchone()[0]
+        )
+    assert todos["unconfigured_rates"] == (
+        sum(s.customer_charge_allowed for s in SERVICES.values()) - configured
+    )
     assert todos["unknown_cost_records"] == 0
     assert "device_slots" not in payload
     assert "online_devices" not in payload["today"]

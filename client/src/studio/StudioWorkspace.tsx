@@ -37,6 +37,7 @@ import {
 } from "../rechargePackageDisplay";
 import { SettingsPanel } from "../SettingsPanel";
 import type { WorkspaceShellProps } from "../workspace-shell";
+import { AccountDiagnosisPage } from "./AccountDiagnosisPage";
 import {
   MaterialsPage,
   PublishPage,
@@ -272,6 +273,8 @@ export const navGroups: {
       // 爆款视频（2026-11-17 恢复）：只展示管理员后台上传/推送的内容；
       // 客户列表接口已放开，抓取类接口（source/search/统计补采）仍保持 410。
       { id: "viral", title: "爆款视频", icon: "fire" },
+      // 账号诊断与爆款视频成对：一个看别人，一个看自己。
+      { id: "account-diagnosis", title: "账号诊断", icon: "chart" },
       { id: "copy", title: "文案工坊", icon: "pen" },
       { id: "replica", title: "视频拆解", icon: "video" },
     ],
@@ -2261,6 +2264,7 @@ export function StudioWorkspace({
     data,
     review,
     user: currentUser,
+    customerAccount,
     videoCapabilities,
     videoCapabilitiesStatus,
     retryVideoCapabilities,
@@ -2704,6 +2708,8 @@ function StudioPageContent({
       return <WorkbenchPage />;
     case "viral":
       return <ViralPage />;
+    case "account-diagnosis":
+      return <AccountDiagnosisPage />;
     case "viral-detail":
       return <ViralDetailPage />;
     case "copy":
