@@ -131,7 +131,8 @@ function WorkbenchWorks() {
       (left, right) =>
         (Date.parse(right.submitted) || 0) - (Date.parse(left.submitted) || 0),
     )
-    .slice(0, 6);
+    // 工作台是概览：右列与左列两张爆款卡高度相当，更多成片走「查看全部任务」。
+    .slice(0, 4);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
   );
@@ -217,50 +218,94 @@ function WorkbenchWorks() {
         </Button>
       </div>
       {work.length ? (
-        <div className="studio-works-row">
-          {work.map((task) => {
-            const poster =
-              task.poster || (task.resultId && thumbnails[task.resultId]);
-            return (
-              <article className="studio-work-card" key={task.id}>
-                <button
-                  type="button"
-                  className="studio-work-open"
-                  aria-label={`查看成片：${task.title}`}
-                  onClick={() =>
-                    navigate("task-detail", taskDetailPatch(task, "workbench"))
-                  }
-                >
-                  <VideoPreview
-                    fitContainer
-                    poster={poster || undefined}
-                    fallback={<Icon name="video" size={28} />}
-                  />
-                  <strong title={task.title}>{task.title}</strong>
-                </button>
-                <div className="studio-work-actions">
-                  <Status task={task} />
-                  {!review && user.role !== "auditor" && task.resultId ? (
-                    <Button
-                      aria-label={`发布成片：${task.title}`}
-                      disabled={publishingTaskId !== undefined}
-                      onClick={() => void preparePublish(task)}
-                      variant="quiet"
-                    >
-                      {publishingTaskId === task.id ? "读取成片…" : "去发布"}
-                    </Button>
-                  ) : null}
-                </div>
-              </article>
-            );
-          })}
-        </div>
+        <>
+          <p className="studio-works-summary">
+            共 {work.length} 支成片
+            {active.length ? ` · ${active.length} 个任务进行中` : ""}
+          </p>
+          <div className="studio-works-grid">
+            {work.map((task) => {
+              const poster =
+                task.poster || (task.resultId && thumbnails[task.resultId]);
+              const copyCount = task.deliverableCount ?? 0;
+              return (
+                <article className="studio-work-card" key={task.id}>
+                  <button
+                    type="button"
+                    className="studio-work-cover"
+                    aria-label={`查看成片：${task.title}`}
+                    onClick={() =>
+                      navigate(
+                        "task-detail",
+                        taskDetailPatch(task, "workbench"),
+                      )
+                    }
+                  >
+                    <VideoPreview
+                      fitContainer
+                      poster={poster || undefined}
+                      fallback={<Icon name="video" size={28} />}
+                    />
+                    <span className="studio-work-play" aria-hidden="true">
+                      ▶
+                    </span>
+                    <span className="studio-work-type">{task.type}</span>
+                  </button>
+                  <div className="studio-work-body">
+                    <strong className="studio-work-title" title={task.title}>
+                      {task.title}
+                    </strong>
+                    <div className="studio-work-meta">
+                      <Status task={task} />
+                      {copyCount > 1 ? (
+                        <span className="studio-work-count">
+                          {copyCount} 支成片
+                        </span>
+                      ) : null}
+                      {task.submitted ? (
+                        <span className="studio-work-time">
+                          {formatTaskTime(task.submitted)}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="studio-work-actions">
+                      <Button
+                        variant="quiet"
+                        onClick={() =>
+                          navigate(
+                            "task-detail",
+                            taskDetailPatch(task, "workbench"),
+                          )
+                        }
+                      >
+                        查看详情
+                      </Button>
+                      {!review && user.role !== "auditor" && task.resultId ? (
+                        <Button
+                          aria-label={`发布成片：${task.title}`}
+                          disabled={publishingTaskId !== undefined}
+                          onClick={() => void preparePublish(task)}
+                          variant="outline"
+                        >
+                          {publishingTaskId === task.id
+                            ? "读取成片…"
+                            : "去发布"}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </>
       ) : (
-        <p className="studio-home-empty" role="status">
-          {data.loading
-            ? "正在读取成片…"
-            : "还没有成片。粘贴链接或上传视频，开始第一支创作。"}
-        </p>
+        <div className="studio-home-empty-card" role="status">
+          <strong>{data.loading ? "正在读取成片…" : "还没有成片"}</strong>
+          {!data.loading ? (
+            <span>粘贴链接或上传视频，开始第一支创作。</span>
+          ) : null}
+        </div>
       )}
       {active.length ? (
         <button
@@ -997,8 +1042,15 @@ export function WorkbenchPage() {
           </div>
         )}
       </div>
-      {!requireLogin && <WorkbenchWorks key={`${review}:${accountId}`} />}
-      <ViralRecommendations />
+      {requireLogin ? (
+        <ViralRecommendations />
+      ) : (
+        // 两列工作台：左侧爆款精选（复用二级页卡片），右侧我的成片。
+        <div className="studio-home-split">
+          <ViralRecommendations />
+          <WorkbenchWorks key={`${review}:${accountId}`} />
+        </div>
+      )}
     </section>
   );
 }

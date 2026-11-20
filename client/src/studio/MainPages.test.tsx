@@ -893,7 +893,7 @@ describe("V1.4 工作台首页爆款精选", () => {
     };
   }
 
-  it("首页精选位于我的成片之后，按置顶顺序和推送时间展示四张小卡", () => {
+  it("工作台两列：左侧爆款精选复用二级页卡片，右侧我的成片", () => {
     const videos = [
       homepageVideo(1, { homepageRank: 20, likes: 999999 }),
       homepageVideo(2, { homepageRank: 1, likes: 1 }),
@@ -908,7 +908,9 @@ describe("V1.4 工作台首页爆款精选", () => {
     });
     useStudio.mockReturnValue(value);
     const { container } = render(<WorkbenchPage />);
-    const panel = container.querySelector<HTMLElement>(
+    const split = container.querySelector(".studio-home-split");
+    expect(split).not.toBeNull();
+    const panel = split?.querySelector<HTMLElement>(
       ".studio-home-recommendations",
     );
     if (!panel) throw new Error("未找到首页精选区域");
@@ -916,18 +918,24 @@ describe("V1.4 工作台首页爆款精选", () => {
     expect(
       within(panel).getByRole("heading", { name: "爆款视频精选" }),
     ).toBeInTheDocument();
-    expect(panel.previousElementSibling).toHaveClass("studio-home-works");
-    expect(panel.nextElementSibling).toBeNull();
+    // 左爆款在 DOM 中位于右成片之前（两列布局）。
+    expect(panel.previousElementSibling).toBeNull();
+    expect(panel.nextElementSibling).toHaveClass("studio-home-works");
+    // 卡片复用二级页 ViralCard 结构；工作台按 3 列铺排，最多两整行共 6 张。
+    expect(panel.querySelectorAll(".viral-card")).toHaveLength(5);
     expect(
-      within(panel)
-        .getAllByText(/^精选视频 \d$/)
-        .map((node) => node.textContent),
-    ).toEqual(["精选视频 2", "精选视频 4", "精选视频 3", "精选视频 1"]);
-    expect(panel.querySelectorAll(".studio-viral-mini")).toHaveLength(4);
-    expect(within(panel).queryByText("精选视频 5")).toBeNull();
-    fireEvent.click(
-      within(panel).getByRole("button", { name: "查看爆款：精选视频 2" }),
-    );
+      [...panel.querySelectorAll(".viral-card-title")].map(
+        (node) => node.textContent,
+      ),
+    ).toEqual([
+      "精选视频 2",
+      "精选视频 4",
+      "精选视频 3",
+      "精选视频 1",
+      "精选视频 5",
+    ]);
+    // 点标题进详情，返回目标为工作台。
+    fireEvent.click(within(panel).getByRole("button", { name: "精选视频 2" }));
     expect(value.navigate).toHaveBeenCalledWith("viral-detail", {
       selectedVideoId: videos[1].id,
       returnTo: "workbench",
@@ -974,8 +982,8 @@ describe("V1.4 工作台首页爆款精选", () => {
       "跨平台推荐 人工置首",
       "跨平台推荐 同平台次位",
       "跨平台推荐 同平台第三",
+      "跨平台推荐 第五张",
     ]);
-    expect(screen.queryByText("跨平台推荐 第五张")).toBeNull();
   });
 
   it.each([true, false])(

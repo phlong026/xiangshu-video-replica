@@ -1904,6 +1904,14 @@
   text-align: left;
   pointer-events: auto;
 }
+/* 全局 button:hover 会刷成主色底，标题悬停时若不还原底色，黄底配黄色文字
+   会让标题彻底看不见。封面的开启按钮同理需要复位。 */
+.viral-card-overlay-text .viral-card-title:not(:disabled):is(:hover, :active) {
+  background: none;
+}
+.viral-card .viral-card-cover-trigger:not(:disabled):is(:hover, :active) {
+  background: #171817;
+}
 
 .viral-card-overlay-text .viral-card-title:hover {
   color: #e5aa36;

@@ -937,6 +937,7 @@ export function ViralCard({
   onFavoriteChange,
   availability = "available",
   cacheProgress,
+  detailReturnTo = "viral",
 }: {
   video: StudioVideo;
   active: boolean;
@@ -945,6 +946,8 @@ export function ViralCard({
   onFavoriteChange?: (saved: boolean) => void;
   availability?: ViralVideoItem["availability"];
   cacheProgress?: ViralCacheProgress;
+  /** 详情页返回目标：爆款页列表默认 viral，工作台内嵌卡片回到 workbench。 */
+  detailReturnTo?: "viral" | "workbench";
 }) {
   const { review, navigate, notify, openLive } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
@@ -962,7 +965,7 @@ export function ViralCard({
   const openDetail = () => {
     navigate("viral-detail", {
       selectedVideoId: video.id,
-      returnTo: "viral",
+      returnTo: detailReturnTo,
     });
     persistViralDetailUrl(video);
   };
