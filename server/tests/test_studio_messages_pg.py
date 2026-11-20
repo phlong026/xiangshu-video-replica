@@ -132,7 +132,7 @@ def _seed(dsn: str) -> None:
             " min_recharge_fen_snapshot, recharge_step_fen_snapshot, amount_fen, "
             " credits, paid_at, prepay_id, code_url, transaction_id) "
             "VALUES ('ro-1','u1','ZH20261120001','wechat_native','PAID','INTERNAL',"
-            " 100, 100, 1000, 1000, 10000, 1000, (now() - interval '2 hours')::text,"
+            " 10, 10, 1000, 1000, 10000, 1000, (now() - interval '2 hours')::text,"
             " 'prepay-1','weixin://wxpay/bizpayurl?pr=test','txn-1')"
         )
         pg.execute(
