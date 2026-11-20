@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from app.db_portable import BusinessConnection
@@ -43,12 +43,25 @@ TIKHUB_BASE_URL = "https://api.tikhub.io"
 DOUYIN_GENERAL_SEARCH_PATH = "/api/v1/douyin/search/fetch_general_search_v2"
 WECHAT_SEARCH_VIDEOS_PATH = "/api/v1/wechat_search/v2/fetch_search_videos"
 WECHAT_VIDEO_DETAIL_PATH = "/api/v1/wechat_channels/v2/fetch_video_detail"
+# 账号诊断用：主页资料（按 sec_uid / 抖音号）与主页作品列表。
+DOUYIN_USER_PROFILE_PATH = "/api/v1/douyin/web/handler_user_profile"
+DOUYIN_USER_PROFILE_BY_UNIQUE_ID_PATH = "/api/v1/douyin/web/handler_user_profile_v2"
+DOUYIN_USER_POSTS_PATH = "/api/v1/douyin/app/v3/fetch_user_post_videos"
+# 账号诊断 L2 增强（星图）：公开拿不到的播放/完播/互动率只对已入驻星图的达人开放；
+# kolid 把 sec_uid 换成星图达人 ID，失败/未收录一律静默回落 L1。
+DOUYIN_XINGTU_KOL_ID_PATH = "/api/v1/douyin/xingtu/get_xingtu_kolid_by_sec_user_id"
+DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH = "/api/v1/douyin/xingtu_v2/get_author_homepage_videos"
 
 # 路径 → 计费元数据 api_type（后台成本报表按节点归集）。
 _API_TYPE_BY_PATH = {
     DOUYIN_GENERAL_SEARCH_PATH: "douyin_search",
     WECHAT_SEARCH_VIDEOS_PATH: "wechat_search_page",
     WECHAT_VIDEO_DETAIL_PATH: "wechat_video_detail",
+    DOUYIN_USER_PROFILE_PATH: "douyin_user_profile",
+    DOUYIN_USER_PROFILE_BY_UNIQUE_ID_PATH: "douyin_user_profile",
+    DOUYIN_USER_POSTS_PATH: "douyin_user_posts",
+    DOUYIN_XINGTU_KOL_ID_PATH: "douyin_xingtu_kol_id",
+    DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH: "douyin_xingtu_author_videos",
 }
 
 # 备用通道配置字段（加密供应商配置存储）。备用入口是主形态（同协议兼容域名），
@@ -285,6 +298,54 @@ class WechatSearchPage:
     videos: list[ViralVideo]
     cursor: str | None
     has_more: bool
+
+
+@dataclass(frozen=True)
+class DouyinUserProfile:
+    """账号主页资料：诊断打分只需要这些字段，播放/完播等增强字段不在公开接口."""
+
+    sec_user_id: str
+    unique_id: str | None
+    nickname: str
+    avatar_url: str | None
+    signature: str | None
+    province: str | None
+    city: str | None
+    ip_location: str | None
+    follower_count: int
+    following_count: int
+    total_favorited: int
+    aweme_count: int
+
+
+@dataclass(frozen=True)
+class DouyinUserPost:
+    aweme_id: str
+    title: str
+    created_at: int | None
+    digg_count: int
+    comment_count: int
+    share_count: int
+    collect_count: int
+    play_count: int | None
+    duration_ms: int | None
+
+
+@dataclass(frozen=True)
+class DouyinUserPostPage:
+    posts: list[DouyinUserPost]
+    max_cursor: int | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
+class DouyinXingtuVideoMetrics:
+    """星图达人单条作品的播放/完播/互动率（账号诊断 L2 口径的数据源）。"""
+
+    item_id: str
+    watch_cnt: int | None
+    finish_rate: float | None
+    interact_rate: float | None
 
 
 # 时间范围是对外中立的业务枚举；两个数据面取值不同，在此集中映射，
@@ -684,6 +745,142 @@ def _parse_viral_envelope(content: bytes) -> dict[str, Any]:
     return data
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    parsed = parse_compact_count(value) if isinstance(value, (str, int)) else None
+    return default if parsed is None else parsed
+
+
+def _as_optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    return parse_compact_count(value) if isinstance(value, (str, int)) else None
+
+
+def _as_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
+def _douyin_user_block(data: Mapping[str, Any]) -> Mapping[str, Any]:
+    """上游在 ``user`` / ``user_info`` / 顶层三种形态间摇摆，统一取同一层."""
+
+    for key in ("user", "user_info"):
+        nested = data.get(key)
+        if isinstance(nested, Mapping):
+            return nested
+    return data
+
+
+def _parse_douyin_user_profile(
+    data: Mapping[str, Any], *, fallback_sec_user_id: str
+) -> DouyinUserProfile:
+    block = _douyin_user_block(data)
+    avatar = _pick_image_url(block.get("avatar_larger")) or _pick_image_url(
+        block.get("avatar_medium")
+    )
+    return DouyinUserProfile(
+        sec_user_id=_as_text(block.get("sec_uid")) or fallback_sec_user_id,
+        unique_id=_as_text(block.get("unique_id")) or _as_text(block.get("short_id")),
+        nickname=_as_text(block.get("nickname")) or "",
+        avatar_url=avatar,
+        signature=_as_text(block.get("signature")),
+        province=_as_text(block.get("province")),
+        city=_as_text(block.get("city")),
+        ip_location=_as_text(block.get("ip_location")) or _as_text(block.get("ipLocation")),
+        follower_count=_as_int(block.get("follower_count")),
+        following_count=_as_int(block.get("following_count")),
+        total_favorited=_as_int(block.get("total_favorited")),
+        aweme_count=_as_int(block.get("aweme_count")),
+    )
+
+
+def _parse_douyin_user_posts(data: Mapping[str, Any]) -> DouyinUserPostPage:
+    items: Any = data.get("aweme_list")
+    if not isinstance(items, list):
+        nested = data.get("data")
+        items = nested.get("aweme_list") if isinstance(nested, Mapping) else None
+    posts: list[DouyinUserPost] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        aweme_id = _as_text(item.get("aweme_id"))
+        if not aweme_id:
+            continue
+        statistics = item.get("statistics")
+        stats = statistics if isinstance(statistics, Mapping) else {}
+        video = item.get("video")
+        video_block = video if isinstance(video, Mapping) else {}
+        duration = _as_optional_int(video_block.get("duration"))
+        posts.append(
+            DouyinUserPost(
+                aweme_id=aweme_id,
+                title=_as_text(item.get("desc")) or _as_text(item.get("title")) or "",
+                created_at=_as_optional_int(item.get("create_time")),
+                digg_count=_as_int(stats.get("digg_count")),
+                comment_count=_as_int(stats.get("comment_count")),
+                share_count=_as_int(stats.get("share_count")),
+                collect_count=_as_int(stats.get("collect_count")),
+                play_count=_as_optional_int(stats.get("play_count")),
+                duration_ms=duration,
+            )
+        )
+    max_cursor = _as_optional_int(data.get("max_cursor"))
+    has_more = bool(_as_int(data.get("has_more")))
+    return DouyinUserPostPage(posts=posts, max_cursor=max_cursor, has_more=has_more)
+
+
+def _as_optional_rate(value: Any) -> float | None:
+    """星图的率字段在 float 与 "45.6%" 字符串之间摇摆，统一成百分数."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().rstrip("%").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_douyin_xingtu_kol_id(data: Mapping[str, Any]) -> str | None:
+    block = _douyin_user_block(data)
+    for key in ("kol_id", "kolId", "id"):
+        value = block.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            text = str(value).strip()
+            if text and text != "0":
+                return text
+    return None
+
+
+def _parse_douyin_xingtu_videos(data: Mapping[str, Any]) -> list[DouyinXingtuVideoMetrics]:
+    items: Any = data.get("items")
+    if not isinstance(items, list):
+        nested = data.get("data")
+        items = nested.get("items") if isinstance(nested, Mapping) else None
+    metrics: list[DouyinXingtuVideoMetrics] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        item_id = _as_text(item.get("item_id")) or _as_text(item.get("aweme_id"))
+        if not item_id:
+            continue
+        metrics.append(
+            DouyinXingtuVideoMetrics(
+                item_id=item_id,
+                watch_cnt=_as_optional_int(item.get("watch_cnt")),
+                finish_rate=_as_optional_rate(item.get("finish_rate")),
+                interact_rate=_as_optional_rate(item.get("interact_rate")),
+            )
+        )
+    return metrics
+
+
 @dataclass(frozen=True)
 class _SourceChannel:
     """数据源的一个物理通道：入口 + 凭据（主/备结构相同，只是优先级不同）."""
@@ -782,6 +979,8 @@ class ViralSourceClient:
         payload: Mapping[str, Any],
         *,
         billing_units: int = 1,
+        method: str = "POST",
+        query: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """按主→备顺序请求；单次失败自动切下一通道，成功立即返回.
 
@@ -793,7 +992,13 @@ class ViralSourceClient:
         for index, channel in enumerate(channels):
             try:
                 data = self._request_once(
-                    transport, path, payload, channel=channel, billing_units=billing_units
+                    transport,
+                    path,
+                    payload,
+                    channel=channel,
+                    billing_units=billing_units,
+                    method=method,
+                    query=query,
                 )
             except ViralSourceError as exc:
                 last_error = exc
@@ -822,9 +1027,18 @@ class ViralSourceClient:
         *,
         channel: _SourceChannel,
         billing_units: int,
+        method: str = "POST",
+        query: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = f"{channel.base_url}{path}"
-        body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
+        if query:
+            url = f"{url}?{urlencode(query)}"
+        # 账号类接口是 GET：带 body 会被部分网关拒绝，这里只在非 GET 时编码请求体。
+        body = (
+            json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
+            if method.upper() != "GET"
+            else None
+        )
         headers = {
             "Authorization": f"Bearer {channel.api_key}",
             "Accept": "application/json",
@@ -847,7 +1061,7 @@ class ViralSourceClient:
             for attempt in range(1, max_attempts + 1):
                 try:
                     with meter_call("viral_data", units=billing_units) as metered_call:
-                        content = transport.request("POST", url, headers=headers, body=body)
+                        content = transport.request(method.upper(), url, headers=headers, body=body)
                         metered_call.record_usage()
                         return _parse_viral_envelope(content)
                 except ViralSourceHttpStatusError as exc:
@@ -957,6 +1171,101 @@ class ViralSourceClient:
             },
         )
         return self._douyin_videos_from_data(data, "")
+
+    # -- 账号诊断（抖音主页资料 / 作品列表）----------------------------------
+
+    def douyin_user_profile(self, *, sec_user_id: str) -> DouyinUserProfile:
+        """按 sec_uid 取主页资料。sec_uid 来自 ``douyin.com/user/{sec_uid}``.
+
+        这是账号诊断的必跑第一步：拿不到资料就不该继续扣客户积分。
+        """
+
+        identifier = sec_user_id.strip()
+        if not identifier:
+            raise ViralSourceError("账号链接缺少账号标识，请重新复制主页链接")
+        data = self._request(
+            self._transport,
+            DOUYIN_USER_PROFILE_PATH,
+            {},
+            method="GET",
+            query={"sec_user_id": identifier},
+        )
+        return _parse_douyin_user_profile(data, fallback_sec_user_id=identifier)
+
+    def douyin_user_profile_by_unique_id(self, *, unique_id: str) -> DouyinUserProfile:
+        """按抖音号取主页资料；纯数字/字母输入走这条路."""
+
+        identifier = unique_id.strip().lstrip("@")
+        if not identifier:
+            raise ViralSourceError("请输入抖音号")
+        data = self._request(
+            self._transport,
+            DOUYIN_USER_PROFILE_BY_UNIQUE_ID_PATH,
+            {},
+            method="GET",
+            query={"unique_id": identifier},
+        )
+        return _parse_douyin_user_profile(data, fallback_sec_user_id="")
+
+    def douyin_user_posts(
+        self,
+        *,
+        sec_user_id: str,
+        max_cursor: int = 0,
+        count: int = 20,
+        sort_type: int = 0,
+    ) -> DouyinUserPostPage:
+        """取主页作品列表；``count`` 上游上限 20，超出会被截断或报错，这里主动收口."""
+
+        identifier = sec_user_id.strip()
+        if not identifier:
+            raise ViralSourceError("账号链接缺少账号标识，请重新复制主页链接")
+        safe_count = max(1, min(count, 20))
+        data = self._request(
+            self._transport,
+            DOUYIN_USER_POSTS_PATH,
+            {},
+            method="GET",
+            query={
+                "sec_user_id": identifier,
+                "max_cursor": max(0, max_cursor),
+                "count": safe_count,
+                "sort_type": 0 if sort_type == 0 else 1,
+            },
+        )
+        return _parse_douyin_user_posts(data)
+
+    def douyin_xingtu_kol_id(self, *, sec_user_id: str) -> str | None:
+        """sec_uid → 星图达人 ID；未收录星图的账号返回 None（调用方回落 L1）."""
+
+        identifier = sec_user_id.strip()
+        if not identifier:
+            raise ViralSourceError("账号链接缺少账号标识，请重新复制主页链接")
+        data = self._request(
+            self._transport,
+            DOUYIN_XINGTU_KOL_ID_PATH,
+            {},
+            method="GET",
+            query={"sec_user_id": identifier},
+        )
+        return _parse_douyin_xingtu_kol_id(data)
+
+    def douyin_xingtu_author_videos(
+        self, *, o_author_id: str, page: int = 1
+    ) -> list[DouyinXingtuVideoMetrics]:
+        """星图达人主页作品列表：watch_cnt / finish_rate / interact_rate."""
+
+        identifier = o_author_id.strip()
+        if not identifier:
+            raise ViralSourceError("星图达人 ID 缺失，无法获取增强数据")
+        data = self._request(
+            self._transport,
+            DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH,
+            {},
+            method="GET",
+            query={"o_author_id": identifier, "page": max(1, page)},
+        )
+        return _parse_douyin_xingtu_videos(data)
 
     # -- 视频号 ---------------------------------------------------------------
 
@@ -1140,4 +1449,24 @@ def viral_source_client_from_settings(conn: BusinessConnection) -> ViralSourceCl
         config = SettingsRepository(conn).load_provider_config("tikhub")
     except SettingsUnavailableError as exc:
         raise ViralSourceUnavailable("爆款视频数据源暂不可用，请联系管理员") from exc
+    return viral_source_client_from_config(config)
+
+
+def account_diagnosis_disabled() -> bool:
+    """账号诊断的独立开关。
+
+    不复用 ``viral_feature_retired``：爆款搜索线已经下线，但账号诊断是独立业务，
+    否则要么诊断上不了线，要么为了诊断把已下线的搜索接口一起放出来。
+    """
+
+    return os.environ.get("ACCOUNT_DIAGNOSIS_DISABLED", "0") == "1"
+
+
+def account_diagnosis_client_from_settings(conn: BusinessConnection) -> ViralSourceClient:
+    if account_diagnosis_disabled():
+        raise ViralSourceUnavailable("账号诊断暂未开放。")
+    try:
+        config = SettingsRepository(conn).load_provider_config("tikhub")
+    except SettingsUnavailableError as exc:
+        raise ViralSourceUnavailable("账号诊断数据源暂不可用，请联系管理员") from exc
     return viral_source_client_from_config(config)

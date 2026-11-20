@@ -12,8 +12,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from app.account_admin_routes import router as account_admin_router
+from app.account_diagnosis_routes import router as account_diagnosis_router
 from app.account_migration_routes import router as account_migration_router
 from app.activation_code_routes import router as customer_activation_router
+from app.admin_account_diagnosis_routes import router as admin_account_diagnosis_router
 from app.admin_activation_routes import router as admin_activation_router
 from app.admin_analysis_parse_stats_routes import router as analysis_parse_stats_router
 from app.admin_audit_routes import router as admin_audit_router
@@ -459,6 +461,8 @@ app.include_router(export_router)  # Admin report export functionality
 app.include_router(settings_router)
 app.include_router(media_router)
 app.include_router(analysis_router)
+app.include_router(account_diagnosis_router)
+app.include_router(admin_account_diagnosis_router)
 app.include_router(viral_router)
 app.include_router(viral_import_router)
 app.include_router(viral_search_router)

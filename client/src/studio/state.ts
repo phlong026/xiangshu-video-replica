@@ -22,6 +22,7 @@ export const pageTitles: Record<StudioPage, string> = {
   workbench: "工作台",
   viral: "爆款视频",
   "viral-detail": "爆款视频详情",
+  "account-diagnosis": "账号诊断",
   copy: "文案工坊",
   replica: "视频拆解",
   "long-replica": "长视频拆解",
@@ -182,6 +183,8 @@ export function navigateStudioState(
     ...state,
     viralReplicateIntent: false,
     viralExtractIntent: false,
+    // 直达意图是单发的：不在 patch 里就清掉，避免残留旧意图在换页时误触发。
+    replicateIntentLink: undefined,
     selectedVideoId: undefined,
     selectedTaskId: keepTaskContext ? state.selectedTaskId : undefined,
     selectedTaskKind: keepTaskContext ? state.selectedTaskKind : undefined,

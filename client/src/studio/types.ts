@@ -6,10 +6,13 @@ import type {
   SavedPromptItem,
 } from "../api";
 
+import type { WorkspaceShellProps } from "../workspace-shell";
+
 export type StudioPage =
   | "workbench"
   | "viral"
   | "viral-detail"
+  | "account-diagnosis"
   | "copy"
   | "replica"
   | "long-replica"
@@ -388,6 +391,10 @@ export type StudioState = {
   viralReplicateIntent?: boolean;
   /** 爆款卡片「提取文案」直达意图——进详情后按详情页双端分流发起提取。 */
   viralExtractIntent?: boolean;
+  /** 工作台识别到账号主页链接后带过来的原文；诊断页用它做初始输入。 */
+  accountDiagnosisInput?: string;
+  /** 诊断报告「一键拆解」直达意图：带上作品链接进工作台自动发起复刻导入。 */
+  replicateIntentLink?: string;
   selectedPersonId?: string;
   savedScripts: StudioScript[];
   favorites: string[];
@@ -418,6 +425,8 @@ export type StudioContextValue = {
   referenceAssetsError?: boolean;
   retryReferenceAssets?: () => void;
   draftSaveStatus?: "idle" | "dirty" | "saving" | "saved" | "error";
+  /** 客户侧充值弹窗依赖的会话与凭据；未登录/内部评审时为 undefined。 */
+  customerAccount?: WorkspaceShellProps["customerAccount"];
   navigate: (page: StudioPage, patch?: Partial<StudioState>) => void;
   patchDraft: (
     patch: Partial<StudioDraft>,
