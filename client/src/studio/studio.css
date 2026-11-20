@@ -682,19 +682,36 @@ html:has(.studio-shell) {
   width: max-content;
   margin-bottom: 12px;
 }
-.studio-home-creation,
-.studio-home-works,
-.studio-home-recommendations {
+.studio-home-creation {
   width: min(1180px, 100%);
   min-width: 0;
   margin: 0 auto 18px;
-}
-.studio-home-creation {
   padding: clamp(16px, 2.5vw, 34px);
   border: 1px solid #443720;
   border-radius: 16px;
   background:
     radial-gradient(ellipse at top, #292217, transparent 78%), #121313;
+}
+/* 两列工作台：左「爆款视频精选」、右「我的成片」。窄屏回落单列。 */
+.studio-home-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.88fr);
+  gap: 18px;
+  width: min(1180px, 100%);
+  min-width: 0;
+  margin: 0 auto 18px;
+  align-items: start;
+}
+.studio-home-split > .studio-home-works,
+.studio-home-split > .studio-home-recommendations {
+  width: auto;
+  min-width: 0;
+  margin: 0;
+}
+/* 未登录时精选不包在两列容器里，独占整宽。 */
+.studio-home > .studio-home-recommendations {
+  width: min(1180px, 100%);
+  margin: 0 auto 18px;
 }
 .studio-hero {
   text-align: center;
@@ -731,98 +748,168 @@ html:has(.studio-shell) {
   background: #171817;
   border-radius: 8px;
 }
-.studio-works-row,
-.studio-viral-compact-row {
+/* 两列内的空态引导卡：避免一列有内容、另一列只剩空白。 */
+.studio-home-empty-card {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 10px;
-  overflow-x: auto;
-  padding: 2px 2px 6px;
+  padding: 18px 16px;
+  border: 1px dashed #35362f;
+  border-radius: 10px;
+  background: #141514;
+  color: #a9aca4;
+  font-size: var(--font-label);
 }
-.studio-work-card,
-.studio-viral-mini {
-  position: relative;
-  flex: none;
-  width: clamp(128px, 15vw, 176px);
+.studio-home-empty-card strong {
+  color: #d8d9d2;
+  font-weight: 500;
+  font-size: var(--font-body);
+}
+/* 爆款精选：复用二级页 ViralCard，2 列网格自然等比缩小。 */
+.studio-home-viral-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.studio-home-viral-grid .viral-card {
+  font-size: var(--font-caption);
+}
+.studio-home-viral-grid .viral-card-body {
+  padding: 8px;
+}
+.studio-home-viral-grid .viral-card-body > .content-card-actions {
+  gap: 4px;
+}
+.studio-home-viral-grid
+  .viral-card-body
+  > .content-card-actions
+  .studio-button {
+  min-height: 26px;
+  padding: 2px 4px;
+  font-size: var(--font-caption);
+}
+/* 我的成片：左封面、右信息的横向列表卡，条目少时也不会留大片空白。 */
+.studio-works-summary {
+  margin: 0 0 10px;
+  color: #85897e;
+  font-size: var(--font-label);
+}
+.studio-works-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.studio-work-card {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
   min-width: 0;
+  padding: 8px;
   border: 1px solid #292a27;
   border-radius: 10px;
   background: #171817;
-  padding: 6px;
+  transition: border-color 0.15s ease;
 }
-.studio-viral-mini {
-  width: 118px;
-}
-.studio-work-open,
-.studio-viral-mini-open {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 100%;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  color: #ecece8;
-}
-/* 覆盖全局主按钮的悬停底色和按下缩放，保持缩略图与文字位置稳定。 */
-.studio-viral-mini-open:not(:disabled):is(:hover, :active) {
-  background: transparent;
-  transform: none;
-}
-.studio-viral-mini:hover,
-.studio-viral-mini:focus-within {
+.studio-work-card:hover,
+.studio-work-card:focus-within {
   border-color: #75602d;
 }
-.studio-work-open > .video-preview {
-  aspect-ratio: 16 / 9;
+.studio-work-cover {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 104px;
+  aspect-ratio: 9 / 16;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: #0e0f0e;
+  cursor: pointer;
+  overflow: hidden;
 }
-.studio-viral-mini-open
+.studio-work-cover > .video-preview {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+.studio-work-cover
   > .video-preview.video-preview--fit
   > img.video-preview__foreground {
   object-fit: cover;
 }
-.studio-work-open strong,
-.studio-viral-mini-title,
-.studio-viral-mini-tags {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: var(--font-caption);
-  font-weight: 500;
+.studio-work-play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 16px;
+  opacity: 0;
+  background: linear-gradient(180deg, transparent 45%, #000000a8 100%);
+  transition: opacity 0.15s ease;
+  pointer-events: none;
 }
-.studio-viral-mini-title {
+.studio-work-card:hover .studio-work-play,
+.studio-work-card:focus-within .studio-work-play {
+  opacity: 1;
+}
+.studio-work-type {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #080909cc;
+  color: #e8e2cf;
+  font-size: var(--font-caption);
+}
+.studio-work-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 2px 2px 0;
+}
+.studio-work-title {
   display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   white-space: normal;
   overflow-wrap: anywhere;
+  color: #ecece8;
+  font-size: var(--font-body);
+  font-weight: 500;
+  line-height: 1.45;
 }
-.studio-viral-mini-tags {
-  color: #a9aca4;
+.studio-work-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
-.studio-viral-mini > .viral-card-favorite {
-  position: absolute;
-  right: 4px;
-  top: 4px;
-  padding: 4px;
-  min-width: 30px;
-  min-height: 30px;
-  background: #080909e6;
+.studio-work-count {
+  color: #9a9b95;
+  font-size: var(--font-caption);
+}
+.studio-work-time {
+  margin-left: auto;
+  color: #767a70;
+  font-size: var(--font-caption);
+  white-space: nowrap;
 }
 .studio-work-actions {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  margin-top: 4px;
+  gap: 6px;
+  margin-top: auto;
 }
 .studio-work-actions .studio-button {
   min-height: 28px;
-  padding: 2px 5px;
+  padding: 3px 8px;
   font-size: var(--font-caption);
 }
 .studio-home-progress {
@@ -1555,6 +1642,10 @@ html:has(.studio-shell) {
 @media (max-width: 1100px) {
   .studio-result-grid,
   .studio-profile-grid {
+    grid-template-columns: 1fr;
+  }
+  /* 工作台两列在窄屏回落为上下排列。 */
+  .studio-home-split {
     grid-template-columns: 1fr;
   }
   .studio-global-search {

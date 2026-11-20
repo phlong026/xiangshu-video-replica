@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { VideoPreview } from "../VideoPreview";
-import { persistViralDetailUrl, ViralFavoriteButton } from "./ContentPages";
+import { ViralCard } from "./ContentPages";
 import { useStudio } from "./context";
 import { loadViralVideos } from "./live";
 import type { StudioVideo, StudioViralTiming } from "./types";
-import { Button, Icon, Panel } from "./ui";
+import { Button, Panel } from "./ui";
 import { isPublishedViralVideo } from "./viralVisibility";
 
 type HomepageResult = Awaited<ReturnType<typeof loadViralVideos>>;
@@ -24,6 +23,10 @@ function clockOffset(
     : 0;
 }
 
+// 工作台两列布局下卡片按二级页尺寸渲染，一行两张即可保持左右列高度协调；
+// 更多精选通过「查看全部爆款」进入列表页。
+const HOMEPAGE_CARD_LIMIT = 2;
+
 function selectHomepageVideos(videos: StudioVideo[]) {
   // 各平台的置顶序号独立分配；队首按推送时间合并，避免新平台上传被旧负序号挤走。
   const groups = new Map<string, StudioVideo[]>();
@@ -41,7 +44,7 @@ function selectHomepageVideos(videos: StudioVideo[]) {
   const pushedTime = (video?: StudioVideo) =>
     Date.parse(video?.pushedAt ?? "") || 0;
   const selected: StudioVideo[] = [];
-  while (selected.length < 4) {
+  while (selected.length < HOMEPAGE_CARD_LIMIT) {
     const queues = [...groups.values()]
       .filter((queue) => queue.length > 0)
       .sort((left, right) => pushedTime(right[0]) - pushedTime(left[0]));
@@ -182,57 +185,36 @@ function HomepageRecommendations() {
         </Button>
       </div>
       {videos.length ? (
-        <div className="studio-viral-compact-row">
+        <div className="studio-home-viral-grid">
           {videos.map((video) => (
-            <article key={video.id} className="studio-viral-mini">
-              <button
-                type="button"
-                className="studio-viral-mini-open"
-                aria-label={`查看爆款：${video.title}`}
-                onClick={() => {
-                  navigate("viral-detail", {
-                    selectedVideoId: video.id,
-                    returnTo: "workbench",
-                  });
-                  persistViralDetailUrl(video);
-                }}
-              >
-                <VideoPreview
-                  fitContainer
-                  poster={video.poster}
-                  fallback={<Icon name="video" size={28} />}
-                />
-                <strong className="studio-viral-mini-title" title={video.title}>
-                  {video.title}
-                </strong>
-                {video.tags?.length ? (
-                  <span className="studio-viral-mini-tags">
-                    {video.tags
-                      .slice(0, 2)
-                      .map((tag) => `#${tag}`)
-                      .join(" ")}
-                  </span>
-                ) : null}
-              </button>
-              <ViralFavoriteButton
-                compact
-                video={video}
-                savedFromServer={
-                  review ? undefined : (favorites[video.id] ?? video.isFavorite)
-                }
-                onSavedChange={(saved) =>
-                  setFavorites((current) => ({ ...current, [video.id]: saved }))
-                }
-              />
-            </article>
+            <ViralCard
+              key={video.id}
+              video={video}
+              active={false}
+              onActivate={() => {}}
+              detailReturnTo="workbench"
+              savedFromServer={
+                review ? undefined : (favorites[video.id] ?? video.isFavorite)
+              }
+              onFavoriteChange={(saved) =>
+                setFavorites((current) => ({ ...current, [video.id]: saved }))
+              }
+            />
           ))}
         </div>
       ) : (
-        <p className="studio-home-empty" role="status">
-          {loading || (review && data.loading)
-            ? "正在读取推荐视频"
-            : "暂无推荐视频"}
-        </p>
+        <div className="studio-home-empty-card" role="status">
+          <strong>
+            {loading || (review && data.loading)
+              ? "正在读取推荐视频"
+              : "暂无推荐视频"}
+          </strong>
+          {!loading && !(review && data.loading) ? (
+            <Button variant="outline" onClick={() => navigate("viral")}>
+              去爆款库逛逛
+            </Button>
+          ) : null}
+        </div>
       )}
     </Panel>
   );
