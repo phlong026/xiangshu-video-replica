@@ -1,4 +1,5 @@
 server/tests/test_activation_code_schema.py
+server/tests/test_admin_analysis_parse_stats.py
 server/tests/test_admin_business_overview.py
 server/tests/test_admin_customer_annotations.py
 server/tests/test_admin_customer_benefits.py

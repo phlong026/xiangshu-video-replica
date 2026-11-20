@@ -335,6 +335,42 @@ def test_failed_calls_keep_more_body_than_successful_ones() -> None:
     assert failed.method == "POST"
 
 
+def test_content_chain_success_keeps_full_body() -> None:
+    """拆解/复刻提示词的成功正文按失败口径留存（2026-11-20 空壳事故复盘）。
+
+    4 KB 摘要会把 analysis.shots 从中间截断，正常样本变得不可解析；内容类
+    链路的成功响应本身就是业务产出，必须留全。其余链路保持 4 KB 摘要。
+    """
+    body = json.dumps({"analysis": {"summary": "x" * (5 * 1024)}})
+    assert len(body.encode("utf-8")) > SUCCEEDED_BODY_LIMIT
+
+    for task_type in ("ANALYSIS", "REPLICA_PROMPT"):
+        with external_call_context(task_type, "task-1"):
+            kept = prepare_external_call(
+                provider="p",
+                endpoint="e",
+                method="post",
+                url=None,
+                outcome="SUCCEEDED",
+                response_body=body,
+            )
+        assert kept.response_body == body
+        assert kept.response_truncated is False
+
+    with external_call_context("VIDEO_GENERATION", "task-2"):
+        summarized = prepare_external_call(
+            provider="p",
+            endpoint="e",
+            method="post",
+            url=None,
+            outcome="SUCCEEDED",
+            response_body=body,
+        )
+    assert summarized.response_body is not None
+    assert len(summarized.response_body) == SUCCEEDED_BODY_LIMIT
+    assert summarized.response_truncated is True
+
+
 def test_success_summary_uses_utf8_bytes_and_does_not_mislabel_redaction() -> None:
     call = prepare_external_call(
         provider="p",
