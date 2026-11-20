@@ -105,16 +105,17 @@ def _seed_package_order(
         }
     )
     raw.execute(
-        "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, status, "
-        "pricing_scope, base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
+        "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, provider_trade_no, "
+        "status, pricing_scope, base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
         "min_recharge_fen_snapshot, recharge_step_fen_snapshot, amount_fen, credits, "
         "package_id, package_snapshot_json, paid_at) "
-        "VALUES (%s, %s, %s, 'zpay', 'PAID', 'CUSTOMER_STANDARD', "
+        "VALUES (%s, %s, %s, 'zpay', %s, 'PAID', 'CUSTOMER_STANDARD', "
         "10000, 10000, 10000, 1000, %s, %s, %s, %s, %s)",
         (
             f"diag-order-{uuid4().hex}",
             user_id,
             f"DIAG-{uuid4().hex}",
+            f"DIAG-TRADE-{uuid4().hex}",
             amount_fen,
             credits,
             package_id,
@@ -131,6 +132,17 @@ def _seed_wallet(raw: psycopg.Connection, user_id: str, credits: int) -> None:
         "VALUES (%s, %s, 0, %s) ON CONFLICT (user_id) DO UPDATE SET "
         "available_credits=excluded.available_credits, reserved_credits=0",
         (user_id, credits, datetime.now(UTC).isoformat()),
+    )
+
+
+def _seed_tariff(raw: psycopg.Connection) -> None:
+    """route_state 的 TRUNCATE users CASCADE 会连坐 billing_tariffs（updated_by_user_id
+    引用 users），迁移种子被清掉——按迁移同款默认值重建。"""
+
+    raw.execute(
+        "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_cost_fen, "
+        "unit_rounding) VALUES ('account_diagnosis', true, 8, 5, 'exact') "
+        "ON CONFLICT (service) DO NOTHING"
     )
 
 
@@ -166,12 +178,19 @@ def test_paid_package_requires_a_package_order_with_credits(client, route_state)
         assert has_paid_package(conn, member) is False
 
         raw.execute(
-            "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, status, "
-            "pricing_scope, base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
-            "min_recharge_fen_snapshot, recharge_step_fen_snapshot, amount_fen, credits) "
-            "VALUES (%s, %s, %s, 'zpay', 'PAID', 'CUSTOMER_STANDARD', "
-            "10000, 10000, 10000, 1000, 10000, 1)",
-            (f"diag-plain-{uuid4().hex}", plain, f"PLAIN-{uuid4().hex}"),
+            "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, "
+            "provider_trade_no, status, pricing_scope, base_unit_price_fen_snapshot, "
+            "charged_unit_price_fen_snapshot, min_recharge_fen_snapshot, "
+            "recharge_step_fen_snapshot, amount_fen, credits, paid_at) "
+            "VALUES (%s, %s, %s, 'zpay', %s, 'PAID', 'CUSTOMER_STANDARD', "
+            "10000, 10000, 10000, 1000, 10000, 1, %s)",
+            (
+                f"diag-plain-{uuid4().hex}",
+                plain,
+                f"PLAIN-{uuid4().hex}",
+                f"PLAIN-TRADE-{uuid4().hex}",
+                datetime.now(UTC),
+            ),
         )
         # 自定义金额订单没有 package_id，不算会员。
         assert has_paid_package(conn, plain) is False
@@ -189,6 +208,7 @@ def test_diagnosis_gate_and_billing(client, route_state, monkeypatch) -> None:
 
     with psycopg.connect(route_state) as raw:
         conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
 
         first = create_diagnosis(
             conn,
@@ -227,6 +247,7 @@ def test_paid_member_is_charged_the_configured_price(client, route_state, monkey
 
     with psycopg.connect(route_state) as raw:
         conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
         _seed_package_order(raw, user_id)
         _seed_wallet(raw, user_id, 100)
 

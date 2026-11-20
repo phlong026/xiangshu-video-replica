@@ -65,7 +65,7 @@ __all__ = ["_clear_dependency_overrides", "client", "cw068_dsn", "holder", "lane
 
 BROWSER = "/api/studio/publish/browser"
 RECORDS = "/api/studio/publish/records"
-HEAD = "20261117T1000_kuaishou_publish_platform"
+HEAD = "20261120T1000_account_diagnosis"
 PREVIOUS_HEAD = "20261116T1000_recharge_orders_closed_at"
 _TABLES = ("publish_browser_accounts", "publish_browser_logins", "publish_records")
 _OLD_PLATFORMS = {"douyin", "wechat_channels", "xiaohongshu"}

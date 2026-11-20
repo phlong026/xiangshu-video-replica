@@ -116,7 +116,9 @@ REPO_ROOT = SERVER_DIR.parent
 # columns +1、partial_indexes +1，表名集与其余计数不变；digest 在空库→新
 # head 的 PG16 探针库重算；20261117T1000_kuaishou_publish_platform 再追加
 # 发布域三表平台 CHECK 的快手值，计数不变，digest 随约束定义重算。
-HEAD_REVISION = "20261117T1000_kuaishou_publish_platform"
+# 20261120T1000_account_diagnosis（账号诊断 P0）再追加两张表并种子价目行，
+# counts/表名集/digest 均按上方 HEAD_SCHEMA_COUNTS 注释重算。
+HEAD_REVISION = "20261120T1000_account_diagnosis"
 
 
 @pytest.mark.pg
@@ -455,17 +457,23 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 故 columns +1、partial_indexes +1；digest 在空库→新 head 的 PG16 探针库重算。
 # 2026-11-17 快手发布：仅替换 publish_browser_accounts / publish_browser_logins /
 # publish_records 的平台 CHECK，约束名和计数均不变，digest 随定义重算。
+# 20261120T1000_account_diagnosis（账号诊断 P0）追加两张表：account_diagnosis_reports
+# （21 列，含 3 timestamptz 中的 2 个 + 2 FK + 3 ix，其中幂等键为 partial 唯一）与
+# account_diagnosis_free_grants（5 列，1 timestamptz + 1 FK + user 唯一 + device
+# partial 唯一），并种子 account_diagnosis 价目行；故 tables +2、columns +26、
+# foreign_keys +3、primary_keys +2、partial_indexes +2、timestamptz_columns +3，
+# 其余计数不变，digest 在空库→新 head 的 PG16 探针库重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "check_constraints": 409,
-    "columns": 1586,
-    "foreign_keys": 221,
+    "columns": 1612,
+    "foreign_keys": 224,
     "identity_columns": 0,
     "jsonb_columns": 16,
-    "partial_indexes": 50,
-    "primary_keys": 140,
+    "partial_indexes": 52,
+    "primary_keys": 142,
     "sequences": 8,
-    "tables": 140,
-    "timestamptz_columns": 131,
+    "tables": 142,
+    "timestamptz_columns": 134,
     "triggers": 61,
     "unique_constraints": 45,
 }
@@ -489,6 +497,8 @@ HEAD_SCHEMA_COUNTS: dict[str, int] = {
 # （blank/known/self_register-has-password），090 之上重挂 20260912T1400 后探针再重算
 # （columns +2=938、check_constraints +3=236，digest b678939f…，表名集不变）。
 HEAD_TABLE_NAMES: tuple[str, ...] = (
+    "account_diagnosis_free_grants",
+    "account_diagnosis_reports",
     "activation_code_activations",
     "activation_code_batches",
     "activation_code_deliveries",
@@ -737,7 +747,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 重算（实测计数与上方 HEAD_SCHEMA_COUNTS 完全一致）。
 # 2026-11-17 快手发布：隔离 PG 探针先验证上一 head 的冻结摘要，再追加本迁移
 # 重算；表名集与计数完全相同，仅三条平台 CHECK 的定义变化。
-HEAD_SCHEMA_DIGEST = "a0f0924aa9ca36388698e8a8d7565301fc11537a362bcc548813031397ca1bf8"
+HEAD_SCHEMA_DIGEST = "962779d77110fc3ee2828028b2358443f7a7e2e554f938f43a571031a84a55e4"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
