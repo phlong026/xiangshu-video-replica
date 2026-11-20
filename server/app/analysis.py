@@ -40,26 +40,24 @@ REPLICA_PROMPT_KIND = "replica_prompt"
 REPLICA_PROMPT_SCHEMA_VERSION = "replica-prompt.v1"
 SCHEMA_VERSION = "b3.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
-# ANALYSIS 链路的结构化输出约束（2026-11-17 生产探测确认网关透传
-# json_schema 且 schema 生效）：只约束顶层信封三键的存在与类型，字段级
-# 合同仍由 ProviderShotCard 严格解析承担——顶层引导消除「模型自由发挥
-# 信封结构」类失败，又不与 Pydantic 模型耦合（strict=false 不要求全字段
-# 列举，模型升级加字段不会 400）。传输层的裸换行注入（探测显示
-# json_schema 下依旧存在）由解析链兜底，与本约束正交。
-ANALYSIS_RESPONSE_JSON_SCHEMA = {
-    "name": "analysis_h3_v1",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "schema_version": {"type": "string"},
-            "analysis": {"type": "object"},
-            "generation_prompt": {"type": "object"},
-        },
-        "required": ["analysis"],
-        "additionalProperties": True,
-    },
-}
-_JSON_SCHEMA_RESPONSE_FORMAT = {"type": "json_schema", "json_schema": ANALYSIS_RESPONSE_JSON_SCHEMA}
+# 视频拆解的结构化输出格式：只要求「是一个 JSON 对象」（json_object）。
+#
+# 2026-11-17（#144）曾把这里换成顶层 json_schema 信封约束，用来消除「模型
+# 自由发挥信封结构」的失败。信封确实稳了，但代价是空壳：那份 schema 把
+# analysis 声明成没有 properties 的自由对象（required 只到 analysis 这一层），
+# 等于对上游说「空对象也是合法答案」。上游在严格应用 schema 的账号/后端上
+# 就按语法把 analysis 解成 {}，41 个 token 便 finish_reason=stop。
+#
+# 生产证据（2026-11-20 任务 e43220c1 / 报障 F82C66E9）：
+#   - 首调 5911 prompt → 41 completion，正文是 {"analysis":{}}，耗时 10.8s；
+#   - 自动修复重问（json_object）只能把空壳抄成空串 + shots:[]；
+#   - 同期回归：11-17 之前跑 json_object 的 156 次成功调用里空壳 0 次，
+#     completion 最低 505、中位 831；11-17 之后 143 次 json_schema 首调里
+#     30 次（21%）是空壳。
+#
+# 结论：信封约束只该在「schema 能写全字段」时启用；只约束信封 = 保证空对象。
+# 想重新引入必须先给 analysis/shots 写全 properties + required，并在网关
+# 侧做 A/B 探测，不能只声明信封。空壳本身的兜底见 EmptyAnalysisPayload。
 _JSON_OBJECT_RESPONSE_FORMAT = {"type": "json_object"}
 # 图像语义检查（人物识别源图、首帧复核）2026-09-26 起与视频拆解统一用
 # gemini-3.8-flash：业务确认两链路同用正式版 flash。此前单独留在 preview 名
@@ -356,6 +354,43 @@ class AnalysisProviderFailed(RuntimeError):
         self.failover_note = failover_note
 
 
+class EmptyAnalysisPayload(ValueError):
+    """上游返回了合法 JSON，但分析内容是空的（2026-11-20 F82C66E9）。
+
+    与格式错误严格区分：格式错误可以靠「重问一次修 JSON」救回来，空内容
+    救不回来——修复指令要求「保持内容与字段完全不变，只修格式」，模型只会
+    把空壳抄成空字符串 + ``shots: []``（生产实测 153→135 token，二次校验
+    依旧失败）。所以空结果必须单独归类、跳过修复重问。
+    """
+
+
+# 判定「空壳」只看业务内容：没有任何镜头、且全部叙述字段为空。
+# 只命中「结构对、内容零」这一种形态；有 summary 但缺 shots 的残缺输出
+# 仍走原有校验/修复通道，不当成空壳。
+_ANALYSIS_TEXT_FIELDS = (
+    "summary",
+    "theme",
+    "visual_style",
+    "pace",
+    "camera_language",
+    "original_script",
+)
+
+
+def _analysis_payload_is_empty(payload: dict[str, Any]) -> bool:
+    # 兼容三种已知形态：带 schema_version 的信封、只有 analysis 键的信封、
+    # 以及早期 json_object 常见的扁平输出（字段直接放顶层）。
+    nested = payload.get("analysis")
+    candidate = nested if isinstance(nested, dict) else payload
+    shots = candidate.get("shots")
+    if isinstance(shots, list) and shots:
+        return False
+    return not any(
+        isinstance(candidate.get(field), str) and candidate[field].strip()
+        for field in _ANALYSIS_TEXT_FIELDS
+    )
+
+
 def _is_timeout_failure(exc: Exception) -> bool:
     """区分网络超时与连接失败——仅作诊断分类（``failure_kind``）。
 
@@ -631,7 +666,7 @@ class ApilioGemini:
         payload = {
             "model": self.model,
             "temperature": 0,
-            "response_format": _JSON_SCHEMA_RESPONSE_FORMAT,
+            "response_format": _JSON_OBJECT_RESPONSE_FORMAT,
             "messages": [
                 {
                     "role": "user",
@@ -688,7 +723,7 @@ class ApilioGemini:
             {
                 "model": self.model,
                 "temperature": 0,
-                "response_format": _JSON_SCHEMA_RESPONSE_FORMAT,
+                "response_format": _JSON_OBJECT_RESPONSE_FORMAT,
                 "messages": [
                     {"role": "system", "content": instruction},
                     {
@@ -870,28 +905,6 @@ class ApilioGemini:
                     with external_call_model(model):
                         return self._complete_once(payload)
                 except AnalysisProviderFailed as exc:
-                    # json_schema 结构化输出仅在主模型上做过生产探测（2026-11-17）；
-                    # 换道到的备选模型若不识别该参数（HTTP 400），退回 json_object
-                    # 立即重发——只降格式约束，不放弃这次任务。输出上限类 400
-                    # 不在此列：那是 max_tokens 预算问题，降格式救不了，交给
-                    # _complete_video 的预算回退通道。
-                    reason_text = str((exc.upstream_diagnostic or {}).get("reason") or "")
-                    if (
-                        exc.failure_phase == HTTP_FAILURE_PHASE
-                        and exc.http_status == 400
-                        and not _OUTPUT_LIMIT_PATTERN.search(reason_text)
-                        and (payload.get("response_format") or {}).get("type") == "json_schema"
-                    ):
-                        logger.warning(
-                            "%s 模型 %s 不支持 json_schema（HTTP 400），降级 json_object 重发",
-                            analysis_log_ref(),
-                            model,
-                        )
-                        payload = {
-                            **payload,
-                            "response_format": _JSON_OBJECT_RESPONSE_FORMAT,
-                        }
-                        continue
                     last_failure = exc
                     if (
                         tracker is not None
@@ -1341,6 +1354,8 @@ def analyze_video(
             payload = payload.get("analysis")
         if not isinstance(payload, dict):
             raise ValueError("analysis must be an object")
+        if _analysis_payload_is_empty(payload):
+            raise EmptyAnalysisPayload("analysis payload carries no content")
         if generation_context is not None:
             for key, value in generation_context.get("media_info", {}).items():
                 if key in ("fps", "resolution", "aspect_ratio"):
@@ -1352,6 +1367,21 @@ def analyze_video(
 
     try:
         analysis, candidate = _unwrap_analysis_payload(response.text)
+    except EmptyAnalysisPayload as exc:
+        # 空壳不是格式问题：重问「只修格式」只会把空内容再抄一遍，白烧一次
+        # 付费调用（2026-11-20 实测修复后仍是空串 + shots:[]）。直接按
+        # 「上游没给内容」归类，允许用户重试，并给出与事实一致的文案。
+        logger.warning("%s 拆解返回空结果：上游未产出任何分析内容", analysis_log_ref())
+        raise AnalysisProviderFailed(
+            "拆解服务未返回有效分析内容，请重新拆解。",
+            failure_phase=RESPONSE_FAILURE_PHASE,
+            retryable=True,
+            upstream_diagnostic={
+                "http_status": None,
+                "failure_phase": RESPONSE_FAILURE_PHASE,
+                "reason": "empty_analysis",
+            },
+        ) from exc
     except (json.JSONDecodeError, ValidationError, ValueError) as exc:
         logger.warning("Video analysis validation failed: %s", _validation_diagnostic(exc))
         # P2 re-ask：把坏输出与解析错误喂回同模型定向修复一次（纯文本调用，
@@ -1386,6 +1416,20 @@ def analyze_video(
                     "%s 格式修复重问成功，拆解结果已恢复",
                     analysis_log_ref(),
                 )
+            except EmptyAnalysisPayload as still_empty:
+                # 修复后仍为空 = 上游确实没产出内容，按空结果归类（可重试），
+                # 不能谎称「格式修复失败」。
+                logger.warning("%s 格式修复后仍为空结果：上游未产出分析内容", analysis_log_ref())
+                raise AnalysisProviderFailed(
+                    "拆解服务未返回有效分析内容，请重新拆解。",
+                    failure_phase=RESPONSE_FAILURE_PHASE,
+                    retryable=True,
+                    upstream_diagnostic={
+                        "http_status": None,
+                        "failure_phase": RESPONSE_FAILURE_PHASE,
+                        "reason": "empty_analysis_after_repair",
+                    },
+                ) from still_empty
             except (json.JSONDecodeError, ValidationError, ValueError) as revalidated:
                 logger.warning(
                     "Video analysis validation failed after re-ask: %s",

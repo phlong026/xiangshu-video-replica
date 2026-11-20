@@ -120,16 +120,15 @@ def test_h3_context_path_falls_over_too() -> None:
 def test_retired_model_http_400_falls_over() -> None:
     """复刻 2026-09-20 事故：上游下线模型表现为 HTTP 400，换模型就能活。
 
-    json_schema 400 降级分支会先在主模型上用 json_object 重发一次（P0 的
-    兼容路径）；仍 400 才按原语义换道到备选模型。
+    视频入口固定发 json_object（2026-11-20 撤掉信封 schema，见 app.analysis
+    里的长注释），不存在「json_schema 400 → 降级重发」的中间路径，400 直接
+    按换道规则处理。
     """
-    provider, transport = _provider(
-        [_model_unavailable(PRIMARY), _model_unavailable(PRIMARY), _success_body()]
-    )
+    provider, transport = _provider([_model_unavailable(PRIMARY), _success_body()])
 
     provider.analyze(video_uri="https://example.com/reference.mp4", duration_seconds=15.0)
 
-    assert transport.requested_models == [PRIMARY, PRIMARY, BACKUP]
+    assert transport.requested_models == [PRIMARY, BACKUP]
 
 
 def test_retired_model_http_404_falls_over() -> None:
@@ -187,7 +186,7 @@ def test_auth_failure_does_not_waste_backup_attempts() -> None:
     ],
 )
 def test_non_model_http_failure_does_not_try_backup(status: int, reason: str) -> None:
-    """非模型类 400/404/500 不换道；仅 json_schema 400 会同模型降级重发一次。"""
+    """非模型类 400/404/500 不换道，也不降级重发（视频入口本就发 json_object）。"""
     failure = AnalysisProviderFailed(
         reason,
         http_status=status,
@@ -201,10 +200,8 @@ def test_non_model_http_failure_does_not_try_backup(status: int, reason: str) ->
         provider.analyze(video_uri="https://example.com/reference.mp4", duration_seconds=15.0)
 
     assert caught.value is failure
-    # json_schema 400 的降级重发发生在同模型上（json_object），不换道；
-    # 404/500 不触发降级，保持单次请求。
-    expected = [PRIMARY, PRIMARY] if status == 400 else [PRIMARY]
-    assert transport.requested_models == expected
+    # 单次请求：换道只看 429/模型下线；格式降级通道已随信封 schema 一起撤掉。
+    assert transport.requested_models == [PRIMARY]
 
 
 def test_network_timeout_does_not_repeat_ambiguous_paid_call() -> None:
