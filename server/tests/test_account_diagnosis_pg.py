@@ -27,7 +27,12 @@ from app.account_diagnosis_entitlement import (
 )
 from app.account_link import AccountTarget
 from app.db_portable import BusinessConnection
-from app.viral_tikhub import DouyinUserPost, DouyinUserPostPage, DouyinUserProfile
+from app.viral_tikhub import (
+    DouyinUserPost,
+    DouyinUserPostPage,
+    DouyinUserProfile,
+    DouyinXingtuVideoMetrics,
+)
 
 pytestmark = pytest.mark.pg
 
@@ -81,6 +86,26 @@ class _FakeClient:
 
     def douyin_user_posts(self, **_: object) -> DouyinUserPostPage:
         return _posts()
+
+
+class _L2Client(_FakeClient):
+    """在基础桩上补星图链路：8 条作品全部命中播放/完播/互动率。"""
+
+    def douyin_xingtu_kol_id(self, *, sec_user_id: str) -> str | None:
+        return "777123"
+
+    def douyin_xingtu_author_videos(
+        self, *, o_author_id: str, page: int = 1
+    ) -> list[DouyinXingtuVideoMetrics]:
+        return [
+            DouyinXingtuVideoMetrics(
+                item_id=f"aweme-{index}",
+                watch_cnt=5_000 + index * 100,
+                finish_rate=32.5,
+                interact_rate=6.1,
+            )
+            for index in range(8)
+        ]
 
 
 def _seed_package_order(
@@ -274,3 +299,144 @@ def test_paid_member_is_charged_the_configured_price(client, route_state, monkey
             (user_id, "account_diagnosis"),
         ).fetchone()
         assert operations is not None and int(operations[0]) == 1
+
+
+def test_xingtu_hit_upgrades_report_to_l2(client, route_state, monkeypatch) -> None:
+    """星图命中：播放量写回作品、data_level 升 L2、l2 汇总落报告。"""
+    _, user_id = account(client, "diag_l2")
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings",
+        lambda conn: _L2Client(),
+    )
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+        _seed_package_order(raw, user_id)
+        _seed_wallet(raw, user_id, 50)
+        device = current_device_id(conn, user_id)
+        assert claim_free_quota(conn, owner_id=user_id, device_id=device, report_id="consumed-l2")
+
+        result = create_diagnosis(
+            conn,
+            user_id=user_id,
+            target=_target("sec-l2"),
+            input_url="https://www.douyin.com/user/sec-l2",
+        )
+
+    assert result["status"] == "SUCCEEDED"
+    assert result["dataLevel"] == "L2"
+    report = result["report"]
+    assert report is not None and report["l2"] is not None
+    assert report["l2"]["source"] == "xingtu"
+    assert report["l2"]["avgFinishRate"] == 32.5
+    assert report["metrics"]["avg_play_count"] is not None
+    works = {work["awemeId"]: work for work in report["works"]}
+    assert works["aweme-0"]["playCount"] == 5000
+
+
+def test_daily_limit_blocks_fourth_diagnosis_same_day(client, route_state, monkeypatch) -> None:
+    _, user_id = account(client, "diag_daily")
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings",
+        lambda conn: _FakeClient(),
+    )
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+        _seed_package_order(raw, user_id)
+        _seed_wallet(raw, user_id, 100)
+        for _ in range(3):
+            raw.execute(
+                "INSERT INTO account_diagnosis_reports "
+                "(id, user_id, wallet_owner_id, platform, sec_user_id, unique_id, input_url, "
+                "status, is_free, created_at, completed_at) "
+                "VALUES (%s, %s, %s, 'douyin', 'sec-daily', NULL, 'x', 'SUCCEEDED', 0, "
+                "now(), now() - interval '48 hours')",
+                (f"diag-seed-{uuid4().hex}", user_id, user_id),
+            )
+        # completed_at 回拨 48h 让 24h 缓存不命中，但 created_at 在今天——
+        # 精确隔离「缓存命中」与「每日限额」两条规则。
+
+        with pytest.raises(Exception) as excinfo:
+            create_diagnosis(
+                conn,
+                user_id=user_id,
+                target=_target("sec-daily"),
+                input_url="https://www.douyin.com/user/sec-daily",
+            )
+        detail = getattr(excinfo.value, "detail", None)
+        assert isinstance(detail, dict)
+        assert detail["code"] == "ACCOUNT_DIAGNOSIS_DAILY_LIMIT"
+
+
+def test_llm_narrative_replaces_rules_when_available(client, route_state, monkeypatch) -> None:
+    _, user_id = account(client, "diag_llm")
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings",
+        lambda conn: _FakeClient(),
+    )
+    monkeypatch.setattr(
+        "app.account_diagnosis.load_narrative_llm_config",
+        lambda conn: ("https://api.deepseek.com", "key", "deepseek-chat"),
+    )
+    monkeypatch.setattr(
+        "app.account_diagnosis.build_llm_narrative",
+        lambda **_: {
+            "summary": "LLM 解读：账号基本盘稳定。",
+            "strengths": [],
+            "weaknesses": [],
+            "actions": [
+                {
+                    "title": "粉丝互动率",
+                    "evidence": "低于腰部基准",
+                    "suggestion": "结尾抛问题引导评论。",
+                }
+            ],
+            "generatedBy": "llm",
+        },
+    )
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+
+        result = create_diagnosis(
+            conn,
+            user_id=user_id,
+            target=_target("sec-llm"),
+            input_url="https://www.douyin.com/user/sec-llm",
+        )
+
+    assert result["narrative"]["generatedBy"] == "llm"
+    assert result["narrative"]["summary"].startswith("LLM 解读")
+
+
+def test_llm_failure_falls_back_to_rules(client, route_state, monkeypatch) -> None:
+    _, user_id = account(client, "diag_llm_fallback")
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings",
+        lambda conn: _FakeClient(),
+    )
+    monkeypatch.setattr(
+        "app.account_diagnosis.load_narrative_llm_config",
+        lambda conn: ("https://api.deepseek.com", "key", "deepseek-chat"),
+    )
+    monkeypatch.setattr(
+        "app.account_diagnosis.build_llm_narrative",
+        lambda **_: None,
+    )
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+
+        result = create_diagnosis(
+            conn,
+            user_id=user_id,
+            target=_target("sec-fallback"),
+            input_url="https://www.douyin.com/user/sec-fallback",
+        )
+
+    assert result["narrative"]["generatedBy"] == "rules"

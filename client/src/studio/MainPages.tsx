@@ -606,7 +606,7 @@ export function WorkbenchPage() {
       );
     }
   };
-  const begin = async (mode: "copy" | "replica") => {
+  const begin = async (mode: "copy" | "replica", overrideLink?: string) => {
     if (requireLogin) {
       requireLogin();
       return;
@@ -615,11 +615,17 @@ export function WorkbenchPage() {
       navigate(mode);
       return;
     }
-    if (sourceLink.trim()) {
+    // 直达意图（诊断报告「一键拆解」）带着链接进来：先回填输入框让用户看得见，
+    // 再用 override 值发起解析——闭包里的 sourceLink 还是上一帧的旧值。
+    const link = (overrideLink ?? sourceLink).trim();
+    if (overrideLink) {
+      setSourceLinkState({ accountContextKey, value: overrideLink });
+    }
+    if (link) {
       if (linkState.status === "loading") return;
       const operation = ++linkOperationRef.current;
       const requestAccount = accountId;
-      const linkActionKey = `link:${sourceLink.trim()}:${mode}`;
+      const linkActionKey = `link:${link}:${mode}`;
       const resolutionKey = viralImportIdempotencyKey(
         requestAccount,
         linkActionKey,
@@ -630,11 +636,7 @@ export function WorkbenchPage() {
         stage: "resolve",
       });
       try {
-        const resolution = await resolveViralLink(
-          sourceLink.trim(),
-          mode,
-          resolutionKey,
-        );
+        const resolution = await resolveViralLink(link, mode, resolutionKey);
         if (
           operation !== linkOperationRef.current ||
           requestAccount !== activeAccountRef.current
@@ -863,6 +865,21 @@ export function WorkbenchPage() {
         );
       });
   };
+  // 诊断报告「一键拆解」直达：消费一次就清掉，避免换页/重渲染重复发起。
+  const consumedReplicateIntentRef = useRef<string | null>(null);
+  const replicateIntentLink = state.replicateIntentLink;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 直达意图只在链接值变化时消费一次；begin/patchState 是当帧闭包，纳入依赖会重复发起拆解
+  useEffect(() => {
+    if (
+      !replicateIntentLink ||
+      consumedReplicateIntentRef.current === replicateIntentLink
+    ) {
+      return;
+    }
+    consumedReplicateIntentRef.current = replicateIntentLink;
+    patchState({ replicateIntentLink: undefined });
+    void begin("replica", replicateIntentLink);
+  }, [replicateIntentLink]);
   // 账号主页链接粘进"视频复刻"输入框时，直接引导到账号诊断，避免"没有可用视频"的报错。
   const accountLinkInInput = /douyin\.com\/user\/[A-Za-z0-9_-]{20,}/.test(
     sourceLink,

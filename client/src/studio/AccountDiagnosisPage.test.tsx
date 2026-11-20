@@ -118,6 +118,7 @@ const reportFixture = {
       awemeCount: 120,
     },
     collectedAt: "2026-11-20T10:00:00+00:00",
+    l2: null,
     works: [
       {
         awemeId: "aweme-1",
@@ -186,5 +187,62 @@ describe("账号诊断页", () => {
         "账号诊断需要先购买充值套餐。",
       ),
     );
+  });
+
+  it("建议复刻的作品可一键带链接进工作台发起拆解", async () => {
+    mocks.createDiagnosis.mockResolvedValue(reportFixture);
+    render(<AccountDiagnosisPage />);
+    await screen.findByText("新用户首单免费");
+
+    fireEvent.change(screen.getByLabelText("抖音账号链接或抖音号"), {
+      target: { value: "https://www.douyin.com/user/sec-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
+    await screen.findByText("三层小别墅开工");
+
+    fireEvent.click(screen.getByRole("button", { name: "一键拆解" }));
+    expect(mocks.navigate).toHaveBeenCalledWith("workbench", {
+      replicateIntentLink: "https://www.douyin.com/video/aweme-1",
+    });
+  });
+
+  it("导出按钮把报告下载为 Markdown 文件", async () => {
+    mocks.createDiagnosis.mockResolvedValue(reportFixture);
+    render(<AccountDiagnosisPage />);
+    await screen.findByText("新用户首单免费");
+
+    fireEvent.change(screen.getByLabelText("抖音账号链接或抖音号"), {
+      target: { value: "https://www.douyin.com/user/sec-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
+    await screen.findByText("三层小别墅开工");
+
+    const click = vi.fn();
+    const createObjectURL = vi.fn(() => "blob:mock");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      value: createObjectURL,
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: revokeObjectURL,
+      configurable: true,
+    });
+    const originalCreate = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation(((tag: string) => {
+      if (tag === "a") {
+        return {
+          set href(_: string) {},
+          set download(_: string) {},
+          click,
+        };
+      }
+      return originalCreate(tag);
+    }) as unknown as typeof document.createElement);
+
+    fireEvent.click(screen.getByRole("button", { name: "导出报告" }));
+    expect(click).toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalled();
+    vi.restoreAllMocks();
   });
 });

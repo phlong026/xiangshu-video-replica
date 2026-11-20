@@ -393,6 +393,8 @@ export type StudioState = {
   viralExtractIntent?: boolean;
   /** 工作台识别到账号主页链接后带过来的原文；诊断页用它做初始输入。 */
   accountDiagnosisInput?: string;
+  /** 诊断报告「一键拆解」直达意图：带上作品链接进工作台自动发起复刻导入。 */
+  replicateIntentLink?: string;
   selectedPersonId?: string;
   savedScripts: StudioScript[];
   favorites: string[];

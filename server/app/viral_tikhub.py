@@ -47,6 +47,10 @@ WECHAT_VIDEO_DETAIL_PATH = "/api/v1/wechat_channels/v2/fetch_video_detail"
 DOUYIN_USER_PROFILE_PATH = "/api/v1/douyin/web/handler_user_profile"
 DOUYIN_USER_PROFILE_BY_UNIQUE_ID_PATH = "/api/v1/douyin/web/handler_user_profile_v2"
 DOUYIN_USER_POSTS_PATH = "/api/v1/douyin/app/v3/fetch_user_post_videos"
+# 账号诊断 L2 增强（星图）：公开拿不到的播放/完播/互动率只对已入驻星图的达人开放；
+# kolid 把 sec_uid 换成星图达人 ID，失败/未收录一律静默回落 L1。
+DOUYIN_XINGTU_KOL_ID_PATH = "/api/v1/douyin/xingtu/get_xingtu_kolid_by_sec_user_id"
+DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH = "/api/v1/douyin/xingtu_v2/get_author_homepage_videos"
 
 # 路径 → 计费元数据 api_type（后台成本报表按节点归集）。
 _API_TYPE_BY_PATH = {
@@ -56,6 +60,8 @@ _API_TYPE_BY_PATH = {
     DOUYIN_USER_PROFILE_PATH: "douyin_user_profile",
     DOUYIN_USER_PROFILE_BY_UNIQUE_ID_PATH: "douyin_user_profile",
     DOUYIN_USER_POSTS_PATH: "douyin_user_posts",
+    DOUYIN_XINGTU_KOL_ID_PATH: "douyin_xingtu_kol_id",
+    DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH: "douyin_xingtu_author_videos",
 }
 
 # 备用通道配置字段（加密供应商配置存储）。备用入口是主形态（同协议兼容域名），
@@ -330,6 +336,16 @@ class DouyinUserPostPage:
     posts: list[DouyinUserPost]
     max_cursor: int | None
     has_more: bool
+
+
+@dataclass(frozen=True)
+class DouyinXingtuVideoMetrics:
+    """星图达人单条作品的播放/完播/互动率（账号诊断 L2 口径的数据源）。"""
+
+    item_id: str
+    watch_cnt: int | None
+    finish_rate: float | None
+    interact_rate: float | None
 
 
 # 时间范围是对外中立的业务枚举；两个数据面取值不同，在此集中映射，
@@ -815,6 +831,56 @@ def _parse_douyin_user_posts(data: Mapping[str, Any]) -> DouyinUserPostPage:
     return DouyinUserPostPage(posts=posts, max_cursor=max_cursor, has_more=has_more)
 
 
+def _as_optional_rate(value: Any) -> float | None:
+    """星图的率字段在 float 与 "45.6%" 字符串之间摇摆，统一成百分数."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().rstrip("%").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_douyin_xingtu_kol_id(data: Mapping[str, Any]) -> str | None:
+    block = _douyin_user_block(data)
+    for key in ("kol_id", "kolId", "id"):
+        value = block.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            text = str(value).strip()
+            if text and text != "0":
+                return text
+    return None
+
+
+def _parse_douyin_xingtu_videos(data: Mapping[str, Any]) -> list[DouyinXingtuVideoMetrics]:
+    items: Any = data.get("items")
+    if not isinstance(items, list):
+        nested = data.get("data")
+        items = nested.get("items") if isinstance(nested, Mapping) else None
+    metrics: list[DouyinXingtuVideoMetrics] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        item_id = _as_text(item.get("item_id")) or _as_text(item.get("aweme_id"))
+        if not item_id:
+            continue
+        metrics.append(
+            DouyinXingtuVideoMetrics(
+                item_id=item_id,
+                watch_cnt=_as_optional_int(item.get("watch_cnt")),
+                finish_rate=_as_optional_rate(item.get("finish_rate")),
+                interact_rate=_as_optional_rate(item.get("interact_rate")),
+            )
+        )
+    return metrics
+
+
 @dataclass(frozen=True)
 class _SourceChannel:
     """数据源的一个物理通道：入口 + 凭据（主/备结构相同，只是优先级不同）."""
@@ -1168,6 +1234,38 @@ class ViralSourceClient:
             },
         )
         return _parse_douyin_user_posts(data)
+
+    def douyin_xingtu_kol_id(self, *, sec_user_id: str) -> str | None:
+        """sec_uid → 星图达人 ID；未收录星图的账号返回 None（调用方回落 L1）."""
+
+        identifier = sec_user_id.strip()
+        if not identifier:
+            raise ViralSourceError("账号链接缺少账号标识，请重新复制主页链接")
+        data = self._request(
+            self._transport,
+            DOUYIN_XINGTU_KOL_ID_PATH,
+            {},
+            method="GET",
+            query={"sec_user_id": identifier},
+        )
+        return _parse_douyin_xingtu_kol_id(data)
+
+    def douyin_xingtu_author_videos(
+        self, *, o_author_id: str, page: int = 1
+    ) -> list[DouyinXingtuVideoMetrics]:
+        """星图达人主页作品列表：watch_cnt / finish_rate / interact_rate."""
+
+        identifier = o_author_id.strip()
+        if not identifier:
+            raise ViralSourceError("星图达人 ID 缺失，无法获取增强数据")
+        data = self._request(
+            self._transport,
+            DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH,
+            {},
+            method="GET",
+            query={"o_author_id": identifier, "page": max(1, page)},
+        )
+        return _parse_douyin_xingtu_videos(data)
 
     # -- 视频号 ---------------------------------------------------------------
 

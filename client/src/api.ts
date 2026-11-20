@@ -8635,6 +8635,14 @@ export type AccountDiagnosisDocument = {
   account: AccountDiagnosisAccount;
   collectedAt: string;
   works: AccountDiagnosisWork[];
+  /** 星图增强命中时的 L2 数据；普通账号（未入驻星图）为 null。 */
+  l2: {
+    source: string;
+    sampleSize: number;
+    avgFinishRate: number | null;
+    avgInteractRate: number | null;
+    finishRates: Record<string, number>;
+  } | null;
 };
 
 export type AccountDiagnosisNarrative = {

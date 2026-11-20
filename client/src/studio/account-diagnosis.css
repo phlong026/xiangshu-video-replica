@@ -160,6 +160,53 @@
   color: #e2a24d;
 }
 
+/* 总分 + 六维雷达并排；雷达是确定性 SVG，不需要图表库。 */
+.studio-shell .diag-score-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: none;
+}
+.studio-shell .diag-radar {
+  width: 190px;
+  height: 190px;
+}
+.studio-shell .diag-radar-ring {
+  fill: none;
+  stroke: #23241f;
+  stroke-width: 1;
+}
+.studio-shell .diag-radar-value {
+  fill: rgba(229, 170, 54, 0.22);
+  stroke: var(--studio-gold);
+  stroke-width: 1.5;
+}
+.studio-shell .diag-radar-dot {
+  fill: var(--studio-gold);
+}
+.studio-shell .diag-radar-label {
+  fill: var(--studio-muted);
+  font-size: 10px;
+}
+
+.studio-shell .diag-trend {
+  width: 100%;
+  max-width: 420px;
+}
+.studio-shell .diag-trend-line {
+  stroke: var(--studio-gold);
+  stroke-width: 2;
+}
+.studio-shell .diag-trend-dot {
+  fill: var(--studio-gold);
+}
+
+.studio-shell .diag-section-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .studio-shell .diag-dimensions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));

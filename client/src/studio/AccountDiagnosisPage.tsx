@@ -39,6 +39,175 @@ function normalized(dimension: AccountDiagnosisDimension): number {
   return Math.round((dimension.score / dimension.effective_full) * 1000) / 10;
 }
 
+const RADAR_SIZE = 220;
+const RADAR_CENTER = RADAR_SIZE / 2;
+const RADAR_RADIUS = 86;
+
+function radarPoint(index: number, total: number, ratio: number): string {
+  const angle = (Math.PI * 2 * index) / total - Math.PI / 2;
+  const r = RADAR_RADIUS * ratio;
+  return `${RADAR_CENTER + Math.cos(angle) * r},${RADAR_CENTER + Math.sin(angle) * r}`;
+}
+
+/** 六维雷达：确定性 SVG（无图表库依赖），维度顺序与报告一致。 */
+function DimensionRadar({
+  dimensions,
+}: {
+  dimensions: AccountDiagnosisDimension[];
+}) {
+  if (dimensions.length === 0) return null;
+  const total = dimensions.length;
+  const rings = [0.25, 0.5, 0.75, 1];
+  const values = dimensions.map((dimension) =>
+    Math.max(0, Math.min(1, normalized(dimension) / 100)),
+  );
+  const polygon = values
+    .map((ratio, index) => radarPoint(index, total, ratio))
+    .join(" ");
+  return (
+    <svg
+      className="diag-radar"
+      viewBox={`0 0 ${RADAR_SIZE} ${RADAR_SIZE}`}
+      role="img"
+      aria-label="六维得分雷达图"
+    >
+      {rings.map((ring) => (
+        <polygon
+          key={ring}
+          className="diag-radar-ring"
+          points={dimensions
+            .map((_, index) => radarPoint(index, total, ring))
+            .join(" ")}
+        />
+      ))}
+      {dimensions.map((dimension, index) => {
+        const [x, y] = radarPoint(index, total, 1.18)
+          .split(",")
+          .map((value) => Number(value));
+        return (
+          <text
+            key={dimension.key}
+            className="diag-radar-label"
+            x={x}
+            y={y}
+            textAnchor="middle"
+            dominantBaseline="middle"
+          >
+            {dimension.label.slice(0, 4)}
+          </text>
+        );
+      })}
+      <polygon className="diag-radar-value" points={polygon} />
+      {values.map((ratio, index) => {
+        const [x, y] = radarPoint(index, total, ratio)
+          .split(",")
+          .map((value) => Number(value));
+        return (
+          <circle
+            key={dimensions[index].key}
+            className="diag-radar-dot"
+            cx={x}
+            cy={y}
+            r={3}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+/** 历史分数折线：只统计 SUCCEEDED 报告，按时间升序。 */
+function ScoreTrend({
+  points,
+}: {
+  points: Array<{ score: number; label: string }>;
+}) {
+  if (points.length < 2) return null;
+  const width = 320;
+  const height = 72;
+  const padding = 10;
+  const scores = points.map((point) => point.score);
+  const min = Math.min(...scores, 0);
+  const max = Math.max(...scores, 100);
+  const step = (width - padding * 2) / (points.length - 1);
+  const path = points
+    .map((point, index) => {
+      const x = padding + index * step;
+      const y =
+        height -
+        padding -
+        ((point.score - min) / Math.max(1, max - min)) * (height - padding * 2);
+      return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const [lastX, lastY] = path
+    .slice(path.lastIndexOf("L") + 1)
+    .split(",")
+    .map((value) => Number(value));
+  return (
+    <svg
+      className="diag-trend"
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label="历史评分趋势"
+    >
+      <path className="diag-trend-line" d={path} fill="none" />
+      <circle className="diag-trend-dot" cx={lastX} cy={lastY} r={3.5} />
+    </svg>
+  );
+}
+
+function buildReportMarkdown(result: AccountDiagnosisResult): string {
+  const doc = result.report;
+  if (!doc) return "";
+  const lines: string[] = [
+    `# 账号诊断：${doc.account.nickname}`,
+    "",
+    `- 综合评分：${doc.score}（${doc.rating}，${doc.tier_label}量级）`,
+    `- 粉丝 ${formatCount(doc.account.followerCount)} · 作品 ${formatCount(doc.account.awemeCount)}`,
+    `- 数据口径：${doc.data_level === "L2" ? "播放口径（L2）" : "公开互动口径（L1）"} · 样本 ${doc.sample_size} 条`,
+    `- 采集时间：${doc.collectedAt}`,
+    "",
+    "## 六维评分",
+    "",
+  ];
+  for (const dimension of doc.dimensions) {
+    lines.push(
+      `- **${dimension.label}**：${normalized(dimension)}（${dimension.score}/${dimension.effective_full}）—— ${dimension.comment}`,
+    );
+  }
+  if (doc.risks.length > 0) {
+    lines.push("", "## 风险预警", "");
+    for (const risk of doc.risks) {
+      lines.push(
+        `- ${risk.label}（${LEVEL_LABEL[risk.level] ?? risk.level}）：${risk.evidence}`,
+      );
+    }
+  }
+  if (result.narrative) {
+    lines.push("", "## 诊断结论", "", result.narrative.summary, "");
+    for (const action of result.narrative.actions) {
+      lines.push(
+        `1. **${action.title}**（${action.evidence}）→ ${action.suggestion}`,
+      );
+    }
+  }
+  lines.push(
+    "",
+    "## 近期作品",
+    "",
+    "| 标题 | 点赞 | 评论 | 分享 | 收藏 |",
+    "| --- | --- | --- | --- | --- |",
+  );
+  for (const work of doc.works) {
+    lines.push(
+      `| ${work.recommended ? "★ " : ""}${work.title || "（无标题）"} | ${work.digg} | ${work.comment} | ${work.share} | ${work.collect} |`,
+    );
+  }
+  lines.push("", `> 由众墅之家账号诊断生成 · ${new Date().toLocaleString()}`);
+  return lines.join("\n");
+}
+
 function errorCode(cause: unknown): string | undefined {
   if (typeof cause !== "object" || cause === null) return undefined;
   const code = (cause as { code?: unknown }).code;
@@ -136,8 +305,41 @@ export function AccountDiagnosisPage() {
     }
   }
 
+  function startReplica(awemeId: string, title: string) {
+    // 一键拆解：把作品链接作为直达意图带进工作台，由工作台自动发起复刻导入。
+    navigate("workbench", {
+      replicateIntentLink: `https://www.douyin.com/video/${awemeId}`,
+    });
+    notify(`正在工作台发起拆解：${title.slice(0, 20) || "选中作品"}`);
+  }
+
+  function exportReport() {
+    if (!result) return;
+    const markdown = buildReportMarkdown(result);
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const nickname = result.report?.account.nickname ?? "账号";
+    anchor.href = url;
+    anchor.download = `账号诊断-${nickname}-${new Date().toISOString().slice(0, 10)}.md`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    notify("报告已导出为 Markdown。");
+  }
+
   const reportDoc = result?.report ?? null;
   const narrative = result?.narrative ?? null;
+
+  const scoreTrend = useMemo(() => {
+    const points = history
+      .filter((item) => item.status === "SUCCEEDED" && item.score !== null)
+      .map((item) => ({
+        score: item.score as number,
+        label: item.createdAt ?? "",
+      }))
+      .reverse();
+    return points;
+  }, [history]);
 
   const availabilityText = useMemo(() => {
     if (!availability) return null;
@@ -219,13 +421,16 @@ export function AccountDiagnosisPage() {
                 </p>
               </div>
             </div>
-            <div
-              className={`diag-score ${RATING_CLASS[reportDoc.rating] ?? ""}`}
-            >
-              <strong>{reportDoc.score}</strong>
-              <span>
-                {reportDoc.rating} · {reportDoc.tier_label}
-              </span>
+            <div className="diag-score-wrap">
+              <DimensionRadar dimensions={reportDoc.dimensions} />
+              <div
+                className={`diag-score ${RATING_CLASS[reportDoc.rating] ?? ""}`}
+              >
+                <strong>{reportDoc.score}</strong>
+                <span>
+                  {reportDoc.rating} · {reportDoc.tier_label}
+                </span>
+              </div>
             </div>
           </header>
 
@@ -236,6 +441,14 @@ export function AccountDiagnosisPage() {
                 : "公开互动口径（L1）"}
             </span>
             <span>样本 {reportDoc.sample_size} 条</span>
+            {reportDoc.l2?.avgFinishRate !== null &&
+            reportDoc.l2?.avgFinishRate !== undefined ? (
+              <span>平均完播率 {reportDoc.l2.avgFinishRate}%</span>
+            ) : null}
+            {reportDoc.l2?.avgInteractRate !== null &&
+            reportDoc.l2?.avgInteractRate !== undefined ? (
+              <span>平均互动率 {reportDoc.l2.avgInteractRate}%</span>
+            ) : null}
             {result?.isFree ? <span>本次免费</span> : null}
             {result?.cached ? <span>24 小时内缓存</span> : null}
             {reportDoc.low_confidence ? (
@@ -315,9 +528,14 @@ export function AccountDiagnosisPage() {
           <section className="diag-works">
             <div className="diag-section-head">
               <h4>近期作品</h4>
-              <Button variant="quiet" onClick={() => navigate("workbench")}>
-                去工作台拆解
-              </Button>
+              <div className="diag-section-actions">
+                <Button variant="quiet" onClick={exportReport}>
+                  导出报告
+                </Button>
+                <Button variant="quiet" onClick={() => navigate("workbench")}>
+                  去工作台拆解
+                </Button>
+              </div>
             </div>
             <table>
               <thead>
@@ -344,6 +562,14 @@ export function AccountDiagnosisPage() {
                     <td>{formatCount(work.share)}</td>
                     <td>{formatCount(work.collect)}</td>
                     <td>
+                      {work.recommended ? (
+                        <Button
+                          variant="quiet"
+                          onClick={() => startReplica(work.awemeId, work.title)}
+                        >
+                          一键拆解
+                        </Button>
+                      ) : null}
                       <Button
                         variant="quiet"
                         onClick={() => void copyWorkLink(work.awemeId)}
@@ -357,6 +583,13 @@ export function AccountDiagnosisPage() {
             </table>
           </section>
         </article>
+      ) : null}
+
+      {scoreTrend.length >= 2 ? (
+        <section className="diag-history">
+          <h4>评分趋势</h4>
+          <ScoreTrend points={scoreTrend} />
+        </section>
       ) : null}
 
       {history.length > 0 ? (

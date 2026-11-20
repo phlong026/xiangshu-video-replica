@@ -152,3 +152,51 @@ def test_account_diagnosis_switch_is_independent_of_viral_retirement(monkeypatch
     assert account_diagnosis_disabled() is False
     monkeypatch.setenv("ACCOUNT_DIAGNOSIS_DISABLED", "1")
     assert account_diagnosis_disabled() is True
+
+
+def test_xingtu_kol_id_parses_the_star_id() -> None:
+    from app.viral_tikhub import DOUYIN_XINGTU_KOL_ID_PATH
+
+    transport = _GetTransport({"id": 777123, "nick_name": "星图达人"})
+    client = ViralSourceClient(api_key="test-key", transport=transport)
+    kol_id = client.douyin_xingtu_kol_id(sec_user_id=SEC_UID)
+
+    assert kol_id == "777123"
+    assert DOUYIN_XINGTU_KOL_ID_PATH in transport.requests[0]["url"]
+    assert f"sec_user_id={SEC_UID}" in transport.requests[0]["url"]
+
+
+def test_xingtu_kol_id_returns_none_for_uncollected_account() -> None:
+    transport = _GetTransport({"id": 0})
+    client = ViralSourceClient(api_key="test-key", transport=transport)
+    assert client.douyin_xingtu_kol_id(sec_user_id=SEC_UID) is None
+
+
+def test_xingtu_author_videos_parse_rates() -> None:
+    from app.viral_tikhub import DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH
+
+    transport = _GetTransport(
+        {
+            "items": [
+                {
+                    "item_id": "7600000000000000001",
+                    "watch_cnt": "12.3万",
+                    "finish_rate": "45.6%",
+                    "interact_rate": 6.1,
+                },
+                {"item_id": "7600000000000000002", "watch_cnt": 800, "finish_rate": 30},
+            ],
+        }
+    )
+    client = ViralSourceClient(api_key="test-key", transport=transport)
+    videos = client.douyin_xingtu_author_videos(o_author_id="777123", page=2)
+
+    assert len(videos) == 2
+    assert videos[0].watch_cnt == 123_000
+    assert videos[0].finish_rate == 45.6
+    assert videos[0].interact_rate == 6.1
+    assert videos[1].finish_rate == 30.0
+    url = transport.requests[0]["url"]
+    assert DOUYIN_XINGTU_AUTHOR_VIDEOS_PATH in url
+    assert "o_author_id=777123" in url
+    assert "page=2" in url

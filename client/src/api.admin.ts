@@ -5018,3 +5018,52 @@ async function readViralOperationEstimate(
   if (!response.ok) throw await parseActivationError(response, "费用预估失败");
   return response.json();
 }
+
+// --- 账号诊断监控（只读）------------------------------------------------------
+
+export interface AdminDiagnosisReport {
+  id: string;
+  user_id: string;
+  wallet_owner_id: string;
+  platform: string;
+  sec_user_id: string | null;
+  unique_id: string | null;
+  input_url: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  data_level: "L1" | "L2" | null;
+  score: number | null;
+  tier: string | null;
+  rating: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  is_free: boolean;
+  idempotency_key: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface AdminDiagnosisReportPage {
+  items: AdminDiagnosisReport[];
+  total: number;
+  limit: number;
+  offset: number;
+  statusCounts: Record<string, number>;
+}
+
+export async function listAdminAccountDiagnosisReports(params: {
+  status?: AdminDiagnosisReport["status"];
+  secUserId?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<AdminDiagnosisReportPage> {
+  const query = new URLSearchParams();
+  if (params.status) query.set("status", params.status);
+  if (params.secUserId) query.set("sec_user_id", params.secUserId);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString();
+  return adminRead<AdminDiagnosisReportPage>(
+    `/api/control/account-diagnosis/reports${suffix ? `?${suffix}` : ""}`,
+    "账号诊断监控数据读取失败",
+  );
+}
