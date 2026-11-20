@@ -868,6 +868,7 @@ export function WorkbenchPage() {
   // 诊断报告「一键拆解」直达：消费一次就清掉，避免换页/重渲染重复发起。
   const consumedReplicateIntentRef = useRef<string | null>(null);
   const replicateIntentLink = state.replicateIntentLink;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 直达意图只在链接值变化时消费一次；begin/patchState 是当帧闭包，纳入依赖会重复发起拆解
   useEffect(() => {
     if (
       !replicateIntentLink ||
@@ -878,7 +879,6 @@ export function WorkbenchPage() {
     consumedReplicateIntentRef.current = replicateIntentLink;
     patchState({ replicateIntentLink: undefined });
     void begin("replica", replicateIntentLink);
-    // biome-ignore lint/correctness/useExhaustiveDependencies: 直达意图只在链接值变化时消费一次；begin/patchState 闭包随渲染更新，纳入依赖会重复发起
   }, [replicateIntentLink]);
   // 账号主页链接粘进"视频复刻"输入框时，直接引导到账号诊断，避免"没有可用视频"的报错。
   const accountLinkInInput = /douyin\.com\/user\/[A-Za-z0-9_-]{20,}/.test(

@@ -42,7 +42,6 @@ export function AdminAccountDiagnosisPage({ readOnly }: { readOnly: boolean }) {
   const [secUserId, setSecUserId] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -63,7 +62,7 @@ export function AdminAccountDiagnosisPage({ readOnly }: { readOnly: boolean }) {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, secUserId, reloadKey]);
+  }, [statusFilter, secUserId]);
 
   useEffect(() => {
     void refresh();
@@ -101,13 +100,13 @@ export function AdminAccountDiagnosisPage({ readOnly }: { readOnly: boolean }) {
           value={secUserId}
           onChange={(event) => setSecUserId(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") setReloadKey((key) => key + 1);
+            if (event.key === "Enter") void refresh();
           }}
         />
         <button
           type="button"
           className="admin-diagnosis-chip"
-          onClick={() => setReloadKey((key) => key + 1)}
+          onClick={() => void refresh()}
           disabled={loading}
         >
           {loading ? "读取中…" : "刷新"}
