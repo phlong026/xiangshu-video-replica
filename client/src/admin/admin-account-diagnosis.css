@@ -1,0 +1,65 @@
+/* 账号诊断监控页：筛选 chips 与只读提示（表格走 DataTable 统一外壳）。 */
+.admin-diagnosis-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  border: 0;
+  padding: 0;
+  margin-block-start: 0;
+}
+
+.admin-diagnosis-filter-legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.admin-diagnosis-chip {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--admin-border, #333);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.admin-diagnosis-chip.is-active {
+  background: var(--admin-accent, #e5aa36);
+  border-color: var(--admin-accent, #e5aa36);
+  color: #101010;
+}
+
+.admin-diagnosis-filter input {
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--admin-border, #333);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  min-width: 220px;
+}
+
+.admin-diagnosis-filter input:focus {
+  outline: none;
+  border-color: var(--admin-accent, #e5aa36);
+}
+
+.admin-diagnosis-filter .admin-diagnosis-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.admin-diagnosis-readonly {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.admin-diagnosis-total {
+  margin-top: 10px;
+  font-size: 12px;
+  opacity: 0.7;
+}

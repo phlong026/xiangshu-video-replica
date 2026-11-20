@@ -183,6 +183,8 @@ export function navigateStudioState(
     ...state,
     viralReplicateIntent: false,
     viralExtractIntent: false,
+    // 直达意图是单发的：不在 patch 里就清掉，避免残留旧意图在换页时误触发。
+    replicateIntentLink: undefined,
     selectedVideoId: undefined,
     selectedTaskId: keepTaskContext ? state.selectedTaskId : undefined,
     selectedTaskKind: keepTaskContext ? state.selectedTaskKind : undefined,

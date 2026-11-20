@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { AdminAccountDiagnosisPage } from "./admin/AdminAccountDiagnosisPage";
 import { AdminAlertsSection } from "./admin/AdminAlertsSection";
 import { AnalyticsPage } from "./admin/AnalyticsPage";
 import { AnnouncementsPage } from "./admin/AnnouncementsPage";
@@ -28,6 +29,7 @@ import { TrainingMaterialsPage } from "./admin/TrainingMaterialsPage";
 import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralAcquirePage } from "./admin/ViralAcquirePage";
 import { WorkerObservationsPage } from "./admin/WorkerObservationsPage";
+import "./admin/admin-account-diagnosis.css";
 import "./admin/admin-login.css";
 import "./admin/admin-training-materials.css";
 import { PageBanner } from "./admin/ui/PageBanner";
@@ -54,6 +56,7 @@ import chartPieIcon from "./assets/icons/chart-pie.svg";
 import clapperboardIcon from "./assets/icons/clapperboard.svg";
 import fileSpreadsheetIcon from "./assets/icons/file-spreadsheet.svg";
 import flameIcon from "./assets/icons/flame.svg";
+import gaugeIcon from "./assets/icons/gauge.svg";
 import trainingIcon from "./assets/icons/graduation-cap.svg";
 import dashboardIcon from "./assets/icons/layout-dashboard.svg";
 import megaphoneIcon from "./assets/icons/megaphone.svg";
@@ -105,6 +108,7 @@ export type AdminTab =
   | "generationRecords"
   | "generationFailures"
   | "workerObservations"
+  | "accountDiagnosis"
   | "externalCalls"
   | "viralAcquire"
   | "auditCenter"
@@ -194,6 +198,11 @@ const tabGroups: Array<{
         helper: "任务积压、高龄任务与隔离区",
       },
       {
+        id: "accountDiagnosis",
+        label: "诊断监控",
+        helper: "账号诊断报告状态与失败原因",
+      },
+      {
         id: "alerts",
         label: "告警总览",
         helper: "近 1 小时失败率与通知渠道",
@@ -259,6 +268,7 @@ const tabPageTitles: Record<AdminTab, string> = {
   generationRecords: "生成记录",
   generationFailures: "失败诊断",
   workerObservations: "队列观测",
+  accountDiagnosis: "诊断监控",
   externalCalls: "接口调用日志",
   viralAcquire: "爆款视频获取",
   auditCenter: "管理操作日志",
@@ -282,6 +292,7 @@ const tabReadPoints: Partial<Record<AdminTab, string>> = {
   sessions: "customer.read",
   generationRecords: "generation.read",
   generationFailures: "generation.read",
+  accountDiagnosis: "generation.read",
   workerObservations: "generation.read",
   alerts: "generation.read",
   externalCalls: "generation.read",
@@ -309,6 +320,7 @@ const navigationIcons: Record<AdminTab, string> = {
   generationRecords: clapperboardIcon,
   generationFailures: alertIcon,
   workerObservations: activityIcon,
+  accountDiagnosis: gaugeIcon,
   externalCalls: serverCogIcon,
   viralAcquire: flameIcon,
   auditCenter: scrollIcon,
@@ -1462,6 +1474,9 @@ export function AdminApp() {
             ) : null}
             {viewTab === "workerObservations" ? (
               <WorkerObservationsPage readOnly={readOnly} />
+            ) : null}
+            {viewTab === "accountDiagnosis" ? (
+              <AdminAccountDiagnosisPage readOnly={readOnly} />
             ) : null}
             {viewTab === "sessions" ? (
               <DeviceManagement

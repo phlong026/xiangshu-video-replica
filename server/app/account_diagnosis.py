@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -27,6 +28,11 @@ from app.account_diagnosis_entitlement import (
     has_paid_package,
     member_required_error,
     wallet_owner,
+)
+from app.account_diagnosis_llm import (
+    build_llm_narrative,
+    load_narrative_llm_config,
+    narrative_llm_disabled,
 )
 from app.account_diagnosis_scoring import (
     DiagnosisAccount,
@@ -45,16 +51,23 @@ from app.usage_billing import accept_operation, finish_source
 from app.viral_tikhub import (
     DouyinUserPost,
     DouyinUserProfile,
+    DouyinXingtuVideoMetrics,
     ViralSourceClient,
     ViralSourceError,
     ViralSourceUnavailable,
     account_diagnosis_client_from_settings,
 )
 
+logger = logging.getLogger(__name__)
+
 SERVICE = "account_diagnosis"
 CACHE_TTL = timedelta(hours=24)
 POSTS_PAGE_SIZE = 20
-POSTS_MAX_PAGES = 2
+# 5 页 × 20 条 = 最多 100 条样本：分布类指标（爆款率/CV/中位偏离）对小样本敏感，
+# 40 条常把尾部账号判成"低爆款率"；5 页是耗时（每页一次上游调用）与样本的折中。
+POSTS_MAX_PAGES = 5
+# 同一目标账号每日计费诊断上限（24h 缓存命中不占额度）。
+DAILY_TARGET_LIMIT = 3
 
 STATUS_RUNNING = "RUNNING"
 STATUS_SUCCEEDED = "SUCCEEDED"
@@ -431,6 +444,79 @@ def _insert_pending(
     )
 
 
+def _merge_xingtu_metrics(
+    posts: list[DouyinUserPost],
+    xingtu: dict[str, DouyinXingtuVideoMetrics],
+) -> list[DouyinUserPost]:
+    """星图命中的作品用 watch_cnt 补播放量；未命中保持原值."""
+
+    merged: list[DouyinUserPost] = []
+    for post in posts:
+        item = xingtu.get(post.aweme_id)
+        play_count = post.play_count
+        if item is not None and item.watch_cnt is not None:
+            play_count = item.watch_cnt
+        merged.append(
+            DouyinUserPost(
+                aweme_id=post.aweme_id,
+                title=post.title,
+                created_at=post.created_at,
+                digg_count=post.digg_count,
+                comment_count=post.comment_count,
+                share_count=post.share_count,
+                collect_count=post.collect_count,
+                play_count=play_count,
+                duration_ms=post.duration_ms,
+            )
+        )
+    return merged
+
+
+def _avg_rate(values: list[float]) -> float | None:
+    usable = [value for value in values if value is not None]
+    if not usable:
+        return None
+    return round(sum(usable) / len(usable), 2)
+
+
+def _l2_document(xingtu: dict[str, DouyinXingtuVideoMetrics]) -> dict[str, Any] | None:
+    if not xingtu:
+        return None
+    return {
+        "source": "xingtu",
+        "sampleSize": len(xingtu),
+        "avgFinishRate": _avg_rate(
+            [item.finish_rate for item in xingtu.values() if item.finish_rate is not None]
+        ),
+        "avgInteractRate": _avg_rate(
+            [item.interact_rate for item in xingtu.values() if item.interact_rate is not None]
+        ),
+        "finishRates": {
+            item_id: item.finish_rate
+            for item_id, item in xingtu.items()
+            if item.finish_rate is not None
+        },
+    }
+
+
+def _load_xingtu_metrics(client: Any, sec_user_id: str) -> dict[str, DouyinXingtuVideoMetrics]:
+    """尝试星图增强链路；任何失败都静默回落 L1，绝不阻塞基础报告."""
+
+    kol_id_lookup = getattr(client, "douyin_xingtu_kol_id", None)
+    videos_lookup = getattr(client, "douyin_xingtu_author_videos", None)
+    if kol_id_lookup is None or videos_lookup is None:
+        return {}
+    try:
+        kol_id = kol_id_lookup(sec_user_id=sec_user_id)
+        if not kol_id:
+            return {}
+        metrics = videos_lookup(o_author_id=str(kol_id), page=1)
+        return {item.item_id: item for item in metrics}
+    except Exception as exc:  # noqa: BLE001 - L2 是加分项，失败只记日志
+        logger.warning("账号诊断星图增强数据不可用（%s），按 L1 出报告", type(exc).__name__)
+        return {}
+
+
 def _run(
     conn: BusinessConnection,
     *,
@@ -462,6 +548,10 @@ def _run(
             },
         ) from exc
 
+    # L2 增强：星图命中时把播放量写回作品、记录完播/互动率，data_level 升级。
+    xingtu = _load_xingtu_metrics(client, profile.sec_user_id)
+    posts = _merge_xingtu_metrics(posts, xingtu)
+
     result = diagnose(_snapshot(profile, posts, collected_at=collected_at))
     account = _account_summary(profile)
     document: dict[str, Any] = {
@@ -477,8 +567,22 @@ def _run(
         },
         "collectedAt": collected_at.isoformat(),
         "works": _works_document(posts),
+        "l2": _l2_document(xingtu),
     }
     narrative = build_narrative(result)
+
+    # LLM 解读：打分不变，只替换解读文案；未配置/失败/开关关闭都回落规则。
+    if not narrative_llm_disabled():
+        llm_config = load_narrative_llm_config(conn)
+        if llm_config is not None:
+            llm = build_llm_narrative(
+                base_url=llm_config[0],
+                api_key=llm_config[1],
+                model=llm_config[2],
+                report=document,
+            )
+            if llm is not None:
+                narrative = {**narrative, **llm}
 
     conn.execute(
         "UPDATE account_diagnosis_reports SET "
@@ -502,6 +606,20 @@ def _run(
         finish_source(conn, report_id, units=1, succeeded=True, service=SERVICE)
     row = _load_report_row(conn, report_id)
     return _payload(row)
+
+
+def _daily_target_count(conn: BusinessConnection, owner_id: str, target: AccountTarget) -> int:
+    """当天（库时区）对该目标账号已完成的有效诊断数."""
+
+    row = conn.execute(
+        "SELECT count(*) FROM account_diagnosis_reports "
+        "WHERE wallet_owner_id=%s AND status='SUCCEEDED' "
+        "AND created_at >= date_trunc('day', now()) "
+        "AND (sec_user_id IS NOT DISTINCT FROM %s) "
+        "AND (unique_id IS NOT DISTINCT FROM %s)",
+        (owner_id, target.sec_uid, target.unique_id),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
 
 
 def create_diagnosis(
@@ -532,6 +650,31 @@ def create_diagnosis(
     cached = _find_cached_report(conn, owner, target)
     if cached is not None:
         return _payload(cached, cached=True)
+
+    # 同一目标账号每日 ≤3 次（缓存命中不占额度）：防止单账号被反复外呼刷上游成本。
+    if _daily_target_count(conn, owner, target) >= DAILY_TARGET_LIMIT:
+        raise HTTPException(
+            429,
+            detail={
+                "code": "ACCOUNT_DIAGNOSIS_DAILY_LIMIT",
+                "message": f"同一账号每天最多诊断 {DAILY_TARGET_LIMIT} 次，请明天再试。",
+            },
+        )
+
+    # 同一付费主体同时只允许一个诊断在跑：诊断是同步外呼，并发双开只会
+    # 放大上游成本与耗时，排队语义在同步模型里等价于"拒绝第二次"。
+    lock_row = conn.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
+        (f"account_diagnosis:owner:{owner}",),
+    ).fetchone()
+    if lock_row is None or not lock_row[0]:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "ACCOUNT_DIAGNOSIS_IN_PROGRESS",
+                "message": "已有一个诊断正在进行，请等待完成后再试。",
+            },
+        )
 
     report_id = str(uuid4())
     device_id = current_device_id(conn, user_id)
