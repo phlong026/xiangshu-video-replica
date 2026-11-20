@@ -9,6 +9,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PromptOptimizeResult } from "../api";
 import {
+  DEFAULT_OPENING_ACTION,
   type FinalReplicaSnapshot,
   PromptEditor,
   ReplicaFinalPromptControls,
@@ -384,6 +385,36 @@ describe("最终提示词后置", () => {
     );
   });
 
+  // 后段画面的开场衔接由服务端强制要求，给空框等于让用户从零写一句话才能合成；
+  // 默认值必须「填好但不锁死」：用户改了就不再覆盖，切回开场画面要能撤回默认值。
+  it("后段画面默认填入开场衔接，用户改写后不再覆盖", () => {
+    const view = render(<FinalHarness sourceFrameTimestamp={1.2} />);
+    expect(screen.getByLabelText("开场衔接")).toHaveValue(
+      DEFAULT_OPENING_ACTION,
+    );
+
+    fireEvent.change(screen.getByLabelText("开场衔接"), {
+      target: { value: "我自己写的衔接：人物先抬头再起步" },
+    });
+    view.rerender(<FinalHarness sourceFrameTimestamp={3.4} />);
+    expect(screen.getByLabelText("开场衔接")).toHaveValue(
+      "我自己写的衔接：人物先抬头再起步",
+    );
+  });
+
+  it("开场画面不填默认值，切到后段画面才补上，切回时撤回", () => {
+    const view = render(<FinalHarness sourceFrameTimestamp={0} />);
+    expect(screen.getByLabelText("开场衔接（可选）")).toHaveValue("");
+
+    view.rerender(<FinalHarness sourceFrameTimestamp={2.5} />);
+    expect(screen.getByLabelText("开场衔接")).toHaveValue(
+      DEFAULT_OPENING_ACTION,
+    );
+
+    view.rerender(<FinalHarness sourceFrameTimestamp={0} />);
+    expect(screen.getByLabelText("开场衔接（可选）")).toHaveValue("");
+  });
+
   it("执行前逐项显示缺失原因，并在补齐前不调用服务端", () => {
     render(<FinalHarness frame="" sourceFrameTimestamp={-1} />);
 
@@ -392,8 +423,9 @@ describe("最终提示词后置", () => {
     expect(checklist).toHaveTextContent("请先完成首帧置换并选定图片");
     expect(checklist).toHaveTextContent("口播文案");
     expect(checklist).toHaveTextContent("请在口播文案区域点击“确认”");
-    expect(checklist).toHaveTextContent("开场衔接");
-    expect(checklist).toHaveTextContent("首帧时间点未知");
+    // 后段画面会自动补默认开场衔接，这一项不再阻塞合成。
+    expect(checklist).toHaveTextContent("开场衔接已完成");
+    expect(checklist).not.toHaveTextContent("首帧时间点未知");
     expect(
       screen.getByRole("button", { name: "合成最终提示词" }),
     ).toBeDisabled();

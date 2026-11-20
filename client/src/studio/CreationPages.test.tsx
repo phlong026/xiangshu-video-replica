@@ -45,6 +45,12 @@ const replicaApi = vi.hoisted(() => ({
   compileGenerationPrompt: vi.fn(),
   saveShotCards: vi.fn(),
   createPromptOptimization: vi.fn(),
+  // 成片就地消费面板：批次详情 + 预签名播放地址 + 下载通道
+  getGenerationBatch: vi.fn(),
+  createGenerationTaskPreviewUrl: vi.fn(),
+  createGenerationResultPreviewUrl: vi.fn(),
+  downloadGenerationTaskResult: vi.fn(),
+  downloadGenerationResult: vi.fn(),
 }));
 const replicaLive = vi.hoisted(() => ({
   readAudioDuration: vi.fn(),
@@ -2474,7 +2480,23 @@ describe("V1.4 创作页面", () => {
 
   it.each(["completed", "cancelled"] as const)(
     "终态 %s 不继续显示等待提示",
-    (status) => {
+    async (status) => {
+      replicaApi.getGenerationBatch.mockResolvedValue({
+        tasks: [
+          {
+            id: "task-1",
+            status: "SUCCEEDED",
+            direct_result_available: true,
+            result_asset_id: null,
+          },
+        ],
+      } as unknown as never);
+      replicaApi.createGenerationTaskPreviewUrl.mockResolvedValue(
+        "https://cdn.example/final.mp4",
+      );
+      replicaApi.downloadGenerationTaskResult.mockResolvedValue({
+        status: "started",
+      });
       const value = studio();
       value.state = {
         ...value.state,
@@ -2502,20 +2524,23 @@ describe("V1.4 创作页面", () => {
       useStudio.mockReturnValue(value);
       render(<VideoPage />);
       if (status === "completed") {
-        fireEvent.click(screen.getByRole("button", { name: "查看成片" }));
-        expect(value.navigate).toHaveBeenCalledWith(
-          "task-detail",
-          expect.objectContaining({
-            selectedTaskId: "done",
-            selectedTaskBackendId: "done",
-            returnTo: "video",
-          }),
+        // 成片就地消费：本页拿到预签名地址直接播，并能就地下载。
+        expect(await screen.findByLabelText("成片预览")).toHaveAttribute(
+          "src",
+          "https://cdn.example/final.mp4",
+        );
+        fireEvent.click(screen.getByRole("button", { name: /下载成片/ }));
+        await waitFor(() =>
+          expect(replicaApi.downloadGenerationTaskResult).toHaveBeenCalledWith(
+            "task-1",
+            "task-1.mp4",
+          ),
         );
       } else {
         expect(screen.getByText("任务已取消")).toBeInTheDocument();
         expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
         expect(
-          screen.queryByRole("button", { name: "查看成片" }),
+          screen.queryByRole("button", { name: /下载成片/ }),
         ).not.toBeInTheDocument();
       }
       expect(screen.queryByText(/已等待/)).not.toBeInTheDocument();
@@ -2930,7 +2955,7 @@ describe("V1.4 创作页面", () => {
     expect(ratio).toBeDisabled();
     expect(ratio).toHaveValue("自动");
     expect(
-      screen.getByText("图生视频的画面比例由首帧图片决定，无需选择。"),
+      screen.getByText("图生视频的画面比例随首帧图片走，无需选择。"),
     ).toBeInTheDocument();
   });
 

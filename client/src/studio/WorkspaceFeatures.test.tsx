@@ -9,14 +9,11 @@ import type { ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { createReviewData, reviewUser } from "./fixtures";
 import { createState } from "./state";
-import { WorkspaceNotifications } from "./WorkspaceNotifications";
 import { WorkspaceSearch } from "./WorkspaceSearch";
 
 const mocks = vi.hoisted(() => ({
   useStudio: vi.fn(),
   searchWorkspace: vi.fn(),
-  getWorkspaceNotifications: vi.fn(),
-  markWorkspaceNotificationsRead: vi.fn(),
   getStudioSavedScript: vi.fn(),
 }));
 vi.mock("./context", () => ({ useStudio: mocks.useStudio }));
@@ -104,58 +101,4 @@ it("搜索读取服务器分页，打开文案重置其他创作来源", async (
       script: expect.objectContaining({ text: "正文", confirmed: false }),
     }),
   });
-});
-
-it("通知读取真实未读数，已读成功后重取并保留任务身份", async () => {
-  const item = {
-    id: "oral:o1",
-    task_id: "o1",
-    task_kind: "oral_task",
-    title: "口播成片",
-    status: "SUCCEEDED",
-    occurred_at: "2026-09-13T00:00:00Z",
-    unread: true,
-  };
-  mocks.getWorkspaceNotifications.mockResolvedValue({
-    enabled: true,
-    unread_count: 1,
-    items: [item],
-  });
-  mocks.markWorkspaceNotificationsRead.mockResolvedValue({
-    read_before: "2026-09-13T01:00:00Z",
-  });
-  render(<WorkspaceNotifications />);
-  fireEvent.click(screen.getByRole("button", { name: "查看任务动态" }));
-  await screen.findByText("最近 50 条任务状态；未读 1 条。");
-  mocks.getWorkspaceNotifications.mockResolvedValue({
-    enabled: true,
-    unread_count: 0,
-    items: [{ ...item, unread: false }],
-  });
-  fireEvent.click(screen.getByRole("button", { name: "全部标为已读" }));
-  await screen.findByText("最近 50 条任务状态；未读 0 条。");
-  fireEvent.click(screen.getByRole("button", { name: /口播成片 · 已完成/ }));
-  expect(value.navigate).toHaveBeenCalledWith("task-detail", {
-    selectedTaskId: "oral-o1",
-    selectedTaskKind: "oral_task",
-    selectedTaskBackendId: "o1",
-    returnTo: "tasks",
-  });
-});
-
-it("标记已读失败不假装清空未读数", async () => {
-  mocks.getWorkspaceNotifications.mockResolvedValue({
-    enabled: true,
-    unread_count: 3,
-    items: [],
-  });
-  mocks.markWorkspaceNotificationsRead.mockRejectedValue(new Error("保存失败"));
-  render(<WorkspaceNotifications />);
-  fireEvent.click(screen.getByRole("button", { name: "查看任务动态" }));
-  await screen.findByText("最近 50 条任务状态；未读 3 条。");
-  fireEvent.click(screen.getByRole("button", { name: "全部标为已读" }));
-  await screen.findByRole("alert");
-  expect(
-    screen.getByText("最近 50 条任务状态；未读 3 条。"),
-  ).toBeInTheDocument();
 });

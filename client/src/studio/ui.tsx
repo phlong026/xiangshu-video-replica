@@ -27,6 +27,9 @@ export function Icon({ name, size = 22 }: { name: string; size?: number }) {
     chart: "M3 21V11h4v10m3 0V3h4v18m3 0V7h4v14M1 21h22",
     search: "M16 16l6 6M2 10a8 8 0 1 0 16 0 8 8 0 0 0-16 0",
     bell: "M5 10c0-9 14-9 14 0v6l2 3H3l2-3v-6M9 22h6M12 1v2",
+    wallet:
+      "M3 6h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H3V6Zm0 0 2-3h12M3 10h18M16 15h2",
+    megaphone: "M4 10v4h3l6 4V6L7 10H4Zm13-1a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
     plus: "M12 3v18M3 12h18",
     arrow: "M5 12h14m-6-6 6 6-6 6",
     back: "m14 4-8 8 8 8",

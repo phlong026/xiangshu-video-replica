@@ -90,6 +90,7 @@ import {
   TasksPage,
   WorkbenchPage,
 } from "./MainPages";
+import { MessageCenter } from "./MessageCenter";
 import { PeoplePage, PersonPage } from "./PeoplePages";
 import { projectSourceAssetId } from "./projectSource";
 import {
@@ -133,7 +134,6 @@ import type {
   StudioTask,
 } from "./types";
 import { Button, Empty, Hint, Icon, Media, StudioDialog } from "./ui";
-import { WorkspaceNotifications } from "./WorkspaceNotifications";
 import { WorkspaceSearch } from "./WorkspaceSearch";
 import "./studio.css";
 
@@ -2431,7 +2431,7 @@ export function StudioWorkspace({
                 <Icon name="search" />
               </button>
             </form>
-            <WorkspaceNotifications />
+            <MessageCenter />
             <button
               type="button"
               aria-label="用户档案"

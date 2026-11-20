@@ -6305,30 +6305,118 @@ async function requestControlJson<T>(
 }
 
 export type WorkspaceSearchKind = "video" | "script" | "person" | "material";
-export type WorkspaceNotifications = {
-  enabled: boolean;
-  unread_count: number;
-  items: Array<{
-    id: string;
-    task_id: string;
-    task_kind: "generation_batch" | "oral_task";
-    title: string;
-    status: string;
-    occurred_at: string;
-    unread: boolean;
-  }>;
+
+export type StudioMessageCategory =
+  | "task"
+  | "billing"
+  | "announcement"
+  | "security";
+export type StudioMessageTone =
+  | "success"
+  | "danger"
+  | "warning"
+  | "info"
+  | "neutral";
+export type StudioBillingStyle = "per_item" | "daily" | "off";
+export type StudioMessageAction = {
+  kind: "task" | "wallet" | "profile";
+  label: string;
+  task_kind?: string | null;
+  task_id?: string | null;
 };
-export function getWorkspaceNotifications() {
-  return requestApiJson<WorkspaceNotifications>(
-    "/api/studio/notifications",
-    "读取任务通知失败",
+export type StudioMessage = {
+  id: string;
+  category: StudioMessageCategory;
+  kind: string;
+  title: string;
+  summary: string;
+  tone: StudioMessageTone;
+  status_label: string;
+  occurred_at: string;
+  unread: boolean;
+  amount_credits: number | null;
+  detail: string | null;
+  action: StudioMessageAction | null;
+};
+export type StudioMessagesPage = {
+  items: StudioMessage[];
+  total: number;
+  unread_count: number;
+  by_category: Record<string, number>;
+  has_more: boolean;
+  enabled: boolean;
+  muted: string[];
+  billing_style: StudioBillingStyle;
+};
+export type StudioMessagesSummary = {
+  total_unread: number;
+  by_category: Record<string, number>;
+  enabled: boolean;
+  muted: string[];
+  billing_style: StudioBillingStyle;
+};
+export type StudioMessagePreferences = {
+  enabled: boolean;
+  muted: StudioMessageCategory[];
+  billing_style: StudioBillingStyle;
+  balance_threshold: number;
+};
+
+export function getStudioMessages(
+  params: {
+    category?: StudioMessageCategory | "all";
+    unreadOnly?: boolean;
+    limit?: number;
+    offset?: number;
+  } = {},
+) {
+  const search = new URLSearchParams({
+    category: params.category ?? "all",
+    unread_only: params.unreadOnly ? "true" : "false",
+    limit: String(params.limit ?? 20),
+    offset: String(params.offset ?? 0),
+  });
+  return requestApiJson<StudioMessagesPage>(
+    `/api/studio/messages?${search}`,
+    "读取消息失败",
   );
 }
-export function markWorkspaceNotificationsRead() {
-  return requestApiJson<{ read_before: string }>(
-    "/api/studio/notifications/read",
-    "标记已读失败",
-    { method: "POST" },
+export function getStudioMessagesSummary() {
+  return requestApiJson<StudioMessagesSummary>(
+    "/api/studio/messages/summary",
+    "读取未读数失败",
+  );
+}
+export function markStudioMessagesRead(payload: {
+  keys?: string[];
+  category?: StudioMessageCategory | "all";
+}) {
+  return requestApiJson<{
+    marked: number;
+    read_before: Record<string, string>;
+  }>("/api/studio/messages/read", "标记已读失败", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+export function getStudioMessagePreferences() {
+  return requestApiJson<StudioMessagePreferences>(
+    "/api/studio/notification-preferences",
+    "读取消息设置失败",
+  );
+}
+export function updateStudioMessagePreferences(
+  payload: StudioMessagePreferences,
+) {
+  return requestApiJson<StudioMessagePreferences>(
+    "/api/studio/notification-preferences",
+    "保存消息设置失败",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
   );
 }
 export type WorkspaceSearchItem = {

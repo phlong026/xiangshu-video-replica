@@ -97,6 +97,7 @@ import {
   releaseReferencePreviews,
 } from "./referenceMaterialPreview";
 import { hasRef2vaStructure } from "./referencePrompt";
+import { StudioResultPreview } from "./StudioResultPreview";
 import {
   clearScriptRewriteIdempotencyKey,
   resolvePendingRewrite,
@@ -4037,12 +4038,9 @@ function ParameterControls() {
       </Field>
       <Field label="画面比例">
         {frameBased ? (
-          <>
-            <select aria-label="画面比例" disabled value="自动">
-              <option value="自动">自动（由首帧图片决定）</option>
-            </select>
-            <Hint>图生视频的画面比例由首帧图片决定，无需选择。</Hint>
-          </>
+          <select aria-label="画面比例" disabled value="自动">
+            <option value="自动">自动（首帧决定）</option>
+          </select>
         ) : (
           <select
             aria-label="画面比例"
@@ -4058,6 +4056,12 @@ function ParameterControls() {
           </select>
         )}
       </Field>
+      {frameBased ? (
+        // 四列参数格里放不下整句：说明单独占一行，不再撑成黄色提示块。
+        <small className="creation-field-note creation-field-note--row">
+          图生视频的画面比例随首帧图片走，无需选择。
+        </small>
+      ) : null}
       <Field label="生成数量">
         <select
           aria-label="生成数量"
@@ -4108,7 +4112,14 @@ function formatElapsed(from: string): string {
 }
 
 /** 生成等待视图：阶段时间线 + 进度百分比 + 轮换安抚文案。 */
-function VideoProgressView({ task }: { task: StudioTask }) {
+function VideoProgressView({
+  task,
+  poster,
+}: {
+  task: StudioTask;
+  /** 首帧画面：生成期间当背景，避免整块面板只有一行进度显得空。 */
+  poster?: ReactNode;
+}) {
   const [copyIndex, setCopyIndex] = useState(0);
   const [, setTick] = useState(0);
   const deliverable = (task.deliverableCount ?? 0) > 0;
@@ -4170,7 +4181,16 @@ function VideoProgressView({ task }: { task: StudioTask }) {
   const partialNote = partial ? failedTaskCreditsNote(task) : null;
 
   return (
-    <div className="creation-progress" aria-live="polite">
+    <div
+      className="creation-progress creation-progress--stage"
+      aria-live="polite"
+    >
+      {poster ? (
+        <div className="creation-progress-poster" aria-hidden>
+          {poster}
+          <span className="creation-progress-scrim" />
+        </div>
+      ) : null}
       <ol className="creation-progress-stages">
         {VIDEO_STAGE_LABELS.map((label, index) => (
           <li
@@ -5726,27 +5746,37 @@ export function VideoPage() {
               }
             />
           ) : videoTask ? (
-            <>
-              <VideoProgressView task={videoTask} />
-              {taskHasDeliverable(videoTask) ? (
-                <Button
-                  variant="primary"
-                  onClick={() =>
-                    navigate("task-detail", {
-                      selectedTaskId: videoTask.id,
-                      selectedTaskKind: videoTask.backendKind,
-                      selectedTaskBackendId:
-                        videoTask.backendId ??
-                        videoTask.batchId ??
-                        videoTask.id,
-                      returnTo: state.page,
-                    })
-                  }
-                >
-                  查看成片
-                </Button>
-              ) : null}
-            </>
+            taskHasDeliverable(videoTask) ? (
+              // 有可交付成片：就地播放 + 下载，不再把用户推去任务中心。
+              <StudioResultPreview
+                batchId={
+                  videoTask.backendId ?? videoTask.batchId ?? videoTask.id
+                }
+                onOpenTasks={() => navigate("tasks")}
+                poster={
+                  firstFrame ? (
+                    <Media
+                      alt="首帧预览"
+                      asset={firstFrame}
+                      className="creation-preview-poster-media"
+                    />
+                  ) : undefined
+                }
+              />
+            ) : (
+              <VideoProgressView
+                poster={
+                  firstFrame ? (
+                    <Media
+                      alt="首帧预览"
+                      asset={firstFrame}
+                      className="creation-preview-poster-media"
+                    />
+                  ) : undefined
+                }
+                task={videoTask}
+              />
+            )
           ) : referenceMode ? (
             references.length ? (
               <Media
@@ -5781,15 +5811,16 @@ export function VideoPage() {
               }
             />
           )}
-          {videoTask && (
-            <Hint>成片与历史进度可在任务中心查看，任务记录不会丢失。</Hint>
-          )}
-          <div className="creation-preview-footer">
-            <Hint>生成后可在此查看视频</Hint>
-            <Button variant="quiet" onClick={() => navigate("tasks")}>
-              前往任务中心 <Icon name="arrow" />
-            </Button>
-          </div>
+          {videoTask && !taskHasDeliverable(videoTask) ? (
+            // 生成期只留一条去任务中心的出口：成片面板已经自带操作条，
+            // 三道重复提示会把「正在生成」这件事淹没。
+            <div className="creation-preview-footer">
+              <Hint>成片与历史进度可在任务中心查看，任务记录不会丢失。</Hint>
+              <Button variant="quiet" onClick={() => navigate("tasks")}>
+                前往任务中心 <Icon name="arrow" />
+              </Button>
+            </div>
+          ) : null}
         </Panel>
       </div>
       <div className="creation-video-bottom-bar">

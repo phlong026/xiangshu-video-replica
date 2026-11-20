@@ -98,6 +98,7 @@ from app.settings_routes import router as settings_router
 from app.simple_character_routes import router as character_simple_router
 from app.source_frame_routes import router as source_frame_router
 from app.studio_draft_routes import router as studio_draft_router
+from app.studio_messages import router as studio_messages_router
 from app.studio_routes import router as studio_router
 from app.task_diagnostic_routes import router as task_diagnostic_router
 from app.training_material_routes import router as training_material_router
@@ -394,6 +395,7 @@ app.middleware("http")(request_observability_middleware)
 app.include_router(task_diagnostic_router)
 app.include_router(generation_router)
 app.include_router(studio_router)
+app.include_router(studio_messages_router)
 app.include_router(studio_draft_router)
 app.include_router(publish_router)
 app.include_router(publish_browser_router)

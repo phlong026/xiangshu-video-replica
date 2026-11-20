@@ -43,6 +43,7 @@ server/tests/test_script_from_audio_copy_gate_pg.py
 server/tests/test_security_contracts.py
 server/tests/test_signed_thumbnail_grant.py
 server/tests/test_studio_draft_tombstone_pg.py
+server/tests/test_studio_messages_pg.py
 server/tests/test_sub_account_permissions.py
 server/tests/test_upload_proxy_contract.py
 server/tests/test_viral_cohort_sources_pg.py

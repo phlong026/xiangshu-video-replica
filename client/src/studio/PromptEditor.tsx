@@ -93,6 +93,17 @@ export function replicaInputKey(input: {
   return JSON.stringify(input);
 }
 
+/**
+ * 开场衔接的初始文案（用户可改）。
+ *
+ * 选了后段画面时服务端必然要求填写开场衔接，空框会让用户面对「请说明如何从该
+ * 画面开始」却无从下手，合成直接被卡在 409；给一段描述源片动作连续性的默认值，
+ * 用户认可就能直接合成，不认可再改写。只用于「后段画面」分支——开场画面
+ * （≈0 秒）本身不需要衔接说明，保持可选且为空。
+ */
+export const DEFAULT_OPENING_ACTION =
+  "人物从所选画面中的姿态自然起步，镜头沿用原片的运动方向与节奏，平滑衔接到之后的动作，不出现跳变或瞬移。";
+
 /** Shared final step for all replica entry points; compilation is always explicit. */
 export function ReplicaFinalPromptControls({
   input,
@@ -161,6 +172,10 @@ export function ReplicaFinalPromptControls({
     sourceFrameTimestamp === undefined ||
     sourceFrameTimestamp < 0 ||
     sourceFrameTimestamp > 0.25;
+  // 后段画面给默认开场衔接：用户不写也能合成，写了就按用户版本走。
+  const defaultOpeningAction = requiresOpeningAction
+    ? DEFAULT_OPENING_ACTION
+    : "";
   const preflightChecks: ReplicaPreflightCheck[] = [
     ...upstreamChecks,
     {
@@ -215,6 +230,23 @@ export function ReplicaFinalPromptControls({
   );
   const preparedCallback = useRef(onPrepared);
   preparedCallback.current = onPrepared;
+  // 默认开场衔接只在「用户没动过这个框」时生效：用户一旦改过就永不再覆盖；
+  // 从草稿恢复的值（用户之前写的）也视为已动过，不进默认填充。
+  const openingTouched = useRef(false);
+  const autoOpeningAction = useRef("");
+  const openingActionRef = useRef(openingAction);
+  openingActionRef.current = openingAction;
+  useEffect(() => {
+    if (openingTouched.current) return;
+    const currentOpening = openingActionRef.current;
+    if (currentOpening === defaultOpeningAction) return;
+    // 既不是默认值也不是上次自动填的值 = 外部写入（草稿恢复），不动它。
+    if (currentOpening.trim() && currentOpening !== autoOpeningAction.current)
+      return;
+    autoOpeningAction.current = defaultOpeningAction;
+    setOpeningAction(defaultOpeningAction);
+    preparedCallback.current(null);
+  }, [defaultOpeningAction]);
   useEffect(() => {
     let active = true;
     const revision = operation.current;
@@ -398,6 +430,7 @@ export function ReplicaFinalPromptControls({
             onChange={(event) => {
               operation.current += 1;
               setPending(null);
+              openingTouched.current = true;
               setOpeningAction(event.target.value);
               onPrepared(null);
             }}
@@ -415,6 +448,7 @@ export function ReplicaFinalPromptControls({
               onChange={(event) => {
                 operation.current += 1;
                 setPending(null);
+                openingTouched.current = true;
                 setOpeningAction(event.target.value);
                 onPrepared(null);
               }}
