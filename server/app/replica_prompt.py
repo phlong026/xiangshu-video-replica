@@ -305,11 +305,7 @@ def acquire_replica_prompt_task(
         worker_id=worker_id,
         attempt=int(row["attempt"]),
         request_id=None if row["request_id"] is None else str(row["request_id"]),
-        mode=(
-            "prompt"
-            if "mode" not in row.keys() or row["mode"] is None
-            else str(row["mode"])
-        ),
+        mode=("prompt" if "mode" not in row.keys() or row["mode"] is None else str(row["mode"])),
     )
 
 
@@ -392,9 +388,7 @@ def perform_replica_prompt_task(
         attempt=work.lease.attempt,
     ):
         storyboard = work.mode == "storyboard"
-        method_name = (
-            "analyze_replica_storyboard" if storyboard else "analyze_replica_prompt"
-        )
+        method_name = "analyze_replica_storyboard" if storyboard else "analyze_replica_prompt"
         method = getattr(work.provider, method_name, None)
         if callable(method):
             response = method(

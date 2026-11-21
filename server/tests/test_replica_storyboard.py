@@ -73,9 +73,7 @@ def test_valid_storyboard_parses_without_warnings() -> None:
 
 def test_raw_newline_injection_recovers() -> None:
     raw = json.dumps(_valid_payload(), ensure_ascii=False)
-    injected = raw.replace('"shot_id"', '"\nshot_id\n"').replace(
-        '"乡村小巷"', '"乡村小\n巷"'
-    )
+    injected = raw.replace('"shot_id"', '"\nshot_id\n"').replace('"乡村小巷"', '"乡村小\n巷"')
     payload = parse_replica_storyboard_payload(injected)
     assert len(payload["shots"]) == 2
 
@@ -106,11 +104,7 @@ def test_duration_mismatch_is_warning_not_rejection() -> None:
 
 
 def test_default_payload_shape_matches_parser() -> None:
-    raw = json.dumps(
-        default_replica_storyboard_payload(120), ensure_ascii=True, sort_keys=True
-    )
-    parsed = parse_replica_storyboard_payload(
-        raw, media_info={"duration_seconds": 120}
-    )
+    raw = json.dumps(default_replica_storyboard_payload(120), ensure_ascii=True, sort_keys=True)
+    parsed = parse_replica_storyboard_payload(raw, media_info={"duration_seconds": 120})
     assert len(parsed["shots"]) >= 2
     assert parsed["warnings"] == []
