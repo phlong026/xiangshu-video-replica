@@ -357,7 +357,6 @@ export function WorkbenchPage() {
     patchState,
     updateData,
     state,
-    discardSavedDraft,
     extractScriptFromUpload,
     refresh,
   } = useStudio();

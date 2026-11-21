@@ -8643,6 +8643,44 @@ export type AccountDiagnosisDocument = {
     avgInteractRate: number | null;
     finishRates: Record<string, number>;
   } | null;
+  /** 行动卡：规则引擎生成的问题锚点/可计算归因/待自查/分步做法/目标值/优先级（旧报告缺省）。 */
+  actionCards?: Array<{
+    key: string;
+    priority: "P0" | "P1" | "P2";
+    dimension: string;
+    title: string;
+    problem: string;
+    evidence: string[];
+    selfChecks: string[];
+    steps: string[];
+    beforeAfter: Array<{ before: string; after: string }>;
+    target: string;
+    metric: string | null;
+    targetValue: number | null;
+    dueWeek: number;
+    /** LLM 重写过步骤话术时标记；规则文案为 rules。 */
+    generatedBy?: "llm" | "rules";
+  }>;
+  /** 同赛道参考爆款（爆款池按标题相似度+热度挑选；旧报告缺省）。 */
+  referenceWorks?: Array<{
+    videoId: string;
+    title: string;
+    author: string;
+    likes: number;
+    score: number;
+    url: string;
+  }>;
+  /** 上次修复回顾（无上次报告时为 null；旧报告缺省）。 */
+  priorReview?: Array<{
+    title: string;
+    status: "fixed" | "open" | "worse" | "manual";
+    note: string;
+  }> | null;
+  /** 2 周改进日历（旧报告缺省）。 */
+  calendar?: Array<{
+    label: string;
+    days: Array<{ date: string; weekday: number; task: string; rest: boolean }>;
+  }>;
 };
 
 export type AccountDiagnosisNarrative = {
