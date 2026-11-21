@@ -234,16 +234,23 @@ describe("RootApp", () => {
     // 激活前不触达任何私有业务接口：唯一允许的 pre-auth 端点是激活/配对/登录，
     // 而激活屏挂载时它们都尚未被调用（浏览器无凭据 → 零 fetch）。收窄白名单，
     // 使 /api/customer/wallet|profile|devices 这类登录后私有接口在激活前被调用即失败。
+    // /api/viral/videos 是服务端明示匿名可读的公开内容池（viral_routes.py 的
+    // list_viral_videos 走无认证 Database + OptionalShortAuthUser，actor=None
+    // 只跳过收藏/个性化标记），工作台未登录态的爆款精选挂载即读取它。
     const preAuthAllowed = [
       "/api/customer/browser-session",
       "/api/customer/activate",
       "/api/customer/sessions/login",
+      "/api/viral/videos",
     ];
     expect(
       called.some(
         (url) =>
           url.includes("/api/") &&
-          !preAuthAllowed.some((endpoint) => url.endsWith(endpoint)),
+          // 端点带查询串（如 /api/viral/videos?platform=…），按去 query 后的路径匹配。
+          !preAuthAllowed.some((endpoint) =>
+            url.split("?")[0].endsWith(endpoint),
+          ),
       ),
     ).toBe(false);
   });

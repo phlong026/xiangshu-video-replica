@@ -140,7 +140,10 @@ def test_published_list_uses_one_database_connection(
     close_pg_pool()
     monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MIN", "1")
     monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_MAX", "1")
-    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_TIMEOUT", "0.2")
+    # 0.2s 是「池耗尽即立刻失败」的行为断言口径；CI 重负载下冷启动建连
+    # （TLS 握手 + auth）偶尔超过 0.2s 造成假失败（连续两轮 sharded
+    # pytest 同例），放宽到 2s 仍远小于任何真实超时，语义不变。
+    monkeypatch.setenv("VIDEO_REPLICA_PG_POOL_TIMEOUT", "2")
     try:
         response = detail_client.get(
             "/api/viral/videos", headers=headers, params={"platform": platform}

@@ -932,9 +932,7 @@ def test_viral_videos_list_serves_anonymous_guests(
     app = FastAPI()
     app.include_router(viral_router)
     with TestClient(app) as test_client:
-        response = test_client.get(
-            "/api/viral/videos", params={"platform": "douyin"}
-        )
+        response = test_client.get("/api/viral/videos", params={"platform": "douyin"})
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["platform"] == "douyin"

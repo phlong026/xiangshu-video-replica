@@ -322,8 +322,12 @@ def _item(
 def list_viral_videos(
     # 匿名访客可读：连接走无认证的 Database（payment 回调同款通道，查询只读），
     # 而不是绑定登录态的 ReadDatabase；个性化标记由 OptionalShortAuthUser 提供。
-    conn: Database,
+    # actor 必须声明在 conn 之前：FastAPI 按签名顺序解析依赖，可选鉴权的短事务
+    # 先借先还连接，conn 才借业务连接。反过来的顺序在池上限=1 时是确定性死锁
+    # ——conn 先占住唯一连接，带凭据请求的认证短事务再等第二条（PoolTimeout，
+    # test_published_list_uses_one_database_connection 连续三轮 CI 实锤）。
     actor: OptionalShortAuthUser,
+    conn: Database,
     platform: str = PLATFORM_DOUYIN,
     sort: str = SORT_HOT,
     limit: Annotated[int, Query(ge=1, le=50)] = 12,
