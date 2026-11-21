@@ -276,7 +276,7 @@ export const navGroups: {
       // 账号诊断与爆款视频成对：一个看别人，一个看自己。
       { id: "account-diagnosis", title: "账号诊断", icon: "chart" },
       { id: "copy", title: "文案工坊", icon: "pen" },
-      { id: "replica", title: "视频拆解", icon: "video" },
+      { id: "replica", title: "视频创作", icon: "video" },
     ],
   },
   {
@@ -472,6 +472,9 @@ export function StudioWorkspace({
   // LEFTOVER-ON-OPEN：读回来但还没回填的上次草稿，等用户决定恢复还是放弃。
   const [pendingRestore, setPendingRestore] =
     useState<CloudDraftRestore | null>(null);
+  // 提醒横幅每天只打扰一次、展示 5 秒后自动收起：草稿本身原样保留，当天
+  // 不再重复提示，次日登录再提示一次。手动「恢复/放弃」不受影响。
+  const [restorePromptVisible, setRestorePromptVisible] = useState(false);
   const [discardBusy, setDiscardBusy] = useState(false);
   const [restoreError, setRestoreError] = useState("");
   if (currentUserRoleRef.current !== currentUser.role) {
@@ -790,6 +793,34 @@ export function StudioWorkspace({
       window.clearTimeout(draftSaveTimerRef.current);
     };
   }, [review, currentUser.id]);
+
+  // 「上次未完成的工作」提醒：每天只展示一次、5 秒后自动收起。展示即记账
+  // （localStorage 存当天日期），手动「恢复/放弃」与自动收起都算已提醒；
+  // 草稿本体不动，次日登录再次提示。
+  useEffect(() => {
+    if (review || !pendingRestore) {
+      setRestorePromptVisible(false);
+      return;
+    }
+    const todayKey = () => {
+      const now = new Date();
+      return `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
+    };
+    const lastShownDay = window.localStorage.getItem(
+      "studio.restorePrompt.lastShown",
+    );
+    if (lastShownDay === todayKey()) {
+      setRestorePromptVisible(false);
+      return;
+    }
+    window.localStorage.setItem("studio.restorePrompt.lastShown", todayKey());
+    setRestorePromptVisible(true);
+    const timer = window.setTimeout(
+      () => setRestorePromptVisible(false),
+      5_000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [review, pendingRestore]);
 
   /** 已排队/在途的自动保存必须先作废，否则删掉云端那行之后，
    * 迟到的一次 PUT 会把同一份旧草稿原样写回来。 */
@@ -2446,7 +2477,7 @@ export function StudioWorkspace({
             </button>
           </div>
           <div className="studio-stage">
-            {pendingRestore && (
+            {pendingRestore && restorePromptVisible && (
               <div className="studio-restore-prompt" role="status">
                 <Icon name="info" />
                 <span>

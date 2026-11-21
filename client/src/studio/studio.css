@@ -766,6 +766,52 @@ html:has(.studio-shell) {
   font-weight: 500;
   font-size: var(--font-body);
 }
+/* 常用工具：四类创作入口 + 空白创作，登录与未登录（引导登录）都可见。 */
+.studio-home-tools {
+  width: min(1180px, 100%);
+  min-width: 0;
+  margin: 0 auto 18px;
+}
+.studio-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.studio-tool-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid #292a27;
+  border-radius: 10px;
+  background: #171817;
+  color: #ecece8;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.studio-tool-card:hover,
+.studio-tool-card:focus-visible {
+  border-color: #75602d;
+}
+.studio-tool-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: #211f18;
+  color: #e5aa36;
+}
+.studio-tool-card strong {
+  font-size: var(--font-body);
+  font-weight: 500;
+}
+.studio-tool-card small {
+  color: #9a9b95;
+  font-size: var(--font-label);
+}
 /* 爆款精选：复用二级页 ViralCard；工作台按 3 列铺排并把封面压到 3:4，
    让一屏能同时看到两排卡片（9:16 会让单卡高近 600px，一屏放不下一排半）。 */
 .studio-home-viral-grid {

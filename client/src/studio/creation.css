@@ -2056,6 +2056,13 @@
   font-weight: 600;
   margin: 0;
 }
+/* 章节标题行右侧的操作位（如拆解历史入口），与 h2 同行两端对齐。 */
+.creation-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 .creation-replica-analyze .creation-panel-title-row {
   flex-wrap: wrap;
   overflow-wrap: anywhere;

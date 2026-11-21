@@ -862,6 +862,10 @@ def classify(method: str, path: str, deps: tuple[str, ...]) -> str:
         "get_current_user" in deps or "get_current_user_short_tx" in deps
     ):
         return "UNCLASSIFIED"  # a fenced write must not also take the read gate
+    if "get_optional_user_short_tx" in deps:
+        # 可选鉴权读：管理员推送的公开内容池（首页爆款精选）。匿名访客可读，
+        # 登录后仅追加收藏/个性化标记；不与 write fence 共存。
+        return "PUBLIC_READ"
     if "get_current_user" in deps or "get_current_user_short_tx" in deps:
         return "READ_OWNER"
     if "get_business_db" in deps:
@@ -910,6 +914,32 @@ def test_every_business_method_path_is_classified_zero_misses() -> None:
     assert matrix[("GET", "/api/wallet")] == "READ_OWNER"
     assert matrix[("POST", "/api/customer/recharge-orders")] == "WRITE_FENCE"
     assert matrix[("POST", "/api/projects/{project_id}/generation-batches")] == "WRITE_FENCE"
+    # 首页爆款精选是公开内容池：匿名访客可读（可选鉴权），是唯一的 PUBLIC_READ。
+    assert matrix[("GET", "/api/viral/videos")] == "PUBLIC_READ"
+
+
+def test_viral_videos_list_serves_anonymous_guests(
+    route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未登录访客请求爆款列表：200 返回公开推送内容，且不携带任何个性化
+    收藏标记；同一路由带有效会话时行为不变（登录后才有 is_favorite）。
+
+    `client` fixture 的裁剪 app 不含 viral 路由，这里按 cw058 同款方式
+    单挂 viral router（空库即可，匿名可达性与无个性化标记是本用例断言）。"""
+    monkeypatch.setenv(DATABASE_URL_ENV, route_state)
+    from app.viral_routes import router as viral_router
+
+    app = FastAPI()
+    app.include_router(viral_router)
+    with TestClient(app) as test_client:
+        response = test_client.get(
+            "/api/viral/videos", params={"platform": "douyin"}
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["platform"] == "douyin"
+        assert isinstance(payload["items"], list)
+        assert all(item["isFavorite"] is False for item in payload["items"])
 
 
 def _hold_customer_read_response(customer_app: FastAPI) -> tuple[Event, Event]:

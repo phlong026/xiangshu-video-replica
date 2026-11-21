@@ -4740,6 +4740,11 @@ describe("视频复刻（模块①）", () => {
     const view = render(<ReplicaPage />);
     await screen.findByRole("button", { name: "重新拆解" });
     fireEvent.click(screen.getByRole("button", { name: "重新拆解" }));
+    // 已有拆解结果：先弹去重确认，弹窗内选「重新拆解」才真正发起。
+    const dedupe = await screen.findByRole("dialog", {
+      name: "已有拆解结果",
+    });
+    fireEvent.click(within(dedupe).getByRole("button", { name: "重新拆解" }));
     await waitFor(() => expect(finish).toBeDefined());
     view.unmount();
     vi.mocked(value.patchDraft).mockClear();
@@ -4971,7 +4976,14 @@ describe("视频复刻（模块①）", () => {
       target: { value: "本地改动的动作" },
     });
 
+    // 已有拆解结果：去重弹窗先拦一道；弹窗内「重新拆解」后才轮到 S9 确认。
     fireEvent.click(screen.getByRole("button", { name: "重新拆解" }));
+    const dedupeDialog = await screen.findByRole("dialog", {
+      name: "已有拆解结果",
+    });
+    fireEvent.click(
+      within(dedupeDialog).getByRole("button", { name: "重新拆解" }),
+    );
 
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("未保存"));
     expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
@@ -4998,7 +5010,14 @@ describe("视频复刻（模块①）", () => {
       target: { value: "本地改动的动作" },
     });
 
+    // 已有拆解结果：去重弹窗先拦一道；弹窗内「重新拆解」后才轮到 S9 确认。
     fireEvent.click(screen.getByRole("button", { name: "重新拆解" }));
+    const dedupeDialog = await screen.findByRole("dialog", {
+      name: "已有拆解结果",
+    });
+    fireEvent.click(
+      within(dedupeDialog).getByRole("button", { name: "重新拆解" }),
+    );
 
     expect(window.confirm).toHaveBeenCalledWith(
       expect.stringContaining("未保存"),
@@ -5027,6 +5046,13 @@ describe("视频复刻（模块①）", () => {
     await screen.findByText("已保存为自定义 ✓");
 
     fireEvent.click(screen.getByRole("button", { name: "重新拆解" }));
+    // 已有拆解结果：去重弹窗先拦一道，弹窗内「重新拆解」直接发起。
+    const dedupeDialog = await screen.findByRole("dialog", {
+      name: "已有拆解结果",
+    });
+    fireEvent.click(
+      within(dedupeDialog).getByRole("button", { name: "重新拆解" }),
+    );
 
     await waitFor(() =>
       expect(replicaApi.startVideoAnalysis).toHaveBeenCalled(),
