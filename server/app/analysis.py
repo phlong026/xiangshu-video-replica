@@ -38,6 +38,11 @@ SHOT_CARD_KIND = "shot_card"
 # 长视频复刻提示词：独立任务族与结果 kind（4–180 秒源片 → 一段完整复刻提示词）。
 REPLICA_PROMPT_KIND = "replica_prompt"
 REPLICA_PROMPT_SCHEMA_VERSION = "replica-prompt.v1"
+# 长视频分镜表拆解（storyboard 模式，2026-11-22 推翻 11-11 D3）：同一任务族
+# 的 mode='storyboard' 产出，kind 独立于 replica_prompt——分镜表与提示词是
+# 两种结果形态，前端按 kind 分别渲染与回看历史。
+LONG_ANALYSIS_KIND = "long_analysis"
+LONG_ANALYSIS_SCHEMA_VERSION = "long-analysis.v1"
 SCHEMA_VERSION = "b3.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 # 视频拆解的结构化输出格式：只要求「是一个 JSON 对象」（json_object）。
@@ -784,6 +789,55 @@ class ApilioGemini:
         )
         return ProviderResponse(text=text, raw=raw)
 
+    def analyze_replica_storyboard(
+        self,
+        *,
+        video_uri: str,
+        duration_seconds: float,
+        media_info: dict[str, Any] | None = None,
+    ) -> ProviderResponse:
+        """长视频分镜表拆解（storyboard 模式）：同通道看完整源片.
+
+        与 analyze_replica_prompt 的差异只在提示词与输出合同：本方法要求
+        模型额外产出与分镜表同构的完整镜头时间轴（shots，12 字段）。
+        保持 json_object（2026-11-20 空壳事故后 json_schema 在本网关已被
+        证实不可靠，见 F82C66E9）。
+        """
+        if not is_https_video_url(video_uri):
+            logger.warning(
+                "%s Replica-storyboard analysis refused: the reference video URL is not HTTPS",
+                analysis_log_ref(),
+            )
+            raise AnalysisProviderFailed(
+                "参考视频没有可用的 HTTPS 签名地址，无法送去拆解；请重新上传参考视频后再试。",
+                failure_phase=REQUEST_FAILURE_PHASE,
+            )
+        from app.h3_prompts import RULES
+
+        instruction = (RULES / "replica_storyboard.txt").read_text(encoding="utf-8")
+        info = dict(media_info or {})
+        info.setdefault("duration_seconds", duration_seconds)
+        instruction = instruction.replace("{MEDIA_INFO_JSON}", json.dumps(info, ensure_ascii=False))
+        text, raw = self._complete_video(
+            {
+                "model": self.model,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": instruction},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "以下视频仅用于分析；不生成最终视频。"},
+                            {"type": "image_url", "image_url": {"url": video_uri}},
+                        ],
+                    },
+                ],
+            },
+            duration_seconds=duration_seconds,
+        )
+        return ProviderResponse(text=text, raw=raw)
+
     def repair_json(
         self, *, broken_text: str, error_message: str, max_tokens: int
     ) -> ProviderResponse:
@@ -1153,6 +1207,120 @@ _REPLICA_FORBIDDEN_WORDS = ("复刻", "原片", "源视频")
 _REPLICA_PROMPT_MAX_CHARS = 8000
 
 
+def parse_replica_storyboard_payload(
+    text: str,
+    *,
+    media_info: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """宽松校验长视频分镜表拆解出参（storyboard 模式，long-analysis.v1）.
+
+    校验取舍与 parse_replica_prompt_payload 同源：宽容链恢复 JSON 后，
+    硬性要求只有三个——payload 是对象、shots 是非空数组、replica_prompt
+    是非空字符串；shots 的时间轴连续性与字段完整性记入 warnings 随
+    payload 落库（LLM 对长视频时间轴的精度有限，逐字段硬拒会把整次付费
+    调用丢掉；下游渲染只取存在的字段）。禁词命中仍硬拒绝。
+    """
+    try:
+        payload, _strategy = parse_llm_json(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise AnalysisProviderFailed(
+            "长视频拆解结果格式无效，请重新拆解。",
+            retryable=False,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AnalysisProviderFailed(
+            "长视频拆解结果格式无效，请重新拆解。",
+            retryable=False,
+        )
+    prompt_text = payload.get("replica_prompt")
+    if not isinstance(prompt_text, str) or not prompt_text.strip():
+        raise AnalysisProviderFailed(
+            "长视频拆解没有产出复刻提示词，请重新拆解。",
+            retryable=False,
+        )
+    shots = payload.get("shots")
+    if not isinstance(shots, list) or not shots:
+        raise AnalysisProviderFailed(
+            "长视频拆解没有产出分镜表，请重新拆解。",
+            retryable=False,
+        )
+    warnings: list[dict[str, str]] = []
+    for word in _REPLICA_FORBIDDEN_WORDS:
+        if word in prompt_text:
+            raise AnalysisProviderFailed(
+                "长视频拆解结果包含内部任务表述，不符合可直用提示词的要求，请重新拆解。",
+                retryable=False,
+            )
+    info = dict(media_info or {})
+    duration_seconds = info.get("duration_seconds")
+    if isinstance(duration_seconds, int | float) and not isinstance(duration_seconds, bool):
+        # 时间轴一致性软校验（不硬拒）：末段 end_time 应落在时长±1 秒内。
+        end_times = [
+            shot["end_time"]
+            for shot in shots
+            if isinstance(shot, dict) and isinstance(shot.get("end_time"), int | float)
+        ]
+        latest_end = max(end_times) if end_times else None
+        if latest_end is None or abs(latest_end - duration_seconds) > 1.0:
+            warnings.append(
+                {
+                    "code": "STORYBOARD_DURATION_MISMATCH",
+                    "message": (
+                        f"分镜表末段结束时间（{latest_end if latest_end is not None else '无'}）"
+                        f"与视频时长（{duration_seconds} 秒）不一致，时间轴可能有漂移。"
+                    ),
+                }
+            )
+    payload = {**payload, "warnings": warnings}
+    return payload
+
+
+def default_replica_storyboard_payload(duration_seconds: float) -> dict[str, Any]:
+    """FakeGemini 的分镜表默认出参：字段形状与真实链路一致，shots 覆盖全片."""
+    midpoint = round(duration_seconds / 2, 3)
+    return {
+        "schema_version": LONG_ANALYSIS_SCHEMA_VERSION,
+        "summary": {field: "测试摘要" for field in _REPLICA_PROMPT_SUMMARY_FIELDS},
+        "spoken_script": [
+            {"start_time": 0.0, "end_time": min(4.0, duration_seconds), "text": "测试口播一句。"}
+        ],
+        "replica_prompt": (
+            "室内场景，一位讲解者面向镜头缓步介绍，镜头跟随，"
+            f"整体时长约 {round(duration_seconds)} 秒。"
+        ),
+        "shots": [
+            {
+                "shot_id": "s1",
+                "start_time": 0,
+                "end_time": midpoint,
+                "shot_type": "中景",
+                "composition": "人物居中",
+                "camera_motion": "固定机位",
+                "subject": "讲解者",
+                "person_count": 1,
+                "action": "面向镜头讲解",
+                "scene": "室内",
+                "spoken_text": "测试口播一句。",
+                "transition": "硬切",
+            },
+            {
+                "shot_id": "s2",
+                "start_time": midpoint,
+                "end_time": duration_seconds,
+                "shot_type": "近景",
+                "composition": "人物偏左",
+                "camera_motion": "手持跟拍",
+                "subject": "讲解者",
+                "person_count": 1,
+                "action": "侧身示意环境",
+                "scene": "室内",
+                "spoken_text": "",
+                "transition": "无切换",
+            },
+        ],
+    }
+
+
 def parse_replica_prompt_payload(
     text: str,
     *,
@@ -1289,6 +1457,21 @@ class FakeGemini:
     ) -> ProviderResponse:
         text = self.analysis_json or json.dumps(
             default_replica_prompt_payload(duration_seconds), ensure_ascii=True, sort_keys=True
+        )
+        return ProviderResponse(
+            text=text,
+            raw={"provider": "fake_gemini", "text": text},
+        )
+
+    def analyze_replica_storyboard(
+        self,
+        *,
+        video_uri: str,
+        duration_seconds: float,
+        media_info: dict[str, Any] | None = None,
+    ) -> ProviderResponse:
+        text = self.analysis_json or json.dumps(
+            default_replica_storyboard_payload(duration_seconds), ensure_ascii=True, sort_keys=True
         )
         return ProviderResponse(
             text=text,

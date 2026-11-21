@@ -7,14 +7,18 @@ import {
   useState,
 } from "react";
 import type {
+  ReplicaPromptHistoryItem,
   ReplicaPromptResult,
+  ReplicaPromptShot,
   ReplicaPromptTask,
   ReplicaPromptVersion,
 } from "../api";
 import {
   cancelReplicaPromptTask,
+  fetchReplicaPromptHistory,
   getLatestReplicaPromptResult,
   getLatestReplicaPromptTask,
+  getReplicaPromptVersionById,
   startReplicaPromptTask,
   waitForReplicaPromptTask,
 } from "../api";
@@ -27,7 +31,7 @@ import {
   isCurrentLongReplicaSession,
   type LongReplicaRun,
 } from "./longReplicaSession";
-import { Button, Empty, Icon, Panel } from "./ui";
+import { Button, Icon, Panel } from "./ui";
 
 import "./longReplica.css";
 
@@ -142,6 +146,18 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
   const [elapsed, setElapsed] = useState(0);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState("");
+  // 上传占位交互：选中文件先停在「待确认」信息卡，用户点「开始拆解」才上传提交。
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingDuration, setPendingDuration] = useState<number | undefined>(
+    undefined,
+  );
+  const [dragOver, setDragOver] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyItems, setHistoryItems] = useState<ReplicaPromptHistoryItem[]>(
+    [],
+  );
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
   const sessionRef = useRef(0);
   const selectionRef = useRef(0);
   const mountedRef = useRef(false);
@@ -231,7 +247,10 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         setStage("ready");
         return;
       }
-      const version = await getLatestReplicaPromptResult(run.projectId);
+      const version = await getLatestReplicaPromptResult(
+        run.projectId,
+        "storyboard",
+      );
       if (!isActive(session)) return;
       cache.result = version;
       resultTaskIdRef.current = version ? task.id : null;
@@ -243,13 +262,24 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
   );
 
   // 创建请求在页间恢复和 StrictMode 重挂载时复用，避免同一来源重复提交。
+  // 本页签固定 storyboard 模式：分镜表 + 提示词 + 口播 + 摘要一次同出。
   const startTask = useCallback(
     async (run: LongReplicaRun, forceNew = false) => {
       const pending =
         cache.starting ??
         (forceNew
-          ? startReplicaPromptTask(run.projectId, run.assetId, true)
-          : startReplicaPromptTask(run.projectId, run.assetId));
+          ? startReplicaPromptTask(
+              run.projectId,
+              run.assetId,
+              true,
+              "storyboard",
+            )
+          : startReplicaPromptTask(
+              run.projectId,
+              run.assetId,
+              false,
+              "storyboard",
+            ));
       cache.starting = pending;
       try {
         const task = await pending;
@@ -344,7 +374,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     resumeRun(cache.run);
   }, [cache, resumeRun]);
 
-  const handleUpload = async (file: File) => {
+  const validateAndStage = async (file: File) => {
     const selection = ++selectionRef.current;
     const validationSession = sessionRef.current;
     if (!isActive(validationSession)) return;
@@ -358,7 +388,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     } catch {
       duration = undefined;
     }
-    // 读取本地时长期间也可能换账号，必须在发起任何上传前再次核对。
+    // 读取本地时长期间也可能换账号，读完后再次核对再进入待确认态。
     if (!isActive(validationSession) || selection !== selectionRef.current)
       return;
     if (typeof duration === "number") {
@@ -373,6 +403,27 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         return;
       }
     }
+    // 进入待确认占位态：文件信息卡 + 「开始拆解」按钮；不上传、不提交。
+    abortRef.current?.abort();
+    pollAbortRef.current?.abort();
+    cache.run = null;
+    cache.result = null;
+    resultTaskIdRef.current = null;
+    cache.pendingAutoStart = false;
+    cache.starting = null;
+    setCurrentRun(null);
+    setResult(null);
+    setUploadPercent(-1);
+    setPendingFile(file);
+    setPendingDuration(duration);
+    setStage("idle");
+    setError("");
+    setCancelError("");
+  };
+
+  const startPendingUpload = async () => {
+    const file = pendingFile;
+    if (!file) return;
     // 新文件通过校验才替换实际任务；无效选择不能让已有上传的回调失效。
     const session = ++sessionRef.current;
     abortRef.current?.abort();
@@ -386,6 +437,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     cache.starting = null;
     setCurrentRun(null);
     setResult(null);
+    setPendingFile(null);
     setUploadPercent(0);
     setStage("uploading");
     setError("");
@@ -493,6 +545,47 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     })();
   };
 
+  const openHistory = async () => {
+    const projectId = currentRun?.projectId ?? cache.run?.projectId;
+    if (!projectId) return;
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const items = await fetchReplicaPromptHistory(projectId);
+      setHistoryItems(items);
+    } catch (cause: unknown) {
+      setHistoryError(
+        cause instanceof Error ? cause.message : "读取拆解历史失败。",
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const loadHistoryVersion = async (versionId: string) => {
+    const session = ++sessionRef.current;
+    if (!isActive(session)) return;
+    try {
+      const version = await getReplicaPromptVersionById(versionId);
+      if (!isActive(session) || !version) return;
+      pollAbortRef.current?.abort();
+      const run = currentRun ?? cache.run;
+      if (run) {
+        cache.run = { ...run, taskId: resultTaskIdRef.current ?? "" };
+      }
+      setResult(version);
+      resultTaskIdRef.current = null;
+      setHistoryOpen(false);
+      setCancelError("");
+      setStage("ready");
+    } catch (cause: unknown) {
+      setHistoryError(
+        cause instanceof Error ? cause.message : "载入历史版本失败。",
+      );
+    }
+  };
+
   const payload: ReplicaPromptResult | null = result
     ? {
         schema_version: String(result.payload.schema_version ?? ""),
@@ -507,6 +600,9 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         },
         spoken_script: Array.isArray(result.payload.spoken_script)
           ? result.payload.spoken_script
+          : [],
+        shots: Array.isArray(result.payload.shots)
+          ? (result.payload.shots as ReplicaPromptShot[])
           : [],
         replica_prompt: String(result.payload.replica_prompt ?? ""),
         warnings: Array.isArray(result.payload.warnings)
@@ -526,7 +622,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
-            if (file) void handleUpload(file);
+            if (file) void validateAndStage(file);
           }}
           type="file"
         />
@@ -613,6 +709,12 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
 
         {stage === "ready" && payload ? (
           <div className="long-replica-results">
+            <header className="long-replica-head">
+              <span />
+              <Button variant="outline" onClick={() => void openHistory()}>
+                拆解历史
+              </Button>
+            </header>
             {payload.warnings?.length ? (
               <Panel className="long-replica-warnings">
                 <ul role="status">
@@ -621,6 +723,48 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                   ))}
                 </ul>
               </Panel>
+            ) : null}
+            {payload.shots?.length ? (
+              <section className="long-replica-block">
+                <div className="long-replica-block__head">
+                  <h3>分镜表（{payload.shots.length} 段）</h3>
+                </div>
+                <div className="long-replica-shots">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>时间</th>
+                        <th>景别</th>
+                        <th>运镜</th>
+                        <th>主体</th>
+                        <th>动作与画面变化</th>
+                        <th>场景</th>
+                        <th>口播</th>
+                        <th>衔接</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {payload.shots.map((shot, index) => (
+                        <tr key={shot.shot_id ?? `shot-${index}`}>
+                          <td>{shot.shot_id ?? index + 1}</td>
+                          <td className="long-replica-shots__time">
+                            {formatSeconds(shot.start_time)}-
+                            {formatSeconds(shot.end_time)}
+                          </td>
+                          <td>{shot.shot_type || "—"}</td>
+                          <td>{shot.camera_motion || "—"}</td>
+                          <td>{shot.subject || "—"}</td>
+                          <td>{shot.action || "—"}</td>
+                          <td>{shot.scene || "—"}</td>
+                          <td>{shot.spoken_text || "—"}</td>
+                          <td>{shot.transition || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
             ) : null}
             <CopyBlock
               emptyHint="本次拆解没有产出复刻提示词。"
@@ -669,20 +813,122 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         ) : null}
 
         {stage === "idle" ? (
-          <Empty
-            action={
-              <Button
-                variant="primary"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                选择 MP4 / MOV 文件
+          <div className="long-replica-idle">
+            <header className="long-replica-head">
+              <span />
+              <Button variant="outline" onClick={() => void openHistory()}>
+                拆解历史
               </Button>
-            }
-            // 空态只保留两句核心：产出什么 + 硬性限制/计费。预计时长与
-            // 「可离开本页」在拆解进行态提示，此处不再重复。
-            description="上传 30–180 秒的爆款视频，AI 拆解出复刻提示词、口播文案与全片摘要。支持 600 MB 内 MP4 / MOV，按次计费。"
-            title="还没有上传长视频"
-          />
+            </header>
+            {pendingFile ? (
+              <Panel className="long-replica-pending">
+                <p className="long-replica-pending__name">{pendingFile.name}</p>
+                <p className="status-note">
+                  {typeof pendingDuration === "number"
+                    ? `时长 ${formatSeconds(pendingDuration)}`
+                    : "时长未知"}{" "}
+                  · {(pendingFile.size / (1024 * 1024)).toFixed(1)} MB
+                </p>
+                <p className="status-note">
+                  确认后开始上传并拆解：AI 输出分镜表、复刻提示词、口播文案与
+                  全片摘要，预计 5–15 分钟。
+                </p>
+                <div className="long-replica-pending__actions">
+                  <Button
+                    variant="primary"
+                    onClick={() => void startPendingUpload()}
+                  >
+                    开始拆解
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    重新选择
+                  </Button>
+                </div>
+              </Panel>
+            ) : (
+              // biome-ignore lint/a11y/noStaticElementInteractions: 拖拽上传区域依赖文件拖放；键盘用户的等效路径是「选择文件」按钮。
+              <div
+                className={
+                  dragOver
+                    ? "long-replica-dropzone is-dragover"
+                    : "long-replica-dropzone"
+                }
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setDragOver(false);
+                  const file = event.dataTransfer.files?.[0];
+                  if (file) void validateAndStage(file);
+                }}
+              >
+                <p className="long-replica-dropzone__title">
+                  拖拽视频到此处，或
+                </p>
+                <Button
+                  variant="primary"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  选择 MP4 / MOV 文件
+                </Button>
+                <p className="long-replica-dropzone__hint">
+                  支持 30 秒–180 秒、600 MB 内的视频，按次计费。AI 拆解出
+                  分镜表、复刻提示词、口播文案与全片摘要。
+                </p>
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        {historyOpen ? (
+          <div
+            className="long-replica-history"
+            role="dialog"
+            aria-label="长视频拆解历史"
+          >
+            <div className="long-replica-history__panel">
+              <div className="long-replica-history__head">
+                <h3>拆解历史</h3>
+                <Button variant="outline" onClick={() => setHistoryOpen(false)}>
+                  关闭
+                </Button>
+              </div>
+              {historyLoading ? (
+                <p role="status">正在读取拆解历史…</p>
+              ) : historyError ? (
+                <p role="alert" className="settings-error">
+                  {historyError}
+                </p>
+              ) : historyItems.length === 0 ? (
+                <p>本项目还没有长视频拆解记录。</p>
+              ) : (
+                <ul className="long-replica-history__list">
+                  {historyItems.map((item) => (
+                    <li key={item.id}>
+                      <span className="long-replica-history__meta">
+                        {item.kind === "long_analysis"
+                          ? "分镜表拆解"
+                          : "提示词拆解"}{" "}
+                        · 第 {item.version_number} 版 · {item.created_at}
+                      </span>
+                      <Button
+                        variant="outline"
+                        onClick={() => void loadHistoryVersion(item.id)}
+                      >
+                        载入此版本
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         ) : null}
       </div>
     </section>

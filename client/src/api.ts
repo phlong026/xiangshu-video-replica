@@ -3691,8 +3691,35 @@ export type ReplicaPromptResult = {
   };
   spoken_script: ReplicaPromptSpokenLine[];
   replica_prompt: string;
+  /** storyboard 模式产出：完整镜头时间轴（与 <30s 分镜表同构，字段可有缺失）。 */
+  shots?: ReplicaPromptShot[];
   /** 服务端软警告（画幅/时长要素缺失、超长）；禁词是硬拒绝，不会出现在这里。 */
   warnings?: ReplicaPromptWarning[];
+};
+
+export type ReplicaPromptShot = {
+  shot_id?: string;
+  start_time?: number;
+  end_time?: number;
+  shot_type?: string;
+  composition?: string;
+  camera_motion?: string;
+  subject?: string;
+  person_count?: number;
+  action?: string;
+  scene?: string;
+  spoken_text?: string;
+  transition?: string;
+};
+
+export type ReplicaPromptHistoryItem = {
+  id: string;
+  project_id: string;
+  asset_id: string | null;
+  kind: string;
+  version_number: number;
+  created_by_user_id: string | null;
+  created_at: string;
 };
 
 export type ReplicaPromptVersion = {
@@ -3710,6 +3737,7 @@ export async function startReplicaPromptTask(
   projectId: string,
   assetId: string,
   forceNew = false,
+  mode: "prompt" | "storyboard" = "storyboard",
 ): Promise<ReplicaPromptTask> {
   const errorPrefix = "启动长视频拆解失败";
   try {
@@ -3721,6 +3749,7 @@ export async function startReplicaPromptTask(
         body: JSON.stringify({
           asset_id: assetId,
           reuse_existing: !forceNew,
+          mode,
         }),
       },
     );
@@ -3766,10 +3795,31 @@ export async function getLatestReplicaPromptTask(
 
 export async function getLatestReplicaPromptResult(
   projectId: string,
+  mode: "prompt" | "storyboard" = "storyboard",
 ): Promise<ReplicaPromptVersion | null> {
   return requestApiJson<ReplicaPromptVersion | null>(
-    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/latest`,
+    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/latest?mode=${mode}`,
     "读取长视频拆解结果失败",
+  );
+}
+
+export async function fetchReplicaPromptHistory(
+  projectId: string,
+  limit = 30,
+): Promise<ReplicaPromptHistoryItem[]> {
+  const data = await requestApiJson<{ items: ReplicaPromptHistoryItem[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/versions?limit=${limit}`,
+    "读取长视频拆解历史失败",
+  );
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+export async function getReplicaPromptVersionById(
+  versionId: string,
+): Promise<ReplicaPromptVersion | null> {
+  return requestApiJson<ReplicaPromptVersion | null>(
+    `/api/replica-prompt-versions/${encodeURIComponent(versionId)}`,
+    "读取长视频拆解历史版本失败",
   );
 }
 

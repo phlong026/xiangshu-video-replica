@@ -8,6 +8,7 @@ import {
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReplicaPromptTask, ReplicaPromptVersion } from "../api";
+import { fetchReplicaPromptHistory, getReplicaPromptVersionById } from "../api";
 import { clearAccountResidue } from "./draftResidue";
 import type { StudioContextValue } from "./types";
 
@@ -53,6 +54,8 @@ vi.mock("../api", async (importOriginal) => ({
   getLatestReplicaPromptResult,
   cancelReplicaPromptTask,
   waitForReplicaPromptTask,
+  fetchReplicaPromptHistory: vi.fn(),
+  getReplicaPromptVersionById: vi.fn(),
 }));
 
 import { LongReplicaPage } from "./LongReplicaPage";
@@ -98,6 +101,21 @@ const RESULT_PAYLOAD = {
   ],
   replica_prompt:
     "一段庭院施工讲解视频：讲解者身穿工装在自家小院内面向镜头介绍施工进度……",
+  shots: [
+    {
+      shot_id: "s1",
+      start_time: 0,
+      end_time: 9,
+      shot_type: "中景",
+      camera_motion: "手持跟随",
+      subject: "工装讲解者",
+      person_count: 1,
+      action: "面向镜头介绍施工进度",
+      scene: "庭院施工现场",
+      spoken_text: "大家好，今天带大家看小院开工。",
+      transition: "硬切",
+    },
+  ],
 };
 
 function resultPayload() {
@@ -123,11 +141,20 @@ function makeFile(overrides: { size?: number } = {}): File {
   return file;
 }
 
-async function pickFile(file: File) {
+async function pickFile(
+  file: File,
+  { autoStart = true }: { autoStart?: boolean } = {},
+) {
   const input = document.querySelector('input[type="file"]');
   expect(input).not.toBeNull();
   await act(async () => {
     fireEvent.change(input as HTMLInputElement, { target: { files: [file] } });
+  });
+  if (!autoStart) return;
+  // 新流程（2026-11-22）：选文件停在待确认占位卡，点「开始拆解」才上传并提交。
+  const startButton = await screen.findByRole("button", { name: "开始拆解" });
+  await act(async () => {
+    fireEvent.click(startButton);
   });
 }
 
@@ -184,7 +211,7 @@ describe("LongReplicaPage 上传门禁", () => {
     const { notify } = setupContext();
     readVideoDuration.mockResolvedValue(200);
     render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    await pickFile(makeFile(), { autoStart: false });
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
         "长视频时长不能超过 180 秒，请裁剪后再上传。",
@@ -197,7 +224,7 @@ describe("LongReplicaPage 上传门禁", () => {
     const { notify } = setupContext();
     readVideoDuration.mockResolvedValue(3);
     render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    await pickFile(makeFile(), { autoStart: false });
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
         "长视频拆解仅支持 30 秒以上的视频，30 秒以内请到「<30s 视频拆解」页签。",
@@ -210,7 +237,9 @@ describe("LongReplicaPage 上传门禁", () => {
     const { notify } = setupContext();
     readVideoDuration.mockResolvedValue(60);
     render(<LongReplicaPage />);
-    await pickFile(makeFile({ size: 601 * 1024 * 1024 }));
+    await pickFile(makeFile({ size: 601 * 1024 * 1024 }), {
+      autoStart: false,
+    });
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
         "长视频不能超过 600 MB，请压缩后再上传。",
@@ -261,14 +290,21 @@ describe("LongReplicaPage 拆解链路", () => {
       );
     });
     await waitFor(() => {
-      expect(startReplicaPromptTask).toHaveBeenCalledWith("proj-1", "asset-1");
+      expect(startReplicaPromptTask).toHaveBeenCalledWith(
+        "proj-1",
+        "asset-1",
+        false,
+        "storyboard",
+      );
     });
     await waitFor(() => {
       expect(screen.getByText("复刻提示词")).toBeTruthy();
     });
     expect(screen.getByText(/庭院施工讲解视频/)).toBeTruthy();
     expect(screen.getByText("逐句口播文案")).toBeTruthy();
-    expect(screen.getByText(/大家好，今天带大家看小院开工/)).toBeTruthy();
+    expect(
+      screen.getAllByText(/大家好，今天带大家看小院开工/).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("全片摘要")).toBeTruthy();
     expect(screen.getByText(/场地平整/)).toBeTruthy();
 
@@ -279,6 +315,69 @@ describe("LongReplicaPage 拆解链路", () => {
       );
     });
     expect(screen.getAllByText("已复制").length).toBeGreaterThan(0);
+  });
+
+  it("storyboard 结果渲染分镜表（时间轴/景别/动作/场景）", async () => {
+    setupContext();
+    getLatestReplicaPromptTask.mockResolvedValue(null);
+    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    startReplicaPromptTask.mockResolvedValue(runningTask());
+    waitForReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+    });
+    render(<LongReplicaPage />);
+    await pickFile(makeFile());
+    await waitFor(() => {
+      expect(screen.getByText(/分镜表（1 段）/)).toBeTruthy();
+    });
+    expect(screen.getByText("手持跟随")).toBeTruthy();
+    expect(screen.getByText("面向镜头介绍施工进度")).toBeTruthy();
+    expect(screen.getByText(/庭院施工现场/)).toBeTruthy();
+    // 分镜表在前，复刻提示词等文本块在其后保留。
+    expect(screen.getByText("复刻提示词")).toBeTruthy();
+    expect(screen.getByText("全片摘要")).toBeTruthy();
+  });
+
+  it("拆解历史弹窗列出历史并可载入历史版本", async () => {
+    setupContext();
+    getLatestReplicaPromptTask.mockResolvedValue(null);
+    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    startReplicaPromptTask.mockResolvedValue(runningTask());
+    waitForReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+    });
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "proj-1",
+      assetId: "asset-1",
+    });
+    vi.mocked(fetchReplicaPromptHistory).mockResolvedValue([
+      {
+        id: "ver-old",
+        project_id: "proj-1",
+        asset_id: "asset-1",
+        kind: "long_analysis",
+        version_number: 1,
+        created_by_user_id: "owner-1",
+        created_at: "2026-11-22 10:00:00",
+      },
+    ]);
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue(resultPayload());
+    render(<LongReplicaPage />);
+    await pickFile(makeFile());
+    await waitFor(() => {
+      expect(screen.getByText(/分镜表（1 段）/)).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    await screen.findByText(/分镜表拆解/);
+    fireEvent.click(screen.getByRole("button", { name: "载入此版本" }));
+    await waitFor(() => {
+      expect(vi.mocked(getReplicaPromptVersionById)).toHaveBeenCalledWith(
+        "ver-old",
+      );
+    });
+    expect(screen.getByText(/分镜表（1 段）/)).toBeTruthy();
   });
 
   it("结果带软警告时在结果区展示警告列表", async () => {
@@ -374,7 +473,12 @@ describe("LongReplicaPage 拆解链路", () => {
     render(<LongReplicaPage />);
 
     await waitFor(() =>
-      expect(startReplicaPromptTask).toHaveBeenCalledWith("proj-9", "asset-9"),
+      expect(startReplicaPromptTask).toHaveBeenCalledWith(
+        "proj-9",
+        "asset-9",
+        false,
+        "storyboard",
+      ),
     );
     await waitFor(() => {
       expect(screen.getByText("复刻提示词")).toBeTruthy();
@@ -463,7 +567,7 @@ describe("长视频任务状态回归", () => {
     render(<LongReplicaPage />);
     expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
     expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
   });
 });
 
@@ -502,7 +606,11 @@ describe("长视频异步边界回归", () => {
     startReplicaPromptTask.mockReturnValue(creation.promise);
     waitForReplicaPromptTask.mockReturnValue(new Promise(() => {}));
     render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    // fake timers 下 findByRole 会卡死：占位卡同步渲染后直接同步点「开始拆解」。
+    await pickFile(makeFile(), { autoStart: false });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "开始拆解" }));
+    });
     const progress = uploadWorkbenchSourceVideo.mock.calls[0][1];
     act(() => progress(37));
     expect(screen.getByText(/正在上传视频.*37%/)).toBeInTheDocument();
@@ -535,7 +643,7 @@ describe("长视频异步边界回归", () => {
     await pickFile(makeFile());
     const [, progress, signal] = uploadWorkbenchSourceVideo.mock.calls[0];
     readVideoDuration.mockResolvedValueOnce(duration);
-    await pickFile(makeFile({ size }));
+    await pickFile(makeFile({ size }), { autoStart: false });
     expect(signal?.aborted).toBe(false);
     act(() => progress(61));
     expect(screen.getByText(/正在上传视频.*61%/)).toBeInTheDocument();
@@ -557,10 +665,17 @@ describe("长视频异步边界回归", () => {
     const newFile = new File(["new"], "new.mp4", { type: "video/mp4" });
     uploadWorkbenchSourceVideo.mockReturnValue(new Promise(() => {}));
     render(<LongReplicaPage />);
-    await pickFile(oldFile);
-    await pickFile(newFile);
+    // 新流程：两次选择都停在待确认占位卡，探测乱序回写后只允许最新的占位开始。
+    await pickFile(oldFile, { autoStart: false });
+    await pickFile(newFile, { autoStart: false });
     await act(async () => newer.resolve(120));
     await act(async () => older.resolve(120));
+    const startButton = await screen.findByRole("button", {
+      name: "开始拆解",
+    });
+    await act(async () => {
+      fireEvent.click(startButton);
+    });
     expect(uploadWorkbenchSourceVideo).toHaveBeenCalledTimes(1);
     expect(uploadWorkbenchSourceVideo.mock.calls[0][0]).toBe(newFile);
   });
@@ -814,7 +929,7 @@ describe("长视频异步边界回归", () => {
     getLatestReplicaPromptTask.mockClear();
     switchAccount("u-2");
     view.rerender(<LongReplicaPage />);
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
     expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
     expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
     getLatestReplicaPromptTask.mockResolvedValue({
@@ -846,7 +961,7 @@ describe("长视频异步边界回归", () => {
     const duration = deferred<number>();
     readVideoDuration.mockReturnValue(duration.promise);
     const view = render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    await pickFile(makeFile(), { autoStart: false });
     switchAccount("u-2");
     view.rerender(<LongReplicaPage />);
     await act(async () => duration.resolve(120));
@@ -867,7 +982,7 @@ describe("长视频异步边界回归", () => {
       upload.resolve({ projectId: "proj-1", assetId: "asset-1" }),
     );
     expect(startReplicaPromptTask).not.toHaveBeenCalled();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
   });
 
   it("结果查询中切账号，旧结果不能写回缓存或新账号界面", async () => {
@@ -886,7 +1001,7 @@ describe("长视频异步边界回归", () => {
     view.rerender(<LongReplicaPage />);
     await act(async () => result.resolve(resultPayload()));
     expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
     expect(getLongReplicaSession("u-1").result).toBeNull();
   });
 
@@ -924,7 +1039,7 @@ describe("长视频异步边界回归", () => {
       } as ReplicaPromptTask),
     );
     expect(notify).not.toHaveBeenCalledWith("本次长视频拆解已取消。");
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
   });
 
   it("登出清理后迟到的建任务响应不能复活旧缓存，同账号重登也为空", async () => {
@@ -942,7 +1057,7 @@ describe("长视频异步边界回归", () => {
     render(<LongReplicaPage />);
     expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
     expect(waitForReplicaPromptTask).not.toHaveBeenCalled();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
   });
 
   it("StrictMode 重挂载复用正在创建的任务，进度可恢复且不重复提交", async () => {
