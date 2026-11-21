@@ -501,24 +501,144 @@ export function SourceFrameSelection({
     ) : null;
   const rowConfirmButton =
     simplified && candidates.length > 0 ? confirmButton : null;
+  // 复刻页行布局（2026-11-21 改版）：当前画面与候选帧合并为一条等大卡片带，
+  // 一行并排、同宽同高；图下说明文字与顶部状态行一并移除（图 1 需求），
+  // 「推荐」改为图角徽标，取帧工具收进卡片带下方的折叠区。
+  const stripCurrentPreview =
+    replicaRowLayout &&
+    materialReady &&
+    selectedAssetId &&
+    previewUrls[selectedAssetId] ? (
+      <VideoPreview
+        className="source-frame-current"
+        fitContainer
+        frameRatio="adaptive"
+        alt="当前原画面"
+        poster={previewUrls[selectedAssetId]}
+        onPosterError={() => {
+          setPreviewUrls((current) => {
+            const next = { ...current };
+            delete next[selectedAssetId];
+            return next;
+          });
+          setError("画面预览加载失败，请重新取帧。");
+        }}
+      />
+    ) : null;
+  const replicaStrip =
+    replicaRowLayout &&
+    materialReady &&
+    (stripCurrentPreview || candidates.length > 0) ? (
+      <fieldset className="source-frame-strip">
+        <legend>选择源画面</legend>
+        {stripCurrentPreview ? (
+          <div className="source-frame-strip__item source-frame-strip__item--current">
+            {stripCurrentPreview}
+            {rowConfirmButton}
+          </div>
+        ) : null}
+        {candidates.map((candidate, index) => (
+          <label
+            className={
+              selectedAssetId === candidate.asset_id
+                ? "source-frame-option source-frame-option--selected"
+                : "source-frame-option"
+            }
+            key={candidate.asset_id}
+          >
+            <input
+              checked={selectedAssetId === candidate.asset_id}
+              disabled={
+                readOnly || isSubmitting || !previewUrls[candidate.asset_id]
+              }
+              name="source-frame"
+              onChange={() => {
+                setSelectedAssetId(candidate.asset_id);
+                setManualConfirmationRequired(true);
+                setStatus("已选择其他源画面，点击下方按钮应用。");
+              }}
+              type="radio"
+              value={candidate.asset_id}
+            />
+            {previewUrls[candidate.asset_id] ? (
+              <VideoPreview
+                alt={`候选源画面 ${index + 1}`}
+                fitContainer
+                frameRatio="adaptive"
+                poster={previewUrls[candidate.asset_id]}
+              />
+            ) : (
+              <span className="source-frame-placeholder">
+                {failedPreviewAssetIds.includes(candidate.asset_id)
+                  ? "预览加载失败"
+                  : readOnly
+                    ? "预览不可用"
+                    : "预览加载中"}
+              </span>
+            )}
+            {candidate.asset_id === preferredCandidateAssetId(candidates) ? (
+              <span className="source-frame-strip__badge">推荐</span>
+            ) : null}
+          </label>
+        ))}
+      </fieldset>
+    ) : null;
+  const replicaToolbar = !readOnly ? (
+    <details className="source-frame-advanced" open>
+      <summary>查看或更换源画面</summary>
+      <div className="source-frame-advanced__body">
+        <div className="source-frame-toolbar">
+          <button
+            className="secondary-button"
+            disabled={isSubmitting || !referenceAssetId}
+            onClick={handleExtract}
+            type="button"
+          >
+            {isSubmitting ? "正在处理" : "重新取帧"}
+          </button>
+          <label>
+            取帧时间（秒）
+            <input
+              disabled={isSubmitting}
+              max={
+                videoDurationSeconds === null
+                  ? undefined
+                  : Math.max(0, videoDurationSeconds - 0.1)
+              }
+              min="0"
+              onChange={(event) =>
+                setManualTimestamp(Number(event.target.value))
+              }
+              step="0.1"
+              type="number"
+              value={manualTimestamp}
+            />
+          </label>
+          <button
+            className="secondary-button"
+            disabled={isSubmitting || !referenceAssetId}
+            onClick={() => void handleManualExtract()}
+            type="button"
+          >
+            取出画面
+          </button>
+        </div>
+      </div>
+    </details>
+  ) : null;
   const alternativesPanel =
     materialReady && candidates.length > 0 ? (
       <details
         className="source-frame-advanced"
-        open={
-          candidatesAlwaysVisible || (!simplified && manualConfirmationRequired)
-        }
+        open={!simplified && manualConfirmationRequired}
       >
         <summary>{readOnly ? "查看源画面记录" : "查看或更换源画面"}</summary>
         <div className="source-frame-advanced__body">
           {!readOnly ? (
             <div className="source-frame-toolbar">
-              {/* 复刻页两栏形态删去这段长提示，取帧工具本身的含义已足够。 */}
-              {replicaRowLayout ? null : (
-                <p>
-                  后段画面也能作为人物与构图参考；确认后请在最终提示词中填写开场衔接。
-                </p>
-              )}
+              <p>
+                后段画面也能作为人物与构图参考；确认后请在最终提示词中填写开场衔接。
+              </p>
               <button
                 className="secondary-button"
                 disabled={isSubmitting || !referenceAssetId}
@@ -673,7 +793,9 @@ export function SourceFrameSelection({
       {!inputMismatch && error ? (
         <p className="settings-error">{error}</p>
       ) : null}
-      {!inputMismatch && status ? (
+      {/* 复刻页行布局：状态行移除（图 1 需求），状态由右上角徽标表达；
+          错误与取帧进度提示不受影响。 */}
+      {!inputMismatch && status && !replicaRowLayout ? (
         <p className="setup-success">{status}</p>
       ) : null}
       {!inputMismatch && !readOnly && activeTask ? (
@@ -719,13 +841,10 @@ export function SourceFrameSelection({
         <p className="file-note">尚未提取候选源画面。</p>
       ) : null}
       {replicaRowLayout ? (
-        <div className="source-frame-selection__row">
-          <div className="source-frame-selection__current">
-            {currentFramePreview}
-            {rowConfirmButton}
-          </div>
-          {alternativesPanel}
-        </div>
+        <>
+          {replicaStrip}
+          {replicaToolbar}
+        </>
       ) : (
         <>
           {currentFramePreview}

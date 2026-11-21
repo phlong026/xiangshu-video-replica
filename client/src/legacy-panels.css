@@ -3234,29 +3234,108 @@
   background: transparent;
 }
 
-/* 复刻页源画面行：当前画面与「查看或更换源画面」并排两栏，不再把预览、
-   候选与取帧工具纵向堆叠成多层。左栏跟随预览宽度（竖屏源画面按 44dvh
-   高度预算约 223px；横屏素材封顶 460px，避免挤掉右栏候选区）。 */
-.creation-replica .source-frame-selection__row {
-  display: grid;
-  grid-template-columns: fit-content(460px) minmax(0, 1fr);
-  gap: 18px;
+/* 复刻页源画面卡片带（2026-11-21 改版）：当前画面 + 候选帧合并为一条等大
+   卡片带，一行并排、同宽同高（图 1 需求）。卡片盒尺寸统一由两个变量推出：
+   高 --source-strip-h，宽 = 高 × 参考视频画幅（面板注入 --row-ratio，横向
+   素材封顶 420px 防止单卡占满整行）；前景 cover 裁切，任何比例差异都不破坏
+   一致性。窄屏一行放不下时由 flex-wrap 换行，卡片自身尺寸不变。
+   取帧工具条在卡片带下方的折叠区里。 */
+.creation-replica .source-frame-strip {
+  --source-strip-h: clamp(260px, 40dvh, 420px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
   align-items: start;
+  margin: 0;
   min-width: 0;
+  border: 0;
+  padding: 0;
 }
 
-.creation-replica .source-frame-selection__current {
+.creation-replica .source-frame-strip legend {
+  width: 100%;
+  padding: 0;
+  color: #d8d4cc;
+  font-size: var(--font-label);
+  font-weight: 800;
+}
+
+.creation-replica .source-frame-strip .source-frame-option,
+.creation-replica .source-frame-strip .source-frame-strip__item--current {
+  width: min(calc(var(--source-strip-h) * var(--row-ratio, 0.5625)), 420px);
+}
+
+.creation-replica .source-frame-strip .video-preview {
+  width: 100%;
+  aspect-ratio: var(--row-ratio, 9 / 16);
+  height: var(--source-strip-h);
+}
+
+.creation-replica .source-frame-strip .source-frame-placeholder {
+  width: 100%;
+  height: var(--source-strip-h);
+}
+
+/* 卡片高亮已表达选中态，右上角的原生单选点在卡片带里是视觉噪音。 */
+.creation-replica .source-frame-strip .source-frame-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.creation-replica .source-frame-strip .source-frame-option {
+  padding-bottom: 0;
+}
+
+.creation-replica .source-frame-strip .source-frame-strip__item--current {
   display: grid;
-  justify-items: center;
   gap: 10px;
   min-width: 0;
 }
 
-/* 并排形态下右栏自带标题（summary），不再需要独立的顶部分隔线。 */
-.creation-replica .source-frame-selection__row > .source-frame-advanced {
+.creation-replica
+  .source-frame-strip
+  .source-frame-strip__item--current
+  .source-frame-confirm {
+  width: 100%;
+}
+
+.creation-replica .source-frame-strip .source-frame-strip__badge {
+  display: block;
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  border-radius: 999px;
+  padding: 2px 9px;
+  color: #1a1206;
+  background: var(--accent, #e0a83f);
+  font-size: var(--font-caption);
+  font-weight: 700;
+}
+
+/* 卡片带下方的取帧工具折叠区：压缩上下留白，紧贴卡片带。 */
+.creation-replica .source-frame-strip + .source-frame-advanced {
   min-width: 0;
-  border-top: 0;
+  margin-top: 2px;
   padding-top: 0;
+}
+
+.creation-replica .source-frame-strip + .source-frame-advanced > summary {
+  margin-bottom: 0;
+}
+
+.creation-replica .source-frame-strip + .source-frame-advanced[open] > summary {
+  margin-bottom: 10px;
+}
+
+.creation-replica
+  .source-frame-strip
+  + .source-frame-advanced
+  .source-frame-toolbar {
+  justify-content: flex-start;
 }
 
 .creation-replica .source-frame-summary h3,
@@ -3292,6 +3371,15 @@
   object-fit: contain;
 }
 
+/* 卡片带里的帧与预览图全部铺满等大卡片盒（规则放在上面的 contain 之后，
+   避免 noDescendingSpecificity 告警）。 */
+.creation-replica
+  .source-frame-strip
+  .video-preview--fit.video-preview
+  > .video-preview__foreground {
+  object-fit: cover;
+}
+
 .creation-replica .source-frame-option > span:last-child {
   min-width: 0;
   padding: 0 6px;
@@ -3301,6 +3389,32 @@
 
 .creation-replica .first-frame-options .source-frame-option small {
   display: none;
+}
+
+/* 图 2 需求（2026-11-21）：「候选与历史」侧栏里的候选缩略图统一为固定尺寸，
+   不再随侧栏列宽伸缩——任意候选数量、任意视口下同宽同高；原生单选点与
+   源画面卡片带同口径隐藏，选中态由卡片高亮表达。 */
+.creation-replica
+  .first-frame-band-extras
+  .source-frame-option
+  > .video-preview,
+.creation-replica .first-frame-band-extras .source-frame-placeholder {
+  width: min(128px, 100%);
+  margin-inline: 0;
+}
+
+.creation-replica .first-frame-band-extras .source-frame-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* 缩略图轨道固定 128px：侧栏多窄都裁不出更小的缩略图，多张候选逐个排开。 */
+.creation-replica .first-frame-band-extras > .first-frame-options {
+  grid-template-columns: repeat(auto-fill, 128px);
+  justify-content: start;
 }
 
 .creation-replica .first-frame-comparison summary,
@@ -3366,8 +3480,9 @@
   .creation-replica .source-frame-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .creation-replica .source-frame-selection__row {
-    grid-template-columns: minmax(0, 1fr);
+  /* 窄屏卡片带一行放不下四张，退化为两列两行，卡片仍同宽同高。 */
+  .creation-replica .source-frame-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .creation-replica .source-frame-toolbar > button,
   .creation-replica .source-frame-actions > button {

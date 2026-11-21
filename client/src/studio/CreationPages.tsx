@@ -3954,8 +3954,12 @@ function ReplicaFirstFrameSection({
         </>
       ) : (
         <>
-          {/* 源画面自带三个候选帧与取帧工具，独占一行横排，不再挤在置换首帧左栏。 */}
-          <Panel className="creation-replacement-source">
+          {/* 源画面自带三个候选帧与取帧工具，独占一行横排，不再挤在置换首帧左栏。
+              面板注入参考视频画幅：卡片带里的当前画面与候选帧按同一形状取盒。 */}
+          <Panel
+            className="creation-replacement-source"
+            style={panelRatioStyle(ratio)}
+          >
             <div className="creation-panel-title-row">
               <span>源画面</span>
             </div>
