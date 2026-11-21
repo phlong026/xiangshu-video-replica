@@ -55,9 +55,9 @@ function selectHomepageVideos(videos: StudioVideo[]) {
 }
 
 export function ViralRecommendations() {
-  const { review, user, requireLogin } = useStudio();
-  if (requireLogin) return null;
-  // 换账号立即丢弃已确认集合与收藏覆盖，旧请求只能触及已卸载的组件。
+  const { review, user } = useStudio();
+  // 爆款精选是公开内容池（服务端 /videos 支持匿名读取），未登录访客同样可见；
+  // 未登录的点击/收藏都会被 context 的 requireLogin 引导去登录。
   return <HomepageRecommendations key={`${review}:${user.id}`} />;
 }
 

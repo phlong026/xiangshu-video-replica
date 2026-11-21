@@ -123,6 +123,35 @@ def get_current_user_short_tx(
 ShortAuthUser = Annotated[CurrentUser, Depends(get_current_user_short_tx)]
 
 
+def get_optional_user_short_tx(
+    request: Request,
+    dev_user_id: Annotated[str | None, Header(alias="X-Dev-User-Id")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> CurrentUser | None:
+    """可选鉴权：与短事务鉴权同语义，但无凭据或凭据无效（401）时返回 None。
+
+    仅供公开内容池（如首页爆款精选）的读取路由使用——匿名访客能看到同一份
+    推送内容，只是拿不到收藏/个性化标记。路由必须保证 None 分支不泄露任何
+    账号私有数据；带凭据的请求行为与 ShortAuthUser 完全一致。
+    """
+    from app.customer_fence import resolve_api_key_user
+
+    # 无任何凭据的快速路径：省一次短事务，直接按匿名处理。
+    if authorization is None and dev_user_id is None and (resolve_api_key_user(request) is None):
+        return None
+    try:
+        return get_current_user_short_tx(
+            request, dev_user_id=dev_user_id, authorization=authorization
+        )
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return None
+        raise
+
+
+OptionalShortAuthUser = Annotated[CurrentUser | None, Depends(get_optional_user_short_tx)]
+
+
 def get_read_database(
     request: Request,
     _actor: ShortAuthUser,

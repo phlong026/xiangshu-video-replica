@@ -18,7 +18,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Resp
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import AuthenticatedUser, Database, ReadDatabase, ShortAuthUser
+from app.auth import (
+    AuthenticatedUser,
+    Database,
+    OptionalShortAuthUser,
+    ReadDatabase,
+    ShortAuthUser,
+)
 from app.billing_catalog import SERVICES
 from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
@@ -314,8 +320,10 @@ def _item(
 
 @router.get("/videos", response_model=ViralListResponse)
 def list_viral_videos(
-    conn: ReadDatabase,
-    actor: ShortAuthUser,
+    # 匿名访客可读：连接走无认证的 Database（payment 回调同款通道，查询只读），
+    # 而不是绑定登录态的 ReadDatabase；个性化标记由 OptionalShortAuthUser 提供。
+    conn: Database,
+    actor: OptionalShortAuthUser,
     platform: str = PLATFORM_DOUYIN,
     sort: str = SORT_HOT,
     limit: Annotated[int, Query(ge=1, le=50)] = 12,
@@ -323,6 +331,8 @@ def list_viral_videos(
     featured_only: bool = False,
 ) -> ViralListResponse:
     # 恢复：列表只读库内「管理员上传/推送」内容，不依赖抓取客户端，故不再 410。
+    # 列表本身是管理员推送的公开内容池，匿名访客（工作台未登录态）可读；
+    # actor 为 None 时仅跳过收藏/个性化扣费标记，不泄露账号私有数据。
     if platform not in _VALID_PLATFORMS:
         raise HTTPException(
             status_code=400,
@@ -355,22 +365,31 @@ def list_viral_videos(
             status_code=400,
             detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
         ) from exc
-    favorite_ids = favorite_viral_video_ids(
-        conn,
-        user_id=actor.id,
-        platform=platform,
-        video_ids=[video.video_id for video in page.items],
+    # 匿名访客没有收藏与个性化扣费口径：两者空集，列表内容完全一致。
+    favorite_ids = (
+        favorite_viral_video_ids(
+            conn,
+            user_id=actor.id,
+            platform=platform,
+            video_ids=[video.video_id for video in page.items],
+        )
+        if actor is not None
+        else set[str]()
     )
     availability_by_id = viral_video_availabilities(
         conn,
         platform=platform,
         video_ids=[video.video_id for video in page.items],
     )
-    detail_charged_ids = viral_detail_charged_ids(
-        conn,
-        user_id=actor.id,
-        platform=platform,
-        video_ids=[video.video_id for video in page.items],
+    detail_charged_ids = (
+        viral_detail_charged_ids(
+            conn,
+            user_id=actor.id,
+            platform=platform,
+            video_ids=[video.video_id for video in page.items],
+        )
+        if actor is not None
+        else set[str]()
     )
     return ViralListResponse(
         platform=platform,

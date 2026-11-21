@@ -2448,11 +2448,37 @@ export function ReplicaPage() {
     });
   };
 
-  const startAnalysis = async () => {
+  // 去重弹窗（用户拍板 2026-11-21 方案 A）：同一参考视频已有拆解结果时，
+  // 再次发起先问「复用现有结果」还是「重新拆解」，避免重复计费的无感重拆。
+  const [dedupeDialogOpen, setDedupeDialogOpen] = useState(false);
+  const startAnalysis = async (options?: { skipDedupe?: boolean }) => {
     if (review || readOnly) {
       notify("审核示例不调用真实接口。");
       return;
     }
+    const projectId = state.draft.projectId;
+    const assetId =
+      state.draft.sourceAssetId ?? project?.reference_asset_id ?? null;
+    if (!projectId || !assetId) {
+      notify("请先上传或选择来源视频。");
+      return;
+    }
+    const taskInFlight =
+      state.draft.analysisTaskStatus === "PENDING" ||
+      state.draft.analysisTaskStatus === "RUNNING";
+    // 已有拆解结果且不在途：先弹窗让用户在「复用现有结果 / 重新拆解」间
+    // 明确取舍；在途任务与无结果场景直接走原有流程（接回/新建）。
+    if (!options?.skipDedupe && !taskInFlight && displayShots.length > 0) {
+      setDedupeDialogOpen(true);
+      return;
+    }
+    await runAnalysis();
+  };
+  startAnalysisRef.current = startAnalysis;
+
+  /** 去重确认后的实际执行体：S9 未保存修改确认 → 发起/接回拆解。
+   * 独立成函数让「复用现有结果」完全绕开计费路径。 */
+  const runAnalysis = async () => {
     const projectId = state.draft.projectId;
     const assetId =
       state.draft.sourceAssetId ?? project?.reference_asset_id ?? null;
@@ -2936,7 +2962,20 @@ export function ReplicaPage() {
       </nav>
       <div className="creation-replica-flow">
         <section className="creation-workflow-section" id="replica-step-1">
-          <h2>1 视频拆解</h2>
+          {/* 拆解历史提升到页面右上角（用户拍板 2026-11-21）：不再埋在
+              「拆解控制」面板标题行里，任何滚动位置都能直达。 */}
+          <div className="creation-section-header">
+            <h2>1 视频拆解</h2>
+            {project ? (
+              <Button
+                variant="quiet"
+                disabled={readOnly}
+                onClick={() => void openAnalysisHistory()}
+              >
+                拆解历史
+              </Button>
+            ) : null}
+          </div>
           {stage === "source" && !project ? (
             <Panel className="creation-empty-workspace">
               <Empty
@@ -3012,15 +3051,6 @@ export function ReplicaPage() {
                         <small>已拆解 {displayShots.length} 个镜头</small>
                       )}
                     </span>
-                    {project ? (
-                      <Button
-                        variant="quiet"
-                        disabled={readOnly}
-                        onClick={() => void openAnalysisHistory()}
-                      >
-                        拆解历史
-                      </Button>
-                    ) : null}
                   </div>
                   <div className="creation-replica-stats">
                     <div className="creation-replica-stat is-gold">
@@ -3114,6 +3144,50 @@ export function ReplicaPage() {
                           ))}
                         </ul>
                       )}
+                    </StudioDialog>
+                  ) : null}
+                  {dedupeDialogOpen ? (
+                    <StudioDialog
+                      title="已有拆解结果"
+                      onClose={() => setDedupeDialogOpen(false)}
+                    >
+                      <div className="oral-upload-panel">
+                        <p className="oral-dialog-intro">
+                          该参考视频已有拆解结果
+                          {analysisCreatedLabel &&
+                            `（末次拆解 ${analysisCreatedLabel}）`}
+                          ，共 {displayShots.length} 个镜头。可复用现有结果，
+                          也可以重新拆解（重新拆解将按实际调用计费）。
+                        </p>
+                        <div className="oral-dialog-actions">
+                          <Button
+                            variant="quiet"
+                            onClick={() => setDedupeDialogOpen(false)}
+                          >
+                            取消
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              setDedupeDialogOpen(false);
+                              notify(
+                                "已复用现有拆解结果，可直接核对分镜与文案。",
+                              );
+                            }}
+                          >
+                            复用现有结果
+                          </Button>
+                          <Button
+                            variant="primary"
+                            onClick={() => {
+                              setDedupeDialogOpen(false);
+                              void startAnalysis({ skipDedupe: true });
+                            }}
+                          >
+                            重新拆解
+                          </Button>
+                        </div>
+                      </div>
                     </StudioDialog>
                   ) : null}
                   {restoreBusy && (
@@ -3880,8 +3954,12 @@ function ReplicaFirstFrameSection({
         </>
       ) : (
         <>
-          {/* 源画面自带三个候选帧与取帧工具，独占一行横排，不再挤在置换首帧左栏。 */}
-          <Panel className="creation-replacement-source">
+          {/* 源画面自带三个候选帧与取帧工具，独占一行横排，不再挤在置换首帧左栏。
+              面板注入参考视频画幅：卡片带里的当前画面与候选帧按同一形状取盒。 */}
+          <Panel
+            className="creation-replacement-source"
+            style={panelRatioStyle(ratio)}
+          >
             <div className="creation-panel-title-row">
               <span>源画面</span>
             </div>

@@ -34,7 +34,13 @@ import {
 import { handOffLongReplicaSource } from "./longReplicaSession";
 import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
-import type { StudioAsset, StudioData, StudioTask, StudioVideo } from "./types";
+import type {
+  StudioAsset,
+  StudioData,
+  StudioPage,
+  StudioTask,
+  StudioVideo,
+} from "./types";
 import {
   Button,
   Empty,
@@ -303,7 +309,12 @@ function WorkbenchWorks() {
         <div className="studio-home-empty-card" role="status">
           <strong>{data.loading ? "正在读取成片…" : "还没有成片"}</strong>
           {!data.loading ? (
-            <span>粘贴链接或上传视频，开始第一支创作。</span>
+            <>
+              <span>粘贴链接或上传视频，开始第一支创作。</span>
+              <Button variant="outline" onClick={() => navigate("replica")}>
+                开始创作
+              </Button>
+            </>
           ) : null}
         </div>
       )}
@@ -1058,47 +1069,72 @@ export function WorkbenchPage() {
             </p>
           )}
         </div>
-        {/* 空白创作同时放弃云端旧草稿，避免再次进入时弹出恢复提示。 */}
-        {!requireLogin && (
-          <div className="studio-create-row">
-            <span className="studio-create-row-label">开始创作</span>
-            <div className="studio-create-row-items">
-              {(
-                [
-                  ["replica", "视频拆解", "video"],
-                  ["replacement", "人物置换", "person"],
-                  ["video", "视频生成", "sparkles"],
-                  ["oral", "数字人口播", "audio"],
-                ] as const
-              ).map(([page, title, icon]) => (
-                <Button key={page} onClick={() => navigate(page)}>
-                  <Icon name={icon} size={18} />
-                  {title}
-                </Button>
-              ))}
-              <Button
-                variant="quiet"
-                onClick={() => {
-                  patchState({ draft: createDraft() });
-                  discardSavedDraft();
-                }}
-              >
-                <Icon name="plus" size={18} />
-                空白创作
-              </Button>
-            </div>
-          </div>
-        )}
       </div>
-      {requireLogin ? (
+      {/* 两列工作台：左侧爆款精选（复用二级页卡片），右侧我的成片。
+          爆款池与成片空态均对未登录访客可见；未登录的点击由 requireLogin 引导。 */}
+      <div className="studio-home-split">
         <ViralRecommendations />
-      ) : (
-        // 两列工作台：左侧爆款精选（复用二级页卡片），右侧我的成片。
-        <div className="studio-home-split">
-          <ViralRecommendations />
-          <WorkbenchWorks key={`${review}:${accountId}`} />
-        </div>
-      )}
+        <WorkbenchWorks key={`${review}:${accountId}`} />
+      </div>
+      <WorkbenchTools key={`tools:${review}:${accountId}`} />
+    </section>
+  );
+}
+
+/** 常用工具：四类创作入口 + 空白创作，登录与未登录（引导登录）都可见。 */
+const TOOL_ENTRIES: ReadonlyArray<
+  [page: StudioPage, title: string, icon: string, blurb: string]
+> = [
+  ["replica", "视频创作", "video", "导入爆款，AI 拆解分镜与文案"],
+  ["replacement", "人物置换", "person", "用数字分身替换视频人物"],
+  ["video", "视频生成", "sparkles", "按提示词直接生成视频"],
+  ["oral", "数字人口播", "audio", "数字人+克隆声音出成片"],
+];
+
+function WorkbenchTools() {
+  const { navigate, review, patchState, discardSavedDraft } = useStudio();
+  return (
+    <section
+      className="studio-home-tools"
+      aria-labelledby="studio-home-tools-title"
+    >
+      <div className="studio-home-section-heading">
+        <h2 id="studio-home-tools-title">常用工具</h2>
+      </div>
+      <div className="studio-tools-grid">
+        {TOOL_ENTRIES.map(([page, title, icon, blurb]) => (
+          <button
+            key={page}
+            type="button"
+            className="studio-tool-card"
+            aria-label={title}
+            onClick={() => navigate(page)}
+          >
+            <span className="studio-tool-icon">
+              <Icon name={icon} size={22} />
+            </span>
+            <strong>{title}</strong>
+            <small>{blurb}</small>
+          </button>
+        ))}
+        {/* 空白创作同时放弃云端旧草稿，避免再次进入时弹出恢复提示。 */}
+        <button
+          type="button"
+          className="studio-tool-card studio-tool-card--quiet"
+          aria-label="空白创作"
+          onClick={() => {
+            patchState({ draft: createDraft() });
+            discardSavedDraft();
+            navigate("replica");
+          }}
+        >
+          <span className="studio-tool-icon">
+            <Icon name="plus" size={22} />
+          </span>
+          <strong>空白创作</strong>
+          <small>从零开始自由编排</small>
+        </button>
+      </div>
     </section>
   );
 }

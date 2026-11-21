@@ -10,7 +10,13 @@
  *    createVideoUploadIntent / getAssetDownloadUrl）在 `../api` 侧打桩，
  *    并以 `upload_required: false` 跳过真实 PUT，使整条链路确定性、无网络。
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StudioContextValue } from "./types";
 
@@ -258,6 +264,17 @@ function analysisButton() {
   return screen.getByRole("button", { name: ANALYSIS_BUTTON_NAME });
 }
 
+/** 已有拆解结果时点主按钮先弹去重确认（方案 A）；弹窗内「重新拆解」才
+ * 真正发起。这批用例的既有分镜都会触发弹窗，统一在此处理。 */
+async function confirmRedeploy() {
+  const dedupeDialog = await screen.findByRole("dialog", {
+    name: "已有拆解结果",
+  });
+  fireEvent.click(
+    within(dedupeDialog).getByRole("button", { name: "重新拆解" }),
+  );
+}
+
 beforeEach(() => {
   useStudio.mockReset();
   api.createProject.mockReset();
@@ -360,6 +377,7 @@ describe("复刻页 A 类：上传与拆解流程", () => {
     const view = render(<ReplicaPage />);
     await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
+    await confirmRedeploy();
     await waitFor(() => expect(finish).toBeDefined());
 
     // 用户在等待期间切到另一个项目 → isCurrentAnalysis() 之后必然失败。
@@ -437,6 +455,7 @@ describe("复刻页 B 类：拆解结果回填写入", () => {
     vi.mocked(value.patchDraft).mockClear();
 
     fireEvent.click(analysisButton());
+    await confirmRedeploy();
 
     await waitFor(
       () =>
@@ -475,6 +494,7 @@ describe("复刻页 B 类：拆解结果回填写入", () => {
     vi.mocked(value.patchDraft).mockClear();
 
     fireEvent.click(analysisButton());
+    await confirmRedeploy();
 
     // 等拆解收尾信号，确保回填判断已经执行过。
     await waitFor(
@@ -537,6 +557,7 @@ describe("复刻页 C 类：素材签名与提示词渲染", () => {
 
     await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
+    await confirmRedeploy();
     await waitFor(
       () =>
         expect(value.notify).toHaveBeenCalledWith(
@@ -586,6 +607,7 @@ describe("复刻页 D 类：输出时长与来源标注", () => {
 
     await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
+    await confirmRedeploy();
 
     await waitFor(
       () =>
@@ -605,6 +627,7 @@ describe("复刻页 D 类：输出时长与来源标注", () => {
 
     await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
+    await confirmRedeploy();
 
     await waitFor(
       () =>

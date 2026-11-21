@@ -1395,23 +1395,25 @@
   white-space: pre-wrap;
 }
 
-/* 复刻页 ⑧：合成按钮降级为次级样式（全局 button 默认金色主按钮），
-   把「唯一主按钮」让给「去 AI 视频创作」。 */
+/* 复刻页 ⑧（2026-11-21 改版）：「重新合成」是提示词区的核心动作，恢复为
+   金色实心主按钮并加大一号。此前曾刻意降级为次级样式、把唯一主按钮让给
+   「去 AI 视频创作」；两个主按钮分属不同区块（提示词区 / 底部动作条），
+   用户拍板恢复突出显示，不再互斥。 */
 .replica-final-compose {
-  background: transparent;
-  border: 1px solid var(--studio-border, #2b2b2b);
-  color: var(--studio-text, #ecece8);
-  font-weight: 500;
+  background: var(--accent, #e0a83f);
+  border: 1px solid var(--accent-strong, #f0bc5e);
+  color: var(--accent-ink, #1a1206);
+  font-weight: 700;
   justify-self: start;
-  min-height: 36px;
-  padding: 0 16px;
+  min-height: 44px;
+  padding: 0 22px;
   width: fit-content;
 }
 
 .replica-final-compose:not(:disabled):hover {
-  background: color-mix(in srgb, var(--studio-gold, #e5aa36) 12%, transparent);
-  border-color: var(--studio-gold, #e5aa36);
-  color: var(--studio-gold, #e5aa36);
+  background: var(--accent-strong, #f0bc5e);
+  border-color: var(--accent-strong, #f0bc5e);
+  color: var(--accent-ink, #1a1206);
 }
 
 .replica-preflight {
@@ -2056,6 +2058,13 @@
   font-weight: 600;
   margin: 0;
 }
+/* 章节标题行右侧的操作位（如拆解历史入口），与 h2 同行两端对齐。 */
+.creation-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 .creation-replica-analyze .creation-panel-title-row {
   flex-wrap: wrap;
   overflow-wrap: anywhere;
@@ -2694,6 +2703,9 @@
   display: grid;
   gap: 16px;
   min-width: 0;
+  /* 控制带装下「说明文字 + 下拉」两行 label（实测 64px），带内不再溢出；
+     左右两栏共用同一带高，媒体框上下缘保持对齐（图 2 需求 2026-11-21）。 */
+  --band-ctrl: 66px;
 }
 
 .creation-replacement-source {

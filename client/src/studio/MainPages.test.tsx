@@ -1339,7 +1339,7 @@ describe("工作台我的成片", () => {
     expect(loadTaskPreview).toHaveBeenCalledWith(task);
   });
 
-  it("访客欢迎页隐藏成片和精选", () => {
+  it("访客欢迎页同样可见爆款精选、成片空态与常用工具（点击引导登录）", () => {
     const value = studio(undefined, {
       state: createState("workbench"),
       data: data([taskA]),
@@ -1347,8 +1347,22 @@ describe("工作台我的成片", () => {
     });
     useStudio.mockReturnValue(value);
     render(<WorkbenchPage />);
-    expect(screen.queryByRole("heading", { name: "我的成片" })).toBeNull();
-    expect(screen.queryByRole("heading", { name: "爆款视频精选" })).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "爆款视频精选" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "我的成片" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "常用工具" }),
+    ).toBeInTheDocument();
+    // 未登录没有成片数据：成片区落在空态引导卡，点「开始创作」即被引导登录。
+    // 本用例带了一支成片：访客直接看到成片卡，点「查看成片」即被导航守卫
+    // （欢迎页 mock：navigate=requireLogin）引导去登录。
+    fireEvent.click(
+      screen.getByRole("button", { name: `查看成片：${taskA.title}` }),
+    );
+    expect(value.navigate).toHaveBeenCalled();
   });
 });
 

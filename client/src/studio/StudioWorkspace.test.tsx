@@ -905,8 +905,8 @@ describe("V1.4 workspace integration", () => {
       within(creationGroup)
         .getAllByRole("button")
         .map((node) => node.textContent),
-    ).toEqual(["爆款视频", "账号诊断", "文案工坊", "视频拆解"]);
-    // 长视频拆解不再是一级入口：导航里不应出现，改由「视频拆解」页内页签承载。
+    ).toEqual(["爆款视频", "账号诊断", "文案工坊", "视频创作"]);
+    // 长视频拆解不再是一级入口：导航里不应出现，改由「视频创作」页内页签承载。
     expect(nav.queryByRole("button", { name: "长视频复刻" })).toBeNull();
     expect(nav.queryByRole("button", { name: "长视频拆解" })).toBeNull();
     expect(
@@ -2761,7 +2761,8 @@ describe("V1.4 workspace integration", () => {
       expect(await screen.findByLabelText("来源原文")).toHaveValue(
         "需要保留的未保存转写原文",
       );
-      fireEvent.click(screen.getByRole("button", { name: /^视频拆解$/ }));
+      // 创作入口已合并进「常用工具」模块：视频创作卡片等价于原「开始创作」行按钮。
+      fireEvent.click(screen.getByRole("button", { name: /^视频创作$/ }));
       await waitFor(() =>
         expect(api.getLatestScriptVersion).toHaveBeenCalledWith("project-1"),
       );
@@ -3273,6 +3274,9 @@ describe("V1.4 workspace integration", () => {
 describe("数字人口播提交", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 恢复提醒每天只展示一次（localStorage 记当天日期），逐用例清掉
+    // 让每个用例都从「今天未提醒」开始。
+    window.localStorage.clear();
     window.history.replaceState(null, "", "/#studio/workbench");
     live.loadStudioData.mockResolvedValue({
       ...createReviewData(),
@@ -3692,6 +3696,9 @@ describe("视频生成（C2 独立创作）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    // 恢复提醒每天只展示一次（localStorage 记当天日期），逐用例清掉，
+    // 避免前面 describe 的提醒标记压住本组云端草稿恢复横幅。
+    window.localStorage.clear();
     api.getWallet.mockReset();
     api.getWallet.mockRejectedValue(new Error("internal wallet unavailable"));
     api.getIndependentCapabilities.mockResolvedValue({
@@ -3742,10 +3749,10 @@ describe("视频生成（C2 独立创作）", () => {
   };
 
   async function openVideoPage() {
-    // 侧边栏「视频拆解」进入复刻页签组，再切到「视频生成」。
+    // 侧边栏「视频创作」进入复刻页签组，再切到「视频生成」。
     // 收窄到导航容器：工作台创作条也有同名入口，全局查询会有歧义。
     const nav = within(screen.getByRole("navigation", { name: "主要导航" }));
-    fireEvent.click(nav.getByRole("button", { name: "视频拆解" }));
+    fireEvent.click(nav.getByRole("button", { name: "视频创作" }));
     fireEvent.click(screen.getByRole("tab", { name: "AI 视频" }));
     await waitFor(() =>
       expect(screen.getByLabelText("提示词")).toBeInTheDocument(),
