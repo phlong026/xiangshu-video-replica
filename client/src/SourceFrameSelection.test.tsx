@@ -201,7 +201,7 @@ describe("SourceFrameSelection", () => {
     expect(confirmSourceFrame).toHaveBeenCalledTimes(1);
   });
 
-  it("places the current frame beside the alternatives in the replica row layout", async () => {
+  it("renders the current frame and candidates as one equal-size strip in the replica row layout", async () => {
     render(
       <SourceFrameSelection
         candidatesAlwaysVisible
@@ -211,24 +211,27 @@ describe("SourceFrameSelection", () => {
       />,
     );
     const currentFrame = await screen.findByAltText("当前原画面");
-    const alternatives = screen.getByText("查看或更换源画面");
-    const row = currentFrame.closest(".source-frame-selection__row");
-    expect(row).not.toBeNull();
-    expect(row).toContainElement(
-      alternatives.closest("details") as HTMLElement,
-    );
-    const currentColumn = row?.querySelector(
-      ".source-frame-selection__current",
-    );
-    expect(currentColumn).not.toBeNull();
-    expect(currentColumn).toContainElement(currentFrame as HTMLElement);
-    expect(currentColumn).toContainElement(
+    const strip = currentFrame.closest(".source-frame-strip");
+    expect(strip).not.toBeNull();
+    expect(strip).toContainElement(
       screen.getByRole("button", { name: "使用这张画面" }),
     );
+    // 候选帧与当前画面同处一条卡片带，说明文字不再渲染。
+    expect(strip).toContainElement(screen.getByAltText("候选源画面 1"));
+    expect(screen.getByRole("radio", { name: /候选源画面 1/ })).toBeChecked();
+    expect(screen.getByText("推荐")).toBeInTheDocument();
+    // 取帧工具收进卡片带下方的折叠区，默认展开。
+    const alternatives = screen.getByText("查看或更换源画面");
     expect(alternatives.closest("details")).toHaveAttribute("open");
+    expect(alternatives.closest("details")).toContainElement(
+      screen.getByRole("button", { name: "重新取帧" }),
+    );
+    expect(alternatives.closest("details")).not.toContainElement(
+      screen.getByAltText("候选源画面 1"),
+    );
   });
 
-  it("keeps the replica row layout free of the long explanatory copy", async () => {
+  it("keeps the replica row layout free of captions and the status line", async () => {
     render(
       <SourceFrameSelection
         candidatesAlwaysVisible
@@ -240,6 +243,13 @@ describe("SourceFrameSelection", () => {
     await screen.findByAltText("当前原画面");
     expect(screen.queryByText(/选择人物清晰、无遮挡的画面/)).toBeNull();
     expect(screen.queryByText(/后段画面也能作为人物与构图参考/)).toBeNull();
+    // 图 1 需求（2026-11-21）：候选图下说明与顶部状态行一并移除。
+    expect(screen.queryByText(/需补开场衔接/)).toBeNull();
+    expect(
+      screen.queryByText(/已确认源画面，将保留原视频的构图与动作/),
+    ).toBeNull();
+    // 状态语义保留在右上角徽标里（此 fixture 无历史确认，为待手动确认态）。
+    expect(screen.getByText("待手动确认")).toBeInTheDocument();
   });
 
   it("keeps the descriptive copy in the full-size layout", async () => {
