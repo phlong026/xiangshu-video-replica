@@ -217,6 +217,18 @@ def _baseline_for(followers: int) -> _Baseline:
     return _BASELINES[-1]
 
 
+def baseline_for_tier(tier: str) -> dict[str, float]:
+    """按量级键返回行动卡可用的公开基准（行动卡引擎用，不暴露 dataclass）."""
+
+    baseline = next((b for b in _BASELINES if b.tier == tier), _BASELINES[-1])
+    return {
+        "engagement_excellent": baseline.engagement_excellent,
+        "engagement_good": baseline.engagement_good,
+        "engagement_low": baseline.engagement_low,
+        "viral_line": baseline.viral_line,
+    }
+
+
 def _round_half_up(value: float) -> int:
     # 内置 round 是银行家舍入（round(0.5)=0），评分必须按四舍五入，否则边界分档不可复现。
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))

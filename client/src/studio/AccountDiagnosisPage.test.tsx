@@ -119,6 +119,55 @@ const reportFixture = {
     },
     collectedAt: "2026-11-20T10:00:00+00:00",
     l2: null,
+    actionCards: [
+      {
+        key: "interact-hook",
+        priority: "P0" as const,
+        dimension: "互动健康度",
+        title: "互动钩子改造",
+        problem: "粉丝互动率 2.1%，低于本量级良好线 4.0%",
+        evidence: ["评论占赞比 1.8%（健康线 ≥4%）"],
+        selfChecks: ["自查：结尾 3 秒是否有互动提问？"],
+        steps: ["结尾 3 秒改为开放式提问", "发布后 1 小时内回复前 10 条评论"],
+        beforeAfter: [
+          {
+            before: "感谢观看，关注我看更多干货。",
+            after: "你家厨房做 U 型还是 L 型？评论区告诉我。",
+          },
+        ],
+        target: "粉丝互动率 ≥ 4.0%",
+        metric: "engagement_rate",
+        targetValue: 4,
+        dueWeek: 1,
+        generatedBy: "rules" as const,
+      },
+    ],
+    referenceWorks: [
+      {
+        videoId: "ref-1",
+        title: "45㎡老破小改造，拆完业主哭了",
+        author: "同赛道账号",
+        likes: 124_000,
+        score: 8.9,
+        url: "https://www.douyin.com/video/ref-1",
+      },
+    ],
+    priorReview: [
+      { title: "头像更换", status: "fixed" as const, note: "当前已达目标" },
+    ],
+    calendar: [
+      {
+        label: "第 1 周",
+        days: [
+          {
+            date: "2026-11-23",
+            weekday: 1,
+            task: "回复评论区 / 备素材",
+            rest: true,
+          },
+        ],
+      },
+    ],
     works: [
       {
         awemeId: "aweme-1",
@@ -159,7 +208,7 @@ describe("账号诊断页", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
 
     expect(await screen.findByText("72")).toBeInTheDocument();
-    expect(screen.getByText("互动健康度")).toBeInTheDocument();
+    expect(screen.getAllByText("互动健康度").length).toBeGreaterThan(0);
     expect(screen.getByText(/衰退 · 中危/)).toBeInTheDocument();
     expect(screen.getByText("建议复刻")).toBeInTheDocument();
     expect(mocks.createDiagnosis).toHaveBeenCalledWith(
@@ -200,7 +249,7 @@ describe("账号诊断页", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
     await screen.findByText("三层小别墅开工");
 
-    fireEvent.click(screen.getByRole("button", { name: "一键拆解" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "一键拆解" })[0]);
     expect(mocks.navigate).toHaveBeenCalledWith("workbench", {
       replicateIntentLink: "https://www.douyin.com/video/aweme-1",
     });
