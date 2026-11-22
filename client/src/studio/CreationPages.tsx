@@ -3366,6 +3366,7 @@ export function ReplicaPage() {
                   />
                   {state.draft.firstFrameId ? (
                     <ReplicaFinalPromptControls
+                      key={finalInput.projectId}
                       input={finalInput}
                       sourceDuration={sourceDuration}
                       sourceFrameTimestamp={

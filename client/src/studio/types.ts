@@ -1,5 +1,6 @@
 import type {
   CurrentUser,
+  GenerationVersion,
   IndependentCapabilities,
   OralVoiceLanguage,
   Project,
@@ -318,9 +319,10 @@ export type StudioDraft = {
   replicaPromptBasis?: string;
   /** 内容准备变更后，须显式交接最新提示词与采用首帧。 */
   replicaPreparationPending?: boolean;
-  /** 已合成终稿的最小指纹（不含完整版本对象）：重进页面时据此判断 finalReady，
-   * 否则按钮会退回"待合成"，上游其实没有任何变化。 */
+  /** 已合成终稿指纹用于重进页面时判断 finalReady；可选版本保留开场与时间线选择。
+   * 旧草稿可能只有指纹，恢复时不能因为默认值初始化而清掉它。 */
   finalSnapshot?: {
+    promptVersion?: GenerationVersion;
     inputKey: string;
     versionId: string;
     scriptVersionId: string;
