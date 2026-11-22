@@ -1,7 +1,7 @@
 """子账号功能权限：读取与准入强制（CUSTOMER-CENTER-V2 Phase 3b / audit-40 权限矩阵）.
 
 母账号通过 ``sub_account_permissions``（迁移 20260922T1800）给某个子账号限定
-「12 类业务权限 + 2 项系统权限」；**无行 = 全允许**——与额度表「无行 = 不限」
+「业务权限 + 2 项系统权限」；**无行 = 全允许**——与额度表「无行 = 不限」
 对称，存量子账号零回填即保持原行为（fail-open，向后兼容）：
 
 - ``allowed_businesses`` 存允许的业务键数组的 TEXT-JSON（仓库约定 JSON 全存
@@ -32,8 +32,8 @@ from typing import Any, Protocol
 
 from fastapi import HTTPException
 
-# 12 类业务权限（与消费流水业务的客户口径一致）：键 → 中文标签。
-# 顺序即 UI 勾选网格顺序（原型 v3「功能权限（12 类业务）」）。
+# 业务权限（与消费流水业务的客户口径一致）：键 → 中文标签。
+# 顺序即 UI 勾选网格顺序。
 BUSINESS_FEATURES: tuple[tuple[str, str], ...] = (
     ("video", "视频生成"),
     ("oral", "数字人口播"),
@@ -47,6 +47,7 @@ BUSINESS_FEATURES: tuple[tuple[str, str], ...] = (
     ("avatar_clone", "形象克隆"),
     ("voice_clone", "声音克隆"),
     ("viral_data", "爆款数据"),
+    ("account_diagnosis", "账号诊断"),
 )
 
 BUSINESS_KEYS: frozenset[str] = frozenset(key for key, _ in BUSINESS_FEATURES)
@@ -69,6 +70,7 @@ SERVICE_FEATURE: dict[str, str] = {
     "prompt_optimize": "prompt_optimize",
     "avatar_clone": "avatar_clone",
     "voice_clone": "voice_clone",
+    "account_diagnosis": "account_diagnosis",
 }
 
 
@@ -116,7 +118,7 @@ def is_all_permissions(
     allow_api_keys: bool,
     allow_publish_accounts: bool,
 ) -> bool:
-    """是否全开（12 类业务 + 两项系统权限）：全开 = 删除行，"全开行"不存在。"""
+    """是否全开（全部业务 + 两项系统权限）：全开 = 删除行，"全开行"不存在。"""
     return allow_api_keys and allow_publish_accounts and set(businesses) >= BUSINESS_KEYS
 
 

@@ -54,6 +54,7 @@ from app.billing_catalog import read_tariff
 from app.db_portable import BusinessConnection
 from app.sub_account_permissions import enforce_sub_account_feature
 from app.usage_billing import accept_operation, finish_source
+from app.viral_content_state import customer_visible_sql
 from app.viral_tikhub import (
     DouyinUserPost,
     DouyinUserProfile,
@@ -524,12 +525,12 @@ def _load_xingtu_metrics(client: Any, sec_user_id: str) -> dict[str, DouyinXingt
 
 
 def _load_reference_pool(conn: BusinessConnection) -> list[dict[str, Any]]:
-    """已发布爆款池候选：只取管理端已上架、未删除的抖音内容，按热度取 60 条."""
+    """与客户爆款库共用可见规则，避免把未推送或下架内容写入诊断报告."""
 
     rows = conn.execute(
-        "SELECT video_id, title, author, likes FROM viral_videos "
-        "WHERE platform='douyin' AND deleted_at IS NULL AND collection_published=1 "
-        "ORDER BY likes DESC NULLS LAST LIMIT 60"
+        "SELECT v.video_id, v.title, v.author, v.likes FROM viral_videos v "
+        f"WHERE v.platform='douyin' AND {customer_visible_sql('v')} "
+        "ORDER BY v.likes DESC NULLS LAST LIMIT 60"
     ).fetchall()
     return [
         {
