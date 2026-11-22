@@ -795,7 +795,7 @@ export function AccountDiagnosisPage() {
           isOpen={rechargeOpen}
           onClose={() => setRechargeOpen(false)}
           onOrderCreated={() => {
-            setRechargeOpen(false);
+            // 建单后仍需展示二维码并等待到账，支付窗口只能在到账或主动关闭时收起。
             void refreshAvailability();
           }}
           onPaid={() => {

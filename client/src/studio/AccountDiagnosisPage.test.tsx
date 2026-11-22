@@ -8,6 +8,13 @@ const mocks = vi.hoisted(() => ({
   listHistory: vi.fn(),
   createDiagnosis: vi.fn(),
   getReport: vi.fn(),
+  getWallet: vi.fn(),
+  listPackages: vi.fn(),
+  createRechargeOrder: vi.fn(),
+  createPaymentCode: vi.fn(),
+  getRechargeOrder: vi.fn(),
+  store: { loadSessionToken: vi.fn() },
+  onSessionExpired: vi.fn(),
 }));
 
 vi.mock("./context", () => ({
@@ -17,26 +24,56 @@ vi.mock("./context", () => ({
     notify: mocks.notify,
     navigate: mocks.navigate,
     customerAccount: {
-      store: {},
-      onSessionExpired: vi.fn(),
+      store: mocks.store,
+      onSessionExpired: mocks.onSessionExpired,
     },
     state: { accountDiagnosisInput: "" },
   }),
 }));
 
-vi.mock("../api", () => ({
+vi.mock("../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api")>()),
   getAccountDiagnosisAvailability: mocks.getAvailability,
   listAccountDiagnoses: mocks.listHistory,
   createAccountDiagnosis: mocks.createDiagnosis,
   getAccountDiagnosis: mocks.getReport,
-}));
-
-vi.mock("../customer/CustomerRechargeDialog", () => ({
-  CustomerRechargeDialog: ({ isOpen }: { isOpen: boolean }) =>
-    isOpen ? <div>充值对话框</div> : null,
+  customerGetWallet: mocks.getWallet,
+  customerListRechargePackages: mocks.listPackages,
+  customerCreateRechargeOrder: mocks.createRechargeOrder,
+  customerCreateRechargePaymentCode: mocks.createPaymentCode,
+  customerGetRechargeOrder: mocks.getRechargeOrder,
 }));
 
 import { AccountDiagnosisPage } from "./AccountDiagnosisPage";
+
+const rechargeOrder = {
+  order_no: "diagnosis-recharge-1",
+  status: "PENDING",
+  amount_fen: 10000,
+  credits: 10,
+};
+const paymentCode = {
+  order_no: rechargeOrder.order_no,
+  amount_fen: rechargeOrder.amount_fen,
+  credits: rechargeOrder.credits,
+  qr_image_url: "https://payment.example/diagnosis-qr.png",
+  payment_url: "https://payment.example/diagnosis-pay",
+};
+
+async function openRechargeDialog() {
+  mocks.createDiagnosis.mockRejectedValue(
+    Object.assign(new Error("账号诊断需要先购买充值套餐。"), {
+      code: "ACCOUNT_DIAGNOSIS_MEMBER_REQUIRED",
+    }),
+  );
+  render(<AccountDiagnosisPage />);
+  await screen.findByText("新用户首单免费");
+  fireEvent.change(screen.getByLabelText("抖音账号链接或抖音号"), {
+    target: { value: "zsj001" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
+  return screen.findByRole("dialog", { name: "扫码充值" });
+}
 
 const reportFixture = {
   id: "report-1",
@@ -186,7 +223,7 @@ const reportFixture = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mocks.getAvailability.mockResolvedValue({
     enabled: true,
     freeQuota: true,
@@ -194,6 +231,27 @@ beforeEach(() => {
     priceCredits: 8,
   });
   mocks.listHistory.mockResolvedValue({ items: [] });
+  mocks.store.loadSessionToken.mockResolvedValue("test");
+  mocks.getWallet.mockResolvedValue({
+    available_credits: 0,
+    reserved_credits: 0,
+    internal_unit_price_fen: 1000,
+    min_recharge_fen: 10000,
+    recharge_step_fen: 1000,
+  });
+  mocks.listPackages.mockResolvedValue([
+    {
+      id: "diagnosis-package",
+      name: "标准档",
+      amount_fen: 10000,
+      credits: 10,
+      discount_rate: null,
+      discount_interfaces: [],
+    },
+  ]);
+  mocks.createRechargeOrder.mockResolvedValue(rechargeOrder);
+  mocks.createPaymentCode.mockResolvedValue(paymentCode);
+  mocks.getRechargeOrder.mockResolvedValue(rechargeOrder);
 });
 
 describe("账号诊断页", () => {
@@ -217,25 +275,77 @@ describe("账号诊断页", () => {
   });
 
   it("第二次使用被会员门禁拦截时直接弹出充值对话框", async () => {
-    mocks.createDiagnosis.mockRejectedValue(
-      Object.assign(new Error("账号诊断需要先购买充值套餐。"), {
-        code: "ACCOUNT_DIAGNOSIS_MEMBER_REQUIRED",
-      }),
-    );
-    render(<AccountDiagnosisPage />);
-    await screen.findByText("新用户首单免费");
-
-    fireEvent.change(screen.getByLabelText("抖音账号链接或抖音号"), {
-      target: { value: "zsj001" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
-
-    expect(await screen.findByText("充值对话框")).toBeInTheDocument();
+    expect(await openRechargeDialog()).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
         "账号诊断需要先购买充值套餐。",
       ),
     );
+  });
+
+  it("建单后保留真实支付窗口，等待付款确认后才关闭", async () => {
+    await openRechargeDialog();
+    fireEvent.click(await screen.findByRole("button", { name: /标准档/ }));
+
+    expect(
+      await screen.findByRole("img", { name: "充值支付二维码" }),
+    ).toHaveAttribute("src", paymentCode.qr_image_url);
+    await waitFor(() => expect(mocks.getRechargeOrder).toHaveBeenCalled());
+    expect(screen.getByText("正在等待支付结果")).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "扫码充值" }),
+    ).toBeInTheDocument();
+    expect(mocks.getAvailability).toHaveBeenCalledTimes(2);
+    expect(mocks.notify).not.toHaveBeenCalledWith("充值到账，可以继续诊断了。");
+
+    mocks.getRechargeOrder.mockResolvedValue({
+      ...rechargeOrder,
+      status: "PAID",
+    });
+    await waitFor(
+      () =>
+        expect(screen.queryByRole("dialog", { name: "扫码充值" })).toBeNull(),
+      { timeout: 3500 },
+    );
+    expect(mocks.notify).toHaveBeenCalledWith("充值到账，可以继续诊断了。");
+    expect(mocks.createRechargeOrder).toHaveBeenCalledOnce();
+    expect(mocks.getAvailability).toHaveBeenCalledTimes(3);
+  });
+
+  it("取码失败后窗口仍在，重试复用同一个充值订单", async () => {
+    mocks.createPaymentCode.mockRejectedValueOnce(new Error("二维码暂不可用"));
+    await openRechargeDialog();
+    fireEvent.click(await screen.findByRole("button", { name: /标准档/ }));
+
+    expect(await screen.findByText("二维码暂不可用")).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "扫码充值" }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "重新获取上一订单二维码" }),
+    );
+
+    expect(
+      await screen.findByRole("img", { name: "充值支付二维码" }),
+    ).toHaveAttribute("src", paymentCode.qr_image_url);
+    expect(mocks.createRechargeOrder).toHaveBeenCalledOnce();
+    expect(mocks.createPaymentCode).toHaveBeenCalledTimes(2);
+    for (const call of mocks.createPaymentCode.mock.calls) {
+      expect(call).toEqual([
+        { kind: "session", token: "test" },
+        rechargeOrder.order_no,
+      ]);
+    }
+  });
+
+  it("等待付款时仍允许用户主动关闭充值窗口", async () => {
+    await openRechargeDialog();
+    fireEvent.click(await screen.findByRole("button", { name: /标准档/ }));
+    await screen.findByRole("img", { name: "充值支付二维码" });
+    fireEvent.click(screen.getByRole("button", { name: "关闭充值窗口" }));
+
+    expect(screen.queryByRole("dialog", { name: "扫码充值" })).toBeNull();
+    expect(mocks.notify).not.toHaveBeenCalledWith("充值到账，可以继续诊断了。");
   });
 
   it("建议复刻的作品可一键带链接进工作台发起拆解", async () => {
