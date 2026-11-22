@@ -47,6 +47,7 @@ import {
   downloadMaterialAsset,
   evictMaterialCachedPreview,
   extractSourceFrames,
+  fetchReplicaPromptHistory,
   fetchViralVideoSource,
   generateFirstFrames,
   getAssetDownloadUrl,
@@ -60,6 +61,7 @@ import {
   getHealth,
   getLatestGenerationPrompt,
   getLatestProjectFirstFrames,
+  getLatestReplicaPromptTask,
   getLatestScriptRewriteTask,
   getLatestScriptVersion,
   getMaterialBatchPreviews,
@@ -87,6 +89,8 @@ import {
   REQUEST_TIMEOUT_MS,
   readAnalysisPayload,
   readFirstFrameCandidates,
+  readReplicaPromptShots,
+  readReplicaPromptSpokenScript,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
@@ -210,6 +214,140 @@ describe("长视频轮询的账号生命周期", () => {
       waitForReplicaPromptTask("compat-task"),
     ]);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("长视频历史账号查询", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("不需要项目 ID 即可请求当前账号历史，并保留项目查询兼容入口", async () => {
+    const items = [{ id: "saved-version", project_id: "saved-project" }];
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items }),
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await expect(fetchReplicaPromptHistory()).resolves.toEqual(items);
+    expect(fetcher.mock.calls[0][0]).toContain(
+      "/api/replica-prompt/versions?limit=30",
+    );
+    await expect(fetchReplicaPromptHistory("project/one", 5)).resolves.toEqual(
+      items,
+    );
+    expect(fetcher.mock.calls[1][0]).toContain(
+      "/api/projects/project%2Fone/replica-prompt/versions?limit=5",
+    );
+  });
+
+  it("分镜只保留白名单的正确类型字段且不补造缺失内容", () => {
+    expect(
+      readReplicaPromptShots([
+        null,
+        {},
+        {
+          " shot_id\n": "s1",
+          " subject ": "讲解者",
+          action: { text: "错误类型" },
+          scene: ["错误类型"],
+          spoken_text: false,
+          person_count: 1.5,
+          unknown: "不应透传",
+        },
+        { start_time: 0, end_time: 3.5 },
+        { composition: "人物居中", person_count: 0 },
+      ]),
+    ).toEqual([
+      { shot_id: "s1", subject: "讲解者" },
+      { start_time: 0, end_time: 3.5 },
+      { composition: "人物居中", person_count: 0 },
+    ]);
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    true,
+    false,
+  ])("分镜数值 %s 不作为时间或人数透传", (value) => {
+    expect(
+      readReplicaPromptShots([
+        {
+          subject: "讲解者",
+          start_time: value,
+          end_time: value,
+          person_count: value,
+        },
+      ]),
+    ).toEqual([{ subject: "讲解者" }]);
+  });
+
+  it("编号、人数或不完整/逆序/负数时间不能独立代表有效分镜", () => {
+    expect(
+      readReplicaPromptShots([
+        { shot_id: "s1" },
+        { person_count: 1 },
+        { subject: " " },
+        { start_time: 0 },
+        { end_time: 60 },
+        { start_time: -1, end_time: 1 },
+        { start_time: 2, end_time: 1 },
+        { start_time: 0, end_time: 0 },
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("长视频口播运行时规范化", () => {
+  it("只保留非空字符串正文并trim键，保留原文和可选时间", () => {
+    expect(
+      readReplicaPromptSpokenScript([
+        null,
+        7,
+        [],
+        {},
+        { text: " \n" },
+        { text: {} },
+        { text: ["数组正文"] },
+        {
+          " text\n": "  原文保留空格  ",
+          " start_time ": 0,
+          end_time: 2.5,
+          extra: "舍弃",
+        },
+        { text: "缺时间正文" },
+        { text: "时间漂移正文", start_time: 8, end_time: 3 },
+      ]),
+    ).toEqual([
+      { text: "  原文保留空格  ", start_time: 0, end_time: 2.5 },
+      { text: "缺时间正文", start_time: null, end_time: null },
+      { text: "时间漂移正文", start_time: 8, end_time: 3 },
+    ]);
+  });
+
+  it("口播的非有限数值、布尔、字符串或对象时间转为未知且不丢正文", () => {
+    for (const time of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      true,
+      false,
+      "3",
+      { toString: null },
+      [],
+    ]) {
+      expect(
+        readReplicaPromptSpokenScript([
+          { text: "有效正文", start_time: time, end_time: time },
+        ]),
+      ).toEqual([{ text: "有效正文", start_time: null, end_time: null }]);
+    }
+  });
+
+  it("缺失或非数组口播变为空列表", () => {
+    for (const value of [undefined, null, {}, "口播", 7, false]) {
+      expect(readReplicaPromptSpokenScript(value)).toEqual([]);
+    }
   });
 });
 
@@ -4682,6 +4820,24 @@ describe("uploadReferenceVideo", () => {
     expect(onSessionExpired).toHaveBeenCalledOnce();
     window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   });
+});
+
+describe("长视频任务模式查询", () => {
+  it.each(["prompt", "storyboard"] as const)(
+    "按 %s 模式恢复最近任务",
+    async (mode) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue({ ok: true, json: async () => null });
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(
+        getLatestReplicaPromptTask("project/one", mode),
+      ).resolves.toBeNull();
+      expect(String(fetchMock.mock.calls[0][0])).toContain(
+        `/api/projects/project%2Fone/replica-prompt-tasks/latest?mode=${mode}`,
+      );
+    },
+  );
 });
 
 describe("deduplicated oral materials", () => {

@@ -3675,6 +3675,30 @@ export type ReplicaPromptSpokenLine = {
   text: string;
 };
 
+/** 新结果和旧历史使用同一口播边界；不把坏时间对象带进渲染 key 或复制正文。 */
+export function readReplicaPromptSpokenScript(
+  value: unknown,
+): ReplicaPromptSpokenLine[] {
+  if (!Array.isArray(value)) return [];
+  const lines: ReplicaPromptSpokenLine[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const source = Object.fromEntries(
+      Object.entries(item).map(([key, field]) => [key.trim(), field]),
+    );
+    if (typeof source.text !== "string" || !source.text.trim()) continue;
+    const start = source.start_time;
+    const end = source.end_time;
+    lines.push({
+      start_time:
+        typeof start === "number" && Number.isFinite(start) ? start : null,
+      end_time: typeof end === "number" && Number.isFinite(end) ? end : null,
+      text: source.text,
+    });
+  }
+  return lines;
+}
+
 export type ReplicaPromptWarning = {
   code: string;
   message: string;
@@ -3691,8 +3715,77 @@ export type ReplicaPromptResult = {
   };
   spoken_script: ReplicaPromptSpokenLine[];
   replica_prompt: string;
+  /** storyboard 模式产出：完整镜头时间轴（与 <30s 分镜表同构，字段可有缺失）。 */
+  shots?: ReplicaPromptShot[];
   /** 服务端软警告（画幅/时长要素缺失、超长）；禁词是硬拒绝，不会出现在这里。 */
   warnings?: ReplicaPromptWarning[];
+};
+
+const REPLICA_SHOT_TEXT_FIELDS = [
+  "shot_id",
+  "shot_type",
+  "composition",
+  "camera_motion",
+  "subject",
+  "action",
+  "scene",
+  "spoken_text",
+  "transition",
+] as const;
+
+export type ReplicaPromptShot = Partial<
+  Pick<
+    ShotCard,
+    (typeof REPLICA_SHOT_TEXT_FIELDS)[number] | "start_time" | "end_time"
+  >
+> & { person_count?: number };
+
+/** 历史版本也可能有旧的脏字段，只保留可展示的镜头，不补造缺失内容。 */
+export function readReplicaPromptShots(value: unknown): ReplicaPromptShot[] {
+  if (!Array.isArray(value)) return [];
+  const shots: ReplicaPromptShot[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const source = Object.fromEntries(
+      Object.entries(item).map(([key, field]) => [key.trim(), field]),
+    );
+    const shot: ReplicaPromptShot = {};
+    for (const field of REPLICA_SHOT_TEXT_FIELDS) {
+      if (typeof source[field] === "string") shot[field] = source[field];
+    }
+    for (const field of ["start_time", "end_time"] as const) {
+      const number = source[field];
+      if (typeof number === "number" && Number.isFinite(number)) {
+        shot[field] = number;
+      }
+    }
+    const count = source.person_count;
+    if (typeof count === "number" && Number.isInteger(count) && count >= 0) {
+      shot.person_count = count;
+    }
+    const hasDescription = REPLICA_SHOT_TEXT_FIELDS.some(
+      (field) => field !== "shot_id" && Boolean(shot[field]?.trim()),
+    );
+    const start = shot.start_time;
+    const end = shot.end_time;
+    if (
+      hasDescription ||
+      (start !== undefined && end !== undefined && start >= 0 && end > start)
+    ) {
+      shots.push(shot);
+    }
+  }
+  return shots;
+}
+
+export type ReplicaPromptHistoryItem = {
+  id: string;
+  project_id: string;
+  asset_id: string | null;
+  kind: string;
+  version_number: number;
+  created_by_user_id: string | null;
+  created_at: string;
 };
 
 export type ReplicaPromptVersion = {
@@ -3710,6 +3803,7 @@ export async function startReplicaPromptTask(
   projectId: string,
   assetId: string,
   forceNew = false,
+  mode: "prompt" | "storyboard" = "storyboard",
 ): Promise<ReplicaPromptTask> {
   const errorPrefix = "启动长视频拆解失败";
   try {
@@ -3721,6 +3815,7 @@ export async function startReplicaPromptTask(
         body: JSON.stringify({
           asset_id: assetId,
           reuse_existing: !forceNew,
+          mode,
         }),
       },
     );
@@ -3757,19 +3852,44 @@ export async function cancelReplicaPromptTask(
 
 export async function getLatestReplicaPromptTask(
   projectId: string,
+  mode: "prompt" | "storyboard" = "storyboard",
 ): Promise<ReplicaPromptTask | null> {
   return requestApiJson<ReplicaPromptTask | null>(
-    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt-tasks/latest`,
+    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt-tasks/latest?mode=${mode}`,
     "读取长视频拆解任务失败",
   );
 }
 
 export async function getLatestReplicaPromptResult(
   projectId: string,
+  mode: "prompt" | "storyboard" = "storyboard",
 ): Promise<ReplicaPromptVersion | null> {
   return requestApiJson<ReplicaPromptVersion | null>(
-    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/latest`,
+    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/latest?mode=${mode}`,
     "读取长视频拆解结果失败",
+  );
+}
+
+export async function fetchReplicaPromptHistory(
+  projectId?: string,
+  limit = 30,
+): Promise<ReplicaPromptHistoryItem[]> {
+  const path = projectId
+    ? `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/versions`
+    : "/api/replica-prompt/versions";
+  const data = await requestApiJson<{ items: ReplicaPromptHistoryItem[] }>(
+    `${path}?limit=${limit}`,
+    "读取长视频拆解历史失败",
+  );
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+export async function getReplicaPromptVersionById(
+  versionId: string,
+): Promise<ReplicaPromptVersion | null> {
+  return requestApiJson<ReplicaPromptVersion | null>(
+    `/api/replica-prompt-versions/${encodeURIComponent(versionId)}`,
+    "读取长视频拆解历史版本失败",
   );
 }
 

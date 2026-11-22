@@ -4,10 +4,16 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReplicaPromptTask, ReplicaPromptVersion } from "../api";
+import type {
+  ReplicaPromptHistoryItem,
+  ReplicaPromptTask,
+  ReplicaPromptVersion,
+} from "../api";
+import { fetchReplicaPromptHistory } from "../api";
 import { clearAccountResidue } from "./draftResidue";
 import type { StudioContextValue } from "./types";
 
@@ -18,6 +24,7 @@ const {
   startReplicaPromptTask,
   getLatestReplicaPromptTask,
   getLatestReplicaPromptResult,
+  getReplicaPromptVersionById,
   cancelReplicaPromptTask,
   waitForReplicaPromptTask,
 } = vi.hoisted(() => ({
@@ -35,6 +42,7 @@ const {
   startReplicaPromptTask: vi.fn(),
   getLatestReplicaPromptTask: vi.fn(),
   getLatestReplicaPromptResult: vi.fn(),
+  getReplicaPromptVersionById: vi.fn(),
   cancelReplicaPromptTask: vi.fn(),
   waitForReplicaPromptTask: vi.fn(),
 }));
@@ -53,6 +61,8 @@ vi.mock("../api", async (importOriginal) => ({
   getLatestReplicaPromptResult,
   cancelReplicaPromptTask,
   waitForReplicaPromptTask,
+  fetchReplicaPromptHistory: vi.fn(),
+  getReplicaPromptVersionById,
 }));
 
 import { LongReplicaPage } from "./LongReplicaPage";
@@ -84,7 +94,7 @@ function deferred<T>() {
 }
 
 const RESULT_PAYLOAD = {
-  schema_version: "replica-prompt.v1",
+  schema_version: "long-analysis.v1",
   summary: {
     theme: "庭院施工过程展示",
     visual_style: "写实实拍",
@@ -98,6 +108,21 @@ const RESULT_PAYLOAD = {
   ],
   replica_prompt:
     "一段庭院施工讲解视频：讲解者身穿工装在自家小院内面向镜头介绍施工进度……",
+  shots: [
+    {
+      shot_id: "s1",
+      start_time: 0,
+      end_time: 9,
+      shot_type: "中景",
+      camera_motion: "手持跟随",
+      subject: "工装讲解者",
+      person_count: 1,
+      action: "面向镜头介绍施工进度",
+      scene: "庭院施工现场",
+      spoken_text: "大家好，今天带大家看小院开工。",
+      transition: "硬切",
+    },
+  ],
 };
 
 function resultPayload() {
@@ -105,7 +130,7 @@ function resultPayload() {
     id: "ver-1",
     project_id: "proj-1",
     asset_id: "asset-1",
-    kind: "replica_prompt",
+    kind: "long_analysis",
     version_number: 1,
     payload: RESULT_PAYLOAD,
     created_by_user_id: "owner-1",
@@ -123,11 +148,20 @@ function makeFile(overrides: { size?: number } = {}): File {
   return file;
 }
 
-async function pickFile(file: File) {
+async function pickFile(
+  file: File,
+  { autoStart = true }: { autoStart?: boolean } = {},
+) {
   const input = document.querySelector('input[type="file"]');
   expect(input).not.toBeNull();
   await act(async () => {
     fireEvent.change(input as HTMLInputElement, { target: { files: [file] } });
+  });
+  if (!autoStart) return;
+  // 新流程（2026-11-22）：选文件停在待确认占位卡，点「开始拆解」才上传并提交。
+  const startButton = await screen.findByRole("button", { name: "开始拆解" });
+  await act(async () => {
+    fireEvent.click(startButton);
   });
 }
 
@@ -171,6 +205,129 @@ function runningTask(): ReplicaPromptTask {
   };
 }
 
+describe("长视频任务结果绑定", () => {
+  const boundVersion = (): ReplicaPromptVersion => ({
+    ...resultPayload(),
+    id: "version-a",
+    kind: "long_analysis",
+    payload: { ...RESULT_PAYLOAD, replica_prompt: "本次任务绑定的版本 A" },
+  });
+  const mismatches = [
+    { field: "id", value: "other-version" },
+    { field: "project_id", value: "other-project" },
+    { field: "asset_id", value: "other-asset" },
+    { field: "kind", value: "replica_prompt" },
+  ];
+
+  beforeEach(() => {
+    setupContext();
+    getLongReplicaSession("u-1").run = {
+      projectId: "proj-1",
+      assetId: "asset-1",
+      taskId: "task-r",
+    };
+    getLatestReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+      result_version_id: "version-a",
+    });
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue(boundVersion());
+    getLatestReplicaPromptResult.mockResolvedValue({
+      ...boundVersion(),
+      id: "version-b",
+      payload: { ...RESULT_PAYLOAD, replica_prompt: "另一任务的最新版本 B" },
+    });
+  });
+
+  it("恢复成功任务只显示其版本 A，即使项目最新版本已是 B", async () => {
+    render(<LongReplicaPage />);
+    expect(await screen.findByText("本次任务绑定的版本 A")).toBeInTheDocument();
+    expect(screen.queryByText("另一任务的最新版本 B")).not.toBeInTheDocument();
+    expect(getReplicaPromptVersionById).toHaveBeenCalledExactlyOnceWith(
+      "version-a",
+    );
+    expect(getLatestReplicaPromptResult).not.toHaveBeenCalled();
+    expect(getLatestReplicaPromptTask).toHaveBeenCalledWith(
+      "proj-1",
+      "storyboard",
+    );
+    expect(getLongReplicaSession("u-1").result?.id).toBe("version-a");
+  });
+
+  it.each([false, true])(
+    "成功任务缺少结果版本 ID 时明确失败（已有缓存：%s）",
+    async (cached) => {
+      if (cached) getLongReplicaSession("u-1").result = boundVersion();
+      getLatestReplicaPromptTask.mockResolvedValue({
+        ...runningTask(),
+        status: "SUCCEEDED",
+        result_version_id: null,
+      });
+      render(<LongReplicaPage />);
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "缺少结果版本",
+      );
+      expect(
+        screen.queryByText("本次任务绑定的版本 A"),
+      ).not.toBeInTheDocument();
+      expect(getReplicaPromptVersionById).not.toHaveBeenCalled();
+      expect(getLatestReplicaPromptResult).not.toHaveBeenCalled();
+      expect(getLongReplicaSession("u-1").result).toBeNull();
+    },
+  );
+
+  it("指定结果版本不存在时明确失败，不回退项目最新结果", async () => {
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue(null);
+    render(<LongReplicaPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "未找到本次拆解的结果版本",
+    );
+    expect(getReplicaPromptVersionById).toHaveBeenCalledWith("version-a");
+    expect(getLatestReplicaPromptResult).not.toHaveBeenCalled();
+    expect(getLongReplicaSession("u-1").result).toBeNull();
+  });
+
+  it.each(mismatches)(
+    "结果版本的 $field 不匹配时拒绝展示",
+    async ({ field, value }) => {
+      vi.mocked(getReplicaPromptVersionById).mockResolvedValue({
+        ...boundVersion(),
+        [field]: value,
+      });
+      render(<LongReplicaPage />);
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "结果版本与本次拆解不匹配",
+      );
+      expect(
+        screen.queryByText("本次任务绑定的版本 A"),
+      ).not.toBeInTheDocument();
+      expect(getLatestReplicaPromptResult).not.toHaveBeenCalled();
+      expect(getLongReplicaSession("u-1").result).toBeNull();
+    },
+  );
+
+  it.each(mismatches)(
+    "同任务缓存的 $field 不匹配时重新读取指定版本",
+    async ({ field, value }) => {
+      getLongReplicaSession("u-1").result = {
+        ...boundVersion(),
+        [field]: value,
+        payload: { ...RESULT_PAYLOAD, replica_prompt: "不能沿用的缓存结果" },
+      };
+      render(<LongReplicaPage />);
+      expect(
+        await screen.findByText("本次任务绑定的版本 A"),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("不能沿用的缓存结果")).not.toBeInTheDocument();
+      expect(getReplicaPromptVersionById).toHaveBeenCalledExactlyOnceWith(
+        "version-a",
+      );
+      expect(getLatestReplicaPromptResult).not.toHaveBeenCalled();
+      expect(getLongReplicaSession("u-1").result).toEqual(boundVersion());
+    },
+  );
+});
+
 describe("LongReplicaPage 上传门禁", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -184,7 +341,7 @@ describe("LongReplicaPage 上传门禁", () => {
     const { notify } = setupContext();
     readVideoDuration.mockResolvedValue(200);
     render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    await pickFile(makeFile(), { autoStart: false });
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
         "长视频时长不能超过 180 秒，请裁剪后再上传。",
@@ -197,7 +354,7 @@ describe("LongReplicaPage 上传门禁", () => {
     const { notify } = setupContext();
     readVideoDuration.mockResolvedValue(3);
     render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    await pickFile(makeFile(), { autoStart: false });
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
         "长视频拆解仅支持 30 秒以上的视频，30 秒以内请到「<30s 视频拆解」页签。",
@@ -210,7 +367,9 @@ describe("LongReplicaPage 上传门禁", () => {
     const { notify } = setupContext();
     readVideoDuration.mockResolvedValue(60);
     render(<LongReplicaPage />);
-    await pickFile(makeFile({ size: 601 * 1024 * 1024 }));
+    await pickFile(makeFile({ size: 601 * 1024 * 1024 }), {
+      autoStart: false,
+    });
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
         "长视频不能超过 600 MB，请压缩后再上传。",
@@ -229,7 +388,7 @@ describe("LongReplicaPage 拆解链路", () => {
     });
     // 默认：没有历史运行可接回（防止用例间模块级状态互相污染断言）。
     getLatestReplicaPromptTask.mockResolvedValue(null);
-    getLatestReplicaPromptResult.mockResolvedValue(null);
+    getReplicaPromptVersionById.mockResolvedValue(null);
   });
 
   it("上传后以 replica_prompt 用途上传并启动拆解，成功后展示三块结果", async () => {
@@ -247,8 +406,9 @@ describe("LongReplicaPage 拆解链路", () => {
       ...runningTask(),
       id: "task-1",
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
-    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    getReplicaPromptVersionById.mockResolvedValue(resultPayload());
     render(<LongReplicaPage />);
     await pickFile(makeFile());
 
@@ -261,14 +421,21 @@ describe("LongReplicaPage 拆解链路", () => {
       );
     });
     await waitFor(() => {
-      expect(startReplicaPromptTask).toHaveBeenCalledWith("proj-1", "asset-1");
+      expect(startReplicaPromptTask).toHaveBeenCalledWith(
+        "proj-1",
+        "asset-1",
+        false,
+        "storyboard",
+      );
     });
     await waitFor(() => {
       expect(screen.getByText("复刻提示词")).toBeTruthy();
     });
     expect(screen.getByText(/庭院施工讲解视频/)).toBeTruthy();
     expect(screen.getByText("逐句口播文案")).toBeTruthy();
-    expect(screen.getByText(/大家好，今天带大家看小院开工/)).toBeTruthy();
+    expect(
+      screen.getAllByText(/大家好，今天带大家看小院开工/).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("全片摘要")).toBeTruthy();
     expect(screen.getByText(/场地平整/)).toBeTruthy();
 
@@ -279,6 +446,76 @@ describe("LongReplicaPage 拆解链路", () => {
       );
     });
     expect(screen.getAllByText("已复制").length).toBeGreaterThan(0);
+  });
+
+  it("storyboard 结果渲染分镜表（时间轴/景别/动作/场景）", async () => {
+    setupContext();
+    readVideoDuration.mockResolvedValue(120);
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "proj-1",
+      assetId: "asset-1",
+    });
+    getLatestReplicaPromptTask.mockResolvedValue(null);
+    getReplicaPromptVersionById.mockResolvedValue(resultPayload());
+    startReplicaPromptTask.mockResolvedValue(runningTask());
+    waitForReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+      result_version_id: "ver-1",
+    });
+    render(<LongReplicaPage />);
+    await pickFile(makeFile());
+    await waitFor(() => {
+      expect(screen.getByText(/分镜表（1 段）/)).toBeTruthy();
+    });
+    expect(screen.getByText("手持跟随")).toBeTruthy();
+    expect(screen.getByText("面向镜头介绍施工进度")).toBeTruthy();
+    expect(screen.getByText(/庭院施工现场/)).toBeTruthy();
+    // 分镜表在前，复刻提示词等文本块在其后保留。
+    expect(screen.getByText("复刻提示词")).toBeTruthy();
+    expect(screen.getByText("全片摘要")).toBeTruthy();
+  });
+
+  it("拆解历史弹窗列出历史并可载入历史版本", async () => {
+    setupContext();
+    getLatestReplicaPromptTask.mockResolvedValue(null);
+    getReplicaPromptVersionById.mockResolvedValue(resultPayload());
+    startReplicaPromptTask.mockResolvedValue(runningTask());
+    waitForReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+      result_version_id: "ver-1",
+    });
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "proj-1",
+      assetId: "asset-1",
+    });
+    vi.mocked(fetchReplicaPromptHistory).mockResolvedValue([
+      {
+        id: "ver-old",
+        project_id: "proj-1",
+        asset_id: "asset-1",
+        kind: "long_analysis",
+        version_number: 1,
+        created_by_user_id: "owner-1",
+        created_at: "2026-11-22 10:00:00",
+      },
+    ]);
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue(resultPayload());
+    render(<LongReplicaPage />);
+    await pickFile(makeFile());
+    await waitFor(() => {
+      expect(screen.getByText(/分镜表（1 段）/)).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    await screen.findByText(/分镜表拆解/);
+    fireEvent.click(screen.getByRole("button", { name: "载入此版本" }));
+    await waitFor(() => {
+      expect(vi.mocked(getReplicaPromptVersionById)).toHaveBeenCalledWith(
+        "ver-old",
+      );
+    });
+    expect(screen.getByText(/分镜表（1 段）/)).toBeTruthy();
   });
 
   it("结果带软警告时在结果区展示警告列表", async () => {
@@ -296,8 +533,9 @@ describe("LongReplicaPage 拆解链路", () => {
       ...runningTask(),
       id: "task-1",
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
-    getLatestReplicaPromptResult.mockResolvedValue({
+    getReplicaPromptVersionById.mockResolvedValue({
       ...resultPayload(),
       payload: {
         ...RESULT_PAYLOAD,
@@ -363,18 +601,32 @@ describe("LongReplicaPage 拆解链路", () => {
     startReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       id: "task-9",
+      project_id: "proj-9",
+      asset_id: "asset-9",
       status: "PENDING",
     });
     waitForReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       id: "task-9",
+      project_id: "proj-9",
+      asset_id: "asset-9",
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
-    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    getReplicaPromptVersionById.mockResolvedValue({
+      ...resultPayload(),
+      project_id: "proj-9",
+      asset_id: "asset-9",
+    });
     render(<LongReplicaPage />);
 
     await waitFor(() =>
-      expect(startReplicaPromptTask).toHaveBeenCalledWith("proj-9", "asset-9"),
+      expect(startReplicaPromptTask).toHaveBeenCalledWith(
+        "proj-9",
+        "asset-9",
+        false,
+        "storyboard",
+      ),
     );
     await waitFor(() => {
       expect(screen.getByText("复刻提示词")).toBeTruthy();
@@ -402,7 +654,7 @@ describe("长视频任务状态回归", () => {
     vi.clearAllMocks();
     setupContext();
     getLatestReplicaPromptTask.mockResolvedValue(null);
-    getLatestReplicaPromptResult.mockResolvedValue(null);
+    getReplicaPromptVersionById.mockResolvedValue(null);
   });
 
   it("首次上传后离开上传态，分析期间显示计时与取消入口", async () => {
@@ -449,8 +701,9 @@ describe("长视频任务状态回归", () => {
     waitForReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
-    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    getReplicaPromptVersionById.mockResolvedValue(resultPayload());
     const first = render(<LongReplicaPage />);
     await screen.findByText(/庭院施工讲解视频/);
     first.unmount();
@@ -463,7 +716,327 @@ describe("长视频任务状态回归", () => {
     render(<LongReplicaPage />);
     expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
     expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
+  });
+});
+
+describe("长视频账号历史恢复", () => {
+  const savedVersion = (): ReplicaPromptVersion => ({
+    ...resultPayload(),
+    id: "saved-version",
+    project_id: "other-own-project",
+    kind: "long_analysis",
+    payload: { ...RESULT_PAYLOAD, replica_prompt: "选中的旧项目历史版本" },
+  });
+  const historyItem = (): ReplicaPromptHistoryItem => ({
+    id: "saved-version",
+    project_id: "other-own-project",
+    asset_id: "saved-asset",
+    kind: "long_analysis",
+    version_number: 9,
+    created_by_user_id: "u-1",
+    created_at: "2026-11-20 10:00:00",
+  });
+
+  beforeEach(() => {
+    setupContext();
+    vi.mocked(fetchReplicaPromptHistory).mockResolvedValue([historyItem()]);
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue(savedVersion());
+  });
+
+  function switchAccount(accountId: string) {
+    const context = useStudio.getMockImplementation()?.() as StudioContextValue;
+    useStudio.mockReturnValue({
+      ...context,
+      user: { ...context.user, id: accountId },
+    });
+  }
+
+  it("冷启动和登出重登后没有当前项目也能打开并载入账号历史", async () => {
+    const first = render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    await screen.findByRole("dialog", { name: "长视频拆解历史" });
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await screen.findByText("选中的旧项目历史版本");
+    expect(fetchReplicaPromptHistory).toHaveBeenCalledWith();
+    expect(startReplicaPromptTask).not.toHaveBeenCalled();
+    clearAccountResidue("u-1");
+    first.unmount();
+
+    render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await screen.findByText("选中的旧项目历史版本");
+    expect(fetchReplicaPromptHistory).toHaveBeenCalledTimes(2);
+    expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+    expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
+  });
+
+  it("选中另一项目历史后重挂载仍保留选择，不恢复旧运行的最新结果", async () => {
+    const cache = getLongReplicaSession("u-1");
+    cache.run = { projectId: "proj-1", assetId: "asset-1", taskId: "task-r" };
+    cache.result = resultPayload() as ReplicaPromptVersion;
+    getLatestReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+      result_version_id: "ver-1",
+    });
+    const first = render(<LongReplicaPage />);
+    await screen.findByText(/庭院施工讲解视频/);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await screen.findByText("选中的旧项目历史版本");
+    first.unmount();
+    getLatestReplicaPromptTask.mockClear();
+
+    render(<LongReplicaPage />);
+    await screen.findByText("选中的旧项目历史版本");
+    expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
+    expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
+    expect(cache.run).toBeNull();
+    expect(cache.result?.id).toBe("saved-version");
+    expect(cache.pendingAutoStart).toBe(false);
+    expect(cache.starting).toBeNull();
+  });
+
+  it.each(["成功", "失败"])(
+    "切账号后旧历史请求迟到%s不结束新账号加载或混入旧记录",
+    async (outcome) => {
+      const previous = deferred<ReplicaPromptHistoryItem[]>();
+      const next = deferred<ReplicaPromptHistoryItem[]>();
+      vi.mocked(fetchReplicaPromptHistory)
+        .mockReturnValueOnce(previous.promise)
+        .mockReturnValueOnce(next.promise);
+      const view = render(<LongReplicaPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+      await screen.findByText("正在读取拆解历史…");
+      switchAccount("u-2");
+      view.rerender(<LongReplicaPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+      await act(async () => {
+        if (outcome === "成功") previous.resolve([historyItem()]);
+        else previous.reject(new Error("旧账号历史读取失败"));
+      });
+      expect(screen.getByText("正在读取拆解历史…")).toBeInTheDocument();
+      expect(screen.queryByText(/第 9 版/)).not.toBeInTheDocument();
+      expect(screen.queryByText("旧账号历史读取失败")).not.toBeInTheDocument();
+      await act(async () =>
+        next.resolve([
+          { ...historyItem(), id: "account-2-version", version_number: 2 },
+        ]),
+      );
+      expect(screen.getByText(/第 2 版/)).toBeInTheDocument();
+      expect(screen.queryByText(/第 9 版/)).not.toBeInTheDocument();
+    },
+  );
+
+  it("载入历史期间切账号，旧详情不能写回任何账号缓存", async () => {
+    const previous = deferred<ReplicaPromptVersion>();
+    vi.mocked(getReplicaPromptVersionById).mockReturnValue(previous.promise);
+    const view = render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await waitFor(() => expect(getReplicaPromptVersionById).toHaveBeenCalled());
+    switchAccount("u-2");
+    view.rerender(<LongReplicaPage />);
+    await act(async () => previous.resolve(savedVersion()));
+    expect(screen.queryByText("选中的旧项目历史版本")).not.toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
+    expect(getLongReplicaSession("u-1").result).toBeNull();
+    expect(getLongReplicaSession("u-2").result).toBeNull();
+  });
+
+  it.each([
+    ["空对象或纯编号", [{}, { shot_id: "s1" }, { person_count: 1 }]],
+    ["空值与标量", [null, 7, false, "坏镜头", []]],
+    ["对象文本", [{ subject: { text: "不能直接渲染" }, scene: ["坏场景"] }]],
+    [
+      "无效数值",
+      [
+        { start_time: Number.NaN, end_time: Number.POSITIVE_INFINITY },
+        {
+          start_time: true,
+          end_time: Number.NEGATIVE_INFINITY,
+          person_count: -1,
+        },
+        { start_time: 0 },
+        { start_time: 2, end_time: 1 },
+      ],
+    ],
+  ])("历史分镜含%s时仍可读提示词且不展示空镜头", async (_name, shots) => {
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue({
+      ...savedVersion(),
+      payload: { ...savedVersion().payload, shots },
+    } as unknown as ReplicaPromptVersion);
+    render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    expect(await screen.findByText("选中的旧项目历史版本")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("历史分镜混有坏行和坏字段时只展示规范化后的有效内容", async () => {
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue({
+      ...savedVersion(),
+      payload: {
+        ...savedVersion().payload,
+        shots: [
+          null,
+          {},
+          {
+            " \nshot_id ": "history-shot",
+            " subject\n": "保留的历史主体",
+            start_time: 0,
+            " end_time ": 60,
+            action: { text: "不能直接渲染" },
+            scene: ["坏场景"],
+            spoken_text: false,
+            camera_motion: "固定机位",
+            unknown: { debug: "不展示" },
+          },
+        ],
+      },
+    } as unknown as ReplicaPromptVersion);
+    render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    expect(await screen.findByText("分镜表（1 段）")).toBeInTheDocument();
+    expect(screen.getByText("保留的历史主体")).toBeInTheDocument();
+    expect(screen.getByText("history-shot")).toBeInTheDocument();
+    expect(screen.getByText("00:00-01:00")).toBeInTheDocument();
+    expect(screen.getByText("固定机位")).toBeInTheDocument();
+    expect(screen.queryByText("不能直接渲染")).not.toBeInTheDocument();
+    expect(screen.getByText("选中的旧项目历史版本")).toBeInTheDocument();
+  });
+});
+
+describe("长视频口播安全展示", () => {
+  beforeEach(() => {
+    setupContext();
+  });
+
+  async function showSpokenScript(spokenScript: unknown, source = "历史") {
+    getReplicaPromptVersionById.mockResolvedValue({
+      ...resultPayload(),
+      payload: {
+        ...RESULT_PAYLOAD,
+        spoken_script: spokenScript,
+        replica_prompt: "口播异常也保留的提示词",
+      },
+    });
+    if (source === "新任务") {
+      getLongReplicaSession("u-1").run = {
+        projectId: "proj-1",
+        assetId: "asset-1",
+        taskId: "task-r",
+      };
+      getLatestReplicaPromptTask.mockResolvedValue({
+        ...runningTask(),
+        status: "SUCCEEDED",
+        result_version_id: "ver-1",
+      });
+      await act(async () => {
+        render(<LongReplicaPage />);
+      });
+    } else {
+      vi.mocked(fetchReplicaPromptHistory).mockResolvedValue([
+        {
+          ...resultPayload(),
+        },
+      ]);
+      render(<LongReplicaPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+      const load = await screen.findByRole("button", { name: "载入此版本" });
+      await act(async () => {
+        fireEvent.click(load);
+      });
+    }
+  }
+
+  it.each(["历史", "新任务"])(
+    "%s口播混有空行和非对象时仍展示并可复制有效口播",
+    async (source) => {
+      await showSpokenScript(
+        [
+          null,
+          7,
+          false,
+          "坏行",
+          [],
+          {},
+          { text: " \n" },
+          { " start_time\n": 0, " end_time ": 2, " text ": "有效口播" },
+          { text: "缺时间的口播" },
+        ],
+        source,
+      );
+      expect(screen.getByText("口播异常也保留的提示词")).toBeInTheDocument();
+      expect(screen.getByText("分镜表（1 段）")).toBeInTheDocument();
+      const block = screen
+        .getByText("逐句口播文案")
+        .closest("section") as HTMLElement;
+      expect(within(block).getAllByRole("listitem")).toHaveLength(2);
+      expect(within(block).getByText("有效口播")).toBeInTheDocument();
+      fireEvent.click(within(block).getByRole("button", { name: "复制" }));
+      await waitFor(() =>
+        expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+          "00:00-00:02 有效口播\n--:-----:-- 缺时间的口播",
+        ),
+      );
+    },
+  );
+
+  it("历史口播的对象或数组正文被过滤，不能作为React子节点", async () => {
+    await showSpokenScript([
+      { start_time: 0, end_time: 1, text: { bad: "对象正文" } },
+      { text: ["数组正文"] },
+      { text: true },
+      { text: 3 },
+      { start_time: 1, end_time: 2, text: "保留有效正文" },
+    ]);
+    expect(screen.getByText("保留有效正文")).toBeInTheDocument();
+    expect(screen.queryByText("对象正文")).not.toBeInTheDocument();
+    expect(screen.queryByText("数组正文")).not.toBeInTheDocument();
+    const block = screen
+      .getByText("逐句口播文案")
+      .closest("section") as HTMLElement;
+    expect(within(block).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("历史口播全为坏行时仍保留有用结果，显示无可辨识口播", async () => {
+    await showSpokenScript([
+      null,
+      7,
+      false,
+      "坏行",
+      [],
+      {},
+      { text: [] },
+      { text: "  " },
+    ]);
+    expect(screen.getByText("口播异常也保留的提示词")).toBeInTheDocument();
+    expect(screen.getByText("分镜表（1 段）")).toBeInTheDocument();
+    expect(screen.getByText("这条视频没有可辨识的口播。")).toBeInTheDocument();
+  });
+
+  it("历史口播时间对象不进入模板key或复制正文", async () => {
+    await showSpokenScript([
+      {
+        start_time: { toString: null },
+        end_time: ["坏时间"],
+        text: "时间未知仍保留正文",
+      },
+    ]);
+    const block = screen
+      .getByText("逐句口播文案")
+      .closest("section") as HTMLElement;
+    expect(within(block).getByText("--:-----:--")).toBeInTheDocument();
+    fireEvent.click(within(block).getByRole("button", { name: "复制" }));
+    await waitFor(() =>
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        "--:-----:-- 时间未知仍保留正文",
+      ),
+    );
   });
 });
 
@@ -471,7 +1044,7 @@ describe("长视频异步边界回归", () => {
   beforeEach(() => {
     setupContext();
     getLatestReplicaPromptTask.mockResolvedValue(null);
-    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    getReplicaPromptVersionById.mockResolvedValue(resultPayload());
     startReplicaPromptTask.mockResolvedValue(runningTask());
     readVideoDuration.mockResolvedValue(120);
   });
@@ -502,7 +1075,11 @@ describe("长视频异步边界回归", () => {
     startReplicaPromptTask.mockReturnValue(creation.promise);
     waitForReplicaPromptTask.mockReturnValue(new Promise(() => {}));
     render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    // fake timers 下 findByRole 会卡死：占位卡同步渲染后直接同步点「开始拆解」。
+    await pickFile(makeFile(), { autoStart: false });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "开始拆解" }));
+    });
     const progress = uploadWorkbenchSourceVideo.mock.calls[0][1];
     act(() => progress(37));
     expect(screen.getByText(/正在上传视频.*37%/)).toBeInTheDocument();
@@ -530,12 +1107,13 @@ describe("长视频异步边界回归", () => {
     waitForReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
     render(<LongReplicaPage />);
     await pickFile(makeFile());
     const [, progress, signal] = uploadWorkbenchSourceVideo.mock.calls[0];
     readVideoDuration.mockResolvedValueOnce(duration);
-    await pickFile(makeFile({ size }));
+    await pickFile(makeFile({ size }), { autoStart: false });
     expect(signal?.aborted).toBe(false);
     act(() => progress(61));
     expect(screen.getByText(/正在上传视频.*61%/)).toBeInTheDocument();
@@ -557,10 +1135,17 @@ describe("长视频异步边界回归", () => {
     const newFile = new File(["new"], "new.mp4", { type: "video/mp4" });
     uploadWorkbenchSourceVideo.mockReturnValue(new Promise(() => {}));
     render(<LongReplicaPage />);
-    await pickFile(oldFile);
-    await pickFile(newFile);
+    // 新流程：两次选择都停在待确认占位卡，探测乱序回写后只允许最新的占位开始。
+    await pickFile(oldFile, { autoStart: false });
+    await pickFile(newFile, { autoStart: false });
     await act(async () => newer.resolve(120));
     await act(async () => older.resolve(120));
+    const startButton = await screen.findByRole("button", {
+      name: "开始拆解",
+    });
+    await act(async () => {
+      fireEvent.click(startButton);
+    });
     expect(uploadWorkbenchSourceVideo).toHaveBeenCalledTimes(1);
     expect(uploadWorkbenchSourceVideo.mock.calls[0][0]).toBe(newFile);
   });
@@ -582,9 +1167,10 @@ describe("长视频异步边界回归", () => {
       completion.resolve({
         ...runningTask(),
         status: "SUCCEEDED",
+        result_version_id: "ver-1",
       } as ReplicaPromptTask),
     );
-    expect(getLatestReplicaPromptResult).not.toHaveBeenCalled();
+    expect(getReplicaPromptVersionById).not.toHaveBeenCalled();
     expect(screen.queryByText("复刻提示词")).not.toBeInTheDocument();
     view.unmount();
     getLatestReplicaPromptTask.mockResolvedValue({
@@ -602,6 +1188,7 @@ describe("长视频异步边界回归", () => {
     cancelReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
     render(<LongReplicaPage />);
     fireEvent.click(await screen.findByRole("button", { name: "取消拆解" }));
@@ -631,6 +1218,7 @@ describe("长视频异步边界回归", () => {
       cancelReplicaPromptTask.mockResolvedValue({
         ...runningTask(),
         status,
+        result_version_id: status === "SUCCEEDED" ? "ver-1" : null,
         error_code: status === "FAILED" ? "ANALYSIS_FAILED" : null,
         error_message: status === "FAILED" ? "原始分析失败" : null,
       });
@@ -652,8 +1240,9 @@ describe("长视频异步边界回归", () => {
     cancelReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
-    getLatestReplicaPromptResult.mockRejectedValue(
+    getReplicaPromptVersionById.mockRejectedValue(
       new Error("结果暂时无法读取"),
     );
     render(<LongReplicaPage />);
@@ -681,6 +1270,7 @@ describe("长视频异步边界回归", () => {
       completion.resolve({
         ...runningTask(),
         status: "SUCCEEDED",
+        result_version_id: "ver-1",
       } as ReplicaPromptTask),
     );
     await screen.findByText(/庭院施工讲解视频/);
@@ -759,21 +1349,29 @@ describe("长视频异步边界回归", () => {
     const completion = pendingRun();
     const cancellation = deferred<ReplicaPromptTask>();
     cancelReplicaPromptTask.mockReturnValue(cancellation.promise);
-    getLatestReplicaPromptResult
+    getReplicaPromptVersionById
       .mockResolvedValueOnce(resultPayload())
       .mockRejectedValueOnce(new Error("重复查询断网"));
     render(<LongReplicaPage />);
     fireEvent.click(await screen.findByRole("button", { name: "取消拆解" }));
     await act(async () =>
-      completion.resolve({ ...runningTask(), status: "SUCCEEDED" }),
+      completion.resolve({
+        ...runningTask(),
+        status: "SUCCEEDED",
+        result_version_id: "ver-1",
+      }),
     );
     await screen.findByText(/庭院施工讲解视频/);
     await act(async () =>
-      cancellation.resolve({ ...runningTask(), status: "SUCCEEDED" }),
+      cancellation.resolve({
+        ...runningTask(),
+        status: "SUCCEEDED",
+        result_version_id: "ver-1",
+      }),
     );
     expect(screen.getByText(/庭院施工讲解视频/)).toBeInTheDocument();
     expect(screen.queryByText("重复查询断网")).not.toBeInTheDocument();
-    expect(getLatestReplicaPromptResult).toHaveBeenCalledTimes(1);
+    expect(getReplicaPromptVersionById).toHaveBeenCalledTimes(1);
   });
 
   it("恢复到服务端新任务后再次离页返回，不能把旧结果误当作新任务结果", async () => {
@@ -792,8 +1390,9 @@ describe("长视频异步边界回归", () => {
       ...runningTask(),
       id: "new-task",
       status: "SUCCEEDED",
+      result_version_id: "new-version",
     });
-    getLatestReplicaPromptResult.mockResolvedValue({
+    getReplicaPromptVersionById.mockResolvedValue({
       ...resultPayload(),
       id: "new-version",
       payload: { ...RESULT_PAYLOAD, replica_prompt: "新任务的最新拆解结果" },
@@ -808,23 +1407,28 @@ describe("长视频异步边界回归", () => {
     waitForReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
     const view = render(<LongReplicaPage />);
     await screen.findByText(/庭院施工讲解视频/);
     getLatestReplicaPromptTask.mockClear();
     switchAccount("u-2");
     view.rerender(<LongReplicaPage />);
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
     expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
     expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
     getLatestReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
     switchAccount("u-1");
     view.rerender(<LongReplicaPage />);
     await screen.findByText(/庭院施工讲解视频/);
-    expect(getLatestReplicaPromptTask).toHaveBeenCalledWith("proj-1");
+    expect(getLatestReplicaPromptTask).toHaveBeenCalledWith(
+      "proj-1",
+      "storyboard",
+    );
   });
 
   it("其他账号不能消费工作台的待启动来源，原账号回来才启动一次", async () => {
@@ -846,7 +1450,7 @@ describe("长视频异步边界回归", () => {
     const duration = deferred<number>();
     readVideoDuration.mockReturnValue(duration.promise);
     const view = render(<LongReplicaPage />);
-    await pickFile(makeFile());
+    await pickFile(makeFile(), { autoStart: false });
     switchAccount("u-2");
     view.rerender(<LongReplicaPage />);
     await act(async () => duration.resolve(120));
@@ -867,7 +1471,7 @@ describe("长视频异步边界回归", () => {
       upload.resolve({ projectId: "proj-1", assetId: "asset-1" }),
     );
     expect(startReplicaPromptTask).not.toHaveBeenCalled();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
   });
 
   it("结果查询中切账号，旧结果不能写回缓存或新账号界面", async () => {
@@ -876,17 +1480,16 @@ describe("长视频异步边界回归", () => {
     waitForReplicaPromptTask.mockResolvedValue({
       ...runningTask(),
       status: "SUCCEEDED",
+      result_version_id: "ver-1",
     });
-    getLatestReplicaPromptResult.mockReturnValue(result.promise);
+    getReplicaPromptVersionById.mockReturnValue(result.promise);
     const view = render(<LongReplicaPage />);
-    await waitFor(() =>
-      expect(getLatestReplicaPromptResult).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(getReplicaPromptVersionById).toHaveBeenCalled());
     switchAccount("u-2");
     view.rerender(<LongReplicaPage />);
     await act(async () => result.resolve(resultPayload()));
     expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
     expect(getLongReplicaSession("u-1").result).toBeNull();
   });
 
@@ -902,9 +1505,10 @@ describe("长视频异步边界回归", () => {
       completion.resolve({
         ...runningTask(),
         status: "SUCCEEDED",
+        result_version_id: "ver-1",
       } as ReplicaPromptTask),
     );
-    expect(getLatestReplicaPromptResult).not.toHaveBeenCalled();
+    expect(getReplicaPromptVersionById).not.toHaveBeenCalled();
   });
 
   it("取消请求中切账号，迟到成功不会通知新账号或停止新账号任务", async () => {
@@ -924,7 +1528,7 @@ describe("长视频异步边界回归", () => {
       } as ReplicaPromptTask),
     );
     expect(notify).not.toHaveBeenCalledWith("本次长视频拆解已取消。");
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
   });
 
   it("登出清理后迟到的建任务响应不能复活旧缓存，同账号重登也为空", async () => {
@@ -942,7 +1546,7 @@ describe("长视频异步边界回归", () => {
     render(<LongReplicaPage />);
     expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
     expect(waitForReplicaPromptTask).not.toHaveBeenCalled();
-    expect(screen.getByText("还没有上传长视频")).toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
   });
 
   it("StrictMode 重挂载复用正在创建的任务，进度可恢复且不重复提交", async () => {

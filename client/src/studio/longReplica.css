@@ -128,3 +128,151 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* 上传占位（拖拽区 + 待确认信息卡）与拆解历史（2026-11-22 分镜表拆解改版） */
+.long-replica-idle {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.long-replica-dropzone {
+  align-items: center;
+  border: 1px dashed var(--studio-border, #d9d9d9);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.long-replica-dropzone.is-dragover {
+  background: var(--studio-surface-hover, rgba(0, 0, 0, 0.03));
+  border-color: var(--studio-primary, #f5a623);
+}
+
+.long-replica-dropzone__title {
+  color: var(--studio-text-secondary, #666);
+  font-size: 15px;
+  margin: 0;
+}
+
+.long-replica-dropzone__hint {
+  color: var(--studio-text-secondary, #888);
+  font-size: 13px;
+  margin: 0;
+}
+
+.long-replica-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.long-replica-pending__name {
+  font-weight: 600;
+  margin: 0;
+  word-break: break-all;
+}
+
+.long-replica-pending__actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.long-replica-history {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+  z-index: 60;
+}
+
+.long-replica-history__panel {
+  background: var(--studio-surface, #fff);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 24px;
+  max-height: 70vh;
+  max-width: 560px;
+  overflow: auto;
+  padding: 20px;
+  width: 100%;
+}
+
+.long-replica-history__head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.long-replica-history__head h3 {
+  margin: 0;
+}
+
+.long-replica-history__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.long-replica-history__list li {
+  align-items: center;
+  border: 1px solid var(--studio-border, #eee);
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.long-replica-history__meta {
+  color: var(--studio-text-secondary, #666);
+  font-size: 13px;
+}
+
+/* 分镜表：横向滚动的紧凑时间轴表格 */
+.long-replica-shots {
+  overflow-x: auto;
+  width: 100%;
+}
+
+.long-replica-shots table {
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 720px;
+  width: 100%;
+}
+
+.long-replica-shots th,
+.long-replica-shots td {
+  border-bottom: 1px solid var(--studio-border, #eee);
+  line-height: 1.6;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.long-replica-shots th {
+  color: var(--studio-text-secondary, #888);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.long-replica-shots__time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
