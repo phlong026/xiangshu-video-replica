@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { useLayoutEffect } from "react";
+import { StrictMode, useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "../api";
 import { getLongReplicaSession } from "./longReplicaSession";
@@ -1752,6 +1752,164 @@ describe("V1.4 工作台上传与创作入口", () => {
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
     expect(value.extractScriptFromUpload).toHaveBeenCalledTimes(1);
     expect(value.openLive).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "诊断直达意图在 StrictMode=%s 时完成一次解析和导入",
+    async (strict) => {
+      const link = "https://www.douyin.com/video/7345678901234567890";
+      const state = createState("workbench");
+      state.replicateIntentLink = link;
+      const value = workbench({ state });
+      useStudio.mockReturnValue(value);
+      const resolution = deferred<import("../api").ViralLinkResolution>();
+      resolveViralLink.mockReturnValue(resolution.promise);
+      createViralImportTask.mockResolvedValue({
+        id: "intent-import",
+        status: "SUCCEEDED",
+        projectId: "intent-project",
+        sourceAssetId: "intent-asset",
+        canAnalyze: true,
+      });
+      const view = render(
+        strict ? (
+          <StrictMode>
+            <WorkbenchPage />
+          </StrictMode>
+        ) : (
+          <WorkbenchPage />
+        ),
+      );
+      await waitFor(() => expect(resolveViralLink).toHaveBeenCalledOnce());
+      expect(resolveViralLink).toHaveBeenCalledWith(
+        link,
+        "replica",
+        expect.any(String),
+      );
+      expect(screen.getByLabelText("视频链接")).toHaveValue(link);
+      resolution.resolve({
+        importIdempotencyKey: "intent-import-key",
+        item: {
+          platform: "douyin",
+          videoId: "7345678901234567890",
+          category: "链接导入",
+          title: "诊断推荐作品",
+          author: "作者",
+          authorAvatar: null,
+          verified: false,
+          coverUrl: null,
+          durationMs: 30_000,
+          likes: 0,
+          comments: null,
+          shares: null,
+          collects: null,
+          publishedAt: null,
+          publishedDisplay: null,
+          likeDisplay: null,
+          tags: [],
+          hasPlayableAudio: true,
+          playUrl: "https://cdn.example/intent.mp4",
+        },
+      });
+      await waitFor(() =>
+        expect(value.navigate).toHaveBeenCalledWith("replica", {
+          selectedVideoId: "douyin-7345678901234567890",
+          returnTo: "workbench",
+        }),
+      );
+      expect(createViralImportTask).toHaveBeenCalledOnce();
+      expect(createViralImportTask).toHaveBeenCalledWith(
+        "douyin",
+        "7345678901234567890",
+        "replica",
+        "intent-import-key",
+      );
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "intent-project",
+        sourceId: "intent-asset",
+        sourceAssetId: "intent-asset",
+      });
+      expect(value.patchState).toHaveBeenCalledOnce();
+      expect(value.patchState).toHaveBeenCalledWith({
+        replicateIntentLink: undefined,
+      });
+      view.rerender(
+        strict ? (
+          <StrictMode>
+            <WorkbenchPage />
+          </StrictMode>
+        ) : (
+          <WorkbenchPage />
+        ),
+      );
+      await act(async () => Promise.resolve());
+      expect(resolveViralLink).toHaveBeenCalledOnce();
+      expect(createViralImportTask).toHaveBeenCalledOnce();
+      expect(value.navigate).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["换账号", "往返换账号", "卸载"])(
+    "诊断直达尚未启动时%s不消费旧意图或发出请求",
+    async (transition) => {
+      const state = createState("workbench");
+      state.replicateIntentLink = "https://v.douyin.com/queued-account-a/";
+      const accountA = workbench({
+        state,
+        user: { id: "queued-account-a" } as StudioContextValue["user"],
+      });
+      const accountB = workbench({
+        // 模拟换号首帧仍有相同链接，effect 不能只依赖链接变化做清理。
+        state,
+        user: { id: "queued-account-b" } as StudioContextValue["user"],
+      });
+      let current = accountA;
+      useStudio.mockImplementation(() => current);
+      resolveViralLink.mockReturnValue(
+        deferred<import("../api").ViralLinkResolution>().promise,
+      );
+      const view = render(<WorkbenchPage />);
+      if (transition === "卸载") {
+        view.unmount();
+      } else {
+        current = accountB;
+        view.rerender(<WorkbenchPage />);
+        if (transition === "往返换账号") {
+          current = accountA;
+          view.rerender(<WorkbenchPage />);
+        }
+      }
+      await act(async () => Promise.resolve());
+
+      expect(resolveViralLink).not.toHaveBeenCalled();
+      expect(createViralImportTask).not.toHaveBeenCalled();
+      for (const account of [accountA, accountB]) {
+        expect(account.patchState).not.toHaveBeenCalled();
+        expect(account.patchDraft).not.toHaveBeenCalled();
+        expect(account.navigate).not.toHaveBeenCalled();
+      }
+      if (transition !== "卸载") {
+        expect(screen.getByLabelText("视频链接")).toHaveValue("");
+      }
+    },
+  );
+
+  it("StrictMode 自动直达仍经过登录入口且不发出真实解析请求", async () => {
+    const state = createState("workbench");
+    state.replicateIntentLink = "https://v.douyin.com/login-required/";
+    const requireLogin = vi.fn();
+    const value = workbench({ state, requireLogin });
+    useStudio.mockReturnValue(value);
+    render(
+      <StrictMode>
+        <WorkbenchPage />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(requireLogin).toHaveBeenCalledOnce());
+    expect(resolveViralLink).not.toHaveBeenCalled();
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
   });
 
   it("抖音链接解析后复用爆款导入状态流进入复刻且不重复提交", async () => {

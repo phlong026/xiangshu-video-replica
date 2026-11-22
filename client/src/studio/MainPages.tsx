@@ -931,9 +931,18 @@ export function WorkbenchPage() {
     ) {
       return;
     }
-    consumedReplicateIntentRef.current = replicateIntentLink;
-    patchState({ replicateIntentLink: undefined });
-    void begin("replica", replicateIntentLink);
+    const accountScope = accountGenerationRef.current;
+    let cancelled = false;
+    // StrictMode 首轮会立即清理；等清理结束再消费，避免把唯一请求先作废。
+    queueMicrotask(() => {
+      if (cancelled || accountScope !== accountGenerationRef.current) return;
+      consumedReplicateIntentRef.current = replicateIntentLink;
+      patchState({ replicateIntentLink: undefined });
+      void begin("replica", replicateIntentLink);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [replicateIntentLink]);
   // 账号主页链接粘进"视频复刻"输入框时，直接引导到账号诊断，避免"没有可用视频"的报错。
   const accountLinkInInput = /douyin\.com\/user\/[A-Za-z0-9_-]{20,}/.test(
