@@ -414,28 +414,41 @@ def _oral_messages(conn: BusinessConnection, user_id: str) -> list[_Message]:
 # ---------------------------------------------------------------------------
 
 
-def _billing_rows(conn: BusinessConnection, user_id: str) -> list[_Message]:
+def _billing_rows(
+    conn: BusinessConnection, user_id: str, *, complete_days: bool = False
+) -> list[_Message]:
     cutoff = _retention_cutoff()
+    # 日账单补齐第 200 条所在的北京时间自然日，避免截断金额且不拉取全部历史。
+    order_by = (
+        "(wt.created_at::timestamptz AT TIME ZONE 'Asia/Shanghai')::date DESC"
+        if complete_days
+        else "wt.created_at::timestamptz DESC, wt.id DESC"
+    )
+    limit_mode = "WITH TIES" if complete_days else "ONLY"
     rows = conn.execute(
-        """
-        SELECT wt.id, wt.type, wt.available_delta, wt.billing_operation_id,
-               wt.recharge_order_id,
-               wt.created_at::timestamptz AS occurred_at,
-               o.charged_credits, o.reserved_credits, o.service,
-               ro.credits AS recharge_credits, ro.amount_fen, ro.provider,
-               ro.merchant_order_no,
-               aa.reason AS adjustment_reason
-        FROM wallet_transactions wt
-        LEFT JOIN billing_operations o ON o.id = wt.billing_operation_id
-        LEFT JOIN recharge_orders ro ON ro.id = wt.recharge_order_id
-             AND ro.user_id = wt.user_id
-        LEFT JOIN admin_adjustments aa ON aa.recharge_order_id = wt.recharge_order_id
-             AND aa.target_user_id = wt.user_id
-        WHERE wt.user_id = %s
-          AND wt.type IN ('CHARGE', 'SETTLE', 'RELEASE', 'REFUND', 'CONVERSION')
-          AND wt.created_at >= %s
-        ORDER BY wt.created_at::timestamptz DESC, wt.id DESC
-        LIMIT %s
+        f"""
+        WITH selected AS (
+            SELECT wt.id, wt.type, wt.available_delta, wt.billing_operation_id,
+                   wt.recharge_order_id,
+                   wt.created_at::timestamptz AS occurred_at,
+                   o.charged_credits, o.reserved_credits, o.service,
+                   ro.credits AS recharge_credits, ro.amount_fen, ro.provider,
+                   ro.merchant_order_no,
+                   aa.reason AS adjustment_reason
+            FROM wallet_transactions wt
+            LEFT JOIN billing_operations o ON o.id = wt.billing_operation_id
+            LEFT JOIN recharge_orders ro ON ro.id = wt.recharge_order_id
+                 AND ro.user_id = wt.user_id
+            LEFT JOIN admin_adjustments aa ON aa.recharge_order_id = wt.recharge_order_id
+                 AND aa.target_user_id = wt.user_id
+            WHERE wt.user_id = %s
+              AND wt.type IN ('CHARGE', 'SETTLE', 'RELEASE', 'REFUND', 'CONVERSION')
+              AND wt.created_at >= %s
+            ORDER BY {order_by}
+            FETCH FIRST %s ROWS {limit_mode}
+        )
+        SELECT * FROM selected
+        ORDER BY occurred_at DESC, id DESC
         """,
         (user_id, cutoff, _SOURCE_LIMIT),
     ).fetchall()
@@ -809,7 +822,9 @@ def collect_messages(
         wallet_owner = _account_scope(conn, actor.id)
         # 子账号共用母钱包但无权充值：账务消息只发给母账号。
         if wallet_owner is None and preferences.billing_style != "off":
-            billing = _billing_rows(conn, actor.id)
+            billing = _billing_rows(
+                conn, actor.id, complete_days=preferences.billing_style == "daily"
+            )
             # 提醒依赖原始结算消息，需在按日合并前计算且不计入汇总笔数。
             warnings = _balance_warning(conn, actor.id, billing, preferences.balance_threshold)
             if preferences.billing_style == "daily":

@@ -16,7 +16,7 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 os.environ.setdefault(
     "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY",
@@ -507,6 +507,116 @@ def test_low_balance_warning_survives_billing_style(messages_db: str, billing_st
             assert page["by_category"]["billing"] == 2
         else:
             assert page["by_category"]["billing"] == 3
+    finally:
+        from app.main import app
+
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("split_days", [False, True], ids=["one-day", "beijing-midnight"])
+def test_daily_billing_includes_whole_selected_days_above_source_limit(
+    messages_db: str, split_days: bool
+) -> None:
+    _seed(messages_db)
+    beijing = timezone(timedelta(hours=8))
+    recent_day = datetime.now(UTC).astimezone(beijing).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - timedelta(days=1)
+    older_day = recent_day - timedelta(days=1) if split_days else recent_day
+    recent_count = 175 if split_days else 250
+    older_count = 100 if split_days else 0
+    with psycopg.connect(messages_db, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE wallet_transactions SET created_at=%s WHERE user_id='u1'",
+            ((older_day + timedelta(minutes=5)).isoformat(),),
+        )
+        rows = [
+            (
+                f"day-conversion-{index}",
+                f"day-conversion-key-{index}",
+                (recent_day + timedelta(minutes=10, seconds=index)).isoformat(),
+            )
+            for index in range(recent_count)
+        ]
+        rows.extend(
+            (
+                f"old-conversion-{index}",
+                f"old-conversion-key-{index}",
+                (older_day + timedelta(hours=23, minutes=40, seconds=index)).isoformat(),
+            )
+            for index in range(older_count)
+        )
+        # 只补齐入选日期；不能因此把保留期内更早的未选日期也一并拉进汇总。
+        rows.append(
+            (
+                "unselected-conversion",
+                "unselected-conversion-key",
+                (older_day - timedelta(days=1)).isoformat(),
+            )
+        )
+        with pg.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO wallet_transactions "
+                "(id, user_id, type, available_delta, reserved_delta, "
+                "idempotency_key, auth_source, created_at) "
+                "VALUES (%s, 'u1', 'CONVERSION', 1, 0, %s, 'internal', %s)",
+                rows,
+            )
+        ledger_before = pg.execute(
+            "SELECT count(*), SUM(available_delta), SUM(reserved_delta) "
+            "FROM wallet_transactions WHERE user_id='u1'"
+        ).fetchone()
+        wallet_before = pg.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id='u1'"
+        ).fetchone()
+    client = _client("u1")
+    try:
+        updated = client.put(
+            "/api/studio/notification-preferences", json={"billing_style": "daily"}
+        )
+        assert updated.status_code == 200
+        response = client.get("/api/studio/messages?category=billing")
+        assert response.status_code == 200
+        daily = {item["status_label"]: item for item in response.json()["items"]}
+        recent_label = recent_day.strftime("%Y-%m-%d")
+        if split_days:
+            older_label = older_day.strftime("%Y-%m-%d")
+            assert set(daily) == {recent_label, older_label}
+            assert daily[recent_label]["amount_credits"] == 175
+            assert daily[older_label]["amount_credits"] == 1082
+            assert "共 102 笔" in daily[older_label]["summary"]
+            assert "收入 +1100" in daily[older_label]["summary"]
+            assert "支出 -18" in daily[older_label]["summary"]
+        else:
+            assert set(daily) == {recent_label}
+            assert daily[recent_label]["amount_credits"] == 1232
+            assert "共 252 笔" in daily[recent_label]["summary"]
+            assert "收入 +1250" in daily[recent_label]["summary"]
+            assert "支出 -18" in daily[recent_label]["summary"]
+        assert all(item["kind"] == "daily" for item in daily.values())
+        assert (
+            client.put(
+                "/api/studio/notification-preferences", json={"billing_style": "per_item"}
+            ).status_code
+            == 200
+        )
+        individual = client.get("/api/studio/messages?category=billing").json()
+        assert individual["total"] == 200
+        assert all(item["kind"] != "daily" for item in individual["items"])
+        with psycopg.connect(messages_db, autocommit=True) as pg:
+            assert (
+                pg.execute(
+                    "SELECT count(*), SUM(available_delta), SUM(reserved_delta) "
+                    "FROM wallet_transactions WHERE user_id='u1'"
+                ).fetchone()
+                == ledger_before
+            )
+            assert (
+                pg.execute(
+                    "SELECT available_credits, reserved_credits FROM wallets WHERE user_id='u1'"
+                ).fetchone()
+                == wallet_before
+            )
     finally:
         from app.main import app
 
