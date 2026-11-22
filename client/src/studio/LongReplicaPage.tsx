@@ -9,7 +9,6 @@ import {
 import type {
   ReplicaPromptHistoryItem,
   ReplicaPromptResult,
-  ReplicaPromptShot,
   ReplicaPromptTask,
   ReplicaPromptVersion,
 } from "../api";
@@ -19,6 +18,7 @@ import {
   getLatestReplicaPromptResult,
   getLatestReplicaPromptTask,
   getReplicaPromptVersionById,
+  readReplicaPromptShots,
   startReplicaPromptTask,
   waitForReplicaPromptTask,
 } from "../api";
@@ -610,9 +610,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         spoken_script: Array.isArray(result.payload.spoken_script)
           ? result.payload.spoken_script
           : [],
-        shots: Array.isArray(result.payload.shots)
-          ? (result.payload.shots as ReplicaPromptShot[])
-          : [],
+        shots: readReplicaPromptShots(result.payload.shots),
         replica_prompt: String(result.payload.replica_prompt ?? ""),
         warnings: Array.isArray(result.payload.warnings)
           ? result.payload.warnings

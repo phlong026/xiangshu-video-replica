@@ -3697,20 +3697,62 @@ export type ReplicaPromptResult = {
   warnings?: ReplicaPromptWarning[];
 };
 
-export type ReplicaPromptShot = {
-  shot_id?: string;
-  start_time?: number;
-  end_time?: number;
-  shot_type?: string;
-  composition?: string;
-  camera_motion?: string;
-  subject?: string;
-  person_count?: number;
-  action?: string;
-  scene?: string;
-  spoken_text?: string;
-  transition?: string;
-};
+const REPLICA_SHOT_TEXT_FIELDS = [
+  "shot_id",
+  "shot_type",
+  "composition",
+  "camera_motion",
+  "subject",
+  "action",
+  "scene",
+  "spoken_text",
+  "transition",
+] as const;
+
+export type ReplicaPromptShot = Partial<
+  Pick<
+    ShotCard,
+    (typeof REPLICA_SHOT_TEXT_FIELDS)[number] | "start_time" | "end_time"
+  >
+> & { person_count?: number };
+
+/** 历史版本也可能有旧的脏字段，只保留可展示的镜头，不补造缺失内容。 */
+export function readReplicaPromptShots(value: unknown): ReplicaPromptShot[] {
+  if (!Array.isArray(value)) return [];
+  const shots: ReplicaPromptShot[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const source = Object.fromEntries(
+      Object.entries(item).map(([key, field]) => [key.trim(), field]),
+    );
+    const shot: ReplicaPromptShot = {};
+    for (const field of REPLICA_SHOT_TEXT_FIELDS) {
+      if (typeof source[field] === "string") shot[field] = source[field];
+    }
+    for (const field of ["start_time", "end_time"] as const) {
+      const number = source[field];
+      if (typeof number === "number" && Number.isFinite(number)) {
+        shot[field] = number;
+      }
+    }
+    const count = source.person_count;
+    if (typeof count === "number" && Number.isInteger(count) && count >= 0) {
+      shot.person_count = count;
+    }
+    const hasDescription = REPLICA_SHOT_TEXT_FIELDS.some(
+      (field) => field !== "shot_id" && Boolean(shot[field]?.trim()),
+    );
+    const start = shot.start_time;
+    const end = shot.end_time;
+    if (
+      hasDescription ||
+      (start !== undefined && end !== undefined && start >= 0 && end > start)
+    ) {
+      shots.push(shot);
+    }
+  }
+  return shots;
+}
 
 export type ReplicaPromptHistoryItem = {
   id: string;
