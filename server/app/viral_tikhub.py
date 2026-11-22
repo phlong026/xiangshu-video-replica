@@ -777,6 +777,9 @@ def _parse_douyin_user_profile(
     data: Mapping[str, Any], *, fallback_sec_user_id: str
 ) -> DouyinUserProfile:
     block = _douyin_user_block(data)
+    # 请求标识只能补全有效资料；空块或仅有坏账号块的信封都不能变成零作品账号。
+    if not block or (block is data and ("user" in data or "user_info" in data)):
+        raise ViralSourceError("账号资料暂时无法获取，请稍后重试")
     avatar = _pick_image_url(block.get("avatar_larger")) or _pick_image_url(
         block.get("avatar_medium")
     )
