@@ -7,7 +7,11 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReplicaPromptTask, ReplicaPromptVersion } from "../api";
+import type {
+  ReplicaPromptHistoryItem,
+  ReplicaPromptTask,
+  ReplicaPromptVersion,
+} from "../api";
 import { fetchReplicaPromptHistory, getReplicaPromptVersionById } from "../api";
 import { clearAccountResidue } from "./draftResidue";
 import type { StudioContextValue } from "./types";
@@ -568,6 +572,133 @@ describe("长视频任务状态回归", () => {
     expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
     expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
     expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
+  });
+});
+
+describe("长视频账号历史恢复", () => {
+  const savedVersion = (): ReplicaPromptVersion => ({
+    ...resultPayload(),
+    id: "saved-version",
+    project_id: "other-own-project",
+    kind: "long_analysis",
+    payload: { ...RESULT_PAYLOAD, replica_prompt: "选中的旧项目历史版本" },
+  });
+  const historyItem = (): ReplicaPromptHistoryItem => ({
+    id: "saved-version",
+    project_id: "other-own-project",
+    asset_id: "saved-asset",
+    kind: "long_analysis",
+    version_number: 9,
+    created_by_user_id: "u-1",
+    created_at: "2026-11-20 10:00:00",
+  });
+
+  beforeEach(() => {
+    setupContext();
+    vi.mocked(fetchReplicaPromptHistory).mockResolvedValue([historyItem()]);
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue(savedVersion());
+  });
+
+  function switchAccount(accountId: string) {
+    const context = useStudio.getMockImplementation()?.() as StudioContextValue;
+    useStudio.mockReturnValue({
+      ...context,
+      user: { ...context.user, id: accountId },
+    });
+  }
+
+  it("冷启动和登出重登后没有当前项目也能打开并载入账号历史", async () => {
+    const first = render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    await screen.findByRole("dialog", { name: "长视频拆解历史" });
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await screen.findByText("选中的旧项目历史版本");
+    expect(fetchReplicaPromptHistory).toHaveBeenCalledWith();
+    expect(startReplicaPromptTask).not.toHaveBeenCalled();
+    clearAccountResidue("u-1");
+    first.unmount();
+
+    render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await screen.findByText("选中的旧项目历史版本");
+    expect(fetchReplicaPromptHistory).toHaveBeenCalledTimes(2);
+    expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+    expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
+  });
+
+  it("选中另一项目历史后重挂载仍保留选择，不恢复旧运行的最新结果", async () => {
+    const cache = getLongReplicaSession("u-1");
+    cache.run = { projectId: "proj-1", assetId: "asset-1", taskId: "task-r" };
+    cache.result = resultPayload() as ReplicaPromptVersion;
+    getLatestReplicaPromptTask.mockResolvedValue({
+      ...runningTask(),
+      status: "SUCCEEDED",
+    });
+    getLatestReplicaPromptResult.mockResolvedValue(resultPayload());
+    const first = render(<LongReplicaPage />);
+    await screen.findByText(/庭院施工讲解视频/);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await screen.findByText("选中的旧项目历史版本");
+    first.unmount();
+    getLatestReplicaPromptTask.mockClear();
+
+    render(<LongReplicaPage />);
+    await screen.findByText("选中的旧项目历史版本");
+    expect(screen.queryByText(/庭院施工讲解视频/)).not.toBeInTheDocument();
+    expect(getLatestReplicaPromptTask).not.toHaveBeenCalled();
+    expect(cache.run).toBeNull();
+    expect(cache.result?.id).toBe("saved-version");
+    expect(cache.pendingAutoStart).toBe(false);
+    expect(cache.starting).toBeNull();
+  });
+
+  it.each(["成功", "失败"])(
+    "切账号后旧历史请求迟到%s不结束新账号加载或混入旧记录",
+    async (outcome) => {
+      const previous = deferred<ReplicaPromptHistoryItem[]>();
+      const next = deferred<ReplicaPromptHistoryItem[]>();
+      vi.mocked(fetchReplicaPromptHistory)
+        .mockReturnValueOnce(previous.promise)
+        .mockReturnValueOnce(next.promise);
+      const view = render(<LongReplicaPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+      await screen.findByText("正在读取拆解历史…");
+      switchAccount("u-2");
+      view.rerender(<LongReplicaPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+      await act(async () => {
+        if (outcome === "成功") previous.resolve([historyItem()]);
+        else previous.reject(new Error("旧账号历史读取失败"));
+      });
+      expect(screen.getByText("正在读取拆解历史…")).toBeInTheDocument();
+      expect(screen.queryByText(/第 9 版/)).not.toBeInTheDocument();
+      expect(screen.queryByText("旧账号历史读取失败")).not.toBeInTheDocument();
+      await act(async () =>
+        next.resolve([
+          { ...historyItem(), id: "account-2-version", version_number: 2 },
+        ]),
+      );
+      expect(screen.getByText(/第 2 版/)).toBeInTheDocument();
+      expect(screen.queryByText(/第 9 版/)).not.toBeInTheDocument();
+    },
+  );
+
+  it("载入历史期间切账号，旧详情不能写回任何账号缓存", async () => {
+    const previous = deferred<ReplicaPromptVersion>();
+    vi.mocked(getReplicaPromptVersionById).mockReturnValue(previous.promise);
+    const view = render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    await waitFor(() => expect(getReplicaPromptVersionById).toHaveBeenCalled());
+    switchAccount("u-2");
+    view.rerender(<LongReplicaPage />);
+    await act(async () => previous.resolve(savedVersion()));
+    expect(screen.queryByText("选中的旧项目历史版本")).not.toBeInTheDocument();
+    expect(screen.getByText("拖拽视频到此处，或")).toBeInTheDocument();
+    expect(getLongReplicaSession("u-1").result).toBeNull();
+    expect(getLongReplicaSession("u-2").result).toBeNull();
   });
 });
 

@@ -171,20 +171,31 @@ def find_latest_replica_prompt_task(
 def list_replica_prompt_versions(
     conn: BusinessConnection,
     *,
-    project_id: str,
+    project_id: str | None = None,
+    owner_user_id: str | None = None,
     limit: int = 30,
 ) -> list[BusinessRow]:
-    """项目内长视频拆解历史（prompt 与 storyboard 两种 kind，新→旧），轻量元数据."""
+    """按项目或项目所有者列出长视频拆解历史（新→旧），只读轻量元数据."""
+    filters = ["v.kind IN (%s, %s)"]
+    params: list[str | int] = [REPLICA_PROMPT_KIND, LONG_ANALYSIS_KIND]
+    if project_id is not None:
+        filters.append("v.project_id = %s")
+        params.append(project_id)
+    if owner_user_id is not None:
+        filters.append("p.owner_user_id = %s")
+        params.append(owner_user_id)
+    params.append(limit)
     rows = conn.execute(
-        """
-        SELECT id, project_id, asset_id, kind, version_number, created_by_user_id,
-               created_at, length(payload_json) AS payload_size
-        FROM versions
-        WHERE project_id = %s AND kind IN (%s, %s)
-        ORDER BY created_at DESC, id DESC
+        f"""
+        SELECT v.id, v.project_id, v.asset_id, v.kind, v.version_number, v.created_by_user_id,
+               v.created_at, length(v.payload_json) AS payload_size
+        FROM versions v
+        JOIN projects p ON p.id = v.project_id
+        WHERE {" AND ".join(filters)}
+        ORDER BY v.created_at DESC, v.id DESC
         LIMIT %s
         """,
-        (project_id, REPLICA_PROMPT_KIND, LONG_ANALYSIS_KIND, limit),
+        tuple(params),
     ).fetchall()
     return list(rows)
 

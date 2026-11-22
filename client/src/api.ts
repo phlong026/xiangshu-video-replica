@@ -3804,11 +3804,14 @@ export async function getLatestReplicaPromptResult(
 }
 
 export async function fetchReplicaPromptHistory(
-  projectId: string,
+  projectId?: string,
   limit = 30,
 ): Promise<ReplicaPromptHistoryItem[]> {
+  const path = projectId
+    ? `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/versions`
+    : "/api/replica-prompt/versions";
   const data = await requestApiJson<{ items: ReplicaPromptHistoryItem[] }>(
-    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt/versions?limit=${limit}`,
+    `${path}?limit=${limit}`,
     "读取长视频拆解历史失败",
   );
   return Array.isArray(data.items) ? data.items : [];

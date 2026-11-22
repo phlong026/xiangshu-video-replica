@@ -28,6 +28,7 @@ os.environ.setdefault(
 import psycopg
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from pg_test_kit import (
     create_test_database,
     drop_test_database,
@@ -36,7 +37,7 @@ from pg_test_kit import (
 )
 
 from app.analysis import FakeGemini
-from app.auth import CurrentUser
+from app.auth import CurrentUser, Role, get_current_user_short_tx
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.replica_prompt import (
@@ -87,6 +88,11 @@ def rp_state(rp_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     close_pg_pool()
     monkeypatch.setenv(DATABASE_URL_ENV, rp_dsn)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+
+    def unexpected_model_http(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("长视频 PG 测试必须使用假模型或已保存版本，禁止模型 HTTP 外呼。")
+
+    monkeypatch.setattr("app.analysis.UrllibApilioChatTransport.post", unexpected_model_http)
     yield rp_dsn
     close_pg_pool()
 
@@ -417,3 +423,103 @@ def test_enqueue_guard_rejects_over_limit_and_non_video(rp_state: str) -> None:
         with pytest.raises(HTTPException) as failure:
             assert_replica_prompt_enqueue_allowed(asset, measured_duration=180.5)
         assert failure.value.detail["code"] == "REPLICA_PROMPT_DURATION_EXCEEDED"
+
+
+@pytest.fixture()
+def history_api(rp_state: str) -> Iterator[TestClient]:
+    from app.main import app
+
+    _seed_asset(rp_state)
+    with psycopg.connect(rp_state, autocommit=True) as pg:
+        pg.execute("UPDATE users SET role = 'customer' WHERE id = 'owner-1'")
+        pg.execute(
+            "INSERT INTO users (id, username, display_name, role, account_type, parent_user_id) "
+            "VALUES ('other', 'other', '其他账号', 'customer', 'MASTER', NULL), "
+            "('child', 'child', '子账号', 'customer', 'SUB', 'owner-1'), "
+            "('admin', 'admin', '管理员', 'admin', 'MASTER', NULL), "
+            "('auditor', 'auditor', '审计员', 'auditor', 'MASTER', NULL)"
+        )
+        pg.execute(
+            "INSERT INTO projects (id, name, owner_user_id) VALUES "
+            "('proj-2', '我的第二个项目', 'owner-1'), "
+            "('proj-other', '其他账号项目', 'other'), "
+            "('proj-child', '子账号项目', 'child')"
+        )
+        pg.execute(
+            "INSERT INTO versions "
+            "(id, project_id, kind, version_number, payload_json, created_at) VALUES "
+            "('own-a', 'proj-1', 'replica_prompt', 1, '{}', '2026-11-20T10:00:00Z'), "
+            "('own-b', 'proj-2', 'long_analysis', 1, '{}', '2026-11-20T10:00:00Z'), "
+            "('foreign', 'proj-other', 'long_analysis', 1, '{}', '2026-11-22T10:00:00Z'), "
+            "('child-version', 'proj-child', 'long_analysis', 1, '{}', '2026-11-21T10:00:00Z'), "
+            "('other-kind', 'proj-1', 'analysis', 1, '{}', '2026-11-23T10:00:00Z')"
+        )
+    app.dependency_overrides[get_current_user_short_tx] = lambda: CurrentUser(
+        id="owner-1", username="owner_1", display_name="Owner", role="customer"
+    )
+    client = TestClient(app)
+    try:
+        yield client
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    ("user_id", "role", "expected_ids"),
+    [
+        ("owner-1", "customer", ["own-b", "own-a"]),
+        ("child", "customer", ["child-version"]),
+        ("other", "customer", ["foreign"]),
+        ("admin", "admin", ["foreign", "child-version", "own-b", "own-a"]),
+        ("auditor", "auditor", ["foreign", "child-version", "own-b", "own-a"]),
+    ],
+)
+def test_account_replica_prompt_history_uses_project_ownership(
+    rp_state: str, history_api: TestClient, user_id: str, role: Role, expected_ids: list[str]
+) -> None:
+    from app.main import app
+
+    app.dependency_overrides[get_current_user_short_tx] = lambda: CurrentUser(
+        id=user_id, username=user_id, display_name=user_id, role=role
+    )
+    # 只存在持久化版本，没有当前任务或内存 projectId 也应能发现全部自有项目。
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute("SELECT count(*) FROM replica_prompt_tasks").fetchone() == (0,)
+    response = history_api.get("/api/replica-prompt/versions")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["id"] for item in items] == expected_ids
+    assert all("payload" not in item for item in items)
+    for version_id in ("own-a", "own-b", "child-version", "foreign"):
+        detail = history_api.get(f"/api/replica-prompt-versions/{version_id}")
+        if version_id in expected_ids:
+            assert detail.status_code == 200
+            assert detail.json()["id"] == version_id
+        else:
+            assert detail.status_code == 404
+            assert detail.json()["detail"]["code"] == "REPLICA_PROMPT_VERSION_NOT_FOUND"
+    for version_id in ("other-kind", "missing"):
+        assert history_api.get(f"/api/replica-prompt-versions/{version_id}").status_code == 404
+
+
+def test_account_replica_prompt_history_has_bounded_limit_and_keeps_project_route(
+    rp_state: str, history_api: TestClient
+) -> None:
+    project = history_api.get("/api/projects/proj-1/replica-prompt/versions")
+    assert project.status_code == 200
+    assert [item["id"] for item in project.json()["items"]] == ["own-a"]
+    assert history_api.get("/api/projects/proj-other/replica-prompt/versions").status_code == 404
+    with psycopg.connect(rp_state, autocommit=True) as pg, pg.cursor() as cursor:
+        cursor.executemany(
+            "INSERT INTO versions "
+            "(id, project_id, kind, version_number, payload_json, created_at) "
+            "VALUES (%s, 'proj-1', 'long_analysis', %s, '{}', '2026-11-24T10:00:00Z')",
+            [(f"extra-{index:03d}", index + 1) for index in range(105)],
+        )
+    for query, expected_count in (("", 30), ("?limit=0", 1), ("?limit=1000", 100)):
+        response = history_api.get(f"/api/replica-prompt/versions{query}")
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert len(items) == expected_count
+        assert items[0]["id"] == "extra-104"

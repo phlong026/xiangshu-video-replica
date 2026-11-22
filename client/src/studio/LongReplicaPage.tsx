@@ -546,20 +546,22 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
   };
 
   const openHistory = async () => {
-    const projectId = currentRun?.projectId ?? cache.run?.projectId;
-    if (!projectId) return;
+    const session = sessionRef.current;
+    if (!isActive(session)) return;
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      const items = await fetchReplicaPromptHistory(projectId);
+      const items = await fetchReplicaPromptHistory();
+      if (!isActive(session)) return;
       setHistoryItems(items);
     } catch (cause: unknown) {
+      if (!isActive(session)) return;
       setHistoryError(
         cause instanceof Error ? cause.message : "读取拆解历史失败。",
       );
     } finally {
-      setHistoryLoading(false);
+      if (isActive(session)) setHistoryLoading(false);
     }
   };
 
@@ -569,17 +571,24 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
     try {
       const version = await getReplicaPromptVersionById(versionId);
       if (!isActive(session) || !version) return;
+      abortRef.current?.abort();
       pollAbortRef.current?.abort();
-      const run = currentRun ?? cache.run;
-      if (run) {
-        cache.run = { ...run, taskId: resultTaskIdRef.current ?? "" };
-      }
+      // 历史是选定版本的快照，重新进入页面时不能接回旧任务并覆盖它。
+      cache.run = null;
+      cache.pendingAutoStart = false;
+      cache.starting = null;
+      cache.result = version;
+      setCurrentRun(null);
+      setPendingFile(null);
+      setPendingDuration(undefined);
       setResult(version);
       resultTaskIdRef.current = null;
       setHistoryOpen(false);
+      setError("");
       setCancelError("");
       setStage("ready");
     } catch (cause: unknown) {
+      if (!isActive(session)) return;
       setHistoryError(
         cause instanceof Error ? cause.message : "载入历史版本失败。",
       );
@@ -906,7 +915,7 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                   {historyError}
                 </p>
               ) : historyItems.length === 0 ? (
-                <p>本项目还没有长视频拆解记录。</p>
+                <p>当前账号还没有长视频拆解记录。</p>
               ) : (
                 <ul className="long-replica-history__list">
                   {historyItems.map((item) => (

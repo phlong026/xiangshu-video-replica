@@ -47,6 +47,7 @@ import {
   downloadMaterialAsset,
   evictMaterialCachedPreview,
   extractSourceFrames,
+  fetchReplicaPromptHistory,
   fetchViralVideoSource,
   generateFirstFrames,
   getAssetDownloadUrl,
@@ -210,6 +211,29 @@ describe("长视频轮询的账号生命周期", () => {
       waitForReplicaPromptTask("compat-task"),
     ]);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("长视频历史账号查询", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("不需要项目 ID 即可请求当前账号历史，并保留项目查询兼容入口", async () => {
+    const items = [{ id: "saved-version", project_id: "saved-project" }];
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items }),
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await expect(fetchReplicaPromptHistory()).resolves.toEqual(items);
+    expect(fetcher.mock.calls[0][0]).toContain(
+      "/api/replica-prompt/versions?limit=30",
+    );
+    await expect(fetchReplicaPromptHistory("project/one", 5)).resolves.toEqual(
+      items,
+    );
+    expect(fetcher.mock.calls[1][0]).toContain(
+      "/api/projects/project%2Fone/replica-prompt/versions?limit=5",
+    );
   });
 });
 

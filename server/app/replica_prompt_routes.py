@@ -374,6 +374,25 @@ def list_replica_prompt_history(
     )
     bounded = max(1, min(limit, 100))
     rows = list_replica_prompt_versions(conn, project_id=project_id, limit=bounded)
+    return _replica_prompt_history_response(rows)
+
+
+@router.get("/replica-prompt/versions")
+def list_account_replica_prompt_history(
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
+    limit: int = 30,
+) -> dict[str, object]:
+    """列出账号可访问的长视频历史，不依赖客户端记住上一次项目."""
+    # 与项目读权限一致：管理员/审计员全局可读，共享钱包不扩大普通账号项目范围。
+    owner_user_id = None if actor.role in {"admin", "auditor"} else actor.id
+    rows = list_replica_prompt_versions(
+        conn, owner_user_id=owner_user_id, limit=max(1, min(limit, 100))
+    )
+    return _replica_prompt_history_response(rows)
+
+
+def _replica_prompt_history_response(rows: list[BusinessRow]) -> dict[str, object]:
     return {
         "items": [
             {
