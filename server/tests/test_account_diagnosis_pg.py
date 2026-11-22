@@ -5,6 +5,7 @@
 
 import json
 from datetime import UTC, datetime
+from unittest.mock import Mock
 from uuid import uuid4
 
 import psycopg
@@ -35,6 +36,17 @@ from app.viral_tikhub import (
 )
 
 pytestmark = pytest.mark.pg
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 仍执行 LLM 分支；漏桩必须立即失败，不能发出请求后靠降级文案蒙混通过。
+    monkeypatch.setenv("ACCOUNT_DIAGNOSIS_LLM_DISABLED", "0")
+
+    def unexpected_request(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("诊断 PG 测试禁止模型 HTTP 外呼，请显式 mock LLM 入口。")
+
+    monkeypatch.setattr("app.account_diagnosis_llm._post_chat_completion", unexpected_request)
 
 
 def _target(sec_uid: str) -> AccountTarget:
@@ -381,9 +393,8 @@ def test_llm_narrative_replaces_rules_when_available(client, route_state, monkey
         "app.account_diagnosis.load_narrative_llm_config",
         lambda conn: ("https://api.deepseek.com", "key", "deepseek-chat"),
     )
-    monkeypatch.setattr(
-        "app.account_diagnosis.build_llm_narrative",
-        lambda **_: {
+    narrative = Mock(
+        return_value={
             "summary": "LLM 解读：账号基本盘稳定。",
             "strengths": [],
             "weaknesses": [],
@@ -397,6 +408,9 @@ def test_llm_narrative_replaces_rules_when_available(client, route_state, monkey
             "generatedBy": "llm",
         },
     )
+    enrichment = Mock(return_value=None)
+    monkeypatch.setattr("app.account_diagnosis.build_llm_narrative", narrative)
+    monkeypatch.setattr("app.account_diagnosis.enrich_action_cards", enrichment)
 
     with psycopg.connect(route_state) as raw:
         conn = BusinessConnection.postgres(raw)
@@ -411,6 +425,8 @@ def test_llm_narrative_replaces_rules_when_available(client, route_state, monkey
 
     assert result["narrative"]["generatedBy"] == "llm"
     assert result["narrative"]["summary"].startswith("LLM 解读")
+    narrative.assert_called_once()
+    enrichment.assert_called_once()
 
 
 def test_llm_failure_falls_back_to_rules(client, route_state, monkeypatch) -> None:
@@ -423,10 +439,10 @@ def test_llm_failure_falls_back_to_rules(client, route_state, monkeypatch) -> No
         "app.account_diagnosis.load_narrative_llm_config",
         lambda conn: ("https://api.deepseek.com", "key", "deepseek-chat"),
     )
-    monkeypatch.setattr(
-        "app.account_diagnosis.build_llm_narrative",
-        lambda **_: None,
-    )
+    narrative = Mock(return_value=None)
+    enrichment = Mock(return_value=None)
+    monkeypatch.setattr("app.account_diagnosis.build_llm_narrative", narrative)
+    monkeypatch.setattr("app.account_diagnosis.enrich_action_cards", enrichment)
 
     with psycopg.connect(route_state) as raw:
         conn = BusinessConnection.postgres(raw)
@@ -440,3 +456,5 @@ def test_llm_failure_falls_back_to_rules(client, route_state, monkeypatch) -> No
         )
 
     assert result["narrative"]["generatedBy"] == "rules"
+    narrative.assert_called_once()
+    enrichment.assert_called_once()
