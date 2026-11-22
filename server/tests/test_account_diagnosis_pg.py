@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from test_customer_center import account, client, route_state  # noqa: F401
 from test_customer_registration import (  # noqa: F401
     client as registration_client,
@@ -424,6 +425,90 @@ def test_paid_member_is_charged_the_configured_price(client, route_state, monkey
             (user_id, "account_diagnosis"),
         ).fetchone()
         assert operations is not None and int(operations[0]) == 1
+
+
+@pytest.mark.parametrize("paid", [False, True], ids=["free", "paid"])
+@pytest.mark.parametrize("businesses", [[], ["viral_data"]], ids=["disabled", "viral-only"])
+def test_sub_account_diagnosis_requires_its_own_permission(
+    client, route_state, monkeypatch, paid: bool, businesses: list[str]
+) -> None:
+    _, owner_id = account(client, "diag_permission_owner")
+    user_id = "diag-permission-sub"
+    provider = Mock(return_value=_FakeClient())
+    monkeypatch.setattr("app.account_diagnosis.account_diagnosis_client_from_settings", provider)
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, parent_user_id, account_type) "
+            "VALUES (%s, %s, '诊断子账号', %s, 'SUB')",
+            (user_id, user_id, owner_id),
+        )
+        raw.execute(
+            "INSERT INTO sub_account_permissions (user_id, allowed_businesses) VALUES (%s, %s)",
+            (user_id, json.dumps(businesses)),
+        )
+        _seed_tariff(raw)
+        _seed_wallet(raw, owner_id, 100)
+        if paid:
+            _seed_package_order(raw, owner_id)
+            assert claim_free_quota(
+                conn, owner_id=owner_id, device_id=None, report_id="already-consumed"
+            )
+
+        def snapshot():
+            return {
+                table: [
+                    tuple(row)
+                    for row in raw.execute(
+                        f"SELECT * FROM {table} WHERE user_id IN (%s, %s) ORDER BY 1",
+                        (owner_id, user_id),
+                    ).fetchall()
+                ]
+                for table in (
+                    "account_diagnosis_free_grants",
+                    "account_diagnosis_reports",
+                    "wallets",
+                    "wallet_transactions",
+                    "billing_operations",
+                )
+            }
+
+        before = snapshot()
+        # 在同一事务内捕获拒绝，避免自动回滚掩盖「先占额度/建报告，再拒绝」的错误。
+        with pytest.raises(HTTPException) as blocked:
+            create_diagnosis(
+                conn,
+                user_id=user_id,
+                target=_target("sec-permission"),
+                input_url="https://www.douyin.com/user/sec-permission",
+            )
+        assert blocked.value.status_code == 403
+        assert blocked.value.detail["code"] == "SUB_ACCOUNT_FEATURE_DISABLED"
+        assert "账号诊断" in blocked.value.detail["message"]
+        assert snapshot() == before
+        provider.assert_not_called()
+
+        # 单独开放诊断即可使用，不依赖爆款数据权限；费用归母账号钱包。
+        raw.execute(
+            "UPDATE sub_account_permissions SET allowed_businesses=%s WHERE user_id=%s",
+            (json.dumps(["account_diagnosis"]), user_id),
+        )
+        result = create_diagnosis(
+            conn,
+            user_id=user_id,
+            target=_target("sec-permission"),
+            input_url="https://www.douyin.com/user/sec-permission",
+        )
+        assert result["status"] == "SUCCEEDED"
+        assert result["isFree"] is not paid
+        assert free_quota_claimed(conn, owner_id) is True
+        balance = raw.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s",
+            (owner_id,),
+        ).fetchone()
+        assert balance is not None and tuple(balance) == (92 if paid else 100, 0)
+        provider.assert_called_once()
 
 
 def test_xingtu_hit_upgrades_report_to_l2(client, route_state, monkeypatch) -> None:

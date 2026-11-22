@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CustomerSubAccountPermissions } from "../api";
+import { businessLabel } from "./businessLabels";
 import {
   BUSINESS_FEATURES,
   isAllGranted,
@@ -12,8 +13,8 @@ import {
   toggleBusiness,
 } from "./permissionViz";
 
-/** 与后端 `sub_account_permissions.BUSINESS_KEYS` 同集合的 12 键。 */
-const ALL_KEYS = [
+/** 已有受限配置不应因新增业务而自动扩权。 */
+const LEGACY_KEYS = [
   "video",
   "oral",
   "character",
@@ -27,16 +28,18 @@ const ALL_KEYS = [
   "voice_clone",
   "viral_data",
 ] as const;
+const ALL_KEYS = [...LEGACY_KEYS, "account_diagnosis"] as const;
 
 describe("permissionViz", () => {
-  it("freezes the 12 business features in the backend declaration order", () => {
+  it("keeps the business features in the backend declaration order", () => {
     expect(BUSINESS_FEATURES.map((feature) => feature.key)).toEqual(ALL_KEYS);
-    expect(BUSINESS_FEATURES).toHaveLength(12);
+    expect(BUSINESS_FEATURES).toHaveLength(13);
     expect(BUSINESS_FEATURES[0]).toEqual({ key: "video", label: "视频生成" });
     expect(BUSINESS_FEATURES[11]).toEqual({
       key: "viral_data",
       label: "爆款数据",
     });
+    expect(businessLabel("account_diagnosis")).toBe("账号诊断");
   });
 
   it("expands an unrestricted account (null) into a fully granted draft", () => {
@@ -84,15 +87,33 @@ describe("permissionViz", () => {
     expect(draft.businesses).toEqual(ALL_KEYS);
   });
 
-  it("only reports full grants when all 12 businesses and both switches are on", () => {
+  it("only reports full grants when all businesses and both switches are on", () => {
     const full = permissionDraft(null);
     expect(isAllGranted(full)).toBe(true);
-    expect(
-      isAllGranted({ ...full, businesses: full.businesses.slice(0, 11) }),
-    ).toBe(false);
+    expect(isAllGranted({ ...full, businesses: [...LEGACY_KEYS] })).toBe(false);
     expect(isAllGranted({ ...full, allowApiKeys: false })).toBe(false);
     expect(isAllGranted({ ...full, allowPublishAccounts: false })).toBe(false);
   });
+
+  it.each([
+    [true, true],
+    [false, true],
+    [true, false],
+  ])(
+    "keeps legacy grants restricted without granting diagnosis (%s, %s)",
+    (allowApiKeys, allowPublishAccounts) => {
+      const permissions = {
+        businesses: [...LEGACY_KEYS],
+        allow_api_keys: allowApiKeys,
+        allow_publish_accounts: allowPublishAccounts,
+      };
+      const draft = permissionDraft(permissions);
+      expect(draft.businesses).toEqual(LEGACY_KEYS);
+      expect(isAllGranted(draft)).toBe(false);
+      expect(isPermissionRestricted(permissions)).toBe(true);
+      expect(permissionsPayload(draft)).toEqual(permissions);
+    },
+  );
 
   it("summarises restrictions with counts and disabled switches", () => {
     expect(permissionSummary(null)).toBe("");
@@ -112,7 +133,7 @@ describe("permissionViz", () => {
       allow_publish_accounts: false,
     };
     expect(permissionSummary(restricted)).toBe(
-      "9/12 类业务 · Token 禁用 · 发布账号禁用",
+      "9/13 类业务 · Token 禁用 · 发布账号禁用",
     );
     // 仅关一个开关（业务全留）也要如实列出。
     expect(
@@ -121,7 +142,7 @@ describe("permissionViz", () => {
         allow_api_keys: false,
         allow_publish_accounts: true,
       }),
-    ).toBe("12/12 类业务 · Token 禁用");
+    ).toBe("13/13 类业务 · Token 禁用");
   });
 
   it("distinguishes unrestricted (null) from a stored full-grant row", () => {
