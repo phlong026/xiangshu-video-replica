@@ -134,6 +134,10 @@ export function StudioResultPreview({
           className="creation-result-player"
           controls
           frameRatio="source"
+          onError={() => {
+            setUrl("");
+            setError("成片播放失败，请点「重新获取」再试。");
+          }}
           playsInline
           preload="metadata"
           src={url}
