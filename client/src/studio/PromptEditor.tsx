@@ -133,18 +133,31 @@ export function ReplicaFinalPromptControls({
   upstreamChecks?: ReplicaPreflightCheck[];
 }) {
   const key = replicaInputKey(input);
-  const [confirmedKey, setConfirmedKey] = useState("");
+  // 分镜版本可能仍在异步读取；已有版本先按项目归属保护，不借用其他项目的选择。
+  const savedSnapshot =
+    snapshot?.inputKey === key ||
+    snapshot?.promptVersion?.project_id === input.projectId
+      ? snapshot
+      : null;
+  const snapshotPayload = savedSnapshot?.promptVersion?.payload;
+  const [confirmedKey, setConfirmedKey] = useState(
+    savedSnapshot?.inputKey ?? "",
+  );
   const confirmed = scriptConfirmed ?? confirmedKey === key;
-  const [scale, setScale] = useState(false);
-  const [openingAction, setOpeningAction] = useState("");
+  const [scale, setScale] = useState(
+    snapshotPayload?.timeline_policy === "scale_confirmed",
+  );
+  const [openingAction, setOpeningAction] = useState(
+    String(snapshotPayload?.opening_action ?? ""),
+  );
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState<{
     text: string;
     snapshot: FinalReplicaSnapshot;
   } | null>(null);
-  const current = useRef({ key, value });
-  current.current = { key, value };
+  const current = useRef({ key, value, snapshot: savedSnapshot });
+  current.current = { key, value, snapshot: savedSnapshot };
   const operation = useRef(0);
   const mounted = useRef(true);
   useEffect(() => {
@@ -232,7 +245,15 @@ export function ReplicaFinalPromptControls({
   preparedCallback.current = onPrepared;
   // 默认开场衔接只在「用户没动过这个框」时生效：用户一旦改过就永不再覆盖；
   // 从草稿恢复的值（用户之前写的）也视为已动过，不进默认填充。
-  const openingTouched = useRef(false);
+  const openingTouched = useRef(Boolean(snapshotPayload));
+  useEffect(() => {
+    if (!snapshotPayload || openingTouched.current || operation.current > 0)
+      return;
+    // 云端草稿可能晚于控件挂载到达；只补初始选择，不覆盖本次主动编辑。
+    openingTouched.current = true;
+    setScale(snapshotPayload.timeline_policy === "scale_confirmed");
+    setOpeningAction(String(snapshotPayload.opening_action ?? ""));
+  }, [snapshotPayload]);
   const autoOpeningAction = useRef("");
   const openingActionRef = useRef(openingAction);
   openingActionRef.current = openingAction;
@@ -244,13 +265,20 @@ export function ReplicaFinalPromptControls({
     if (currentOpening.trim() && currentOpening !== autoOpeningAction.current)
       return;
     autoOpeningAction.current = defaultOpeningAction;
+    // 默认值填充不是用户修改；首帧等真实输入变化由 inputKey 判定旧稿失效。
     setOpeningAction(defaultOpeningAction);
-    preparedCallback.current(null);
   }, [defaultOpeningAction]);
   useEffect(() => {
     let active = true;
     const revision = operation.current;
-    if (!restoreEnabled || !input.projectId || !input.firstFrameAssetId) return;
+    // 草稿里的终稿是用户已保存的选择；项目最新历史只用于补齐缺失的快照。
+    if (
+      !restoreEnabled ||
+      !input.projectId ||
+      !input.firstFrameAssetId ||
+      current.current.snapshot
+    )
+      return;
     void Promise.resolve()
       .then(() => getLatestGenerationPrompt(input.projectId))
       .then((state) => {
@@ -259,6 +287,7 @@ export function ReplicaFinalPromptControls({
         if (
           !active ||
           revision !== operation.current ||
+          current.current.snapshot ||
           !version ||
           state.stale ||
           !payload?.final_composition
@@ -286,7 +315,12 @@ export function ReplicaFinalPromptControls({
         });
       })
       .catch((error: unknown) => {
-        if (!active || revision !== operation.current) return;
+        if (
+          !active ||
+          revision !== operation.current ||
+          current.current.snapshot
+        )
+          return;
         setMessage(
           error instanceof Error
             ? `历史终稿读取失败：${error.message}`

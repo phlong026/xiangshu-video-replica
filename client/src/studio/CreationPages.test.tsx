@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { replicaInputKey } from "./PromptEditor";
 import { createState } from "./state";
 import type { StudioAsset, StudioContextValue } from "./types";
 
@@ -5097,6 +5098,156 @@ describe("视频复刻（模块①）", () => {
       },
     });
   }
+
+  it("恢复有效终稿草稿时不会把快照清空写回，真实修改开场才失效", async () => {
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    replicaApi.getLatestGenerationPrompt.mockRejectedValue(
+      new Error("历史提示词暂不可用"),
+    );
+    const input = {
+      projectId: "project-1",
+      scriptText: value.state.draft.script.text,
+      firstFrameAssetId: "frame-1",
+      duration: 8,
+      resolution: "768P" as const,
+      ratio: "16:9" as const,
+      shotCardVersionId: "scv-saved",
+    };
+    const openingAction = "先停顿看向镜头，再继续介绍庭院。";
+    value.state.draft = {
+      ...value.state.draft,
+      sourceFrameTimestampSeconds: 1.2,
+      prompt: "草稿中已确认的最终提示词",
+      promptEdited: true,
+      scriptEdited: true,
+      finalSnapshot: {
+        inputKey: replicaInputKey(input),
+        versionId: "draft-final",
+        scriptVersionId: "draft-script",
+        shotCardVersionId: "scv-saved",
+        promptVersion: {
+          id: "draft-final",
+          project_id: "project-1",
+          asset_id: null,
+          kind: "prompt",
+          version_number: 1,
+          created_by_user_id: "customer-1",
+          created_at: "2026-11-20T00:00:00Z",
+          payload: {
+            opening_action: openingAction,
+            timeline_policy: "preserve",
+          },
+        },
+      },
+    };
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    await screen.findByText("已保存为自定义 ✓");
+    expect(screen.getByLabelText("最终提示词")).toHaveValue(
+      "草稿中已确认的最终提示词",
+    );
+    expect(screen.getByLabelText("开场衔接")).toHaveValue(openingAction);
+    expect(screen.getByText(/^已就绪/)).toBeInTheDocument();
+    expect(value.patchDraft).not.toHaveBeenCalledWith(
+      expect.objectContaining({ finalSnapshot: undefined }),
+    );
+
+    fireEvent.change(screen.getByLabelText("开场衔接"), {
+      target: { value: "改为先转身，再面向镜头介绍。" },
+    });
+    expect(value.patchDraft).toHaveBeenCalledWith({ finalSnapshot: undefined });
+    expect(screen.getByText(/^待合成/)).toBeInTheDocument();
+  });
+
+  it("完整草稿直接切换项目后恢复该项目的开场与时间线选择", async () => {
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    replicaApi.getLatestGenerationPrompt.mockRejectedValue(
+      new Error("历史提示词暂不可用"),
+    );
+    function savedDraft(
+      projectId: string,
+      openingAction: string,
+      timelinePolicy: "preserve" | "scale_confirmed",
+    ): StudioContextValue["state"]["draft"] {
+      return {
+        ...value.state.draft,
+        projectId,
+        duration: 4,
+        sourceFrameTimestampSeconds: 1.2,
+        prompt: `${projectId} 保存的正文`,
+        promptEdited: true,
+        scriptEdited: true,
+        finalSnapshot: {
+          inputKey: replicaInputKey({
+            projectId,
+            scriptText: value.state.draft.script.text,
+            firstFrameAssetId: "frame-1",
+            duration: 4,
+            resolution: "768P",
+            ratio: "16:9",
+            shotCardVersionId: "scv-saved",
+          }),
+          versionId: `${projectId}-final`,
+          scriptVersionId: `${projectId}-script`,
+          shotCardVersionId: "scv-saved",
+          promptVersion: {
+            id: `${projectId}-final`,
+            project_id: projectId,
+            asset_id: null,
+            kind: "prompt",
+            version_number: 1,
+            created_by_user_id: "customer-1",
+            created_at: "2026-11-20T00:00:00Z",
+            payload: {
+              opening_action: openingAction,
+              timeline_policy: timelinePolicy,
+            },
+          },
+        },
+      };
+    }
+    value.state.draft = savedDraft(
+      "project-1",
+      "项目甲保存的开场动作。",
+      "scale_confirmed",
+    );
+    useStudio.mockReturnValue(value);
+    const view = render(<ReplicaPage />);
+    await screen.findByText("已保存为自定义 ✓");
+    expect(screen.getByLabelText("开场衔接")).toHaveValue(
+      "项目甲保存的开场动作。",
+    );
+    expect(screen.getByLabelText("将 8.0 秒内容压缩到 4 秒")).toBeChecked();
+
+    value.data.projects.push({
+      ...value.data.projects[0],
+      id: "project-2",
+      name: "项目乙",
+    });
+    // 模拟 acceptPendingRestore 整体替换草稿，首帧始终非空，不经过清空项目入口。
+    value.state = {
+      ...value.state,
+      draft: savedDraft("project-2", "项目乙保存的开场动作。", "preserve"),
+    };
+    view.rerender(<ReplicaPage />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("开场衔接")).toHaveValue(
+        "项目乙保存的开场动作。",
+      ),
+    );
+    expect(screen.getByLabelText("将 8.0 秒内容压缩到 4 秒")).not.toBeChecked();
+    expect(screen.getByLabelText("最终提示词")).toHaveValue(
+      "project-2 保存的正文",
+    );
+    expect(screen.getByText(/^已就绪/)).toBeInTheDocument();
+    expect(value.patchDraft).not.toHaveBeenCalledWith(
+      expect.objectContaining({ finalSnapshot: undefined }),
+    );
+  });
 
   it("返回复刻页时自动恢复分镜、脚本与 Prompt，不重新发起拆解", async () => {
     const value = replicaStudio(3);
