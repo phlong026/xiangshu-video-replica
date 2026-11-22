@@ -18,6 +18,7 @@ import {
   getLatestReplicaPromptTask,
   getReplicaPromptVersionById,
   readReplicaPromptShots,
+  readReplicaPromptSpokenScript,
   startReplicaPromptTask,
   waitForReplicaPromptTask,
 } from "../api";
@@ -630,9 +631,9 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
           ),
           color_tone: String(result.payload.summary?.color_tone ?? ""),
         },
-        spoken_script: Array.isArray(result.payload.spoken_script)
-          ? result.payload.spoken_script
-          : [],
+        spoken_script: readReplicaPromptSpokenScript(
+          result.payload.spoken_script,
+        ),
         shots: readReplicaPromptShots(result.payload.shots),
         replica_prompt: String(result.payload.replica_prompt ?? ""),
         warnings: Array.isArray(result.payload.warnings)

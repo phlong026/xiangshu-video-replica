@@ -3675,6 +3675,30 @@ export type ReplicaPromptSpokenLine = {
   text: string;
 };
 
+/** 新结果和旧历史使用同一口播边界；不把坏时间对象带进渲染 key 或复制正文。 */
+export function readReplicaPromptSpokenScript(
+  value: unknown,
+): ReplicaPromptSpokenLine[] {
+  if (!Array.isArray(value)) return [];
+  const lines: ReplicaPromptSpokenLine[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const source = Object.fromEntries(
+      Object.entries(item).map(([key, field]) => [key.trim(), field]),
+    );
+    if (typeof source.text !== "string" || !source.text.trim()) continue;
+    const start = source.start_time;
+    const end = source.end_time;
+    lines.push({
+      start_time:
+        typeof start === "number" && Number.isFinite(start) ? start : null,
+      end_time: typeof end === "number" && Number.isFinite(end) ? end : null,
+      text: source.text,
+    });
+  }
+  return lines;
+}
+
 export type ReplicaPromptWarning = {
   code: string;
   message: string;

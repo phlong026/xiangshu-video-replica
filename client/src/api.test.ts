@@ -90,6 +90,7 @@ import {
   readAnalysisPayload,
   readFirstFrameCandidates,
   readReplicaPromptShots,
+  readReplicaPromptSpokenScript,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
@@ -294,6 +295,59 @@ describe("长视频历史账号查询", () => {
         { start_time: 0, end_time: 0 },
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("长视频口播运行时规范化", () => {
+  it("只保留非空字符串正文并trim键，保留原文和可选时间", () => {
+    expect(
+      readReplicaPromptSpokenScript([
+        null,
+        7,
+        [],
+        {},
+        { text: " \n" },
+        { text: {} },
+        { text: ["数组正文"] },
+        {
+          " text\n": "  原文保留空格  ",
+          " start_time ": 0,
+          end_time: 2.5,
+          extra: "舍弃",
+        },
+        { text: "缺时间正文" },
+        { text: "时间漂移正文", start_time: 8, end_time: 3 },
+      ]),
+    ).toEqual([
+      { text: "  原文保留空格  ", start_time: 0, end_time: 2.5 },
+      { text: "缺时间正文", start_time: null, end_time: null },
+      { text: "时间漂移正文", start_time: 8, end_time: 3 },
+    ]);
+  });
+
+  it("口播的非有限数值、布尔、字符串或对象时间转为未知且不丢正文", () => {
+    for (const time of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      true,
+      false,
+      "3",
+      { toString: null },
+      [],
+    ]) {
+      expect(
+        readReplicaPromptSpokenScript([
+          { text: "有效正文", start_time: time, end_time: time },
+        ]),
+      ).toEqual([{ text: "有效正文", start_time: null, end_time: null }]);
+    }
+  });
+
+  it("缺失或非数组口播变为空列表", () => {
+    for (const value of [undefined, null, {}, "口播", 7, false]) {
+      expect(readReplicaPromptSpokenScript(value)).toEqual([]);
+    }
   });
 });
 

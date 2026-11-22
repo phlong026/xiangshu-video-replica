@@ -14,6 +14,7 @@ import pytest
 from app.analysis import (
     AnalysisProviderFailed,
     default_replica_storyboard_payload,
+    parse_replica_prompt_payload,
     parse_replica_storyboard_payload,
 )
 
@@ -108,6 +109,67 @@ def test_default_payload_shape_matches_parser() -> None:
     parsed = parse_replica_storyboard_payload(raw, media_info={"duration_seconds": 120})
     assert len(parsed["shots"]) >= 2
     assert parsed["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [parse_replica_prompt_payload, parse_replica_storyboard_payload],
+    ids=["prompt", "storyboard"],
+)
+def test_replica_spoken_script_filters_bad_rows_and_preserves_optional_times(parser) -> None:
+    valid = _valid_payload()
+    valid["spoken_script"] = [
+        None,
+        7,
+        False,
+        "坏行",
+        [],
+        {},
+        {"text": {"bad": "对象正文"}},
+        {"text": ["数组正文"]},
+        {"text": 12},
+        {"text": " \n\t"},
+        {" start_time\n": 0, "end_time ": 2.5, "\ntext ": "  有效口播  ", "unknown": "舍弃"},
+        {"text": "缺时间也保留正文"},
+        {"start_time": 8, "end_time": 3, "text": "时间漂移不拒绝正文"},
+    ]
+    parsed = parser(json.dumps(valid, ensure_ascii=False))
+    assert parsed["spoken_script"] == [
+        {"start_time": 0, "end_time": 2.5, "text": "  有效口播  "},
+        {"start_time": None, "end_time": None, "text": "缺时间也保留正文"},
+        {"start_time": 8, "end_time": 3, "text": "时间漂移不拒绝正文"},
+    ]
+    assert parsed["replica_prompt"] == valid["replica_prompt"]
+    if parser is parse_replica_storyboard_payload:
+        assert parsed["shots"] == valid["shots"]
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [parse_replica_prompt_payload, parse_replica_storyboard_payload],
+    ids=["prompt", "storyboard"],
+)
+@pytest.mark.parametrize("spoken_script", [None, {}, "坏数组", 7, False, [None, {"text": []}]])
+def test_replica_spoken_script_is_optional_and_cannot_discard_useful_result(
+    parser, spoken_script
+) -> None:
+    valid = {**_valid_payload(), "spoken_script": spoken_script}
+    parsed = parser(json.dumps(valid, ensure_ascii=False))
+    assert parsed["spoken_script"] == []
+    assert parsed["replica_prompt"] == valid["replica_prompt"]
+    if parser is parse_replica_storyboard_payload:
+        assert parsed["shots"] == valid["shots"]
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [parse_replica_prompt_payload, parse_replica_storyboard_payload],
+    ids=["prompt", "storyboard"],
+)
+def test_replica_spoken_script_missing_is_an_empty_list(parser) -> None:
+    valid = _valid_payload()
+    del valid["spoken_script"]
+    assert parser(json.dumps(valid, ensure_ascii=False))["spoken_script"] == []
 
 
 @pytest.mark.parametrize(

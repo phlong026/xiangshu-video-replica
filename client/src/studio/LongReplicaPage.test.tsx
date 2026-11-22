@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -906,6 +907,136 @@ describe("长视频账号历史恢复", () => {
     expect(screen.getByText("固定机位")).toBeInTheDocument();
     expect(screen.queryByText("不能直接渲染")).not.toBeInTheDocument();
     expect(screen.getByText("选中的旧项目历史版本")).toBeInTheDocument();
+  });
+});
+
+describe("长视频口播安全展示", () => {
+  beforeEach(() => {
+    setupContext();
+  });
+
+  async function showSpokenScript(spokenScript: unknown, source = "历史") {
+    getReplicaPromptVersionById.mockResolvedValue({
+      ...resultPayload(),
+      payload: {
+        ...RESULT_PAYLOAD,
+        spoken_script: spokenScript,
+        replica_prompt: "口播异常也保留的提示词",
+      },
+    });
+    if (source === "新任务") {
+      getLongReplicaSession("u-1").run = {
+        projectId: "proj-1",
+        assetId: "asset-1",
+        taskId: "task-r",
+      };
+      getLatestReplicaPromptTask.mockResolvedValue({
+        ...runningTask(),
+        status: "SUCCEEDED",
+        result_version_id: "ver-1",
+      });
+      await act(async () => {
+        render(<LongReplicaPage />);
+      });
+    } else {
+      vi.mocked(fetchReplicaPromptHistory).mockResolvedValue([
+        {
+          ...resultPayload(),
+        },
+      ]);
+      render(<LongReplicaPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+      const load = await screen.findByRole("button", { name: "载入此版本" });
+      await act(async () => {
+        fireEvent.click(load);
+      });
+    }
+  }
+
+  it.each(["历史", "新任务"])(
+    "%s口播混有空行和非对象时仍展示并可复制有效口播",
+    async (source) => {
+      await showSpokenScript(
+        [
+          null,
+          7,
+          false,
+          "坏行",
+          [],
+          {},
+          { text: " \n" },
+          { " start_time\n": 0, " end_time ": 2, " text ": "有效口播" },
+          { text: "缺时间的口播" },
+        ],
+        source,
+      );
+      expect(screen.getByText("口播异常也保留的提示词")).toBeInTheDocument();
+      expect(screen.getByText("分镜表（1 段）")).toBeInTheDocument();
+      const block = screen
+        .getByText("逐句口播文案")
+        .closest("section") as HTMLElement;
+      expect(within(block).getAllByRole("listitem")).toHaveLength(2);
+      expect(within(block).getByText("有效口播")).toBeInTheDocument();
+      fireEvent.click(within(block).getByRole("button", { name: "复制" }));
+      await waitFor(() =>
+        expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+          "00:00-00:02 有效口播\n--:-----:-- 缺时间的口播",
+        ),
+      );
+    },
+  );
+
+  it("历史口播的对象或数组正文被过滤，不能作为React子节点", async () => {
+    await showSpokenScript([
+      { start_time: 0, end_time: 1, text: { bad: "对象正文" } },
+      { text: ["数组正文"] },
+      { text: true },
+      { text: 3 },
+      { start_time: 1, end_time: 2, text: "保留有效正文" },
+    ]);
+    expect(screen.getByText("保留有效正文")).toBeInTheDocument();
+    expect(screen.queryByText("对象正文")).not.toBeInTheDocument();
+    expect(screen.queryByText("数组正文")).not.toBeInTheDocument();
+    const block = screen
+      .getByText("逐句口播文案")
+      .closest("section") as HTMLElement;
+    expect(within(block).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("历史口播全为坏行时仍保留有用结果，显示无可辨识口播", async () => {
+    await showSpokenScript([
+      null,
+      7,
+      false,
+      "坏行",
+      [],
+      {},
+      { text: [] },
+      { text: "  " },
+    ]);
+    expect(screen.getByText("口播异常也保留的提示词")).toBeInTheDocument();
+    expect(screen.getByText("分镜表（1 段）")).toBeInTheDocument();
+    expect(screen.getByText("这条视频没有可辨识的口播。")).toBeInTheDocument();
+  });
+
+  it("历史口播时间对象不进入模板key或复制正文", async () => {
+    await showSpokenScript([
+      {
+        start_time: { toString: null },
+        end_time: ["坏时间"],
+        text: "时间未知仍保留正文",
+      },
+    ]);
+    const block = screen
+      .getByText("逐句口播文案")
+      .closest("section") as HTMLElement;
+    expect(within(block).getByText("--:-----:--")).toBeInTheDocument();
+    fireEvent.click(within(block).getByRole("button", { name: "复制" }));
+    await waitFor(() =>
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        "--:-----:-- 时间未知仍保留正文",
+      ),
+    );
   });
 });
 

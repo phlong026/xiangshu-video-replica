@@ -1256,6 +1256,28 @@ def _normalize_replica_storyboard_shots(raw: object) -> list[dict[str, Any]]:
     return shots
 
 
+def _normalize_replica_spoken_script(raw: object) -> list[dict[str, Any]]:
+    """口播是可选信息；过滤坏行并保留正文，不让次要字段丢掉整次拆解结果."""
+    if not isinstance(raw, list):
+        return []
+    spoken_script: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        item_fields = {key.strip(): value for key, value in item.items() if isinstance(key, str)}
+        line = item_fields.get("text")
+        if not isinstance(line, str) or not line.strip():
+            continue
+        spoken_script.append(
+            {
+                "start_time": item_fields.get("start_time"),
+                "end_time": item_fields.get("end_time"),
+                "text": line,
+            }
+        )
+    return spoken_script
+
+
 def parse_replica_storyboard_payload(
     text: str,
     *,
@@ -1315,7 +1337,12 @@ def parse_replica_storyboard_payload(
                     ),
                 }
             )
-    payload = {**payload, "shots": shots, "warnings": warnings}
+    payload = {
+        **payload,
+        "shots": shots,
+        "spoken_script": _normalize_replica_spoken_script(payload.get("spoken_script")),
+        "warnings": warnings,
+    }
     return payload
 
 
@@ -1447,29 +1474,10 @@ def parse_replica_prompt_payload(
         else {}
     )
     summary = {field: summary_source.get(field, "") for field in _REPLICA_PROMPT_SUMMARY_FIELDS}
-    spoken_raw = payload.get("spoken_script")
-    spoken_script: list[dict[str, Any]] = []
-    if isinstance(spoken_raw, list):
-        for item in spoken_raw:
-            if not isinstance(item, dict):
-                continue
-            item_fields = {
-                key.strip(): value for key, value in item.items() if isinstance(key, str)
-            }
-            line = item_fields.get("text")
-            if not isinstance(line, str) or not line.strip():
-                continue
-            spoken_script.append(
-                {
-                    "start_time": item_fields.get("start_time"),
-                    "end_time": item_fields.get("end_time"),
-                    "text": line,
-                }
-            )
     return {
         "schema_version": REPLICA_PROMPT_SCHEMA_VERSION,
         "summary": summary,
-        "spoken_script": spoken_script,
+        "spoken_script": _normalize_replica_spoken_script(payload.get("spoken_script")),
         "replica_prompt": prompt_text,
         "warnings": warnings,
     }
