@@ -811,7 +811,7 @@ describe("SubAccountManagementPage", () => {
 
     expect(screen.getByText("权限受限")).toBeInTheDocument();
     expect(
-      screen.getByText("权限：2/12 类业务 · Token 禁用 · 发布账号禁用"),
+      screen.getByText("权限：2/13 类业务 · Token 禁用 · 发布账号禁用"),
     ).toBeInTheDocument();
     expect(screen.getByText("权限：全部开放")).toBeInTheDocument();
   });
@@ -908,6 +908,57 @@ describe("SubAccountManagementPage", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("saves and revokes diagnosis independently of viral data access", async () => {
+    let permissions = {
+      businesses: ["viral_data"],
+      allow_api_keys: true,
+      allow_publish_accounts: true,
+    };
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "PUT") {
+        permissions = JSON.parse(String(init.body));
+        return jsonResponse({ ...subAccount, permissions });
+      }
+      return jsonResponse({
+        sub_accounts: [{ ...subAccount, permissions }],
+        total_count: 1,
+      });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    for (const granted of [false, true]) {
+      fireEvent.click(screen.getByRole("button", { name: "设置权限" }));
+      const dialog = screen.getByRole("dialog", { name: /功能权限 张三/ });
+      const diagnosis = within(dialog).getByRole("checkbox", {
+        name: "账号诊断",
+      });
+      expect(diagnosis).toHaveProperty("checked", granted);
+      expect(
+        within(dialog).getByRole("checkbox", { name: "爆款数据" }),
+      ).toBeChecked();
+      fireEvent.click(diagnosis);
+      fireEvent.click(within(dialog).getByRole("button", { name: "保存权限" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+    }
+
+    expect(
+      fetchMock.mock.calls
+        .filter(([, init]) => init?.method === "PUT")
+        .map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      { ...permissions, businesses: ["viral_data", "account_diagnosis"] },
+      { ...permissions, businesses: ["viral_data"] },
+    ]);
+  });
+
   // 批次2：全开保存 = 恢复默认（后端折叠为删行），前端给出恢复提示。
   it("saves the full grant to restore the default permissions", async () => {
     const elevenKeys = [
@@ -948,6 +999,7 @@ describe("SubAccountManagementPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "设置权限" }));
     const dialog = screen.getByRole("dialog", { name: /功能权限 张三/ });
     fireEvent.click(within(dialog).getByRole("checkbox", { name: "爆款数据" }));
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "账号诊断" }));
     fireEvent.click(
       within(dialog).getByRole("checkbox", {
         name: "允许使用发布账号（导入 / 扫码）",
@@ -968,7 +1020,7 @@ describe("SubAccountManagementPage", () => {
       ([, init]) => init?.method === "PUT",
     );
     expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
-      businesses: [...elevenKeys, "viral_data"],
+      businesses: [...elevenKeys, "viral_data", "account_diagnosis"],
       allow_api_keys: true,
       allow_publish_accounts: true,
     });

@@ -9,7 +9,7 @@
  * 不再允许两边漂移。
  *
  * `recharge` 与 `other` 是消费记录独有的两个桶（充值行没有计费科目；
- * 无 operation 的历史行由后端归到 `other`），不属于 12 类功能权限，单独补在这里。
+ * 无 operation 的历史行由后端归到 `other`），不属于功能权限，单独补在这里。
  */
 import { BUSINESS_FEATURES } from "./permissionViz";
 
