@@ -155,15 +155,16 @@ def find_latest_replica_prompt_task(
     *,
     project_id: str,
     asset_id: str,
+    mode: str = "prompt",
 ) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT * FROM replica_prompt_tasks
-        WHERE project_id = %s AND asset_id = %s
+        WHERE project_id = %s AND asset_id = %s AND mode = %s
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
-        (project_id, asset_id),
+        (project_id, asset_id, mode),
     ).fetchone()
     return None if row is None else cast(BusinessRow, row)
 
@@ -223,6 +224,18 @@ def find_latest_replica_prompt_version(
     return None if row is None else cast(BusinessRow, row)
 
 
+def _require_replica_prompt_mode(row: BusinessRow, mode: str) -> BusinessRow:
+    if row["mode"] != mode:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "REPLICA_PROMPT_MODE_CONFLICT",
+                "message": "该视频已有另一种拆解正在进行，请等待其完成后再试。",
+            },
+        )
+    return row
+
+
 def enqueue_replica_prompt_task(
     conn: BusinessConnection,
     *,
@@ -233,11 +246,11 @@ def enqueue_replica_prompt_task(
     request_id: str | None = None,
     mode: str = "prompt",
 ) -> tuple[BusinessRow, bool]:
-    """入队一个长视频拆解任务；同资产的活跃任务直接复用，不重复计费.
+    """入队一个长视频拆解任务；同资产同模式的活跃任务复用，不重复计费.
 
     mode：'prompt'（一段式提示词，默认）| 'storyboard'（分镜表拆解）。
-    同资产活跃任务复用不区分 mode——同一素材同时排两种拆解会产生重复
-    付费调用，活跃任务唯一索引本就按 (project_id, asset_id) 收口。
+    活跃任务唯一索引仍按 (project_id, asset_id) 收口，避免重复付费调用；
+    异模式活跃任务明确冲突，不能当成本次请求的结果。
     """
     existing = conn.execute(
         """
@@ -250,7 +263,7 @@ def enqueue_replica_prompt_task(
         (project_id, asset_id),
     ).fetchone()
     if existing is not None:
-        return cast(BusinessRow, existing), False
+        return _require_replica_prompt_mode(cast(BusinessRow, existing), mode), False
 
     task_id = str(uuid4())
     conn.execute(
@@ -289,7 +302,7 @@ def enqueue_replica_prompt_task(
     ).fetchone()
     if concurrent is None:
         raise RuntimeError("replica prompt task enqueue conflict left no active task")
-    return cast(BusinessRow, concurrent), False
+    return _require_replica_prompt_mode(cast(BusinessRow, concurrent), mode), False
 
 
 def acquire_replica_prompt_task(

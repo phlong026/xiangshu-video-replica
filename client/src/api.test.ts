@@ -61,6 +61,7 @@ import {
   getHealth,
   getLatestGenerationPrompt,
   getLatestProjectFirstFrames,
+  getLatestReplicaPromptTask,
   getLatestScriptRewriteTask,
   getLatestScriptVersion,
   getMaterialBatchPreviews,
@@ -4765,6 +4766,24 @@ describe("uploadReferenceVideo", () => {
     expect(onSessionExpired).toHaveBeenCalledOnce();
     window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   });
+});
+
+describe("长视频任务模式查询", () => {
+  it.each(["prompt", "storyboard"] as const)(
+    "按 %s 模式恢复最近任务",
+    async (mode) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue({ ok: true, json: async () => null });
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(
+        getLatestReplicaPromptTask("project/one", mode),
+      ).resolves.toBeNull();
+      expect(String(fetchMock.mock.calls[0][0])).toContain(
+        `/api/projects/project%2Fone/replica-prompt-tasks/latest?mode=${mode}`,
+      );
+    },
+  );
 });
 
 describe("deduplicated oral materials", () => {

@@ -7,7 +7,7 @@
 1. 计费闭环：入队预扣（RESERVE）、成功结算（SETTLE）、失败/取消释放（RELEASE），
    且同资产活跃任务复用不重复计费；
 2. 租约语义：认领串行、过期 RUNNING 翻转 INTERRUPTED、迟到完成被 CAS 拦截；
-3. 结果发布：versions 落 kind=replica_prompt，载荷为 replica-prompt.v1。
+3. 结果发布：任务绑定精确版本，prompt / storyboard 分别落对应 kind 与载荷。
 
 The database is the only real dependency: a dedicated TEST-PG database created
 through the CW-007 kit, migrated to alembic ``head`` and TRUNCATEd per test.
@@ -16,7 +16,10 @@ through the CW-007 kit, migrated to alembic ``head`` and TRUNCATEd per test.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import Barrier
 from typing import Any
 
 # Set the audit HMAC key before importing app modules (audit writers require it).
@@ -38,6 +41,7 @@ from pg_test_kit import (
 
 from app.analysis import FakeGemini
 from app.auth import CurrentUser, Role, get_current_user_short_tx
+from app.customer_fence import get_business_db
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.replica_prompt import (
@@ -151,7 +155,9 @@ def _seed_asset(
             )
 
 
-def _enqueue(dsn: str, *, duration_seconds: float = 120.0) -> tuple[dict[str, Any], bool]:
+def _enqueue(
+    dsn: str, *, duration_seconds: float = 120.0, mode: str = "prompt"
+) -> tuple[dict[str, Any], bool]:
     with pg_transaction() as raw:
         row, created = enqueue_replica_prompt_task(
             BusinessConnection.postgres(raw),
@@ -159,6 +165,7 @@ def _enqueue(dsn: str, *, duration_seconds: float = 120.0) -> tuple[dict[str, An
             asset_id="asset-1",
             created_by_user_id="owner-1",
             duration_seconds=duration_seconds,
+            mode=mode,
         )
     return dict(row), created
 
@@ -186,21 +193,22 @@ def _wallet(dsn: str) -> tuple[int, int]:
     return int(row["available_credits"]), int(row["reserved_credits"])
 
 
-def _ledger(dsn: str) -> list[str]:
+def _ledger(dsn: str, task_id: str = "task-1") -> list[str]:
     with pg_transaction() as raw:
         rows = (
             BusinessConnection.postgres(raw)
             .execute(
                 "SELECT type FROM wallet_transactions WHERE billing_operation_id = "
-                "(SELECT id FROM billing_operations WHERE source_id = 'task-1' "
-                " AND service = 'analysis') ORDER BY ledger_sequence"
+                "(SELECT id FROM billing_operations WHERE source_id = %s "
+                " AND service = 'analysis') ORDER BY ledger_sequence",
+                (task_id,),
             )
             .fetchall()
         )
     return [str(row["type"]) for row in rows]
 
 
-def _version_payload(dsn: str) -> dict[str, Any] | None:
+def _version_payload(dsn: str, *, kind: str = "replica_prompt") -> dict[str, Any] | None:
     with pg_transaction() as raw:
         row = (
             BusinessConnection.postgres(raw)
@@ -214,19 +222,20 @@ def _version_payload(dsn: str) -> dict[str, Any] | None:
         return None
     import json
 
-    assert str(row["kind"]) == "replica_prompt"
+    assert str(row["kind"]) == kind
     return dict(json.loads(str(row["payload_json"])))
 
 
-def test_enqueue_reserves_once_and_reuses_active_task(rp_state: str) -> None:
+@pytest.mark.parametrize("mode", ["prompt", "storyboard"])
+def test_enqueue_reserves_once_and_reuses_active_task(rp_state: str, mode: str) -> None:
     """同资产已有活跃任务时复用：不新插入、不重复预扣."""
     _seed_asset(rp_state)
-    row, created = _enqueue(rp_state)
+    row, created = _enqueue(rp_state, mode=mode)
     assert created is True
     assert row["status"] == "PENDING"
     assert _wallet(rp_state) == (9, 1)  # 预扣 1 积分
 
-    again, created_again = _enqueue(rp_state)
+    again, created_again = _enqueue(rp_state, mode=mode)
     assert created_again is False
     assert again["id"] == row["id"]
     assert _wallet(rp_state) == (9, 1)
@@ -271,11 +280,20 @@ def test_acquire_claims_pending_and_expires_stale_running(rp_state: str) -> None
     assert bool(task["retryable"]) is True
 
 
-def test_prepare_perform_complete_publishes_version_and_settles(rp_state: str) -> None:
-    """FakeGemini 全链路：prepare 保留本地 URI → perform 出 replica-prompt.v1 →
-    complete 落 versions + 结算 SETTLE."""
+@pytest.mark.parametrize(
+    ("mode", "kind", "schema"),
+    [
+        ("prompt", "replica_prompt", "replica-prompt.v1"),
+        ("storyboard", "long_analysis", "long-analysis.v1"),
+    ],
+)
+def test_prepare_perform_complete_publishes_version_and_settles(
+    rp_state: str, mode: str, kind: str, schema: str
+) -> None:
+    """FakeGemini 两种模式全链路：执行解析 → 发布精确结果版本 → 单次结算."""
     _seed_asset(rp_state, task_status="PENDING")
     with pg_transaction() as raw:
+        raw.execute("UPDATE replica_prompt_tasks SET mode = %s WHERE id = 'task-1'", (mode,))
         accept_operation(
             BusinessConnection.postgres(raw),
             user_id="owner-1",
@@ -286,6 +304,7 @@ def test_prepare_perform_complete_publishes_version_and_settles(rp_state: str) -
     with pg_transaction() as raw:
         lease = acquire_replica_prompt_task(BusinessConnection.postgres(raw), worker_id="worker-a")
     assert lease is not None
+    assert lease.mode == mode
 
     with pg_transaction() as raw:
         work = prepare_replica_prompt_task(
@@ -297,9 +316,12 @@ def test_prepare_perform_complete_publishes_version_and_settles(rp_state: str) -
     # FakeGemini 不要求 HTTPS：video_uri 保留 asset URI；媒体信息带服务端实测时长。
     assert work.video_uri.startswith("cos://")
     assert work.media_info["duration_seconds"] == 120.0
+    assert work.mode == mode
 
     payload = perform_replica_prompt_task(work)
-    assert payload["schema_version"] == "replica-prompt.v1"
+    assert payload["schema_version"] == schema
+    if mode == "storyboard":
+        assert payload["shots"]
     assert payload["replica_prompt"].strip()
     assert set(payload["summary"]) == {
         "theme",
@@ -315,7 +337,11 @@ def test_prepare_perform_complete_publishes_version_and_settles(rp_state: str) -
     assert task is not None
     assert task["status"] == "SUCCEEDED"
     assert task["result_version_id"] is not None
-    published = _version_payload(rp_state)
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute(
+            "SELECT kind, asset_id FROM versions WHERE id = %s", (task["result_version_id"],)
+        ).fetchone() == (kind, "asset-1")
+    published = _version_payload(rp_state, kind=kind)
     assert published is not None
     assert published["replica_prompt"] == payload["replica_prompt"]
     assert published["source_asset"]["id"] == "asset-1"
@@ -523,3 +549,166 @@ def test_account_replica_prompt_history_has_bounded_limit_and_keeps_project_rout
         items = response.json()["items"]
         assert len(items) == expected_count
         assert items[0]["id"] == "extra-104"
+
+
+@pytest.fixture()
+def task_api(rp_state: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    from app.main import app
+
+    _seed_asset(rp_state)
+
+    class TaskDb:
+        @contextmanager
+        def write(self) -> Iterator[tuple[BusinessConnection, CurrentUser]]:
+            with pg_transaction() as raw:
+                yield BusinessConnection.postgres(raw), _owner()
+
+    app.dependency_overrides[get_current_user_short_tx] = _owner
+    app.dependency_overrides[get_business_db] = TaskDb
+    monkeypatch.setattr(
+        "app.replica_prompt_routes.get_video_analysis_provider", lambda _c: FakeGemini()
+    )
+    client = TestClient(app)
+    try:
+        yield client
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+
+def _seed_completed_mode(dsn: str, *, mode: str, created_at: str) -> str:
+    task_id = f"complete-{mode}"
+    version_id = f"version-{mode}"
+    kind = "long_analysis" if mode == "storyboard" else "replica_prompt"
+    with psycopg.connect(dsn, autocommit=True) as pg:
+        pg.execute(
+            "INSERT INTO versions "
+            "(id, project_id, asset_id, kind, version_number, payload_json) "
+            "VALUES (%s, 'proj-1', 'asset-1', %s, 1, '{}')",
+            (version_id, kind),
+        )
+        pg.execute(
+            "INSERT INTO replica_prompt_tasks "
+            "(id, project_id, asset_id, created_by_user_id, duration_seconds, status, "
+            "result_version_id, mode, created_at) "
+            "VALUES (%s, 'proj-1', 'asset-1', 'owner-1', 120, 'SUCCEEDED', %s, %s, %s)",
+            (task_id, version_id, mode, created_at),
+        )
+    return task_id
+
+
+@pytest.mark.parametrize("mode", ["prompt", "storyboard"])
+def test_mode_specific_create_does_not_reuse_completed_other_mode(
+    rp_state: str, task_api: TestClient, mode: str
+) -> None:
+    other_mode = "prompt" if mode == "storyboard" else "storyboard"
+    previous_id = _seed_completed_mode(rp_state, mode=other_mode, created_at="2026-11-20T10:00:00Z")
+    request = {"asset_id": "asset-1", "reuse_existing": True, "mode": mode}
+    response = task_api.post("/api/projects/proj-1/replica-prompt-tasks", json=request)
+    assert response.status_code == 202
+    task = response.json()
+    assert task["id"] != previous_id
+    assert task["status"] == "PENDING"
+    row = _task_row(rp_state, task["id"])
+    assert row is not None and row["mode"] == mode
+    assert _wallet(rp_state) == (9, 1)
+    assert _ledger(rp_state, task["id"]) == ["RESERVE"]
+    repeated = task_api.post("/api/projects/proj-1/replica-prompt-tasks", json=request)
+    assert repeated.status_code == 202
+    assert repeated.json()["id"] == task["id"]
+    assert _wallet(rp_state) == (9, 1)
+    assert _ledger(rp_state, task["id"]) == ["RESERVE"]
+
+
+def test_latest_and_reuse_choose_requested_mode(rp_state: str, task_api: TestClient) -> None:
+    expected = {
+        "prompt": _seed_completed_mode(rp_state, mode="prompt", created_at="2026-11-20T10:00:00Z"),
+        "storyboard": _seed_completed_mode(
+            rp_state, mode="storyboard", created_at="2026-11-21T10:00:00Z"
+        ),
+    }
+    for mode, task_id in expected.items():
+        latest = task_api.get(f"/api/projects/proj-1/replica-prompt-tasks/latest?mode={mode}")
+        assert latest.status_code == 200
+        assert latest.json()["id"] == task_id
+        reused = task_api.post(
+            "/api/projects/proj-1/replica-prompt-tasks",
+            json={"asset_id": "asset-1", "reuse_existing": True, "mode": mode},
+        )
+        assert reused.status_code == 202
+        assert reused.json()["id"] == task_id
+    assert _wallet(rp_state) == (10, 0)
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("reuse_existing", [True, False])
+@pytest.mark.parametrize("active_status", ["PENDING", "RUNNING"])
+def test_other_mode_active_returns_conflict_without_reserve(
+    rp_state: str, task_api: TestClient, reuse_existing: bool, active_status: str
+) -> None:
+    active, _created = _enqueue(rp_state, mode="prompt")
+    with psycopg.connect(rp_state, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE replica_prompt_tasks SET status = %s, locked_by = 'worker-a', "
+            "locked_until = now() + interval '25 minutes' WHERE id = %s",
+            (active_status, active["id"]),
+        )
+    response = task_api.post(
+        "/api/projects/proj-1/replica-prompt-tasks",
+        json={"asset_id": "asset-1", "reuse_existing": reuse_existing, "mode": "storyboard"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "REPLICA_PROMPT_MODE_CONFLICT"
+    assert _wallet(rp_state) == (9, 1)
+    assert _ledger(rp_state, active["id"]) == ["RESERVE"]
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute("SELECT count(*) FROM replica_prompt_tasks").fetchone() == (1,)
+        assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("second_mode", ["prompt", "storyboard"])
+def test_concurrent_enqueue_respects_mode_and_reserves_once(
+    rp_state: str, monkeypatch: pytest.MonkeyPatch, second_mode: str
+) -> None:
+    _seed_asset(rp_state)
+    gate = Barrier(2)
+    execute = BusinessConnection.execute
+
+    def simultaneous_insert(
+        conn: BusinessConnection, sql: str, params: Sequence[object] = ()
+    ) -> Any:
+        if "INSERT INTO replica_prompt_tasks" in sql:
+            # 两个首查均已真实返回空，再同时 INSERT，强制走数据库唯一冲突回查。
+            gate.wait(timeout=10)
+        return execute(conn, sql, params)
+
+    monkeypatch.setattr(BusinessConnection, "execute", simultaneous_insert)
+
+    def submit(mode: str) -> tuple[dict[str, Any], bool] | HTTPException:
+        try:
+            return _enqueue(rp_state, mode=mode)
+        except HTTPException as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(submit, mode) for mode in ("prompt", second_mode)]
+        results = [future.result(timeout=20) for future in futures]
+    successes = [result for result in results if not isinstance(result, HTTPException)]
+    failures = [result for result in results if isinstance(result, HTTPException)]
+    assert sum(created for _row, created in successes) == 1
+    if second_mode == "prompt":
+        assert not failures
+        assert len(successes) == 2
+        assert successes[0][0]["id"] == successes[1][0]["id"]
+    else:
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert failures[0].status_code == 409
+        assert failures[0].detail["code"] == "REPLICA_PROMPT_MODE_CONFLICT"
+    task_id = successes[0][0]["id"]
+    assert _wallet(rp_state) == (9, 1)
+    assert _ledger(rp_state, task_id) == ["RESERVE"]
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute("SELECT count(*) FROM replica_prompt_tasks").fetchone() == (1,)
+        assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone() == (1,)

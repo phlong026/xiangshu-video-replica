@@ -15,7 +15,6 @@ import type {
 import {
   cancelReplicaPromptTask,
   fetchReplicaPromptHistory,
-  getLatestReplicaPromptResult,
   getLatestReplicaPromptTask,
   getReplicaPromptVersionById,
   readReplicaPromptShots,
@@ -240,23 +239,44 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         );
         return;
       }
-      // 轮询可能先于取消回执拿到结果；同一成功终态直接复用，迟到回执不再发起可能失败的查询。
-      if (resultTaskIdRef.current === task.id && cache.result) {
+      const matchesTask = (version: ReplicaPromptVersion) =>
+        version.id === task.result_version_id &&
+        version.project_id === task.project_id &&
+        version.project_id === run.projectId &&
+        version.asset_id === task.asset_id &&
+        version.asset_id === run.assetId &&
+        version.kind === "long_analysis";
+      // 轮询可能先于取消回执拿到结果；仅复用精确匹配的版本，避免旧缓存串到本次任务。
+      if (
+        task.result_version_id &&
+        resultTaskIdRef.current === task.id &&
+        cache.result &&
+        matchesTask(cache.result)
+      ) {
         setResult(cache.result);
         setCancelError("");
         setStage("ready");
         return;
       }
-      const version = await getLatestReplicaPromptResult(
-        run.projectId,
-        "storyboard",
-      );
+      cache.result = null;
+      resultTaskIdRef.current = null;
+      setResult(null);
+      if (!task.result_version_id) {
+        throw new Error("本次拆解缺少结果版本，请重新拆解。");
+      }
+      const version = await getReplicaPromptVersionById(task.result_version_id);
       if (!isActive(session)) return;
+      if (!version) {
+        throw new Error("未找到本次拆解的结果版本，请重新拆解。");
+      }
+      if (!matchesTask(version)) {
+        throw new Error("结果版本与本次拆解不匹配，请重新拆解。");
+      }
       cache.result = version;
-      resultTaskIdRef.current = version ? task.id : null;
+      resultTaskIdRef.current = task.id;
       setResult(version);
       setCancelError("");
-      setStage(version ? "ready" : "idle");
+      setStage("ready");
     },
     [cache, isActive, showFailure],
   );
@@ -336,7 +356,10 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
             awaitTaskRun(startedRun, session);
             return;
           }
-          const task = await getLatestReplicaPromptTask(run.projectId);
+          const task = await getLatestReplicaPromptTask(
+            run.projectId,
+            "storyboard",
+          );
           if (!isActive(session)) return;
           if (!task || task.asset_id !== run.assetId) {
             cache.run = null;
