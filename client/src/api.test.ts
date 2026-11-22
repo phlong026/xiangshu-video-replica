@@ -88,6 +88,7 @@ import {
   REQUEST_TIMEOUT_MS,
   readAnalysisPayload,
   readFirstFrameCandidates,
+  readReplicaPromptShots,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
@@ -234,6 +235,64 @@ describe("长视频历史账号查询", () => {
     expect(fetcher.mock.calls[1][0]).toContain(
       "/api/projects/project%2Fone/replica-prompt/versions?limit=5",
     );
+  });
+
+  it("分镜只保留白名单的正确类型字段且不补造缺失内容", () => {
+    expect(
+      readReplicaPromptShots([
+        null,
+        {},
+        {
+          " shot_id\n": "s1",
+          " subject ": "讲解者",
+          action: { text: "错误类型" },
+          scene: ["错误类型"],
+          spoken_text: false,
+          person_count: 1.5,
+          unknown: "不应透传",
+        },
+        { start_time: 0, end_time: 3.5 },
+        { composition: "人物居中", person_count: 0 },
+      ]),
+    ).toEqual([
+      { shot_id: "s1", subject: "讲解者" },
+      { start_time: 0, end_time: 3.5 },
+      { composition: "人物居中", person_count: 0 },
+    ]);
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    true,
+    false,
+  ])("分镜数值 %s 不作为时间或人数透传", (value) => {
+    expect(
+      readReplicaPromptShots([
+        {
+          subject: "讲解者",
+          start_time: value,
+          end_time: value,
+          person_count: value,
+        },
+      ]),
+    ).toEqual([{ subject: "讲解者" }]);
+  });
+
+  it("编号、人数或不完整/逆序/负数时间不能独立代表有效分镜", () => {
+    expect(
+      readReplicaPromptShots([
+        { shot_id: "s1" },
+        { person_count: 1 },
+        { subject: " " },
+        { start_time: 0 },
+        { end_time: 60 },
+        { start_time: -1, end_time: 1 },
+        { start_time: 2, end_time: 1 },
+        { start_time: 0, end_time: 0 },
+      ]),
+    ).toEqual([]);
   });
 });
 

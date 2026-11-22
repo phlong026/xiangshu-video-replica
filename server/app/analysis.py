@@ -1206,6 +1206,55 @@ _REPLICA_FORBIDDEN_WORDS = ("复刻", "原片", "源视频")
 # 次要要素缺失不丢整次付费调用（与既有宽松校验取舍一致）。
 _REPLICA_PROMPT_MAX_CHARS = 8000
 
+_REPLICA_SHOT_TEXT_FIELDS = (
+    "shot_id",
+    "shot_type",
+    "composition",
+    "camera_motion",
+    "subject",
+    "action",
+    "scene",
+    "spoken_text",
+    "transition",
+)
+
+
+def _normalize_replica_storyboard_shots(raw: object) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    shots: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        source = {key.strip(): value for key, value in item.items() if isinstance(key, str)}
+        shot = {
+            field: source[field]
+            for field in _REPLICA_SHOT_TEXT_FIELDS
+            if isinstance(source.get(field), str)
+        }
+        for field in ("start_time", "end_time", "person_count"):
+            value = source.get(field)
+            try:
+                number = _finite_number(value)
+            except OverflowError:
+                continue
+            if number is None:
+                continue
+            if field == "person_count":
+                if number < 0 or not number.is_integer():
+                    continue
+                shot[field] = value if isinstance(value, int) else int(number)
+            else:
+                shot[field] = value
+        # 编号/人数不代表已完成拆解；描述可独立保留，纯时间行需有有效区间。
+        has_description = any(
+            shot.get(field, "").strip() for field in _REPLICA_SHOT_TEXT_FIELDS if field != "shot_id"
+        )
+        start, end = shot.get("start_time"), shot.get("end_time")
+        if has_description or (start is not None and end is not None and 0 <= start < end):
+            shots.append(shot)
+    return shots
+
 
 def parse_replica_storyboard_payload(
     text: str,
@@ -1215,10 +1264,9 @@ def parse_replica_storyboard_payload(
     """宽松校验长视频分镜表拆解出参（storyboard 模式，long-analysis.v1）.
 
     校验取舍与 parse_replica_prompt_payload 同源：宽容链恢复 JSON 后，
-    硬性要求只有三个——payload 是对象、shots 是非空数组、replica_prompt
-    是非空字符串；shots 的时间轴连续性与字段完整性记入 warnings 随
-    payload 落库（LLM 对长视频时间轴的精度有限，逐字段硬拒会把整次付费
-    调用丢掉；下游渲染只取存在的字段）。禁词命中仍硬拒绝。
+    要求非空提示词及至少一个可用镜头。镜头文本/数值按类型保留，缺少
+    可选字段不补造内容，类型错误字段与空行丢弃；时间轴与时长的偏差仍
+    记软警告，避免因长视频时间精度不足丢掉整次调用。禁词命中仍硬拒绝。
     """
     try:
         payload, _strategy = parse_llm_json(text)
@@ -1238,8 +1286,8 @@ def parse_replica_storyboard_payload(
             "长视频拆解没有产出复刻提示词，请重新拆解。",
             retryable=False,
         )
-    shots = payload.get("shots")
-    if not isinstance(shots, list) or not shots:
+    shots = _normalize_replica_storyboard_shots(payload.get("shots"))
+    if not shots:
         raise AnalysisProviderFailed(
             "长视频拆解没有产出分镜表，请重新拆解。",
             retryable=False,
@@ -1255,11 +1303,7 @@ def parse_replica_storyboard_payload(
     duration_seconds = info.get("duration_seconds")
     if isinstance(duration_seconds, int | float) and not isinstance(duration_seconds, bool):
         # 时间轴一致性软校验（不硬拒）：末段 end_time 应落在时长±1 秒内。
-        end_times = [
-            shot["end_time"]
-            for shot in shots
-            if isinstance(shot, dict) and isinstance(shot.get("end_time"), int | float)
-        ]
+        end_times = [shot["end_time"] for shot in shots if "end_time" in shot]
         latest_end = max(end_times) if end_times else None
         if latest_end is None or abs(latest_end - duration_seconds) > 1.0:
             warnings.append(
@@ -1271,7 +1315,7 @@ def parse_replica_storyboard_payload(
                     ),
                 }
             )
-    payload = {**payload, "warnings": warnings}
+    payload = {**payload, "shots": shots, "warnings": warnings}
     return payload
 
 

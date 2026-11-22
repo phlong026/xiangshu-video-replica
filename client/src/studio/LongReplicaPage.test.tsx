@@ -700,6 +700,69 @@ describe("长视频账号历史恢复", () => {
     expect(getLongReplicaSession("u-1").result).toBeNull();
     expect(getLongReplicaSession("u-2").result).toBeNull();
   });
+
+  it.each([
+    ["空对象或纯编号", [{}, { shot_id: "s1" }, { person_count: 1 }]],
+    ["空值与标量", [null, 7, false, "坏镜头", []]],
+    ["对象文本", [{ subject: { text: "不能直接渲染" }, scene: ["坏场景"] }]],
+    [
+      "无效数值",
+      [
+        { start_time: Number.NaN, end_time: Number.POSITIVE_INFINITY },
+        {
+          start_time: true,
+          end_time: Number.NEGATIVE_INFINITY,
+          person_count: -1,
+        },
+        { start_time: 0 },
+        { start_time: 2, end_time: 1 },
+      ],
+    ],
+  ])("历史分镜含%s时仍可读提示词且不展示空镜头", async (_name, shots) => {
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue({
+      ...savedVersion(),
+      payload: { ...savedVersion().payload, shots },
+    } as unknown as ReplicaPromptVersion);
+    render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    expect(await screen.findByText("选中的旧项目历史版本")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("历史分镜混有坏行和坏字段时只展示规范化后的有效内容", async () => {
+    vi.mocked(getReplicaPromptVersionById).mockResolvedValue({
+      ...savedVersion(),
+      payload: {
+        ...savedVersion().payload,
+        shots: [
+          null,
+          {},
+          {
+            " \nshot_id ": "history-shot",
+            " subject\n": "保留的历史主体",
+            start_time: 0,
+            " end_time ": 60,
+            action: { text: "不能直接渲染" },
+            scene: ["坏场景"],
+            spoken_text: false,
+            camera_motion: "固定机位",
+            unknown: { debug: "不展示" },
+          },
+        ],
+      },
+    } as unknown as ReplicaPromptVersion);
+    render(<LongReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "拆解历史" }));
+    fireEvent.click(await screen.findByRole("button", { name: "载入此版本" }));
+    expect(await screen.findByText("分镜表（1 段）")).toBeInTheDocument();
+    expect(screen.getByText("保留的历史主体")).toBeInTheDocument();
+    expect(screen.getByText("history-shot")).toBeInTheDocument();
+    expect(screen.getByText("00:00-01:00")).toBeInTheDocument();
+    expect(screen.getByText("固定机位")).toBeInTheDocument();
+    expect(screen.queryByText("不能直接渲染")).not.toBeInTheDocument();
+    expect(screen.getByText("选中的旧项目历史版本")).toBeInTheDocument();
+  });
 });
 
 describe("长视频异步边界回归", () => {

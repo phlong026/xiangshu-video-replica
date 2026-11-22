@@ -108,3 +108,127 @@ def test_default_payload_shape_matches_parser() -> None:
     parsed = parse_replica_storyboard_payload(raw, media_info={"duration_seconds": 120})
     assert len(parsed["shots"]) >= 2
     assert parsed["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "shots",
+    [
+        [],
+        [None],
+        [7],
+        ["镜头内容"],
+        [False],
+        [[]],
+        [{}],
+        [{"unknown": "无已知镜头字段"}],
+        [{"shot_id": "s1", "person_count": 1}],
+        [{"shot_id": "s1"}],
+        [{"person_count": 1}],
+        [{"start_time": 0}],
+        [{"end_time": 60}],
+        [{"start_time": -1, "end_time": 1}],
+        [{"start_time": 2, "end_time": 1}],
+        [{"start_time": 0, "end_time": 0}],
+        [{"subject": "  ", "spoken_text": ""}],
+        [{"subject": {"text": "错误类型"}, "scene": ["错误类型"]}],
+    ],
+)
+def test_storyboard_without_usable_shots_is_rejected(shots: list[object]) -> None:
+    payload = {**_valid_payload(), "shots": shots}
+    with pytest.raises(AnalysisProviderFailed, match="没有产出分镜表") as error:
+        parse_replica_storyboard_payload(json.dumps(payload, ensure_ascii=False))
+    assert error.value.retryable is False
+
+
+def test_storyboard_filters_bad_rows_and_normalizes_only_known_fields() -> None:
+    valid = _valid_payload()["shots"][1]
+    payload = {
+        **_valid_payload(),
+        "shots": [
+            None,
+            7,
+            {},
+            {
+                " \nshot_id\t": "s1",
+                " subject ": "讲解者",
+                "start_time": 0,
+                " end_time\n": 45.5,
+                "person_count": 0,
+                "extra": {"internal": "不应透传"},
+            },
+            valid,
+        ],
+    }
+    parsed = parse_replica_storyboard_payload(
+        json.dumps(payload, ensure_ascii=False), media_info={"duration_seconds": 60}
+    )
+    assert parsed["shots"] == [
+        {
+            "shot_id": "s1",
+            "subject": "讲解者",
+            "start_time": 0,
+            "end_time": 45.5,
+            "person_count": 0,
+        },
+        valid,
+    ]
+    assert parsed["warnings"] == []
+
+
+@pytest.mark.parametrize("bad_text", [{"text": "错误类型"}, ["错误类型"]])
+def test_storyboard_drops_non_string_text_fields(bad_text: object) -> None:
+    payload = _valid_payload()
+    payload["shots"][0].update({"shot_id": bad_text, "action": bad_text, "spoken_text": bad_text})
+    parsed = parse_replica_storyboard_payload(json.dumps(payload, ensure_ascii=False))
+    shot = parsed["shots"][0]
+    assert "shot_id" not in shot
+    assert "action" not in shot
+    assert "spoken_text" not in shot
+    assert shot["subject"] == "讲解者"
+
+
+@pytest.mark.parametrize(
+    "invalid_number",
+    [float("nan"), float("inf"), -float("inf"), True, False, "3", {}, [], 10**400],
+)
+def test_storyboard_omits_invalid_numbers_and_warns_about_missing_timeline(
+    invalid_number: object,
+) -> None:
+    payload = {
+        **_valid_payload(),
+        "shots": [
+            {
+                "subject": "讲解者",
+                "start_time": invalid_number,
+                "end_time": invalid_number,
+                "person_count": invalid_number,
+            }
+        ],
+    }
+    parsed = parse_replica_storyboard_payload(
+        json.dumps(payload, ensure_ascii=False), media_info={"duration_seconds": 60}
+    )
+    assert parsed["shots"] == [{"subject": "讲解者"}]
+    assert [warning["code"] for warning in parsed["warnings"]] == ["STORYBOARD_DURATION_MISMATCH"]
+    json.dumps(parsed, allow_nan=False)
+
+
+@pytest.mark.parametrize("person_count", [-1, 1.5])
+def test_storyboard_omits_negative_or_fractional_person_count(person_count: float) -> None:
+    payload = {**_valid_payload(), "shots": [{"subject": "讲解者", "person_count": person_count}]}
+    parsed = parse_replica_storyboard_payload(json.dumps(payload, ensure_ascii=False))
+    assert parsed["shots"] == [{"subject": "讲解者"}]
+
+
+@pytest.mark.parametrize(
+    "shot",
+    [
+        {"subject": "讲解者"},
+        {"start_time": 0, "end_time": 3.5},
+        {"composition": "人物居中", "spoken_text": "", "person_count": 1},
+    ],
+)
+def test_storyboard_keeps_partial_shots_without_inventing_missing_fields(shot: dict) -> None:
+    payload = {**_valid_payload(), "shots": [shot]}
+    parsed = parse_replica_storyboard_payload(json.dumps(payload, ensure_ascii=False))
+    assert parsed["shots"] == [shot]
