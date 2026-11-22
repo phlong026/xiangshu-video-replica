@@ -330,16 +330,24 @@ export function AccountDiagnosisPage() {
   const reportDoc = result?.report ?? null;
   const narrative = result?.narrative ?? null;
 
+  const reportAccountId = reportDoc?.account.secUserId;
   const scoreTrend = useMemo(() => {
+    // 钱包共享的历史可能来自多个账号，趋势只跟随正在查看的报告。
+    if (!reportAccountId) return [];
     const points = history
-      .filter((item) => item.status === "SUCCEEDED" && item.score !== null)
+      .filter(
+        (item) =>
+          item.status === "SUCCEEDED" &&
+          item.score !== null &&
+          item.account?.secUserId === reportAccountId,
+      )
       .map((item) => ({
         score: item.score as number,
         label: item.createdAt ?? "",
       }))
       .reverse();
     return points;
-  }, [history]);
+  }, [history, reportAccountId]);
 
   const availabilityText = useMemo(() => {
     if (!availability) return null;

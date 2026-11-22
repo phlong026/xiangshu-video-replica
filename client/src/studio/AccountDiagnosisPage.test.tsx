@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AccountDiagnosisHistoryItem } from "../api";
 
 const mocks = vi.hoisted(() => ({
   notify: vi.fn(),
@@ -222,6 +223,38 @@ const reportFixture = {
   },
 };
 
+function historyItem(
+  id: string,
+  secUserId: string | null,
+  score: number | null,
+): AccountDiagnosisHistoryItem {
+  return {
+    id,
+    status: "SUCCEEDED",
+    score,
+    tier: "B",
+    rating: "正常",
+    isFree: false,
+    createdAt: reportFixture.createdAt,
+    account:
+      secUserId === null ? null : { ...reportFixture.account, secUserId },
+  };
+}
+
+const mixedHistory = [
+  historyItem("a-new", "sec-1", 72),
+  historyItem("b-new", "sec-2", 85),
+  historyItem("unknown", null, 99),
+  historyItem("missing-id", "", 98),
+  { ...historyItem("failed", "sec-1", 97), status: "FAILED" },
+  historyItem("unscored", "sec-1", null),
+  historyItem("b-old", "sec-2", 40),
+  {
+    ...historyItem("a-old", "sec-1", 0),
+    account: { ...reportFixture.account, nickname: "旧昵称", uniqueId: "old" },
+  },
+];
+
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.getAvailability.mockResolvedValue({
@@ -272,6 +305,78 @@ describe("账号诊断页", () => {
     expect(mocks.createDiagnosis).toHaveBeenCalledWith(
       "https://www.douyin.com/user/sec-1",
     );
+  });
+
+  it("评分趋势只跟随当前报告账号，排除无效记录并保留零分", async () => {
+    mocks.listHistory.mockResolvedValue({ items: mixedHistory });
+    mocks.createDiagnosis.mockResolvedValue(reportFixture);
+    const secondAccount = { ...reportFixture.account, secUserId: "sec-2" };
+    mocks.getReport.mockResolvedValue({
+      ...reportFixture,
+      id: "b-new",
+      account: secondAccount,
+      report: { ...reportFixture.report, account: secondAccount, score: 85 },
+    });
+    render(<AccountDiagnosisPage />);
+    await screen.findByText("诊断历史");
+    fireEvent.change(screen.getByLabelText("抖音账号链接或抖音号"), {
+      target: { value: "https://www.douyin.com/user/sec-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
+
+    const firstTrend = await screen.findByRole("img", {
+      name: "历史评分趋势",
+    });
+    const firstPath = firstTrend.querySelector("path")?.getAttribute("d");
+    // 同一账号恰有两次有效记录，其中一次为零分；改名不能切断它的历史。
+    expect(firstPath?.match(/[ML]/g)).toHaveLength(2);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /众墅之家.*85.*分.*正常/ }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("img", { name: "历史评分趋势" }).querySelector("path"),
+      ).not.toHaveAttribute("d", firstPath),
+    );
+    expect(
+      screen
+        .getByRole("img", { name: "历史评分趋势" })
+        .querySelector("path")
+        ?.getAttribute("d")
+        ?.match(/[ML]/g),
+    ).toHaveLength(2);
+    expect(mocks.getReport).toHaveBeenCalledWith("b-new");
+  });
+
+  it("评分趋势在尚未选择报告时不展示混合账号历史", async () => {
+    mocks.listHistory.mockResolvedValue({ items: mixedHistory });
+    render(<AccountDiagnosisPage />);
+
+    await screen.findByText("诊断历史");
+    expect(
+      screen.queryByRole("img", { name: "历史评分趋势" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("评分趋势在当前报告缺少稳定账号标识时保持隐藏", async () => {
+    mocks.listHistory.mockResolvedValue({ items: mixedHistory });
+    mocks.getReport.mockResolvedValue({
+      ...reportFixture,
+      report: {
+        ...reportFixture.report,
+        account: { ...reportFixture.account, secUserId: "" },
+      },
+    });
+    render(<AccountDiagnosisPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /众墅之家.*98.*分.*正常/ }),
+    );
+
+    await screen.findByRole("heading", { name: "众墅之家" });
+    expect(
+      screen.queryByRole("img", { name: "历史评分趋势" }),
+    ).not.toBeInTheDocument();
   });
 
   it("第二次使用被会员门禁拦截时直接弹出充值对话框", async () => {
