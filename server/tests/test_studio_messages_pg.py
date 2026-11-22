@@ -472,6 +472,47 @@ def test_daily_billing_style_collapses_per_day(messages_db: str) -> None:
         app.dependency_overrides.clear()
 
 
+@pytest.mark.parametrize("billing_style", ["per_item", "daily", "off"])
+def test_low_balance_warning_survives_billing_style(messages_db: str, billing_style: str) -> None:
+    _seed(messages_db)
+    with psycopg.connect(messages_db, autocommit=True) as pg:
+        pg.execute("UPDATE wallets SET available_credits = 20 WHERE user_id = 'u1'")
+    client = _client("u1")
+    try:
+        response = client.put(
+            "/api/studio/notification-preferences",
+            json={"billing_style": billing_style, "balance_threshold": 100},
+        )
+        assert response.status_code == 200
+        page = client.get("/api/studio/messages?category=billing").json()
+        if billing_style == "off":
+            assert page["items"] == []
+            assert page["by_category"]["billing"] == 0
+            return
+
+        warnings = [item for item in page["items"] if item["kind"] == "low_balance"]
+        assert len(warnings) == 1
+        assert warnings[0]["title"] == "余额不足提醒"
+        assert "当前余额 20 积分" in warnings[0]["summary"]
+        assert "提醒阈值 100 积分" in warnings[0]["summary"]
+        assert warnings[0]["unread"] is True
+        assert warnings[0]["action"]["kind"] == "wallet"
+
+        # 改为按日显示只改变账单呈现；告警不能消失，也不能混入当天金额。
+        if billing_style == "daily":
+            daily = [item for item in page["items"] if item["kind"] == "daily"]
+            assert len(daily) == 1
+            assert daily[0]["amount_credits"] == 982
+            assert daily[0]["summary"] == "共 2 笔 · 收入 +1000 积分 · 支出 -18 积分"
+            assert page["by_category"]["billing"] == 2
+        else:
+            assert page["by_category"]["billing"] == 3
+    finally:
+        from app.main import app
+
+        app.dependency_overrides.clear()
+
+
 def test_mark_all_keeps_legacy_notification_endpoint_in_sync(messages_db: str) -> None:
     """新旧客户端混用：新「全部已读」必须让旧接口也归零。"""
     _seed(messages_db)
