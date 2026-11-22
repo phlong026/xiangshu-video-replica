@@ -18,7 +18,7 @@ from test_customer_registration import (
     registration_dsn,
 )
 
-from app.account_diagnosis import availability, create_diagnosis
+from app.account_diagnosis import _load_reference_pool, availability, create_diagnosis
 from app.account_diagnosis_entitlement import (
     claim_free_quota,
     current_device_id,
@@ -181,6 +181,119 @@ def _seed_tariff(raw: psycopg.Connection) -> None:
         "unit_rounding) VALUES ('account_diagnosis', true, 8, 5, 'exact') "
         "ON CONFLICT (service) DO NOTHING"
     )
+
+
+def _seed_reference(
+    raw: psycopg.Connection,
+    video_id: str,
+    *,
+    likes: int = 100,
+    platform: str = "douyin",
+) -> None:
+    raw.execute(
+        "INSERT INTO viral_videos "
+        "(platform, video_id, title, author, likes, collection_published, pushed_at) "
+        "VALUES (%s, %s, '装修作品', '参考作者', %s, 1, now())",
+        (platform, video_id, likes),
+    )
+    raw.execute(
+        "INSERT INTO viral_media_preparations "
+        "(id, platform, video_id, media_kind, status, storage_uri) "
+        "VALUES (%s, %s, %s, 'video', 'SUCCEEDED', 'local://diagnosis/reference.mp4')",
+        (f"reference-media-{platform}-{video_id}", platform, video_id),
+    )
+
+
+@pytest.mark.parametrize(
+    "state,visible",
+    [
+        ("published", True),
+        ("hidden", False),
+        ("unpublished", False),
+        ("unpushed", False),
+        ("unready", False),
+        ("future", False),
+        ("expired", False),
+    ],
+)
+def test_reference_pool_obeys_public_visibility(
+    route_state: str, state: str, visible: bool
+) -> None:
+    with psycopg.connect(route_state) as raw, raw.transaction(force_rollback=True):
+        conn = BusinessConnection.postgres(raw)
+        _seed_reference(raw, "reference")
+        video_changes = {
+            "unpublished": "collection_published=0",
+            "unpushed": "pushed_at=NULL",
+            "future": "homepage_starts_at=now()+interval '1 day'",
+            "expired": "homepage_ends_at=now()-interval '1 day'",
+        }
+        if state in video_changes:
+            raw.execute(
+                f"UPDATE viral_videos SET {video_changes[state]} WHERE video_id='reference'"
+            )
+        if state == "hidden":
+            raw.execute(
+                "INSERT INTO viral_video_visibility(platform, video_id, status) "
+                "VALUES ('douyin', 'reference', 'HIDDEN')"
+            )
+        if state == "unready":
+            raw.execute(
+                "UPDATE viral_media_preparations SET status='PENDING' WHERE video_id='reference'"
+            )
+
+        assert _load_reference_pool(conn) == (
+            [{"video_id": "reference", "title": "装修作品", "author": "参考作者", "likes": 100}]
+            if visible
+            else []
+        )
+
+
+def test_reference_pool_filters_before_its_hotness_limit(route_state: str) -> None:
+    with psycopg.connect(route_state) as raw, raw.transaction(force_rollback=True):
+        conn = BusinessConnection.postgres(raw)
+        for likes in range(1, 62):
+            _seed_reference(raw, f"reference-{likes}", likes=likes)
+        _seed_reference(raw, "hidden-hot", likes=1_000_000)
+        raw.execute(
+            "INSERT INTO viral_video_visibility(platform, video_id, status) "
+            "VALUES ('douyin', 'hidden-hot', 'HIDDEN')"
+        )
+        _seed_reference(raw, "other-platform", likes=2_000_000, platform="wechat_channels")
+
+        # 隐藏高热度项不能挤占 60 个公开候选，也不能扩大到其他平台。
+        pool = _load_reference_pool(conn)
+        assert [row["video_id"] for row in pool] == [
+            f"reference-{likes}" for likes in range(61, 1, -1)
+        ]
+        assert [row["likes"] for row in pool] == list(range(61, 1, -1))
+
+
+def test_report_references_exclude_hidden_videos(client, route_state, monkeypatch) -> None:
+    _, user_id = account(client, "diag_references")
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings", lambda conn: _FakeClient()
+    )
+    with psycopg.connect(route_state) as raw, raw.transaction(force_rollback=True):
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+        _seed_reference(raw, "public-reference")
+        _seed_reference(raw, "hidden-reference", likes=1_000_000)
+        raw.execute(
+            "INSERT INTO viral_video_visibility(platform, video_id, status) "
+            "VALUES ('douyin', 'hidden-reference', 'HIDDEN')"
+        )
+
+        result = create_diagnosis(
+            conn,
+            user_id=user_id,
+            target=_target("sec-references"),
+            input_url="https://www.douyin.com/user/sec-references",
+        )
+        assert result["status"] == "SUCCEEDED"
+        assert [row["videoId"] for row in result["report"]["referenceWorks"]] == [
+            "public-reference"
+        ]
 
 
 def test_free_quota_is_claimed_once_per_user_and_device(client, route_state) -> None:
