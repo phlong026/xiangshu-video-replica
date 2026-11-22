@@ -808,17 +808,14 @@ def collect_messages(
         messages.extend(_security_messages(conn, actor.id))
         wallet_owner = _account_scope(conn, actor.id)
         # 子账号共用母钱包但无权充值：账务消息只发给母账号。
-        if wallet_owner is None:
+        if wallet_owner is None and preferences.billing_style != "off":
             billing = _billing_rows(conn, actor.id)
+            # 提醒依赖原始结算消息，需在按日合并前计算且不计入汇总笔数。
+            warnings = _balance_warning(conn, actor.id, billing, preferences.balance_threshold)
             if preferences.billing_style == "daily":
                 billing = _daily_billing(billing)
-            elif preferences.billing_style == "off":
-                billing = []
-            if billing and preferences.billing_style != "off":
-                billing.extend(
-                    _balance_warning(conn, actor.id, billing, preferences.balance_threshold)
-                )
             messages.extend(billing)
+            messages.extend(warnings)
 
     receipts = state.receipts
     for message in messages:
