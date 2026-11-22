@@ -264,7 +264,7 @@ beforeEach(() => {
     priceCredits: 8,
   });
   mocks.listHistory.mockResolvedValue({ items: [] });
-  mocks.store.loadSessionToken.mockResolvedValue("diagnosis-test-session");
+  mocks.store.loadSessionToken.mockResolvedValue("test");
   mocks.getWallet.mockResolvedValue({
     available_credits: 0,
     reserved_credits: 0,
@@ -437,7 +437,7 @@ describe("账号诊断页", () => {
     expect(mocks.createPaymentCode).toHaveBeenCalledTimes(2);
     for (const call of mocks.createPaymentCode.mock.calls) {
       expect(call).toEqual([
-        { kind: "session", token: "diagnosis-test-session" },
+        { kind: "session", token: "test" },
         rechargeOrder.order_no,
       ]);
     }
