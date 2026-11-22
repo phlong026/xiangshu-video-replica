@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -10,8 +12,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from unittest.mock import Mock
 
 import pytest
+import requests
+from cryptography.fernet import Fernet
+from fastapi import FastAPI
 
 import app.gate1_e2e as gate1_e2e
 from app.gate1_e2e import (
@@ -23,6 +29,7 @@ from app.gate1_e2e import (
     wait_for_http,
     write_evidence_manifest,
 )
+from app.main import app as production_app
 
 
 def _isolated_child_env() -> dict[str, str]:
@@ -47,6 +54,155 @@ def test_isolated_child_env_preserves_linux_loader_path(monkeypatch: pytest.Monk
     environment = _isolated_child_env()
 
     assert environment == {"LD_LIBRARY_PATH": loader_path}
+
+
+@pytest.fixture()
+def customer_e2e_environment(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    from app import customer_email_routes
+
+    dsn = "postgresql://e2e_user:e2e_password@127.0.0.1:1/customer_e2e"
+    monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", dsn)
+    monkeypatch.setenv("CUSTOMER_E2E_DATABASE_URL", dsn)
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    # create_app 只在 E2E 进程替换工厂；测试结束必须恢复，不能污染后续生产路由用例。
+    monkeypatch.setattr(
+        customer_email_routes,
+        "email_sender_from_settings",
+        customer_email_routes.email_sender_from_settings,
+    )
+    attempts = {"http": 0}
+
+    def forbid_http(*_args: object, **_kwargs: object) -> requests.Response:
+        attempts["http"] += 1
+        raise AssertionError("customer E2E must not send external HTTP")
+
+    monkeypatch.setattr(requests, "post", forbid_http)
+    return attempts
+
+
+def _customer_e2e_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    directory = Path(__file__).resolve().parents[2] / "e2e" / "customer"
+    runner = (directory / "setup-backend.mjs").read_text(encoding="utf-8")
+    target = re.search(r'"uvicorn",\s*"([^"]+)"', runner)
+    assert target, "customer E2E runner must declare its ASGI entry"
+    monkeypatch.syspath_prepend(str(directory))
+    module, attribute = target[1].split(":", 1)
+    entry = getattr(importlib.import_module(module), attribute)
+    return entry() if '"--factory"' in runner else entry
+
+
+def test_customer_e2e_import_does_not_replace_production_sender(
+    monkeypatch: pytest.MonkeyPatch, customer_e2e_environment: dict[str, int]
+) -> None:
+    from app import customer_email_routes
+
+    original_factory = customer_email_routes.email_sender_from_settings
+    monkeypatch.delenv("VIDEO_REPLICA_DATABASE_URL")
+    monkeypatch.delenv("CUSTOMER_E2E_DATABASE_URL")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "e2e" / "customer"))
+    importlib.reload(importlib.import_module("customer_e2e_backend"))
+    assert customer_email_routes.email_sender_from_settings is original_factory
+    assert customer_e2e_environment["http"] == 0
+
+
+@pytest.mark.parametrize("delivery", ["code", "reset_notice"])
+def test_customer_e2e_configured_email_is_delivered_without_http_or_sensitive_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    customer_e2e_environment: dict[str, int],
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    delivery: str,
+) -> None:
+    from app import customer_email_routes
+    from app.db_portable import BusinessConnection
+    from app.email_delivery import deliver_quietly
+    from app.settings import SettingsRepository
+
+    config = {
+        "secret_id": "fixture-mail-id",
+        "secret_key": "fixture-mail-key",
+        "from_address": "sender@e2e.invalid",
+        "code_template_id": "123456",
+        "notice_template_id": "123457",
+    }
+    monkeypatch.setattr(SettingsRepository, "load_provider_config", lambda _self, _name: config)
+    application = _customer_e2e_app(monkeypatch)
+
+    assert application is production_app
+    sender = customer_email_routes.email_sender_from_settings(Mock(spec=BusinessConnection))
+    assert sender is not None
+    recipient, code = "recipient@e2e.invalid", "045678"
+    if delivery == "code":
+        delivered = deliver_quietly(
+            lambda: sender.send_code(to=recipient, code=code, action="绑定邮箱", minutes=15),
+            kind="e2e-bind",
+        )
+    else:
+        delivered = deliver_quietly(
+            lambda: sender.send_password_reset_notice(
+                to=recipient, username="fixture-user", occurred_at="2026-11-22 12:00"
+            ),
+            kind="e2e-reset",
+        )
+    assert customer_e2e_environment["http"] == 0
+    assert delivered is True
+    captured = capsys.readouterr()
+    output = captured.out + captured.err + caplog.text
+    for private_value in (recipient, code, *config.values()):
+        assert private_value not in output
+
+
+@pytest.mark.parametrize("config", [None, {}])
+def test_customer_e2e_missing_email_configuration_stays_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    customer_e2e_environment: dict[str, int],
+    config: dict[str, str] | None,
+) -> None:
+    from app import customer_email_routes
+    from app.db_portable import BusinessConnection
+    from app.settings import SettingsRepository
+
+    monkeypatch.setattr(SettingsRepository, "load_provider_config", lambda _self, _name: config)
+    _customer_e2e_app(monkeypatch)
+    assert customer_email_routes.email_sender_from_settings(Mock(spec=BusinessConnection)) is None
+    assert customer_e2e_environment["http"] == 0
+
+
+@pytest.mark.parametrize(
+    ("database_dsn", "runner_dsn"),
+    [
+        (None, "postgresql://127.0.0.1:1/customer_e2e"),
+        ("postgresql://127.0.0.1:1/customer", "postgresql://127.0.0.1:1/customer"),
+        ("postgresql://127.0.0.1:1/customer_e2e", None),
+        ("postgresql://127.0.0.1:1/customer_e2e", "postgresql://127.0.0.1:2/customer_e2e"),
+        (
+            "postgresql://127.0.0.1:1/customer_e2e?dbname=customer",
+            "postgresql://127.0.0.1:1/customer_e2e?dbname=customer",
+        ),
+        ("invalid dsn", "postgresql://127.0.0.1:1/customer_e2e"),
+    ],
+)
+def test_customer_e2e_entry_refuses_non_dedicated_or_mismatched_database(
+    monkeypatch: pytest.MonkeyPatch,
+    customer_e2e_environment: dict[str, int],
+    database_dsn: str | None,
+    runner_dsn: str | None,
+) -> None:
+    from app import customer_email_routes
+
+    original_factory = customer_email_routes.email_sender_from_settings
+    for variable, value in (
+        ("VIDEO_REPLICA_DATABASE_URL", database_dsn),
+        ("CUSTOMER_E2E_DATABASE_URL", runner_dsn),
+    ):
+        if value is None:
+            monkeypatch.delenv(variable, raising=False)
+        else:
+            monkeypatch.setenv(variable, value)
+    with pytest.raises(RuntimeError, match="customer_e2e"):
+        _customer_e2e_app(monkeypatch)
+    assert customer_email_routes.email_sender_from_settings is original_factory
+    assert customer_e2e_environment["http"] == 0
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
