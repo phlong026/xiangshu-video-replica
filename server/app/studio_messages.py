@@ -827,13 +827,17 @@ def collect_messages(
             # 客户端横幅消失）；本表单条回执同样视为已读。
             message.unread = message.unread and message.key not in receipts
         else:
-            cutoff = state.watermarks.get(message.category) or state.watermarks.get("all")
-            if message.key in receipts:
-                message.unread = False
-            elif cutoff is None:
-                message.unread = True
-            else:
-                message.unread = message.occurred_at > _as_datetime(cutoff)
+            # 回执只覆盖阅读当时的版本，分类和全局水位也按最新已读时刻共同生效。
+            cutoffs = [
+                _as_datetime(value)
+                for value in (
+                    receipts.get(message.key),
+                    state.watermarks.get(message.category),
+                    state.watermarks.get("all"),
+                )
+                if value
+            ]
+            message.unread = not cutoffs or message.occurred_at > max(cutoffs)
         if message.category in preferences.muted:
             message.unread = False
     return messages
@@ -980,8 +984,9 @@ def mark_studio_messages_read(
             read_at = str(row["cutoff"].isoformat())
             for key in keys:
                 if key not in receipts:
-                    receipts[key] = read_at
                     marked += 1
+                # 同一批次/日账单会更新；重复阅读也要推进时间，计数仍只统计新增键。
+                receipts[key] = read_at
             announcement_ids = [
                 key.split(":", 1)[1]
                 for key in keys
