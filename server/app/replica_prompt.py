@@ -23,6 +23,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.analysis import (
+    LONG_ANALYSIS_KIND,
     REPLICA_PROMPT_KIND,
     AnalysisProviderFailed,
     UrllibApilioChatTransport,
@@ -31,6 +32,7 @@ from app.analysis import (
     analysis_task_context,
     insert_version,
     parse_replica_prompt_payload,
+    parse_replica_storyboard_payload,
 )
 from app.analysis_routes import (
     analysis_provider_error,
@@ -123,6 +125,8 @@ class ReplicaPromptTaskLease:
     worker_id: str
     attempt: int = 1
     request_id: str | None = None
+    # storyboard：分镜表拆解（long-analysis.v1）；prompt（默认）：一段式复刻提示词。
+    mode: str = "prompt"
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,7 @@ class ReplicaPromptTaskWork:
     asset_uri: str
     media_info: dict[str, Any]
     storage: StorageAdapter | None = None
+    mode: str = "prompt"
 
 
 def load_replica_prompt_task(conn: BusinessConnection, task_id: str) -> BusinessRow:
@@ -150,23 +155,57 @@ def find_latest_replica_prompt_task(
     *,
     project_id: str,
     asset_id: str,
+    mode: str = "prompt",
 ) -> BusinessRow | None:
     row = conn.execute(
         """
         SELECT * FROM replica_prompt_tasks
-        WHERE project_id = %s AND asset_id = %s
+        WHERE project_id = %s AND asset_id = %s AND mode = %s
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
-        (project_id, asset_id),
+        (project_id, asset_id, mode),
     ).fetchone()
     return None if row is None else cast(BusinessRow, row)
+
+
+def list_replica_prompt_versions(
+    conn: BusinessConnection,
+    *,
+    project_id: str | None = None,
+    owner_user_id: str | None = None,
+    limit: int = 30,
+) -> list[BusinessRow]:
+    """按项目或项目所有者列出长视频拆解历史（新→旧），只读轻量元数据."""
+    filters = ["v.kind IN (%s, %s)"]
+    params: list[str | int] = [REPLICA_PROMPT_KIND, LONG_ANALYSIS_KIND]
+    if project_id is not None:
+        filters.append("v.project_id = %s")
+        params.append(project_id)
+    if owner_user_id is not None:
+        filters.append("p.owner_user_id = %s")
+        params.append(owner_user_id)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT v.id, v.project_id, v.asset_id, v.kind, v.version_number, v.created_by_user_id,
+               v.created_at, length(v.payload_json) AS payload_size
+        FROM versions v
+        JOIN projects p ON p.id = v.project_id
+        WHERE {" AND ".join(filters)}
+        ORDER BY v.created_at DESC, v.id DESC
+        LIMIT %s
+        """,
+        tuple(params),
+    ).fetchall()
+    return list(rows)
 
 
 def find_latest_replica_prompt_version(
     conn: BusinessConnection,
     *,
     project_id: str,
+    mode: str = "prompt",
 ) -> BusinessRow | None:
     row = conn.execute(
         """
@@ -177,9 +216,24 @@ def find_latest_replica_prompt_version(
         ORDER BY version_number DESC
         LIMIT 1
         """,
-        (project_id, REPLICA_PROMPT_KIND),
+        (
+            project_id,
+            LONG_ANALYSIS_KIND if mode == "storyboard" else REPLICA_PROMPT_KIND,
+        ),
     ).fetchone()
     return None if row is None else cast(BusinessRow, row)
+
+
+def _require_replica_prompt_mode(row: BusinessRow, mode: str) -> BusinessRow:
+    if row["mode"] != mode:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "REPLICA_PROMPT_MODE_CONFLICT",
+                "message": "该视频已有另一种拆解正在进行，请等待其完成后再试。",
+            },
+        )
+    return row
 
 
 def enqueue_replica_prompt_task(
@@ -190,8 +244,14 @@ def enqueue_replica_prompt_task(
     created_by_user_id: str,
     duration_seconds: float,
     request_id: str | None = None,
+    mode: str = "prompt",
 ) -> tuple[BusinessRow, bool]:
-    """入队一个长视频拆解任务；同资产的活跃任务直接复用，不重复计费."""
+    """入队一个长视频拆解任务；同资产同模式的活跃任务复用，不重复计费.
+
+    mode：'prompt'（一段式提示词，默认）| 'storyboard'（分镜表拆解）。
+    活跃任务唯一索引仍按 (project_id, asset_id) 收口，避免重复付费调用；
+    异模式活跃任务明确冲突，不能当成本次请求的结果。
+    """
     existing = conn.execute(
         """
         SELECT * FROM replica_prompt_tasks
@@ -203,18 +263,18 @@ def enqueue_replica_prompt_task(
         (project_id, asset_id),
     ).fetchone()
     if existing is not None:
-        return cast(BusinessRow, existing), False
+        return _require_replica_prompt_mode(cast(BusinessRow, existing), mode), False
 
     task_id = str(uuid4())
     conn.execute(
         """
         INSERT INTO replica_prompt_tasks (
             id, project_id, asset_id, created_by_user_id,
-            duration_seconds, status, request_id
-        ) VALUES (%s, %s, %s, %s, %s, 'PENDING', %s)
+            duration_seconds, status, request_id, mode
+        ) VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s)
         ON CONFLICT DO NOTHING
         """,
-        (task_id, project_id, asset_id, created_by_user_id, duration_seconds, request_id),
+        (task_id, project_id, asset_id, created_by_user_id, duration_seconds, request_id, mode),
     )
     inserted = conn.execute(
         "SELECT * FROM replica_prompt_tasks WHERE id = %s",
@@ -242,7 +302,7 @@ def enqueue_replica_prompt_task(
     ).fetchone()
     if concurrent is None:
         raise RuntimeError("replica prompt task enqueue conflict left no active task")
-    return cast(BusinessRow, concurrent), False
+    return _require_replica_prompt_mode(cast(BusinessRow, concurrent), mode), False
 
 
 def acquire_replica_prompt_task(
@@ -269,6 +329,7 @@ def acquire_replica_prompt_task(
         worker_id=worker_id,
         attempt=int(row["attempt"]),
         request_id=None if row["request_id"] is None else str(row["request_id"]),
+        mode=("prompt" if "mode" not in row.keys() or row["mode"] is None else str(row["mode"])),
     )
 
 
@@ -331,20 +392,28 @@ def prepare_replica_prompt_task(
         asset_uri=asset_uri,
         media_info=media_info,
         storage=storage,
+        mode=lease.mode,
     )
 
 
 def perform_replica_prompt_task(
     work: ReplicaPromptTaskWork, *, on_provider_result: Any = None
 ) -> dict[str, Any]:
-    """跑付费 provider 调用并把出参解析成 replica-prompt.v1 载荷."""
+    """跑付费 provider 调用并把出参解析成对应模式的载荷.
+
+    mode='prompt'（默认）→ replica-prompt.v1（一段式提示词+口播+摘要）；
+    mode='storyboard' → long-analysis.v1（分镜表 shots + 提示词 + 口播 + 摘要，
+    2026-11-22 推翻 11-11 D3 的分镜表拆解）。
+    """
     with analysis_task_context(
         task_id=work.lease.id,
         project_id=work.lease.project_id,
         asset_id=work.lease.asset_id,
         attempt=work.lease.attempt,
     ):
-        method = getattr(work.provider, "analyze_replica_prompt", None)
+        storyboard = work.mode == "storyboard"
+        method_name = "analyze_replica_storyboard" if storyboard else "analyze_replica_prompt"
+        method = getattr(work.provider, method_name, None)
         if callable(method):
             response = method(
                 video_uri=work.video_uri,
@@ -361,6 +430,8 @@ def perform_replica_prompt_task(
             on_provider_result()
         # 透传服务端已验证的媒体信息：禁词硬拒绝与画幅/时长软警告都以它为准
         # （方案 T10），不让模型自报的媒体事实参与校验。
+        if storyboard:
+            return parse_replica_storyboard_payload(response.text, media_info=work.media_info)
         return parse_replica_prompt_payload(response.text, media_info=work.media_info)
 
 
@@ -387,7 +458,7 @@ def complete_replica_prompt_task(
         conn,
         project_id=work.lease.project_id,
         asset_id=work.lease.asset_id,
-        kind=REPLICA_PROMPT_KIND,
+        kind=LONG_ANALYSIS_KIND if work.mode == "storyboard" else REPLICA_PROMPT_KIND,
         created_by_user_id=work.lease.created_by_user_id,
         payload={
             **payload,

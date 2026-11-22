@@ -1,16 +1,16 @@
 /**
  * 批次2（CW-062 方案 B 差距 3）：功能权限矩阵可视化纯函数。
  *
- * 与后端 `sub_account_permissions.py` 的 BUSINESS_FEATURES 同源对齐——12 类
- * 业务键 + 中文标签，顺序即 Modal 勾选格子顺序（原型 v3「功能权限（12 类）」
- * 的客户口径）。`permissions === null` = 全允许（无权限行），与额度表
+ * 与后端 `sub_account_permissions.py` 的 BUSINESS_FEATURES 同源对齐——
+ * 业务键 + 中文标签，顺序即 Modal 勾选格子顺序。
+ * `permissions === null` = 全允许（无权限行），与额度表
  * 「无行 = 不限」对称：前端只做展示与草稿整理，不放行任何操作；权威校验
  * 在服务端预扣/端点入口（403 三个稳定错误码）。
  */
 
 import type { CustomerSubAccountPermissions } from "../api";
 
-/** 12 类业务权限（key + 中文标签）；顺序与后端 BUSINESS_FEATURES 一致。 */
+/** 业务权限（key + 中文标签）；顺序与后端 BUSINESS_FEATURES 一致。 */
 export const BUSINESS_FEATURES = [
   { key: "video", label: "视频生成" },
   { key: "oral", label: "数字人口播" },
@@ -24,6 +24,7 @@ export const BUSINESS_FEATURES = [
   { key: "avatar_clone", label: "形象克隆" },
   { key: "voice_clone", label: "声音克隆" },
   { key: "viral_data", label: "爆款数据" },
+  { key: "account_diagnosis", label: "账号诊断" },
 ] as const;
 
 /** 业务权限键（与服务端 BUSINESS_KEYS 同集合）。 */
@@ -86,7 +87,7 @@ export function toggleBusiness(
   };
 }
 
-/** 是否全开（12 业务 + 两开关）：全开保存 = 删行，「全开行」不存在。 */
+/** 是否全开（全部业务 + 两开关）：全开保存 = 删行，「全开行」不存在。 */
 export function isAllGranted(draft: PermissionDraft): boolean {
   return (
     draft.allowApiKeys &&

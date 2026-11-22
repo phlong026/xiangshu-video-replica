@@ -278,7 +278,18 @@ export function MessageCenter() {
   }
 
   async function markRead(keys: string[]) {
-    if (review || !canMark || keys.length === 0) return;
+    // 已读会收缩未读分页；偏好保存也会刷新列表，回执需与两种请求串行。
+    if (
+      review ||
+      !canMark ||
+      keys.length === 0 ||
+      busy ||
+      savingPrefs ||
+      loading ||
+      loadingMore
+    )
+      return;
+    setBusy(true);
     try {
       await markStudioMessagesRead({ keys });
       setItems((current) =>
@@ -289,11 +300,14 @@ export function MessageCenter() {
       await loadSummary();
     } catch {
       // 标记失败保留未读态；下一次点击或「全部已读」可重试。
+    } finally {
+      setBusy(false);
     }
   }
 
   async function markAll() {
-    if (review || !canMark || busy) return;
+    if (review || !canMark || busy || savingPrefs || loading || loadingMore)
+      return;
     const scope =
       category === "all"
         ? (summary?.total_unread ?? 0)
@@ -371,6 +385,7 @@ export function MessageCenter() {
         type="button"
         className="studio-notifications"
         aria-label="打开消息中心"
+        disabled={busy}
         onClick={() => setOpen(true)}
       >
         <Icon name="bell" size={28} />
@@ -404,7 +419,14 @@ export function MessageCenter() {
                       <button
                         type="button"
                         className="mc-text-btn"
-                        disabled={busy || currentUnread === 0 || !canMark}
+                        disabled={
+                          busy ||
+                          savingPrefs ||
+                          loading ||
+                          loadingMore ||
+                          currentUnread === 0 ||
+                          !canMark
+                        }
                         onClick={() => void markAll()}
                       >
                         全部已读
@@ -413,6 +435,7 @@ export function MessageCenter() {
                         type="button"
                         className="mc-icon-btn"
                         aria-label="消息设置"
+                        disabled={busy}
                         onClick={() => setView("settings")}
                       >
                         <Icon name="settings" size={18} />
@@ -440,6 +463,7 @@ export function MessageCenter() {
                       <button
                         key={tab.value}
                         type="button"
+                        disabled={busy}
                         className={`mc-tab ${category === tab.value ? "is-active" : ""}`}
                         aria-current={
                           category === tab.value ? "true" : undefined
@@ -464,6 +488,7 @@ export function MessageCenter() {
                     <input
                       type="checkbox"
                       checked={unreadOnly}
+                      disabled={busy}
                       onChange={(event) => setUnreadOnly(event.target.checked)}
                     />
                     <span className="mc-switch" aria-hidden="true" />
@@ -478,6 +503,7 @@ export function MessageCenter() {
                     <span>{error}</span>
                     <button
                       type="button"
+                      disabled={busy}
                       onClick={() => void loadPage(0, false)}
                     >
                       重试
@@ -531,6 +557,13 @@ export function MessageCenter() {
                               <button
                                 type="button"
                                 key={item.id}
+                                disabled={
+                                  item.unread &&
+                                  (busy ||
+                                    savingPrefs ||
+                                    loading ||
+                                    loadingMore)
+                                }
                                 className={`mc-item ${item.unread ? "mc-item--unread" : "mc-item--read"} ${
                                   item.tone === "danger" ||
                                   item.tone === "warning"
@@ -618,8 +651,15 @@ export function MessageCenter() {
                         {page?.has_more ? (
                           <button
                             type="button"
-                            disabled={loadingMore}
-                            onClick={() => void loadPage(items.length, true)}
+                            disabled={busy || loading || loadingMore}
+                            onClick={() =>
+                              void loadPage(
+                                unreadOnly
+                                  ? items.filter((item) => item.unread).length
+                                  : items.length,
+                                true,
+                              )
+                            }
                           >
                             {loadingMore ? "正在加载…" : "加载更多"}
                           </button>

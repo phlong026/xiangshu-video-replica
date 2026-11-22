@@ -118,7 +118,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 发布域三表平台 CHECK 的快手值，计数不变，digest 随约束定义重算。
 # 20261120T1000_account_diagnosis（账号诊断 P0）再追加两张表并种子价目行，
 # counts/表名集/digest 均按上方 HEAD_SCHEMA_COUNTS 注释重算。
-HEAD_REVISION = "20261120T1000_account_diagnosis"
+HEAD_REVISION = "20261122T1000_replica_prompt_mode"
 
 
 @pytest.mark.pg
@@ -463,9 +463,13 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # partial 唯一），并种子 account_diagnosis 价目行；故 tables +2、columns +26、
 # foreign_keys +3、primary_keys +2、partial_indexes +2、timestamptz_columns +3，
 # 其余计数不变，digest 在空库→新 head 的 PG16 探针库重算。
+# 20261122T1000_replica_prompt_mode（长视频分镜表拆解 mode）：replica_prompt_tasks
+# 追加 mode 列（Text NOT NULL DEFAULT 'prompt'，storyboard=分镜表拆解，合法值
+# 校验在 API 层 Literal 收口，本迁移不加 CHECK），故 columns +1，其余计数与
+# 表名集不变；digest 在空库→新 head 的 PG16 探针库重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "check_constraints": 409,
-    "columns": 1612,
+    "columns": 1613,
     "foreign_keys": 224,
     "identity_columns": 0,
     "jsonb_columns": 16,
@@ -747,7 +751,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 重算（实测计数与上方 HEAD_SCHEMA_COUNTS 完全一致）。
 # 2026-11-17 快手发布：隔离 PG 探针先验证上一 head 的冻结摘要，再追加本迁移
 # 重算；表名集与计数完全相同，仅三条平台 CHECK 的定义变化。
-HEAD_SCHEMA_DIGEST = "962779d77110fc3ee2828028b2358443f7a7e2e554f938f43a571031a84a55e4"
+HEAD_SCHEMA_DIGEST = "e765573ed3272db06ec2d5deb6cfa2d4286b61c9a227d4272af7311529052b0b"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

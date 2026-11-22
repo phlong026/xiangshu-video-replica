@@ -6,11 +6,12 @@ storage 网络调用（付费调用在 worker 事务外）；轮询走只读任�
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.analysis import LONG_ANALYSIS_KIND, REPLICA_PROMPT_KIND
 from app.analysis_routes import get_video_analysis_provider
 from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
@@ -28,6 +29,7 @@ from app.replica_prompt import (
     enqueue_replica_prompt_task,
     find_latest_replica_prompt_task,
     find_latest_replica_prompt_version,
+    list_replica_prompt_versions,
     load_replica_prompt_task,
 )
 
@@ -39,6 +41,8 @@ class CreateReplicaPromptTaskRequest(BaseModel):
 
     asset_id: str = Field(min_length=1)
     reuse_existing: bool = True
+    # prompt（默认）：一段式复刻提示词；storyboard：分镜表拆解（long-analysis.v1）。
+    mode: Literal["prompt", "storyboard"] = "prompt"
 
 
 class ReplicaPromptTaskResponse(BaseModel):
@@ -162,7 +166,7 @@ def create_project_replica_prompt_task(
         )
         if request.reuse_existing:
             existing = find_latest_replica_prompt_task(
-                conn, project_id=project_id, asset_id=request.asset_id
+                conn, project_id=project_id, asset_id=request.asset_id, mode=request.mode
             )
             if existing is not None:
                 return replica_prompt_task_response(existing)
@@ -182,6 +186,7 @@ def create_project_replica_prompt_task(
             created_by_user_id=actor.id,
             duration_seconds=_measured_asset_duration(asset),
             request_id=request_id,
+            mode=request.mode,
         )
         if not created:
             return replica_prompt_task_response(row)
@@ -196,6 +201,7 @@ def create_project_replica_prompt_task(
                 "asset_id": request.asset_id,
                 "asset_sha256": str(asset["sha256"]),
                 "request_id": request_id,
+                "mode": request.mode,
             },
         )
         return replica_prompt_task_response(row)
@@ -231,8 +237,9 @@ def read_latest_replica_prompt_task(
     project_id: str,
     conn: ReadDatabase,
     actor: ShortAuthUser,
+    mode: Literal["prompt", "storyboard"] = "prompt",
 ) -> ReplicaPromptTaskResponse | None:
-    """项目内最新一次长视频拆解任务；没有历史时返回 null（前端据此判空）."""
+    """项目内指定模式的最新一次拆解任务；没有历史时返回 null."""
     require_project_access(
         conn,
         actor=actor,
@@ -242,11 +249,11 @@ def read_latest_replica_prompt_task(
     row = conn.execute(
         """
         SELECT * FROM replica_prompt_tasks
-        WHERE project_id = %s
+        WHERE project_id = %s AND mode = %s
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
-        (project_id,),
+        (project_id, mode),
     ).fetchone()
     return None if row is None else replica_prompt_task_response(row)
 
@@ -266,15 +273,19 @@ def read_latest_replica_prompt_result(
     project_id: str,
     conn: ReadDatabase,
     actor: ShortAuthUser,
+    mode: Literal["prompt", "storyboard"] = "prompt",
 ) -> ReplicaPromptVersionResponse | None:
-    """项目内最新一份长视频拆解结果；没有时返回 null."""
+    """项目内最新一份长视频拆解结果；没有时返回 null.
+
+    mode=storyboard 时返回分镜表拆解结果（long_analysis kind）。
+    """
     require_project_access(
         conn,
         actor=actor,
         project_id=project_id,
         action="replica_prompt.read",
     )
-    row = find_latest_replica_prompt_version(conn, project_id=project_id)
+    row = find_latest_replica_prompt_version(conn, project_id=project_id, mode=mode)
     if row is None:
         return None
     return ReplicaPromptVersionResponse(
@@ -289,6 +300,116 @@ def read_latest_replica_prompt_result(
         ),
         created_at=str(row["created_at"]),
     )
+
+
+@router.get("/replica-prompt-versions/{version_id}")
+def read_replica_prompt_version_by_id(
+    version_id: str,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
+) -> ReplicaPromptVersionResponse | None:
+    """按 id 读一份长视频拆解版本（拆解历史「载入此版本」用）。
+
+    只回 replica_prompt / long_analysis 两种 kind；其它 kind 404（拆解历史
+    的边界就到这里，shot_card/analysis 走各自的端点）。
+    """
+    row = conn.execute(
+        """
+        SELECT id, project_id, asset_id, kind, version_number, payload_json,
+               created_by_user_id, created_at
+        FROM versions
+        WHERE id = %s AND kind IN (%s, %s)
+        """,
+        (version_id, REPLICA_PROMPT_KIND, LONG_ANALYSIS_KIND),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            404,
+            detail={"code": "REPLICA_PROMPT_VERSION_NOT_FOUND"},
+        )
+    try:
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=str(row["project_id"]),
+            action="replica_prompt.read",
+        )
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise remap_security_denial(
+                exc,
+                status_code=404,
+                detail={"code": "REPLICA_PROMPT_VERSION_NOT_FOUND"},
+            ) from exc
+        raise
+    return ReplicaPromptVersionResponse(
+        id=str(row["id"]),
+        project_id=str(row["project_id"]),
+        asset_id=None if row["asset_id"] is None else str(row["asset_id"]),
+        kind=str(row["kind"]),
+        version_number=int(row["version_number"]),
+        payload=_version_payload(row),
+        created_by_user_id=(
+            None if row["created_by_user_id"] is None else str(row["created_by_user_id"])
+        ),
+        created_at=str(row["created_at"]),
+    )
+
+
+@router.get("/projects/{project_id}/replica-prompt/versions")
+def list_replica_prompt_history(
+    project_id: str,
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
+    limit: int = 30,
+) -> dict[str, object]:
+    """项目内长视频拆解历史（prompt 与 storyboard 两种 kind，新→旧）。
+
+    轻量元数据：不带 payload（分镜表正文按 id 走 latest/read 端点取）。
+    """
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="replica_prompt.read",
+    )
+    bounded = max(1, min(limit, 100))
+    rows = list_replica_prompt_versions(conn, project_id=project_id, limit=bounded)
+    return _replica_prompt_history_response(rows)
+
+
+@router.get("/replica-prompt/versions")
+def list_account_replica_prompt_history(
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
+    limit: int = 30,
+) -> dict[str, object]:
+    """列出账号可访问的长视频历史，不依赖客户端记住上一次项目."""
+    # 与项目读权限一致：管理员/审计员全局可读，共享钱包不扩大普通账号项目范围。
+    owner_user_id = None if actor.role in {"admin", "auditor"} else actor.id
+    rows = list_replica_prompt_versions(
+        conn, owner_user_id=owner_user_id, limit=max(1, min(limit, 100))
+    )
+    return _replica_prompt_history_response(rows)
+
+
+def _replica_prompt_history_response(rows: list[BusinessRow]) -> dict[str, object]:
+    return {
+        "items": [
+            {
+                "id": str(row["id"]),
+                "project_id": str(row["project_id"]),
+                "asset_id": None if row["asset_id"] is None else str(row["asset_id"]),
+                "kind": str(row["kind"]),
+                "version_number": int(row["version_number"]),
+                "created_by_user_id": (
+                    None if row["created_by_user_id"] is None else str(row["created_by_user_id"])
+                ),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+    }
 
 
 def _version_payload(row: BusinessRow) -> dict[str, Any]:

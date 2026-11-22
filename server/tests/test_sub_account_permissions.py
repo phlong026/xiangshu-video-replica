@@ -1,6 +1,6 @@
 """CUSTOMER-CENTER-V2 Phase 3b — 子账号功能权限矩阵（audit-40 权限矩阵）。
 
-``sub_account_permissions``（迁移 20260922T1800）给子账号限定「12 类业务权限
+``sub_account_permissions``（迁移 20260922T1800）给子账号限定「业务权限
 + 2 项系统权限」，**无行 = 全允许**（与额度表同款 fail-open，存量子账号零回填）。
 本文件按四层锁住这份契约：
 
@@ -71,7 +71,7 @@ PERMISSIONS_DB = "t_sub_account_permission"
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、
 # 20260926T0000 爆款首页策展排行与 20260925T1400 计费触发器追加修复，
 # 故链尾为该值。
-_HEAD_REVISION = "20261120T1000_account_diagnosis"
+_HEAD_REVISION = "20261122T1000_replica_prompt_mode"
 _PRIOR_REVISION = "20260921T1200_sub_account_quotas"
 
 
@@ -368,6 +368,10 @@ def test_downgrade_guard_refuses_while_permission_rows_exist(permission_dsn: str
 
 def test_normalize_businesses_sorts_dedupes_and_rejects_unknown() -> None:
     assert normalize_businesses(["oral", "video", "oral"]) == ["video", "oral"]
+    assert normalize_businesses(["account_diagnosis", "viral_data"]) == [
+        "viral_data",
+        "account_diagnosis",
+    ]
     assert normalize_businesses([]) == []
     assert normalize_businesses(ALL_BUSINESSES) == ALL_BUSINESSES
     with pytest.raises(ValueError, match="未知业务权限键"):
@@ -380,6 +384,11 @@ def test_is_all_permissions_requires_the_full_grant() -> None:
     )
     assert not is_all_permissions(
         businesses=ALL_BUSINESSES[:-1], allow_api_keys=True, allow_publish_accounts=True
+    )
+    assert not is_all_permissions(
+        businesses=[key for key in ALL_BUSINESSES if key != "account_diagnosis"],
+        allow_api_keys=True,
+        allow_publish_accounts=True,
     )
     assert not is_all_permissions(
         businesses=ALL_BUSINESSES, allow_api_keys=False, allow_publish_accounts=True
@@ -417,6 +426,7 @@ def test_feature_gate_codes_and_passthroughs(permission_dsn: str) -> None:
     with psycopg.connect(permission_dsn, autocommit=True) as conn:
         # 无行 = 直通；未映射的内部科目（cos 等）不看权限行。
         enforce_sub_account_feature(conn, actor_id="s1", service="asr")
+        enforce_sub_account_feature(conn, actor_id="s1", service="account_diagnosis")
         enforce_sub_account_feature(conn, actor_id="s2", service="cos")
 
         _insert_permissions(conn, "s2", businesses=["oral"])
@@ -432,6 +442,7 @@ def test_feature_gate_codes_and_passthroughs(permission_dsn: str) -> None:
         # 母账号直通：即便有人绕过 API 给它插一行。
         _insert_permissions(conn, "m1", businesses=[])
         enforce_sub_account_feature(conn, actor_id="m1", service="asr")
+        enforce_sub_account_feature(conn, actor_id="m1", service="account_diagnosis")
 
 
 def test_api_keys_and_publish_gates(permission_dsn: str) -> None:
@@ -591,6 +602,49 @@ def test_put_permissions_upserts_then_full_grant_clears(client, route_state: str
             ).fetchone()[0]
             == 0
         )
+
+
+@pytest.mark.parametrize(
+    "allow_api_keys,allow_publish_accounts", [(True, True), (False, True), (True, False)]
+)
+def test_put_diagnosis_permission_and_revoke_with_legacy_grants(
+    client, route_state: str, allow_api_keys: bool, allow_publish_accounts: bool
+) -> None:
+    master_headers, _ = _master_session(client, "perm_diag_master")
+    sub = _create_sub(client, master_headers, username="perm_diag_sub").json()
+
+    granted = _set_permissions(
+        client, master_headers, sub["id"], businesses=["viral_data", "account_diagnosis"]
+    )
+    assert granted.status_code == 200, granted.text
+    assert granted.json()["permissions"]["businesses"] == ["viral_data", "account_diagnosis"]
+
+    # 旧配置即使打开两项系统开关，也仍缺少新增业务，不能折叠删行而变成全开。
+    legacy_businesses = [key for key in ALL_BUSINESSES if key != "account_diagnosis"]
+    revoked = _set_permissions(
+        client,
+        master_headers,
+        sub["id"],
+        businesses=legacy_businesses,
+        allow_api_keys=allow_api_keys,
+        allow_publish_accounts=allow_publish_accounts,
+    )
+    assert revoked.status_code == 200, revoked.text
+    expected = {
+        "businesses": legacy_businesses,
+        "allow_api_keys": allow_api_keys,
+        "allow_publish_accounts": allow_publish_accounts,
+    }
+    assert revoked.json()["permissions"] == expected
+    listing = client.get(SUB_ACCOUNTS_PATH, headers=master_headers).json()["sub_accounts"]
+    assert listing[0]["permissions"] == expected
+    with psycopg.connect(route_state) as conn:
+        permissions = read_sub_account_permissions(conn, sub["id"])
+        assert permissions is not None
+        assert "account_diagnosis" not in permissions.businesses
+        with pytest.raises(HTTPException) as blocked:
+            enforce_sub_account_feature(conn, actor_id=sub["id"], service="account_diagnosis")
+        assert blocked.value.status_code == 403
 
 
 def test_put_permissions_rejects_unknown_keys_and_guards(client) -> None:

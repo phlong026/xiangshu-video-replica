@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -304,6 +305,114 @@ def test_single_read_receipt_and_category_watermark(messages_db: str) -> None:
                 "SELECT user_id FROM announcement_reads WHERE announcement_id = 'a1'"
             ).fetchone()
         assert row is not None and row[0] == "u1"
+    finally:
+        from app.main import app
+
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("category", ["task", "billing"])
+def test_updated_message_becomes_unread_again_and_can_be_read_again(
+    messages_db: str, category: str
+) -> None:
+    _seed(messages_db)
+    client = _client("u1")
+    try:
+        if category == "billing":
+            response = client.put(
+                "/api/studio/notification-preferences", json={"billing_style": "daily"}
+            )
+            assert response.status_code == 200
+        endpoint = f"/api/studio/messages?category={category}"
+        initial = client.get(endpoint).json()["items"]
+        assert len(initial) == 1
+        message_id = initial[0]["id"]
+        assert initial[0]["unread"] is True
+
+        read = client.post("/api/studio/messages/read", json={"keys": [message_id]})
+        assert read.status_code == 200
+        assert read.json()["marked"] == 1
+        assert _by_id(client.get(endpoint).json()["items"])[message_id]["unread"] is False
+
+        # 读回执落库后再发生业务更新；使用数据库时钟保证事件在回执之后，无需 sleep。
+        with psycopg.connect(messages_db, autocommit=True) as pg:
+            if category == "task":
+                pg.execute(
+                    "UPDATE generation_tasks SET status = 'SUCCEEDED', "
+                    "updated_at = clock_timestamp()::text WHERE id = 't-bad'"
+                )
+            else:
+                pg.execute(
+                    "INSERT INTO wallet_transactions "
+                    "(id, user_id, type, available_delta, reserved_delta, "
+                    "idempotency_key, auth_source, created_at) "
+                    "VALUES ('new-conversion','u1','CONVERSION',1,0,"
+                    "'idem-new-conversion','internal',clock_timestamp()::text)"
+                )
+
+        updated = _by_id(client.get(endpoint).json()["items"])[message_id]
+        assert updated["occurred_at"] > initial[0]["occurred_at"]
+        assert updated["unread"] is True
+        unread = client.get(f"{endpoint}&unread_only=true").json()["items"]
+        assert message_id in _by_id(unread)
+        assert client.get("/api/studio/messages/summary").json()["by_category"][category] == 1
+
+        # 同一个消息 ID 再次已读必须推进回执，否则修复比较时间后仍会永久留红点。
+        reread = client.post("/api/studio/messages/read", json={"keys": [message_id]})
+        assert reread.status_code == 200
+        # marked 保留「新建回执数」口径，更新时间不新增消息键。
+        assert reread.json()["marked"] == 0
+        assert _by_id(client.get(endpoint).json()["items"])[message_id]["unread"] is False
+        assert client.get("/api/studio/messages/summary").json()["by_category"][category] == 0
+    finally:
+        from app.main import app
+
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    "receipt,category,global_cutoff,unread",
+    [
+        (None, -1, 1, False),
+        (-1, 1, None, False),
+        (1, -1, -2, False),
+        (-1, -2, -3, True),
+    ],
+    ids=["global-newest", "category-newest", "receipt-newest", "event-newest"],
+)
+def test_message_read_state_uses_the_latest_applicable_cutoff(
+    messages_db: str,
+    receipt: int | None,
+    category: int,
+    global_cutoff: int | None,
+    unread: bool,
+) -> None:
+    _seed(messages_db)
+    client = _client("u1")
+    try:
+        item = client.get("/api/studio/messages?category=task").json()["items"][0]
+        occurred_at = datetime.fromisoformat(item["occurred_at"])
+        watermarks = {"task": (occurred_at + timedelta(minutes=category)).isoformat()}
+        if global_cutoff is not None:
+            watermarks["all"] = (occurred_at + timedelta(minutes=global_cutoff)).isoformat()
+        receipts = (
+            {item["id"]: (occurred_at + timedelta(minutes=receipt)).isoformat()}
+            if receipt is not None
+            else {}
+        )
+        with psycopg.connect(messages_db, autocommit=True) as pg:
+            pg.execute(
+                "INSERT INTO studio_notification_preferences(user_id, prefs_json) "
+                "VALUES ('u1', %s) ON CONFLICT (user_id) DO UPDATE SET "
+                "prefs_json=excluded.prefs_json",
+                (json.dumps({"receipts": receipts, "read_before": watermarks}),),
+            )
+
+        updated = client.get("/api/studio/messages?category=task").json()
+        assert updated["items"][0]["unread"] is unread
+        assert updated["by_category"]["task"] == int(unread)
+        filtered = client.get("/api/studio/messages?category=task&unread_only=true").json()
+        assert [message["id"] for message in filtered["items"]] == ([item["id"]] if unread else [])
     finally:
         from app.main import app
 

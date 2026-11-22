@@ -247,6 +247,244 @@ it("仅看未读为空时给出空态，可一键回到全部", async () => {
   );
 });
 
+it.each([
+  [true, false],
+  [true, true],
+  [false, false],
+])(
+  "标记消息后分页不漏项（仅未读=%s，回执失败=%s）",
+  async (unreadOnly, readFails) => {
+    let messages = Array.from({ length: 25 }, (_, index) => ({
+      ...announcementItem,
+      id: `announcement:page-${index + 1}`,
+      title: `分页公告${String(index + 1).padStart(2, "0")}`,
+      detail: `第 ${index + 1} 条公告全文。`,
+    }));
+    const unreadCount = () => messages.filter((item) => item.unread).length;
+    mocks.getStudioMessagesSummary.mockImplementation(async () => ({
+      ...summary(),
+      total_unread: unreadCount(),
+      by_category: {
+        task: 0,
+        billing: 0,
+        announcement: unreadCount(),
+        security: 0,
+      },
+    }));
+    mocks.getStudioMessages.mockImplementation(
+      async (request: {
+        unreadOnly: boolean;
+        offset: number;
+        limit: number;
+      }) => {
+        const filtered = request.unreadOnly
+          ? messages.filter((item) => item.unread)
+          : messages;
+        return {
+          ...page(
+            filtered.slice(request.offset, request.offset + request.limit),
+          ),
+          total: filtered.length,
+          unread_count: unreadCount(),
+          has_more: request.offset + request.limit < filtered.length,
+        };
+      },
+    );
+    mocks.markStudioMessagesRead.mockImplementation(
+      async ({ keys }: { keys: string[] }) => {
+        if (readFails) throw new Error("回执暂不可用");
+        messages = messages.map((item) =>
+          keys.includes(item.id) ? { ...item, unread: false } : item,
+        );
+        return { marked: keys.length, read_before: {} };
+      },
+    );
+    render(<MessageCenter />);
+    fireEvent.click(screen.getByRole("button", { name: "打开消息中心" }));
+    if (unreadOnly) fireEvent.click(screen.getByRole("checkbox"));
+    await screen.findByText("分页公告20");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /分页公告01/ }));
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "加载更多" }));
+    await screen.findByText("分页公告25");
+
+    const expected = unreadOnly
+      ? messages.filter((item) => item.unread)
+      : messages;
+    for (const item of expected) {
+      expect(screen.getAllByText(item.title)).toHaveLength(1);
+    }
+    const firstMessage = screen.queryByRole("button", {
+      name: /分页公告01/,
+    });
+    // 公告可以暂留供用户阅读展开的正文，但成功回执后不能继续显示未读点。
+    if (!readFails && firstMessage) {
+      expect(firstMessage.querySelector(".mc-item__dot")).toBeNull();
+    }
+  },
+);
+
+it("翻页与已读回执在途时串行处理，后续未读消息不遗漏", async () => {
+  let messages = Array.from({ length: 45 }, (_, index) => ({
+    ...announcementItem,
+    id: `announcement:serial-${index + 1}`,
+    title: `串行公告${String(index + 1).padStart(2, "0")}`,
+    detail: `第 ${index + 1} 条串行公告全文。`,
+  }));
+  let resolveNextPage!: (value: StudioMessagesPage) => void;
+  const nextPage = new Promise<StudioMessagesPage>((resolve) => {
+    resolveNextPage = resolve;
+  });
+  let resolveRead!: () => void;
+  const readReceipt = new Promise<void>((resolve) => {
+    resolveRead = resolve;
+  });
+  mocks.getStudioMessages.mockImplementation(
+    async (request: { unreadOnly: boolean; offset: number; limit: number }) => {
+      if (request.offset === 20) return nextPage;
+      const filtered = request.unreadOnly
+        ? messages.filter((item) => item.unread)
+        : messages;
+      return {
+        ...page(filtered.slice(request.offset, request.offset + request.limit)),
+        total: filtered.length,
+        has_more: request.offset + request.limit < filtered.length,
+      };
+    },
+  );
+  mocks.markStudioMessagesRead.mockImplementation(
+    async ({ keys }: { keys: string[] }) => {
+      await readReceipt;
+      messages = messages.map((item) =>
+        keys.includes(item.id) ? { ...item, unread: false } : item,
+      );
+      return { marked: keys.length, read_before: {} };
+    },
+  );
+  render(<MessageCenter />);
+  fireEvent.click(screen.getByRole("button", { name: "打开消息中心" }));
+  fireEvent.click(screen.getByRole("checkbox"));
+  await screen.findByText("串行公告20");
+
+  fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  const firstMessage = screen.getByRole("button", { name: /串行公告01/ });
+  expect(firstMessage).toBeDisabled();
+  fireEvent.click(firstMessage);
+  expect(mocks.markStudioMessagesRead).not.toHaveBeenCalled();
+  await act(async () => {
+    resolveNextPage({
+      ...page(messages.slice(20, 40)),
+      total: 45,
+      has_more: true,
+    });
+  });
+  await screen.findByText("串行公告40");
+
+  fireEvent.click(firstMessage);
+  await screen.findByText("第 1 条串行公告全文。");
+  const callsBeforeReceipt = mocks.getStudioMessages.mock.calls.length;
+  const loadMore = screen.getByRole("button", { name: "加载更多" });
+  expect(loadMore).toBeDisabled();
+  fireEvent.click(loadMore);
+  expect(mocks.getStudioMessages).toHaveBeenCalledTimes(callsBeforeReceipt);
+  await act(async () => resolveRead());
+  await waitFor(() => expect(loadMore).toBeEnabled());
+  expect(firstMessage.querySelector(".mc-item__dot")).toBeNull();
+  expect(screen.getByText("第 1 条串行公告全文。")).toBeInTheDocument();
+
+  fireEvent.click(loadMore);
+  await screen.findByText("串行公告45");
+  for (const item of messages.filter((item) => item.unread)) {
+    expect(screen.getAllByText(item.title)).toHaveLength(1);
+  }
+});
+
+it("偏好保存触发的迟到列表刷新不回滚已读状态或漏掉未读消息", async () => {
+  let messages = Array.from({ length: 25 }, (_, index) => ({
+    ...announcementItem,
+    id: `announcement:refresh-${index + 1}`,
+    title: `刷新公告${String(index + 1).padStart(2, "0")}`,
+  }));
+  let resolveSave!: () => void;
+  const saving = new Promise<void>((resolve) => {
+    resolveSave = resolve;
+  });
+  let resolveRead!: () => void;
+  const receipt = new Promise<void>((resolve) => {
+    resolveRead = resolve;
+  });
+  let deferRefresh = false;
+  let resolveRefresh!: () => void;
+  mocks.getStudioMessages.mockImplementation(
+    (request: { unreadOnly: boolean; offset: number; limit: number }) => {
+      const filtered = request.unreadOnly
+        ? messages.filter((item) => item.unread)
+        : messages;
+      const result = {
+        ...page(filtered.slice(request.offset, request.offset + request.limit)),
+        total: filtered.length,
+        has_more: request.offset + request.limit < filtered.length,
+      };
+      if (deferRefresh && request.offset === 0) {
+        deferRefresh = false;
+        return new Promise<StudioMessagesPage>((resolve) => {
+          // 保留请求时的快照，让刷新晚于已读回执返回。
+          resolveRefresh = () => resolve(result);
+        });
+      }
+      return Promise.resolve(result);
+    },
+  );
+  mocks.updateStudioMessagePreferences.mockImplementation(
+    async (value: unknown) => {
+      await saving;
+      return value;
+    },
+  );
+  mocks.markStudioMessagesRead.mockImplementation(
+    async ({ keys }: { keys: string[] }) => {
+      await receipt;
+      messages = messages.map((item) =>
+        keys.includes(item.id) ? { ...item, unread: false } : item,
+      );
+      return { marked: keys.length, read_before: {} };
+    },
+  );
+  render(<MessageCenter />);
+  fireEvent.click(screen.getByRole("button", { name: "打开消息中心" }));
+  fireEvent.click(screen.getByRole("checkbox"));
+  await screen.findByText("刷新公告20");
+  fireEvent.click(screen.getByRole("button", { name: "消息设置" }));
+  fireEvent.click(await screen.findByRole("button", { name: "每日汇总" }));
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: /刷新公告01/ }));
+  deferRefresh = true;
+  await act(async () => resolveSave());
+  await act(async () => resolveRead());
+  await act(async () => resolveRefresh());
+  fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  await screen.findByText("刷新公告25");
+  for (const item of messages.filter((item) => item.unread)) {
+    expect(screen.getAllByText(item.title)).toHaveLength(1);
+  }
+
+  // 保存与其刷新均完成后，公告仍可正常展开并提交一次已读回执。
+  const firstMessage = screen.getByRole("button", { name: /刷新公告01/ });
+  fireEvent.click(firstMessage);
+  await waitFor(() =>
+    expect(firstMessage.querySelector(".mc-item__dot")).toBeNull(),
+  );
+  expect(mocks.markStudioMessagesRead).toHaveBeenCalledTimes(1);
+  expect(
+    screen.getByText(announcementItem.detail as string),
+  ).toBeInTheDocument();
+});
+
 it("审核员不能标记已读；设置页静音类别会提交偏好", async () => {
   mocks.useStudio.mockReturnValue({
     ...studio,

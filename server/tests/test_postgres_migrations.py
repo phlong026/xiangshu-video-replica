@@ -65,7 +65,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # recharge_orders.closed_at 与 CLOSED 扫描部分索引，链尾随之前移。
 # 20261117T1000_kuaishou_publish_platform 仅扩发布域三张表的平台 CHECK。
 # 20261120T1000_account_diagnosis 新建账号诊断报告与免费额度两张表并种子价目行。
-HEAD_REVISION = "20261120T1000_account_diagnosis"
+HEAD_REVISION = "20261122T1000_replica_prompt_mode"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(
