@@ -20,7 +20,13 @@ from test_customer_registration import (
     registration_dsn,
 )
 
-from app.account_diagnosis import _load_reference_pool, availability, create_diagnosis
+from app.account_diagnosis import (
+    _load_prior_actions,
+    _load_reference_pool,
+    availability,
+    create_diagnosis,
+    get_report,
+)
 from app.account_diagnosis_entitlement import (
     claim_free_quota,
     current_device_id,
@@ -300,6 +306,150 @@ def test_report_references_exclude_hidden_videos(client, route_state, monkeypatc
         assert [row["videoId"] for row in result["report"]["referenceWorks"]] == [
             "public-reference"
         ]
+
+
+def _seed_prior_report(
+    raw: psycopg.Connection,
+    owner_id: str,
+    *,
+    report_id: str = "prior-report",
+    sec_user_id: str = "resolved-by-unique-id",
+    unique_id: str = "old_handle",
+    platform: str = "douyin",
+    status: str = "SUCCEEDED",
+    age_days: int = 2,
+) -> None:
+    raw.execute(
+        "INSERT INTO account_diagnosis_reports "
+        "(id, user_id, wallet_owner_id, platform, sec_user_id, unique_id, input_url, "
+        "status, report_json, narrative_json, created_at, completed_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'prior-input', %s, %s, %s, "
+        "now()-%s::interval, now()-%s::interval)",
+        (
+            report_id,
+            owner_id,
+            owner_id,
+            platform,
+            sec_user_id,
+            unique_id,
+            status,
+            json.dumps(
+                {
+                    "actionCards": [
+                        {"title": "上次粉丝目标", "metric": "followers", "targetValue": 60000}
+                    ],
+                    "metrics": {"followers": 70000},
+                }
+            ),
+            # 真实报告的机器目标保存在 report_json，解读文案没有 actionCards。
+            json.dumps({"summary": "上次解读", "actions": [{"title": "文案中的简短建议"}]}),
+            f"{age_days} days",
+            f"{age_days} days",
+        ),
+    )
+
+
+@pytest.mark.parametrize("lookup", ["link", "unique_id"])
+def test_prior_review_reads_report_snapshot_for_the_resolved_account(
+    client, route_state, monkeypatch, lookup: str
+) -> None:
+    _, user_id = account(client, "diag_prior_review")
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings", lambda conn: _FakeClient()
+    )
+    target = (
+        _target("resolved-by-unique-id")
+        if lookup == "link"
+        else AccountTarget(platform="douyin", sec_uid=None, unique_id="zsj001")
+    )
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+        _seed_prior_report(raw, user_id)
+        result = create_diagnosis(conn, user_id=user_id, target=target, input_url=target.identity)
+        assert result["status"] == "SUCCEEDED"
+        assert result["cached"] is False
+
+    expected = [
+        {
+            "title": "上次粉丝目标",
+            "status": "worse",
+            "note": "当前 50000 较上次 70000 进一步下滑（目标 60000）",
+        }
+    ]
+    assert result["report"]["priorReview"] == expected
+    # 从新连接读取落库报告，覆盖 _run → report_json → get_report 的完整链路。
+    with psycopg.connect(route_state) as raw:
+        stored = get_report(
+            BusinessConnection.postgres(raw), user_id=user_id, report_id=result["id"]
+        )
+    assert stored["report"]["priorReview"] == expected
+
+
+def test_prior_review_excludes_the_current_report(client, route_state) -> None:
+    _, user_id = account(client, "diag_prior_exclude")
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_prior_report(raw, user_id)
+        _seed_prior_report(raw, user_id, report_id="current-report", age_days=0)
+        raw.execute(
+            "UPDATE account_diagnosis_reports SET report_json=%s WHERE id='current-report'",
+            (
+                json.dumps(
+                    {"actionCards": [{"title": "当前报告"}], "metrics": {"followers": 50000}}
+                ),
+            ),
+        )
+        prior = _load_prior_actions(
+            conn,
+            owner_id=user_id,
+            sec_user_id="resolved-by-unique-id",
+            exclude_report_id="current-report",
+        )
+        assert prior is not None
+        assert prior["cards"][0]["title"] == "上次粉丝目标"
+        assert prior["priorMetrics"] == {"followers": 70000}
+
+
+@pytest.mark.parametrize(
+    "history", ["other-account", "other-wallet", "other-platform", "failed", "expired"]
+)
+def test_prior_review_does_not_cross_history_boundaries(
+    client, route_state, monkeypatch, history: str
+) -> None:
+    _, user_id = account(client, "diag_prior_boundary")
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings", lambda conn: _FakeClient()
+    )
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+        owner_id = user_id
+        if history == "other-wallet":
+            owner_id = "other-prior-owner"
+            raw.execute(
+                "INSERT INTO users(id, username, display_name) VALUES (%s, %s, '其他客户')",
+                (owner_id, owner_id),
+            )
+        _seed_prior_report(
+            raw,
+            owner_id,
+            sec_user_id="another-account"
+            if history == "other-account"
+            else "resolved-by-unique-id",
+            unique_id="zsj001",
+            platform="wechat_channels" if history == "other-platform" else "douyin",
+            status="FAILED" if history == "failed" else "SUCCEEDED",
+            age_days=61 if history == "expired" else 2,
+        )
+        result = create_diagnosis(
+            conn,
+            user_id=user_id,
+            target=AccountTarget(platform="douyin", sec_uid=None, unique_id="zsj001"),
+            input_url="zsj001",
+        )
+        assert result["status"] == "SUCCEEDED"
+        assert result["report"]["priorReview"] is None
 
 
 def test_free_quota_is_claimed_once_per_user_and_device(client, route_state) -> None:

@@ -544,40 +544,37 @@ def _load_reference_pool(conn: BusinessConnection) -> list[dict[str, Any]]:
 
 
 def _load_prior_actions(
-    conn: BusinessConnection, *, owner_id: str, target: AccountTarget, exclude_report_id: str
+    conn: BusinessConnection, *, owner_id: str, sec_user_id: str, exclude_report_id: str
 ) -> dict[str, Any] | None:
     """取上一次成功报告的行动卡（含机器目标），供修复回顾对比."""
 
+    # 链接和抖音号都按取数后解析出的稳定账号标识匹配，改名不切断历史。
     row = conn.execute(
-        "SELECT narrative_json, report_json FROM account_diagnosis_reports "
+        "SELECT report_json FROM account_diagnosis_reports "
         "WHERE wallet_owner_id=%s AND platform='douyin' AND status='SUCCEEDED' "
         "AND id <> %s "
-        "AND (sec_user_id IS NOT DISTINCT FROM %s) "
-        "AND (unique_id IS NOT DISTINCT FROM %s) "
+        "AND sec_user_id=%s "
         "AND completed_at >= now() - interval '60 days' "
         "ORDER BY completed_at DESC LIMIT 1",
-        (owner_id, exclude_report_id, target.sec_uid, target.unique_id),
+        (owner_id, exclude_report_id, sec_user_id),
     ).fetchone()
     if row is None:
         return None
-    narrative = row[0]
-    if not narrative:
+    report_json = row[0]
+    if not report_json:
         return None
     try:
-        payload = json.loads(narrative)
+        payload = json.loads(report_json)
     except (json.JSONDecodeError, TypeError):
         return None
     cards = payload.get("actionCards") if isinstance(payload, dict) else None
     if not isinstance(cards, list) or not cards:
         return None
-    report_json = row[1]
-    prior_metrics: dict[str, Any] = {}
-    if report_json:
-        try:
-            prior_metrics = json.loads(report_json).get("metrics") or {}
-        except (json.JSONDecodeError, TypeError):
-            prior_metrics = {}
-    return {"cards": cards, "priorMetrics": prior_metrics}
+    prior_metrics = payload.get("metrics")
+    return {
+        "cards": cards,
+        "priorMetrics": prior_metrics if isinstance(prior_metrics, dict) else {},
+    }
 
 
 def _prior_review(
@@ -680,7 +677,7 @@ def _run(
     prior = _load_prior_actions(
         conn,
         owner_id=owner_id,
-        target=target,
+        sec_user_id=profile.sec_user_id,
         exclude_report_id=report_id,
     )
     review = _prior_review(prior, result.metrics)
