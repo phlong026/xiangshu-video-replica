@@ -2529,6 +2529,7 @@ describe("V1.4 创作页面", () => {
           "src",
           "https://cdn.example/final.mp4",
         );
+        expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
         fireEvent.click(screen.getByRole("button", { name: /下载成片/ }));
         await waitFor(() =>
           expect(replicaApi.downloadGenerationTaskResult).toHaveBeenCalledWith(
@@ -2544,6 +2545,88 @@ describe("V1.4 创作页面", () => {
         ).not.toBeInTheDocument();
       }
       expect(screen.queryByText(/已等待/)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    { status: "running", remainingStatus: "RUNNING" },
+    { status: "partial", remainingStatus: "FAILED" },
+    { status: "uncertain", remainingStatus: "SUBMISSION_UNCERTAIN" },
+  ] as const)(
+    "批次一条成功且其余为 $remainingStatus 时保留播放器与批次说明",
+    async ({ status, remainingStatus }) => {
+      replicaApi.getGenerationBatch.mockResolvedValue({
+        tasks: [
+          {
+            id: "successful-task",
+            status: "SUCCEEDED",
+            direct_result_available: true,
+            result_asset_id: null,
+          },
+          ...Array.from({ length: 3 }, (_, index) => ({
+            id: `remaining-task-${index}`,
+            status: remainingStatus,
+            direct_result_available: false,
+            result_asset_id: null,
+          })),
+        ],
+      } as unknown as never);
+      replicaApi.createGenerationTaskPreviewUrl.mockResolvedValue(
+        "https://cdn.example/first-result.mp4",
+      );
+      const value = studio();
+      value.state = {
+        ...value.state,
+        page: "video",
+        draft: {
+          ...value.state.draft,
+          firstFrameId: undefined,
+          videoBatchId: "mixed-batch",
+          count: 4,
+        },
+      };
+      value.data = {
+        ...value.data,
+        tasks: [
+          {
+            id: "mixed-batch",
+            backendKind: "generation_batch",
+            backendId: "mixed-batch",
+            title: "庭院四条批次",
+            type: "视频生成",
+            status,
+            deliverableCount: 1,
+            progress: 25,
+            submitted: new Date(Date.now() - 70_000).toISOString(),
+            credits:
+              status === "partial" ? { charged: 8, refunded: 24 } : undefined,
+          },
+        ],
+      };
+      useStudio.mockReturnValue(value);
+      render(<VideoPage />);
+
+      expect(await screen.findByLabelText("成片预览")).toHaveAttribute(
+        "src",
+        "https://cdn.example/first-result.mp4",
+      );
+      expect(screen.getByRole("button", { name: /下载成片/ })).toBeEnabled();
+      if (status === "running") {
+        expect(
+          screen.getByRole("progressbar", { name: "生成进度" }),
+        ).toHaveAttribute("value", "25");
+        expect(screen.getByText(/已等待/)).toBeInTheDocument();
+      } else if (status === "partial") {
+        expect(screen.getByText(/其余未生成成功/)).toBeInTheDocument();
+        expect(screen.getByText(/已自动退回 24 积分/)).toHaveTextContent(
+          "实扣 8 积分",
+        );
+      } else {
+        expect(screen.getByText(/其余任务状态待确认/)).toBeInTheDocument();
+        expect(
+          screen.getByText(/确认未成功后，暂扣的积分会自动退回/),
+        ).toBeInTheDocument();
+      }
     },
   );
 

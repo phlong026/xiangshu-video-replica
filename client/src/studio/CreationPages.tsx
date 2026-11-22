@@ -5825,22 +5825,27 @@ export function VideoPage() {
             />
           ) : videoTask ? (
             taskHasDeliverable(videoTask) ? (
-              // 有可交付成片：就地播放 + 下载，不再把用户推去任务中心。
-              <StudioResultPreview
-                batchId={
-                  videoTask.backendId ?? videoTask.batchId ?? videoTask.id
-                }
-                onOpenTasks={() => navigate("tasks")}
-                poster={
-                  firstFrame ? (
-                    <Media
-                      alt="首帧预览"
-                      asset={firstFrame}
-                      className="creation-preview-poster-media"
-                    />
-                  ) : undefined
-                }
-              />
+              <>
+                {/* 已出片可播放，剩余任务的状态与计费说明仍需保留。 */}
+                <StudioResultPreview
+                  batchId={
+                    videoTask.backendId ?? videoTask.batchId ?? videoTask.id
+                  }
+                  onOpenTasks={() => navigate("tasks")}
+                  poster={
+                    firstFrame ? (
+                      <Media
+                        alt="首帧预览"
+                        asset={firstFrame}
+                        className="creation-preview-poster-media"
+                      />
+                    ) : undefined
+                  }
+                />
+                {videoTask.status !== "completed" ? (
+                  <VideoProgressView task={videoTask} />
+                ) : null}
+              </>
             ) : (
               <VideoProgressView
                 poster={
