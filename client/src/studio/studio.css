@@ -1438,6 +1438,12 @@ html:has(.studio-shell) {
   margin: 55px 0 18px;
   font-size: var(--font-body);
 }
+.studio-restore-prompt--collapsed {
+  justify-content: flex-end;
+  padding: 0;
+  border: 0;
+  background: none;
+}
 /* 顶上已有恢复提示时错开外边距，避免两条中间空出一大截。 */
 .studio-restore-prompt + .studio-errors,
 .studio-restore-prompt ~ .studio-restore-error {

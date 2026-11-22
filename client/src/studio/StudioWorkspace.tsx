@@ -470,8 +470,12 @@ export function StudioWorkspace({
   const currentUserRoleRef = useRef(currentUser.role);
   const permissionGenerationRef = useRef(0);
   // LEFTOVER-ON-OPEN：读回来但还没回填的上次草稿，等用户决定恢复还是放弃。
-  const [pendingRestore, setPendingRestore] =
-    useState<CloudDraftRestore | null>(null);
+  const [restoreCandidate, setPendingRestore] = useState<
+    (CloudDraftRestore & { accountId: string }) | null
+  >(null);
+  // 换号后的首帧仍可能留着旧 state，不能先替新账号记下「已提醒」。
+  const pendingRestore =
+    restoreCandidate?.accountId === currentUser.id ? restoreCandidate : null;
   // 提醒横幅每天只打扰一次、展示 5 秒后自动收起：草稿本身原样保留，当天
   // 不再重复提示，次日登录再提示一次。手动「恢复/放弃」不受影响。
   const [restorePromptVisible, setRestorePromptVisible] = useState(false);
@@ -605,6 +609,7 @@ export function StudioWorkspace({
   const saveOperationRef = useRef(0);
   const saveMountedRef = useRef(false);
   const saveAccountRef = useRef(currentUser.id);
+  const draftAccountGenerationRef = useRef(0);
   const savePermissionGenerationRef = useRef(permissionGenerationRef.current);
   const saveScopeRef = useRef(savedDraftScope(currentUser.id, state.draft));
   const renderedSaveScope = savedDraftScope(currentUser.id, state.draft);
@@ -616,6 +621,11 @@ export function StudioWorkspace({
       savePermissionGenerationRef.current === renderedPermissionGeneration
     )
       return;
+    if (saveAccountRef.current !== currentUser.id) {
+      // 单独记录换号，既挡住 A→B→A 的旧回执，也不把普通编辑当成换号。
+      draftAccountGenerationRef.current += 1;
+      setDiscardBusy(false);
+    }
     if (
       saveAccountRef.current !== currentUser.id ||
       currentUserRoleRef.current === "auditor"
@@ -767,7 +777,6 @@ export function StudioWorkspace({
   // 直接 setState 覆盖 draft，于是每次打开软件都带着上次的项目、来源视频和
   // 分镜进来——复刻页拿到 projectId 就自动把上次的拆解结果拉回来，用户永远
   // 看不到干净的首屏，也没有任何入口能把它清掉。
-  // biome-ignore lint/correctness/useExhaustiveDependencies: loadCloudDraft 读的是「当前会话那个账号」的草稿，依赖是语义上的而非语法上的——换账号必须重读，否则提示里挂的还是上一个人的内容。
   useEffect(() => {
     if (review) return;
     let active = true;
@@ -784,7 +793,7 @@ export function StudioWorkspace({
         if (saved.length)
           setState((previous) => ({ ...previous, savedScripts: saved }));
         if (restore && !draftTouchedRef.current && shouldPromptRestore(restore))
-          setPendingRestore(restore);
+          setPendingRestore({ ...restore, accountId: currentUser.id });
       })
       .catch(() => {});
     return () => {
@@ -806,21 +815,20 @@ export function StudioWorkspace({
       const now = new Date();
       return `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
     };
-    const lastShownDay = window.localStorage.getItem(
-      "studio.restorePrompt.lastShown",
-    );
+    const storageKey = `studio.restorePrompt.lastShown/${encodeURIComponent(currentUser.id)}`;
+    const lastShownDay = window.localStorage.getItem(storageKey);
     if (lastShownDay === todayKey()) {
       setRestorePromptVisible(false);
       return;
     }
-    window.localStorage.setItem("studio.restorePrompt.lastShown", todayKey());
+    window.localStorage.setItem(storageKey, todayKey());
     setRestorePromptVisible(true);
     const timer = window.setTimeout(
       () => setRestorePromptVisible(false),
       5_000,
     );
     return () => window.clearTimeout(timer);
-  }, [review, pendingRestore]);
+  }, [review, pendingRestore, currentUser.id]);
 
   /** 已排队/在途的自动保存必须先作废，否则删掉云端那行之后，
    * 迟到的一次 PUT 会把同一份旧草稿原样写回来。 */
@@ -836,9 +844,14 @@ export function StudioWorkspace({
    * 不再把旧内容写回服务端（真正的写回由服务端墓碑围栏兜底拒绝）。 */
   const discardStoredDraft = useCallback(async () => {
     cancelPendingDraftSave();
+    const accountGeneration = draftAccountGenerationRef.current;
     const revision = await discardCloudDraft();
     cloudDraftQueue.discard(currentUser.id);
-    lastDraftRevisionRef.current = revision;
+    if (
+      mountedRef.current &&
+      accountGeneration === draftAccountGenerationRef.current
+    )
+      lastDraftRevisionRef.current = revision;
     clearCreationDraftResidue(currentUser.id);
   }, [cancelPendingDraftSave, cloudDraftQueue, currentUser.id]);
 
@@ -846,10 +859,15 @@ export function StudioWorkspace({
    * 失败只提示，不阻塞页面自己的清空动作。 */
   const discardSavedDraft = () => {
     if (review || currentUserRoleRef.current === "auditor") return;
+    const accountGeneration = draftAccountGenerationRef.current;
     draftTouchedRef.current = false;
     setPendingRestore(null);
     void discardStoredDraft().catch(() => {
-      if (mountedRef.current) notify("云端上次内容未能清除，请稍后重试。");
+      if (
+        mountedRef.current &&
+        accountGeneration === draftAccountGenerationRef.current
+      )
+        notify("云端上次内容未能清除，请稍后重试。");
     });
   };
 
@@ -874,20 +892,24 @@ export function StudioWorkspace({
   // 提示还挂着时用户完全可能已经开始写新的了。
   const discardPendingRestore = () => {
     if (currentUserRoleRef.current === "auditor" || discardBusy) return;
+    const accountGeneration = draftAccountGenerationRef.current;
+    const isCurrentAccount = () =>
+      mountedRef.current &&
+      accountGeneration === draftAccountGenerationRef.current;
     setDiscardBusy(true);
     setRestoreError("");
     void discardStoredDraft()
       .then(() => {
-        if (!mountedRef.current) return;
+        if (!isCurrentAccount()) return;
         setPendingRestore(null);
         notify("上次内容已清除，这次从空白开始。");
       })
       .catch(() => {
-        if (mountedRef.current)
+        if (isCurrentAccount())
           setRestoreError("未能清除上次内容，请检查网络后重试。");
       })
       .finally(() => {
-        if (mountedRef.current) setDiscardBusy(false);
+        if (isCurrentAccount()) setDiscardBusy(false);
       });
   };
   // 自动保存始终跟随最新草稿：导入项目、任务快照回填等不经 patchDraft 的
@@ -2477,14 +2499,21 @@ export function StudioWorkspace({
             </button>
           </div>
           <div className="studio-stage">
-            {pendingRestore && restorePromptVisible && (
-              <div className="studio-restore-prompt" role="status">
-                <Icon name="info" />
-                <span>
-                  上次还有没做完的创作
-                  {savedAtLabel && `（保存于 ${savedAtLabel}）`}
-                  。不恢复就从空白开始。
-                </span>
+            {pendingRestore && (
+              <div
+                className={`studio-restore-prompt${restorePromptVisible ? "" : " studio-restore-prompt--collapsed"}`}
+                role={restorePromptVisible ? "status" : undefined}
+              >
+                {restorePromptVisible && (
+                  <>
+                    <Icon name="info" />
+                    <span>
+                      上次还有没做完的创作
+                      {savedAtLabel && `（保存于 ${savedAtLabel}）`}
+                      。不恢复就从空白开始。
+                    </span>
+                  </>
+                )}
                 <Button variant="outline" onClick={acceptPendingRestore}>
                   恢复上次内容
                 </Button>
