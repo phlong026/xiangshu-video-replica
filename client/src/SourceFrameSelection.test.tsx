@@ -20,17 +20,22 @@ import {
 } from "./api";
 import { SourceFrameSelection } from "./SourceFrameSelection";
 
-vi.mock("./api", () => ({
-  cancelSourceFrameTask: vi.fn(),
-  confirmSourceFrame: vi.fn(),
-  extractSourceFrames: vi.fn(),
-  getAssetDownloadUrl: vi.fn(),
-  getLatestProjectSourceFrameTask: vi.fn(),
-  getLatestProjectSourceFrameSelection: vi.fn(),
-  getLatestProjectSourceFrames: vi.fn(),
-  readSourceFrameCandidates: vi.fn((version) => version.payload),
-  waitForSourceFrameTask: vi.fn(),
-}));
+vi.mock("./api", async (importOriginal) => {
+  const { SourceFrameTaskFailedError } =
+    await importOriginal<typeof import("./api")>();
+  return {
+    SourceFrameTaskFailedError,
+    cancelSourceFrameTask: vi.fn(),
+    confirmSourceFrame: vi.fn(),
+    extractSourceFrames: vi.fn(),
+    getAssetDownloadUrl: vi.fn(),
+    getLatestProjectSourceFrameTask: vi.fn(),
+    getLatestProjectSourceFrameSelection: vi.fn(),
+    getLatestProjectSourceFrames: vi.fn(),
+    readSourceFrameCandidates: vi.fn((version) => version.payload),
+    waitForSourceFrameTask: vi.fn(),
+  };
+});
 
 const candidatesVersion = {
   id: "source-candidates-1",
@@ -230,6 +235,58 @@ describe("SourceFrameSelection", () => {
       screen.getByAltText("候选源画面 1"),
     );
   });
+
+  it.each(["success", "failure"])(
+    "locks both extraction actions during the initial candidate read and releases them after %s",
+    async (outcome) => {
+      let resolveCandidates:
+        | ((value: typeof candidatesVersion) => void)
+        | undefined;
+      let rejectCandidates: ((reason: Error) => void) | undefined;
+      vi.mocked(getLatestProjectSourceFrames).mockReturnValueOnce(
+        new Promise<typeof candidatesVersion>((resolve, reject) => {
+          resolveCandidates = resolve;
+          rejectCandidates = reject;
+        }),
+      );
+      render(
+        <SourceFrameSelection
+          candidatesAlwaysVisible
+          projectId="project-1"
+          referenceAssetId="reference-1"
+          simplified
+          videoDurationSeconds={12}
+        />,
+      );
+      const automatic = screen.getByRole("button", { name: "重新取帧" });
+      const manual = screen.getByRole("button", { name: "取出画面" });
+
+      expect(screen.getByText("正在读取候选源画面")).toBeInTheDocument();
+      expect(automatic).toBeDisabled();
+      expect(manual).toBeDisabled();
+      fireEvent.click(automatic);
+      fireEvent.click(manual);
+      expect(extractSourceFrames).not.toHaveBeenCalled();
+
+      await act(async () => {
+        if (outcome === "success") resolveCandidates?.(candidatesVersion);
+        else rejectCandidates?.(new Error("候选服务暂不可用"));
+      });
+
+      if (outcome === "success") {
+        expect(await screen.findByAltText("当前原画面")).toBeVisible();
+      } else {
+        expect(await screen.findByText("候选服务暂不可用")).toBeVisible();
+      }
+      await waitFor(() => {
+        expect(
+          screen.queryByText("正在读取候选源画面"),
+        ).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "重新取帧" })).toBeEnabled();
+        expect(screen.getByRole("button", { name: "取出画面" })).toBeEnabled();
+      });
+    },
+  );
 
   it("keeps the replica row layout free of captions and the status line", async () => {
     render(
@@ -887,6 +944,44 @@ describe("SourceFrameSelection", () => {
         [0, 3.6, 6, 8.4, 10.8],
       ),
     );
+  });
+
+  it("自动取帧入队后停止重提失败仍释放加载状态并允许再次恢复", async () => {
+    vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
+    vi.mocked(extractSourceFrames)
+      .mockResolvedValueOnce(sourceFrameTask)
+      .mockRejectedValueOnce(new Error("再次提交取帧失败"))
+      .mockResolvedValueOnce({ ...sourceFrameTask, id: "retry-task" });
+    vi.mocked(waitForSourceFrameTask).mockReturnValueOnce(
+      new Promise<SourceFrameTask>(() => undefined),
+    );
+    render(
+      <SourceFrameSelection
+        candidatesAlwaysVisible
+        projectId="project-1"
+        referenceAssetId="reference-1"
+        simplified
+        videoDurationSeconds={12}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "停止并重新取帧" }),
+    );
+
+    expect(await screen.findByText("再次提交取帧失败")).toBeVisible();
+    expect(cancelSourceFrameTask).toHaveBeenCalledWith(sourceFrameTask.id);
+    expect(screen.queryByText("正在读取候选源画面")).not.toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "重新开始取帧" });
+    expect(retry).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重新取帧" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "取出画面" })).toBeEnabled();
+    fireEvent.click(retry);
+
+    expect(await screen.findByAltText("当前原画面")).toBeVisible();
+    expect(extractSourceFrames).toHaveBeenCalledTimes(3);
+    expect(waitForSourceFrameTask).toHaveBeenLastCalledWith("retry-task");
+    expect(screen.queryByText("再次提交取帧失败")).not.toBeInTheDocument();
+    expect(screen.queryByText("正在读取候选源画面")).not.toBeInTheDocument();
   });
 
   it("offers a direct retry after the latest task failed", async () => {

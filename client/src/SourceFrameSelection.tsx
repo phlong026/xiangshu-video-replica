@@ -191,6 +191,8 @@ export function SourceFrameSelection({
               return;
             }
             setActiveTask(task);
+            // 任务已入队，后续等待由 isSubmitting 表达，停止重提不能遗留旧 loader。
+            setIsLoading(false);
             enqueuePending = false;
             setBusy(false);
             setStatus(sourceFrameTaskStatus(task));
@@ -590,7 +592,7 @@ export function SourceFrameSelection({
         <div className="source-frame-toolbar">
           <button
             className="secondary-button"
-            disabled={isSubmitting || !referenceAssetId}
+            disabled={contextLoading || isSubmitting || !referenceAssetId}
             onClick={handleExtract}
             type="button"
           >
@@ -616,7 +618,7 @@ export function SourceFrameSelection({
           </label>
           <button
             className="secondary-button"
-            disabled={isSubmitting || !referenceAssetId}
+            disabled={contextLoading || isSubmitting || !referenceAssetId}
             onClick={() => void handleManualExtract()}
             type="button"
           >
@@ -641,7 +643,7 @@ export function SourceFrameSelection({
               </p>
               <button
                 className="secondary-button"
-                disabled={isSubmitting || !referenceAssetId}
+                disabled={contextLoading || isSubmitting || !referenceAssetId}
                 onClick={handleExtract}
                 type="button"
               >
@@ -667,7 +669,7 @@ export function SourceFrameSelection({
               </label>
               <button
                 className="secondary-button"
-                disabled={isSubmitting || !referenceAssetId}
+                disabled={contextLoading || isSubmitting || !referenceAssetId}
                 onClick={() => void handleManualExtract()}
                 type="button"
               >
@@ -830,7 +832,7 @@ export function SourceFrameSelection({
       !activeTask ? (
         <button
           className="secondary-button"
-          disabled={isSubmitting || !referenceAssetId}
+          disabled={contextLoading || isSubmitting || !referenceAssetId}
           onClick={() => void handleRestart()}
           type="button"
         >
