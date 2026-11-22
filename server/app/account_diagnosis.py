@@ -21,6 +21,11 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from app.account_diagnosis_actions import (
+    build_action_cards,
+    build_calendar,
+    pick_reference_works,
+)
 from app.account_diagnosis_entitlement import (
     claim_free_quota,
     current_device_id,
@@ -31,6 +36,7 @@ from app.account_diagnosis_entitlement import (
 )
 from app.account_diagnosis_llm import (
     build_llm_narrative,
+    enrich_action_cards,
     load_narrative_llm_config,
     narrative_llm_disabled,
 )
@@ -517,12 +523,108 @@ def _load_xingtu_metrics(client: Any, sec_user_id: str) -> dict[str, DouyinXingt
         return {}
 
 
+def _load_reference_pool(conn: BusinessConnection) -> list[dict[str, Any]]:
+    """已发布爆款池候选：只取管理端已上架、未删除的抖音内容，按热度取 60 条."""
+
+    rows = conn.execute(
+        "SELECT video_id, title, author, likes FROM viral_videos "
+        "WHERE platform='douyin' AND deleted_at IS NULL AND collection_published=1 "
+        "ORDER BY likes DESC NULLS LAST LIMIT 60"
+    ).fetchall()
+    return [
+        {
+            "video_id": str(row[0]),
+            "title": str(row[1] or ""),
+            "author": str(row[2] or ""),
+            "likes": int(row[3] or 0),
+        }
+        for row in rows
+    ]
+
+
+def _load_prior_actions(
+    conn: BusinessConnection, *, owner_id: str, target: AccountTarget, exclude_report_id: str
+) -> dict[str, Any] | None:
+    """取上一次成功报告的行动卡（含机器目标），供修复回顾对比."""
+
+    row = conn.execute(
+        "SELECT narrative_json, report_json FROM account_diagnosis_reports "
+        "WHERE wallet_owner_id=%s AND platform='douyin' AND status='SUCCEEDED' "
+        "AND id <> %s "
+        "AND (sec_user_id IS NOT DISTINCT FROM %s) "
+        "AND (unique_id IS NOT DISTINCT FROM %s) "
+        "AND completed_at >= now() - interval '60 days' "
+        "ORDER BY completed_at DESC LIMIT 1",
+        (owner_id, exclude_report_id, target.sec_uid, target.unique_id),
+    ).fetchone()
+    if row is None:
+        return None
+    narrative = row[0]
+    if not narrative:
+        return None
+    try:
+        payload = json.loads(narrative)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    cards = payload.get("actionCards") if isinstance(payload, dict) else None
+    if not isinstance(cards, list) or not cards:
+        return None
+    report_json = row[1]
+    prior_metrics: dict[str, Any] = {}
+    if report_json:
+        try:
+            prior_metrics = json.loads(report_json).get("metrics") or {}
+        except (json.JSONDecodeError, TypeError):
+            prior_metrics = {}
+    return {"cards": cards, "priorMetrics": prior_metrics}
+
+
+def _prior_review(
+    prior: dict[str, Any] | None, current_metrics: dict[str, Any]
+) -> list[dict[str, Any]] | None:
+    """把上次行动卡与本次指标对比，产出修复回顾清单（fixed/open/worse）."""
+
+    if prior is None:
+        return None
+    prior_metrics = prior.get("priorMetrics") or {}
+    review: list[dict[str, Any]] = []
+    for card in prior.get("cards", []):
+        if not isinstance(card, dict):
+            continue
+        title = str(card.get("title") or "")
+        metric = card.get("metric")
+        target_value = card.get("targetValue")
+        if not metric or not isinstance(target_value, (int, float)):
+            review.append(
+                {"title": title, "status": "manual", "note": "人工自查项，请对照上次建议确认"}
+            )
+            continue
+        current = current_metrics.get(metric)
+        if not isinstance(current, (int, float)):
+            review.append({"title": title, "status": "open", "note": "本次样本不足，未能自动判定"})
+            continue
+        if current >= target_value:
+            note = f"当前 {current} 已达目标 {target_value}"
+            status = "fixed"
+        elif prior_metrics.get(metric) is not None and current < float(prior_metrics[metric]):
+            note = (
+                f"当前 {current} 较上次 {prior_metrics[metric]} 进一步下滑（目标 {target_value}）"
+            )
+            status = "worse"
+        else:
+            note = f"当前 {current}，目标 {target_value}，仍需继续执行"
+            status = "open"
+        review.append({"title": title, "status": status, "note": note})
+    return review or None
+
+
 def _run(
     conn: BusinessConnection,
     *,
     report_id: str,
     target: AccountTarget,
     is_free: bool,
+    owner_id: str,
 ) -> dict[str, Any]:
     collected_at = _now()
     conn.execute(
@@ -569,9 +671,27 @@ def _run(
         "works": _works_document(posts),
         "l2": _l2_document(xingtu),
     }
+
+    # 行动卡引擎（规则层）：短板 → 可执行动作卡（问题锚点/可计算归因/待自查/
+    # 分步做法/Before-After 话术/目标值/优先级），再补同赛道参考爆款与修复回顾。
+    report_dict = report_to_dict(result)
+    cards = build_action_cards(_snapshot(profile, posts, collected_at=collected_at), report_dict)
+    prior = _load_prior_actions(
+        conn,
+        owner_id=owner_id,
+        target=target,
+        exclude_report_id=report_id,
+    )
+    review = _prior_review(prior, result.metrics)
+    calendar = build_calendar([card.to_dict() for card in cards], collected_at)
+    refs = pick_reference_works(
+        _load_reference_pool(conn), _snapshot(profile, posts, collected_at=collected_at)
+    )
+
     narrative = build_narrative(result)
 
     # LLM 解读：打分不变，只替换解读文案；未配置/失败/开关关闭都回落规则。
+    cards_dict = [card.to_dict() for card in cards]
     if not narrative_llm_disabled():
         llm_config = load_narrative_llm_config(conn)
         if llm_config is not None:
@@ -583,6 +703,30 @@ def _run(
             )
             if llm is not None:
                 narrative = {**narrative, **llm}
+            # 行动卡话术升级：LLM 把规则步骤重写成贴合账号类目的具体做法
+            # （含 Before/After 话术）；逐卡校验，未命中的卡保留规则文案。
+            enriched = enrich_action_cards(
+                base_url=llm_config[0],
+                api_key=llm_config[1],
+                model=llm_config[2],
+                cards=cards_dict,
+                titles=[v.title for v in posts if v.title][:12],
+            )
+            if enriched:
+                for card in cards_dict:
+                    patch = enriched.get(card["key"])
+                    if patch:
+                        card["steps"] = patch["steps"]
+                        if patch.get("beforeAfter"):
+                            card["beforeAfter"] = patch["beforeAfter"]
+                        card["generatedBy"] = "llm"
+                    else:
+                        card["generatedBy"] = "rules"
+
+    document["actionCards"] = cards_dict
+    document["referenceWorks"] = [ref.to_dict() for ref in refs]
+    document["priorReview"] = review
+    document["calendar"] = [week.to_dict() for week in calendar]
 
     conn.execute(
         "UPDATE account_diagnosis_reports SET "
@@ -702,7 +846,7 @@ def create_diagnosis(
             source_id=report_id,
             units=1,
         )
-    return _run(conn, report_id=report_id, target=target, is_free=is_free)
+    return _run(conn, report_id=report_id, target=target, is_free=is_free, owner_id=owner)
 
 
 def get_report(conn: BusinessConnection, *, user_id: str, report_id: str) -> dict[str, Any]:

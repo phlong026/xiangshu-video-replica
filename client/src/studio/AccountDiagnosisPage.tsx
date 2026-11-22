@@ -509,7 +509,9 @@ export function AccountDiagnosisPage() {
             <section className="diag-narrative">
               <h4>诊断结论</h4>
               <p>{narrative.summary}</p>
-              {narrative.actions.length > 0 ? (
+              {/* 有行动卡时不再渲染旧版 actions 清单，避免同内容双入口 */}
+              {!reportDoc.actionCards?.length &&
+              narrative.actions.length > 0 ? (
                 <ol className="diag-actions">
                   {narrative.actions.map((action) => (
                     <li
@@ -582,6 +584,181 @@ export function AccountDiagnosisPage() {
               </tbody>
             </table>
           </section>
+
+          {(reportDoc.referenceWorks ?? []).length > 0 ? (
+            <section className="diag-refs">
+              <h4>同赛道参考爆款</h4>
+              <p className="diag-section-sub">
+                从已上架爆款池按标题相似度与热度挑选；「一键拆解」带链接直达工作台自动发起复刻导入。
+              </p>
+              <div className="ref-list">
+                {(reportDoc.referenceWorks ?? []).map((ref) => (
+                  <div className="ref-item" key={ref.videoId}>
+                    <div className="ref-score">参考分 {ref.score}</div>
+                    <div className="ref-title2" title={ref.title}>
+                      {ref.title || "（无标题）"}
+                    </div>
+                    <div className="ref-author">
+                      @{ref.author || "未知"} · 赞 {formatCount(ref.likes)}
+                    </div>
+                    <Button
+                      variant="quiet"
+                      onClick={() =>
+                        startReplica(ref.videoId, ref.title || "参考爆款")
+                      }
+                    >
+                      一键拆解
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {(reportDoc.actionCards ?? []).length > 0 ? (
+            <section className="diag-action-cards">
+              <h4>优先修复行动卡</h4>
+              <p className="diag-section-sub">
+                按「影响面 ×
+                执行难度」排序；每条含数据锚点、归因、分步做法与下次诊断的验收指标。勾选「已执行」只影响本机记录，下次诊断自动按指标核对修复情况。
+              </p>
+              {(reportDoc.actionCards ?? []).map((card) => {
+                const doneKey = `diag-action-done:${result?.id}:${card.key}`;
+                return (
+                  <article
+                    key={card.key}
+                    className={`diag-action-card ${card.priority.toLowerCase()}`}
+                  >
+                    <div className="action-head">
+                      <span className="prio">
+                        {card.priority}
+                        {card.priority === "P0"
+                          ? " · 本周必做"
+                          : card.priority === "P1"
+                            ? " · 两周内"
+                            : " · 顺手改"}
+                      </span>
+                      <h5>{card.title}</h5>
+                      <span className="dim-tag">{card.dimension}</span>
+                      {card.generatedBy === "llm" ? (
+                        <span className="gen-tag">AI 定制</span>
+                      ) : null}
+                    </div>
+                    <p className="problem">{card.problem}</p>
+                    {card.evidence.length > 0 ? (
+                      <ul className="evidence">
+                        {card.evidence.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {card.selfChecks.length > 0 ? (
+                      <ul className="self-checks">
+                        {card.selfChecks.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <ol className="steps">
+                      {card.steps.map((step) => (
+                        <li key={`${card.key}-step-${step.slice(0, 24)}`}>
+                          {step}
+                        </li>
+                      ))}
+                    </ol>
+                    {card.beforeAfter.map((pair) => (
+                      <div
+                        className="ba"
+                        key={`${card.key}-ba-${pair.before.slice(0, 12)}`}
+                      >
+                        <div className="before">
+                          <span className="tag">BEFORE · 现在的做法</span>
+                          {pair.before}
+                        </div>
+                        <div className="after">
+                          <span className="tag">AFTER · 改成</span>
+                          {pair.after}
+                        </div>
+                      </div>
+                    ))}
+                    <p className="target">{card.target}</p>
+                    <label className="done-chk">
+                      <input
+                        type="checkbox"
+                        defaultChecked={localStorage.getItem(doneKey) === "1"}
+                        onChange={(event) => {
+                          localStorage.setItem(
+                            doneKey,
+                            event.target.checked ? "1" : "0",
+                          );
+                        }}
+                      />
+                      已执行（下次诊断自动核对）
+                    </label>
+                  </article>
+                );
+              })}
+            </section>
+          ) : null}
+
+          {(reportDoc.priorReview ?? []).length > 0 ? (
+            <section className="diag-review">
+              <h4>上次修复回顾</h4>
+              <ul className="review">
+                {(reportDoc.priorReview ?? []).map((item) => (
+                  <li
+                    key={item.title}
+                    className={
+                      item.status === "fixed"
+                        ? "ok"
+                        : item.status === "worse"
+                          ? "warn"
+                          : ""
+                    }
+                  >
+                    <span className="ic">
+                      {item.status === "fixed"
+                        ? "✓"
+                        : item.status === "worse"
+                          ? "△"
+                          : item.status === "manual"
+                            ? "✎"
+                            : "○"}
+                    </span>
+                    <span>
+                      <b>{item.title}</b>
+                      <span className="meta2">{item.note}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {(reportDoc.calendar ?? []).length > 0 ? (
+            <section className="diag-calendar">
+              {(reportDoc.calendar ?? []).map((week) => (
+                <div key={week.label}>
+                  <h4>{week.label}</h4>
+                  <div className="cal">
+                    {["一", "二", "三", "四", "五", "六", "日"].map((wd) => (
+                      <div className="wd" key={`${week.label}-wd-${wd}`}>
+                        {wd}
+                      </div>
+                    ))}
+                    {week.days.map((day) => (
+                      <div className="cell" key={day.date}>
+                        <div className="day">{day.date.slice(5)}</div>
+                        <div className={day.rest ? "task rest" : "task"}>
+                          {day.task}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </section>
+          ) : null}
         </article>
       ) : null}
 
