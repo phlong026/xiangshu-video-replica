@@ -3828,9 +3828,10 @@ export async function cancelReplicaPromptTask(
 
 export async function getLatestReplicaPromptTask(
   projectId: string,
+  mode: "prompt" | "storyboard" = "storyboard",
 ): Promise<ReplicaPromptTask | null> {
   return requestApiJson<ReplicaPromptTask | null>(
-    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt-tasks/latest`,
+    `/api/projects/${encodeURIComponent(projectId)}/replica-prompt-tasks/latest?mode=${mode}`,
     "读取长视频拆解任务失败",
   );
 }

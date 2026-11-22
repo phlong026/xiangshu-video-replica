@@ -166,7 +166,7 @@ def create_project_replica_prompt_task(
         )
         if request.reuse_existing:
             existing = find_latest_replica_prompt_task(
-                conn, project_id=project_id, asset_id=request.asset_id
+                conn, project_id=project_id, asset_id=request.asset_id, mode=request.mode
             )
             if existing is not None:
                 return replica_prompt_task_response(existing)
@@ -237,8 +237,9 @@ def read_latest_replica_prompt_task(
     project_id: str,
     conn: ReadDatabase,
     actor: ShortAuthUser,
+    mode: Literal["prompt", "storyboard"] = "prompt",
 ) -> ReplicaPromptTaskResponse | None:
-    """项目内最新一次长视频拆解任务；没有历史时返回 null（前端据此判空）."""
+    """项目内指定模式的最新一次拆解任务；没有历史时返回 null."""
     require_project_access(
         conn,
         actor=actor,
@@ -248,11 +249,11 @@ def read_latest_replica_prompt_task(
     row = conn.execute(
         """
         SELECT * FROM replica_prompt_tasks
-        WHERE project_id = %s
+        WHERE project_id = %s AND mode = %s
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
-        (project_id,),
+        (project_id, mode),
     ).fetchone()
     return None if row is None else replica_prompt_task_response(row)
 
