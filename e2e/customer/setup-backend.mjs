@@ -138,6 +138,8 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
   const apiEnv = {
     ...process.env,
     VIDEO_REPLICA_DATABASE_URL: dsn,
+    CUSTOMER_E2E_DATABASE_URL: dsn,
+    PYTHONPATH: serverDir,
     VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY: keys.ACTIVATION,
     VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY: keys.FINGERPRINT,
     VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY: keys.ADMIN_SESSION,
@@ -163,9 +165,10 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
     [
       "-m",
       "uvicorn",
-      "app.main:app",
+      "customer_e2e_backend:create_app",
+      "--factory",
       "--app-dir",
-      serverDir,
+      __dirname,
       "--host",
       "127.0.0.1",
       "--port",

@@ -16,11 +16,9 @@ code. This is the same shape
 test_customer_recharge.py::recharge_config_fixture uses. Without it the route
 answers 503 ZPAY_CONFIGURATION_INVALID.
 
-The SES seeding opens the email lane: the bind-email card only offers binding
-when a mail provider is configured (``service_available``), and the forgot
-flow requires one too. The credentials are throwaway — every actual send
-fails, which ``deliver_quietly`` logs and ignores; the specs read the code
-back from the database with read_email_code.py instead of from a mailbox.
+邮件测试配置保留绑定与找回密码的 ``service_available`` 边界。凭据仅供本轮测试，
+setup-backend 启动的专用工厂在本地确认模板投递，不发起外网请求；spec 仍通过
+read_email_code.py 从测试库取得真实签发的验证码，完成绑定与密码重置验证。
 
 The plaintext codes are printed once at the end so the Playwright spec can
 drive the activation UI with them, and the Fernet key the ZPay config was
@@ -117,9 +115,7 @@ def main() -> None:
             """,
             (encrypted_config,),
         )
-        # 邮箱功能（绑定 + 找回密码）以「已配置发信」为开关，这里把 ses
-        # 通道拧开；真发信必失败，由 deliver_quietly 记警告，spec 用
-        # read_email_code.py 从库里反推验证码。
+        # 保留「已配置发信」边界；专用 E2E 工厂只替换投递传输，验证码仍真实入库。
         conn.execute(
             """
             INSERT INTO provider_settings (
@@ -135,9 +131,7 @@ def main() -> None:
         # 客户 E2E 没有 COS 凭据，素材/资产上传会 503 STORAGE_PROVIDER_FORBIDDEN。
         # 改用本地持久盘（配套 VIDEO_REPLICA_STORAGE_ROOT，见 setup-backend.mjs），
         # 让上传、归档等触达存储的链路在隔离环境里可跑。
-        conn.execute(
-            "UPDATE runtime_settings SET active_storage_provider = 'local' WHERE id = 1"
-        )
+        conn.execute("UPDATE runtime_settings SET active_storage_provider = 'local' WHERE id = 1")
         # 充值套餐（RECHARGE-PACKAGES-20260922）：充值对话框的档位由管理员配置的套餐
         # 提供（写死的 100/300/500 预设已移除）；recharge.spec.mjs 点选 100 元档位走
         # 真实套餐下单链路，需要一行启用套餐。名称以「100 元」开头以匹配该 spec 的
