@@ -7,7 +7,11 @@ import {
 } from "@testing-library/react";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { GenerationVersionState, PromptOptimizeResult } from "../api";
+import type {
+  GenerationVersion,
+  GenerationVersionState,
+  PromptOptimizeResult,
+} from "../api";
 import {
   DEFAULT_OPENING_ACTION,
   type FinalReplicaSnapshot,
@@ -254,6 +258,175 @@ describe("最终提示词后置", () => {
     await Promise.resolve();
     expect(api.latestPrompt).not.toHaveBeenCalled();
   });
+  function legacyFinalHistory() {
+    const input = {
+      projectId: "project",
+      scriptText: "新文案",
+      firstFrameAssetId: "frame",
+      duration: 4,
+      resolution: "768P" as const,
+      ratio: "adaptive" as const,
+      shotCardVersionId: "shots",
+    };
+    const snapshot = {
+      inputKey: replicaInputKey(input),
+      versionId: "saved-final",
+      scriptVersionId: "saved-script",
+      shotCardVersionId: "shots",
+    } satisfies FinalReplicaSnapshot;
+    const version = {
+      id: snapshot.versionId,
+      project_id: input.projectId,
+      asset_id: null,
+      kind: "prompt",
+      version_number: 1,
+      created_by_user_id: "owner",
+      created_at: "2026-11-20T00:00:00Z",
+      payload: {
+        final_composition: true,
+        prompt_text: "服务端保存的正文",
+        confirmed_script_text: input.scriptText,
+        first_frame_asset_id: input.firstFrameAssetId,
+        output_duration_seconds: input.duration,
+        resolution: input.resolution,
+        ratio: input.ratio,
+        shot_card_version_id: snapshot.shotCardVersionId,
+        script_version_id: snapshot.scriptVersionId,
+        timeline_policy: "scale_confirmed",
+        opening_action: "保存时先看向镜头，再自然起步。",
+      },
+    } satisfies GenerationVersion;
+    return { snapshot, version };
+  }
+
+  it("旧指纹快照从相同版本补齐压缩和开场，保留草稿版本及正文", async () => {
+    const { snapshot, version } = legacyFinalHistory();
+    api.latestPrompt.mockResolvedValue({
+      version,
+      stale: false,
+      stale_reasons: [],
+    });
+    const onPrepared = vi.fn();
+    render(
+      <FinalHarness
+        initialSnapshot={snapshot}
+        initialText="草稿中继续编辑的正文"
+        sourceDuration={8}
+        sourceFrameTimestamp={1.2}
+        onPrepared={onPrepared}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("将 8.0 秒内容压缩到 4 秒")).toBeChecked(),
+    );
+    expect(screen.getByLabelText("开场衔接")).toHaveValue(
+      version.payload.opening_action,
+    );
+    expect(screen.getByLabelText("最终正文")).toHaveValue(
+      "草稿中继续编辑的正文",
+    );
+    expect(screen.getByText(/已就绪/)).toBeInTheDocument();
+    expect(onPrepared).not.toHaveBeenCalled();
+    expect(api.compile).not.toHaveBeenCalled();
+  });
+
+  it("旧指纹快照不从另一终稿版本借用选择", async () => {
+    const { snapshot, version } = legacyFinalHistory();
+    api.latestPrompt.mockResolvedValue({
+      version: { ...version, id: "newer-final" },
+      stale: false,
+      stale_reasons: [],
+    });
+    const onPrepared = vi.fn();
+    render(
+      <FinalHarness
+        initialSnapshot={snapshot}
+        initialText="草稿中继续编辑的正文"
+        sourceDuration={8}
+        sourceFrameTimestamp={1.2}
+        onPrepared={onPrepared}
+      />,
+    );
+    await act(() => Promise.resolve());
+
+    expect(screen.getByLabelText("将 8.0 秒内容压缩到 4 秒")).not.toBeChecked();
+    expect(screen.getByLabelText("开场衔接")).toHaveValue(
+      DEFAULT_OPENING_ACTION,
+    );
+    expect(screen.getByLabelText("最终正文")).toHaveValue(
+      "草稿中继续编辑的正文",
+    );
+    expect(screen.getByText(/已就绪/)).toBeInTheDocument();
+    expect(onPrepared).not.toHaveBeenCalled();
+  });
+
+  it.each(["opening", "scale", "text"])(
+    "旧指纹快照的迟到历史不覆盖用户编辑 %s",
+    async (choice) => {
+      const { snapshot, version } = legacyFinalHistory();
+      let resolveHistory: ((value: GenerationVersionState) => void) | undefined;
+      api.latestPrompt.mockReturnValue(
+        new Promise<GenerationVersionState>((resolve) => {
+          resolveHistory = resolve;
+        }),
+      );
+      const onPrepared = vi.fn();
+      render(
+        <FinalHarness
+          initialSnapshot={snapshot}
+          initialText="草稿正文"
+          sourceDuration={8}
+          sourceFrameTimestamp={1.2}
+          onPrepared={onPrepared}
+        />,
+      );
+      await act(() => Promise.resolve());
+      if (choice === "opening") {
+        fireEvent.change(screen.getByLabelText("开场衔接"), {
+          target: { value: "用户刚改为先转身再起步。" },
+        });
+      } else if (choice === "scale") {
+        fireEvent.click(screen.getByLabelText("将 8.0 秒内容压缩到 4 秒"));
+      }
+      fireEvent.change(screen.getByLabelText("最终正文"), {
+        target: { value: "用户正在编辑的正文" },
+      });
+      await act(async () => {
+        resolveHistory?.({
+          version: {
+            ...version,
+            payload: { ...version.payload, timeline_policy: "preserve" },
+          },
+          stale: false,
+          stale_reasons: [],
+        });
+      });
+
+      expect(screen.getByLabelText("开场衔接")).toHaveValue(
+        choice === "opening"
+          ? "用户刚改为先转身再起步。"
+          : choice === "text"
+            ? version.payload.opening_action
+            : DEFAULT_OPENING_ACTION,
+      );
+      expect(
+        (screen.getByLabelText("将 8.0 秒内容压缩到 4 秒") as HTMLInputElement)
+          .checked,
+      ).toBe(choice === "scale");
+      expect(screen.getByLabelText("最终正文")).toHaveValue(
+        "用户正在编辑的正文",
+      );
+      if (choice === "text") {
+        expect(screen.getByText(/已就绪/)).toBeInTheDocument();
+        expect(onPrepared).not.toHaveBeenCalled();
+      } else {
+        expect(screen.getByText(/待合成/)).toBeInTheDocument();
+        expect(onPrepared).toHaveBeenCalledExactlyOnceWith(null);
+      }
+    },
+  );
+
   it.each([
     { sourceFrameTimestamp: 1.2, historyOutcome: "failure" },
     { sourceFrameTimestamp: -1, historyOutcome: "failure" },

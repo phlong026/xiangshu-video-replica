@@ -5161,6 +5161,94 @@ describe("视频复刻（模块①）", () => {
     expect(screen.getByText(/^待合成/)).toBeInTheDocument();
   });
 
+  it("旧指纹终稿草稿恢复历史选择时保留选中版本和人工正文", async () => {
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    const input = {
+      projectId: "project-1",
+      scriptText: value.state.draft.script.text,
+      firstFrameAssetId: "frame-1",
+      duration: 4,
+      resolution: "768P" as const,
+      ratio: "16:9" as const,
+      shotCardVersionId: "scv-saved",
+    };
+    const finalSnapshot = {
+      inputKey: replicaInputKey(input),
+      versionId: "draft-final",
+      scriptVersionId: "draft-script",
+      shotCardVersionId: "scv-saved",
+    };
+    const promptVersion = {
+      id: "draft-final",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "prompt",
+      version_number: 1,
+      created_by_user_id: "customer-1",
+      created_at: "2026-11-20T00:00:00Z",
+      payload: {
+        final_composition: true,
+        prompt_text: "服务端保存的正文",
+        confirmed_script_text: input.scriptText,
+        first_frame_asset_id: input.firstFrameAssetId,
+        output_duration_seconds: input.duration,
+        resolution: input.resolution,
+        ratio: input.ratio,
+        shot_card_version_id: finalSnapshot.shotCardVersionId,
+        script_version_id: finalSnapshot.scriptVersionId,
+        opening_action: "历史保存为先停顿看向镜头，再继续介绍。",
+        timeline_policy: "scale_confirmed",
+      },
+    };
+    replicaApi.getLatestGenerationPrompt.mockResolvedValue({
+      stale: false,
+      stale_reasons: [],
+      version: promptVersion,
+    });
+    value.state.draft = {
+      ...value.state.draft,
+      duration: 4,
+      sourceFrameTimestampSeconds: 1.2,
+      prompt: "草稿中继续修改的最终提示词",
+      promptEdited: true,
+      scriptEdited: true,
+      finalSnapshot,
+    };
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("开场衔接")).toHaveValue(
+        promptVersion.payload.opening_action,
+      ),
+    );
+    expect(screen.getByLabelText("将 8.0 秒内容压缩到 4 秒")).toBeChecked();
+    expect(screen.getByLabelText("最终提示词")).toHaveValue(
+      "草稿中继续修改的最终提示词",
+    );
+    expect(screen.getByText(/^已就绪/)).toBeInTheDocument();
+    expect(value.patchDraft).not.toHaveBeenCalledWith(
+      expect.objectContaining({ finalSnapshot: expect.anything() }),
+    );
+    expect(value.patchDraft).not.toHaveBeenCalledWith(
+      expect.objectContaining({ finalSnapshot: undefined }),
+    );
+
+    // 仅恢复选择不能把手写正文标成编译稿，否则下次分镜保存会把正文清空。
+    replicaApi.saveShotCards.mockResolvedValue({ id: "scv-edited" });
+    fireEvent.change(screen.getByLabelText("s1 动作"), {
+      target: { value: "修改后继续缓推庭院" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存为自定义" }));
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("分镜已保存。"),
+    );
+    expect(screen.getByLabelText("最终提示词")).toHaveValue(
+      "草稿中继续修改的最终提示词",
+    );
+  });
+
   it("完整草稿直接切换项目后恢复该项目的开场与时间线选择", async () => {
     const value = replicaStudio();
     mockSavedReplicaVersions();

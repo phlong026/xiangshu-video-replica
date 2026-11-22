@@ -133,10 +133,14 @@ export function ReplicaFinalPromptControls({
   upstreamChecks?: ReplicaPreflightCheck[];
 }) {
   const key = replicaInputKey(input);
-  // 分镜版本可能仍在异步读取；已有版本先按项目归属保护，不借用其他项目的选择。
+  // 分镜版本还在异步读取时，先用草稿里的版本比对指纹，避免误选项目最新稿。
   const savedSnapshot =
-    snapshot?.inputKey === key ||
-    snapshot?.promptVersion?.project_id === input.projectId
+    snapshot?.inputKey ===
+      replicaInputKey({
+        ...input,
+        shotCardVersionId:
+          input.shotCardVersionId ?? snapshot?.shotCardVersionId,
+      }) || snapshot?.promptVersion?.project_id === input.projectId
       ? snapshot
       : null;
   const snapshotPayload = savedSnapshot?.promptVersion?.payload;
@@ -271,12 +275,12 @@ export function ReplicaFinalPromptControls({
   useEffect(() => {
     let active = true;
     const revision = operation.current;
-    // 草稿里的终稿是用户已保存的选择；项目最新历史只用于补齐缺失的快照。
+    // 完整草稿保留已有选择；旧指纹快照仍需从同一保存版本补齐选择。
     if (
       !restoreEnabled ||
       !input.projectId ||
       !input.firstFrameAssetId ||
-      current.current.snapshot
+      current.current.snapshot?.promptVersion
     )
       return;
     void Promise.resolve()
@@ -287,11 +291,14 @@ export function ReplicaFinalPromptControls({
         if (
           !active ||
           revision !== operation.current ||
-          current.current.snapshot ||
+          current.current.snapshot?.promptVersion ||
           !version ||
           state.stale ||
           !payload?.final_composition
         )
+          return;
+        const restoredSnapshot = current.current.snapshot;
+        if (restoredSnapshot && restoredSnapshot.versionId !== version.id)
           return;
         if (
           payload.confirmed_script_text !== input.scriptText.trim() ||
@@ -303,9 +310,14 @@ export function ReplicaFinalPromptControls({
             payload.shot_card_version_id !== input.shotCardVersionId)
         )
           return;
-        setConfirmedKey(key);
+        setConfirmedKey(restoredSnapshot?.inputKey ?? key);
         setScale(payload.timeline_policy === "scale_confirmed");
         setOpeningAction(String(payload.opening_action ?? ""));
+        if (restoredSnapshot) {
+          // 补回控件选择不是产生新终稿，避免父层把手写正文标为编译结果。
+          openingTouched.current = true;
+          return;
+        }
         preparedCallback.current({
           inputKey: key,
           versionId: version.id,
