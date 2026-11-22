@@ -82,6 +82,64 @@ def test_user_profile_by_unique_id_hits_the_v2_path() -> None:
     assert "unique_id=abc_123" in transport.requests[0]["url"]
 
 
+@pytest.mark.parametrize("lookup", ["sec_uid", "unique_id"])
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"user": {}},
+        {"user_info": {}},
+        {"user": None},
+        {"user_info": None},
+        {"user": []},
+        {"user_info": []},
+        {"user": "unavailable"},
+        {"user_info": "unavailable"},
+    ],
+    ids=[
+        "empty-response",
+        "empty-user",
+        "empty-user-info",
+        "null-user",
+        "null-user-info",
+        "list-user",
+        "list-user-info",
+        "scalar-user",
+        "scalar-user-info",
+    ],
+)
+def test_empty_profile_is_rejected_before_falling_back_to_the_requested_id(
+    data: dict[str, Any], lookup: str
+) -> None:
+    transport = _GetTransport(data)
+    client = ViralSourceClient(api_key="test-key", transport=transport)
+    with pytest.raises(ViralSourceError, match="账号资料"):
+        if lookup == "sec_uid":
+            client.douyin_user_profile(sec_user_id=SEC_UID)
+        else:
+            client.douyin_user_profile_by_unique_id(unique_id="abc_123")
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("wrapper", [None, "user", "user_info"])
+def test_zero_statistics_do_not_make_a_profile_empty(wrapper: str | None) -> None:
+    profile_data = {
+        "nickname": "合法新账号",
+        "follower_count": 0,
+        "following_count": 0,
+        "total_favorited": 0,
+        "aweme_count": 0,
+    }
+    transport = _GetTransport(profile_data if wrapper is None else {wrapper: profile_data})
+    profile = ViralSourceClient(api_key="test-key", transport=transport).douyin_user_profile(
+        sec_user_id=SEC_UID
+    )
+    assert profile.sec_user_id == SEC_UID
+    assert profile.nickname == "合法新账号"
+    assert profile.follower_count == profile.following_count == 0
+    assert profile.total_favorited == profile.aweme_count == 0
+
+
 def test_user_posts_parse_statistics_and_missing_play_count() -> None:
     transport = _GetTransport(
         {
@@ -154,10 +212,15 @@ def test_account_diagnosis_switch_is_independent_of_viral_retirement(monkeypatch
     assert account_diagnosis_disabled() is True
 
 
-def test_xingtu_kol_id_parses_the_star_id() -> None:
+@pytest.mark.parametrize(
+    "data",
+    [{"id": 777123, "nick_name": "星图达人"}, {"id": 777123, "user": None}],
+    ids=["plain", "empty-optional-user"],
+)
+def test_xingtu_kol_id_parses_the_star_id(data: dict[str, Any]) -> None:
     from app.viral_tikhub import DOUYIN_XINGTU_KOL_ID_PATH
 
-    transport = _GetTransport({"id": 777123, "nick_name": "星图达人"})
+    transport = _GetTransport(data)
     client = ViralSourceClient(api_key="test-key", transport=transport)
     kol_id = client.douyin_xingtu_kol_id(sec_user_id=SEC_UID)
 

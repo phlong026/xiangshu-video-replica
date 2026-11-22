@@ -6,6 +6,7 @@
 import json
 from datetime import UTC, datetime
 from unittest.mock import Mock
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import psycopg
@@ -29,10 +30,14 @@ from app.account_diagnosis_entitlement import (
 from app.account_link import AccountTarget
 from app.db_portable import BusinessConnection
 from app.viral_tikhub import (
+    DOUYIN_USER_POSTS_PATH,
+    DOUYIN_USER_PROFILE_PATH,
+    DOUYIN_XINGTU_KOL_ID_PATH,
     DouyinUserPost,
     DouyinUserPostPage,
     DouyinUserProfile,
     DouyinXingtuVideoMetrics,
+    ViralSourceClient,
 )
 
 pytestmark = pytest.mark.pg
@@ -311,6 +316,116 @@ def test_paid_member_is_charged_the_configured_price(client, route_state, monkey
             (user_id, "account_diagnosis"),
         ).fetchone()
         assert operations is not None and int(operations[0]) == 1
+
+
+@pytest.mark.parametrize("paid", [False, True], ids=["free", "paid"])
+@pytest.mark.parametrize("valid_profile", [False, True], ids=["empty-profile", "zero-works"])
+def test_profile_response_controls_transactional_diagnosis_billing(
+    client, route_state, monkeypatch, paid: bool, valid_profile: bool
+) -> None:
+    from app.account_diagnosis_routes import router
+
+    client.app.include_router(router)
+    headers, user_id = account(client, "diag_profile_validation")
+    profile_data = (
+        {
+            "nickname": "合法新账号",
+            "follower_count": 0,
+            "following_count": 0,
+            "total_favorited": 0,
+            "aweme_count": 0,
+        }
+        if valid_profile
+        else {}
+    )
+    requested_paths: list[str] = []
+
+    def request(method: str, url: str, *, headers, body=None) -> bytes:
+        path = urlsplit(url).path
+        requested_paths.append(path)
+        data_by_path = {
+            DOUYIN_USER_PROFILE_PATH: {"user": profile_data},
+            DOUYIN_USER_POSTS_PATH: {"aweme_list": [], "has_more": 0},
+            DOUYIN_XINGTU_KOL_ID_PATH: {"id": 0},
+        }
+        assert path in data_by_path, "诊断测试不允许未声明的数据源请求"
+        return json.dumps({"code": 200, "data": data_by_path[path]}).encode("utf-8")
+
+    transport = Mock()
+    transport.request.side_effect = request
+    source = ViralSourceClient(
+        api_key="test-key",
+        base_url="https://source.example",
+        transport=transport,
+        detail_transport=transport,
+    )
+    monkeypatch.setattr(
+        "app.account_diagnosis.account_diagnosis_client_from_settings", lambda conn: source
+    )
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_tariff(raw)
+        _seed_wallet(raw, user_id, 100)
+        if paid:
+            _seed_package_order(raw, user_id)
+            assert claim_free_quota(
+                conn,
+                owner_id=user_id,
+                device_id=current_device_id(conn, user_id),
+                report_id="already-consumed",
+            )
+        grants_before = [
+            tuple(row)
+            for row in raw.execute(
+                "SELECT * FROM account_diagnosis_free_grants WHERE user_id=%s", (user_id,)
+            ).fetchall()
+        ]
+
+    # 真实路由负责让异常越过事务边界，响应返回后才从新连接核对持久化结果。
+    response = client.post(
+        "/api/account-diagnosis",
+        headers=headers,
+        json={"input": "https://www.douyin.com/user/MS4wLjABAAAA_diagnosis_test_profile"},
+    )
+    if valid_profile:
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == "SUCCEEDED"
+        assert result["isFree"] is not paid
+        assert result["report"]["account"]["nickname"] == "合法新账号"
+        assert result["report"]["works"] == []
+    else:
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "ACCOUNT_DIAGNOSIS_SOURCE_FAILED"
+        assert requested_paths == [DOUYIN_USER_PROFILE_PATH]
+
+    with psycopg.connect(route_state) as raw:
+        balance = raw.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (user_id,)
+        ).fetchone()
+        assert balance == (92 if paid and valid_profile else 100, 0)
+        reports = raw.execute(
+            "SELECT status FROM account_diagnosis_reports WHERE user_id=%s", (user_id,)
+        ).fetchall()
+        assert reports == ([("SUCCEEDED",)] if valid_profile else [])
+        grants_after = raw.execute(
+            "SELECT * FROM account_diagnosis_free_grants WHERE user_id=%s", (user_id,)
+        ).fetchall()
+        if valid_profile:
+            assert len(grants_after) == 1
+        else:
+            assert grants_after == grants_before
+        # 数据源平台成本独立计量；这里只核对客户诊断扣费，不把平台请求当作扣分。
+        operations = raw.execute(
+            "SELECT count(*) FROM billing_operations WHERE user_id=%s AND service=%s",
+            (user_id, "account_diagnosis"),
+        ).fetchone()[0]
+        assert operations == int(paid and valid_profile)
+        ledger_delta = raw.execute(
+            "SELECT COALESCE(SUM(available_delta), 0) FROM wallet_transactions WHERE user_id=%s",
+            (user_id,),
+        ).fetchone()[0]
+        assert ledger_delta == (-8 if paid and valid_profile else 0)
 
 
 def test_xingtu_hit_upgrades_report_to_l2(client, route_state, monkeypatch) -> None:
