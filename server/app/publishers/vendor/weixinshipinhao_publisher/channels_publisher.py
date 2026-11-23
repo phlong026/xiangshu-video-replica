@@ -1964,7 +1964,7 @@ class ChannelsPublisher:
                     logger.info("clip_result keys=%s", list(result.keys()))
                     final_url = result.get("url") or final_url
                     clip_media_md5 = result.get("md5") or None
-                    # 已有本地/指定封面时，不被 clip 空字段覆盖
+                    # 显式传入的封面已由用户或适配层选定，裁剪结果只替换默认封面。
                     clip_thumb = (
                         result.get("thumbUrl")
                         or result.get("coverUrl")
@@ -1975,9 +1975,9 @@ class ChannelsPublisher:
                         or result.get("fullCoverUrl")
                         or result.get("thumbUrl")
                     )
-                    if clip_thumb:
+                    if not cover_path and clip_thumb:
                         thumb_url = clip_thumb
-                    if clip_cover:
+                    if not cover_path and clip_cover:
                         cover_url = clip_cover
                     final_w = int(result.get("width") or final_w)
                     final_h = int(result.get("height") or final_h)
