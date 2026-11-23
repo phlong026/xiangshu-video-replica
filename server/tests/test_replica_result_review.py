@@ -250,6 +250,85 @@ def test_first_frame_opening_override_replaces_stale_first_motion():
     first = context(provider)["segments"][0]
     assert first["action"] == expected["opening_action"]
     assert "motion" not in first
+    assert "camera_motion" not in first
+
+
+def facts_expectations() -> dict:
+    expected = expectations()
+    expected["shots"][0]["facts"] = {
+        "schema_version": "storyboard.facts.v1",
+        "camera_shot_id": "camera-1",
+        "entry_boundary": "VIDEO_START",
+        "subjects": [
+            {"subject_id": "p1", "label": "主讲人", "kind": "PERSON", "visibility": "VISIBLE"}
+        ],
+        "primary_subject_id": "p1",
+        "actions": [
+            {
+                "subject_id": "p1",
+                "translation": "MOVING",
+                "gait": "WALKING",
+                "turning": "NONE",
+                "gesture": "GESTURING",
+                "direction": "away_from_camera",
+                "path": "从院子走向门口",
+                "hand_detail": "右手指向门口",
+                "description": "主讲人边走边做手势",
+            }
+        ],
+        "camera": {"motion": "STATIC", "detail": ""},
+        "relative_motion": "主讲人逐渐远离固定机位",
+        "evidence": [
+            {
+                "source": "VIDEO",
+                "fields": ["actions"],
+                "start_time": 0,
+                "end_time": 2,
+                "observation": "这是源视频的动作证据，不是成片证据",
+            }
+        ],
+    }
+    expected["shots"][0]["motion"] = {"subject_motion_state": "STATIC"}
+    expected["shots"][0]["action"] = "过期文字：人物静止"
+    return expected
+
+
+def test_result_review_uses_subject_facts_but_never_supplies_source_evidence_as_observation():
+    expected = facts_expectations()
+    before = copy.deepcopy(expected)
+    provider = Provider()
+    assert review(provider, expected).quality_status == "REPLICA_REVIEW_PASSED"
+    first = context(provider)["segments"][0]
+    assert first["motion"]["subject_motion_state"] == "WALKING+GESTURING_ONLY"
+    assert "过期文字" not in first["action"]
+    assert first["expected_facts"]["actions"][0]["subject_id"] == "p1"
+    assert "evidence" not in first["expected_facts"]
+    assert "这是源视频的动作证据" not in provider.calls[0]["instructions"]
+    assert expected == before
+
+
+@pytest.mark.parametrize("override", ["opening", "revised"])
+def test_result_review_drops_stale_facts_after_user_overrides(override: str):
+    expected = facts_expectations()
+    provider = Provider()
+    if override == "opening":
+        expected["opening_action"] = "坐在院子里抬头看向门口"
+        result = review(provider, expected)
+    else:
+        result = review(provider, expected, prompt_text="全程坐着做手势，无行走。")
+    assert result.quality_status == "REPLICA_REVIEW_PASSED"
+    first = context(provider)["segments"][0]
+    assert "expected_facts" not in first and "motion" not in first
+    assert "过期文字" not in provider.calls[0]["instructions"]
+
+
+def test_result_review_does_not_silently_ignore_invalid_facts():
+    expected = facts_expectations()
+    expected["shots"][0]["facts"]["actions"][0]["subject_id"] = "missing-person"
+    provider = Provider()
+    result = review(provider, expected)
+    assert result.issue_codes == ["REPLICA_REVIEW_INCOMPLETE"]
+    assert not provider.calls
 
 
 def test_replaced_scene_does_not_require_old_scene_objects():
@@ -280,7 +359,13 @@ def test_actual_final_prompt_takes_precedence_over_old_motion_and_timing(marked_
 
 
 @pytest.mark.parametrize(
-    "bad_expected", [{}, {"shots": []}, {**expectations(), "output_duration_seconds": 30}]
+    "bad_expected",
+    [
+        {},
+        {"shots": []},
+        {**expectations(), "output_duration_seconds": 30},
+        {**expectations(), "shots": [None]},
+    ],
 )
 def test_invalid_expectations_do_not_call_provider(bad_expected: dict):
     provider = Provider()

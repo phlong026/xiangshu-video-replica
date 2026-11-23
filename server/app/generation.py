@@ -53,7 +53,14 @@ from app.first_frames import (
     ImageInput,
     evaluate_generated_video_quality,
 )
-from app.h3_prompts import FORMATTER_VERSION, GenerationContext, require_consistent_storyboard
+from app.h3_prompts import (
+    FORMATTER_VERSION,
+    GenerationContext,
+    anchor_storyboard_presenter,
+    normalize_consistent_storyboard,
+    render_first_frame_motion,
+    require_consistent_storyboard,
+)
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
@@ -83,12 +90,15 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
-from app.storyboard_consistency import parse_subject_motion_states
+from app.storyboard_facts import (
+    CAMERA_MOTION_LABELS,
+    subject_motion_phrase,
+)
 
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v8"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v9"
 H3_PROMPT_TEMPLATE_SPEC = (
     (
         "intro",
@@ -129,57 +139,21 @@ H3_PROMPT_TEMPLATE_SPEC = (
 H3_PROMPT_TEMPLATES = dict(H3_PROMPT_TEMPLATE_SPEC)
 H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
     json.dumps(
-        H3_PROMPT_TEMPLATE_SPEC,
+        (H3_PROMPT_TEMPLATE_VERSION, H3_PROMPT_TEMPLATE_SPEC),
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode()
 ).hexdigest()
 
 # Final replica compilation is a separate contract from the retained preview API.
-FINAL_REPLICA_TEMPLATE_VERSION = "h3.replica.final.v5"
+FINAL_REPLICA_TEMPLATE_VERSION = "h3.replica.final.v6"
 FINAL_REPLICA_TEMPLATE_HASH = hashlib.sha256(
-    b"h3.replica.final.v5:confirmed-script:first-frame-presenter-authority:"
+    b"h3.replica.final.v6:confirmed-script:first-frame-presenter-authority:"
     b"voice-gender-continuity:multi-person-role-separation:frame-scene-authority:"
     b"complete-narration:source-video-exclusion:real-cuts:action-beat-timing:human-opening:"
-    b"storyboard-consistency:compound-motion:source-fixture-review:original-speech-timing"
+    b"storyboard-consistency:compound-motion:source-fixture-review:original-speech-timing:"
+    b"subject-bound-facts:orthogonal-motion:shared-motion-semantics"
 ).hexdigest()
-
-# 拆解结果 motion 枚举到中文运动指令的确定性映射：渲染逻辑在代码里，
-# 不依赖分析模型把“行走”写成好句子——只要状态枚举正确，Prompt 必然
-# 携带正向运动指令。
-SUBJECT_MOTION_STATE_CLAUSES = {
-    "STATIC": "人物保持站位，动作限于口播与手势，双脚位置不变",
-    "WALKING": "人物持续行走，每一步脚掌落地、重心自然转移、双臂随步态摆动，不得僵立原地",
-    "RUNNING": "人物持续跑动，步幅与摆臂真实连贯，不得僵立原地",
-    "TURNING": "人物原地转身，躯干与视线自然转动，双脚位置基本不变",
-    "GESTURING_ONLY": "人物站位固定，仅上半身与手部做手势和口播",
-    "OBJECT_MOTION": "画面主体为物体运动，无人物位移",
-    "NO_PERSON": "本镜头无人物出镜",
-    "UNKNOWN": "人物运动状态无法判断，不凭空补充动作",
-}
-SUBJECT_DIRECTION_LABELS = {
-    "toward_camera": "向镜头方向",
-    "away_from_camera": "背离镜头方向",
-    "left": "向画面左侧",
-    "right": "向画面右侧",
-    "lateral": "横向移动",
-    "in_place": "原地",
-    "none": "无位移方向",
-}
-MOTION_CAMERA_MOTION_LABELS = {
-    "STATIC": "固定机位",
-    "PUSH_IN": "镜头缓慢推近",
-    "PULL_BACK": "镜头缓慢拉远",
-    "HANDHELD_TRACKING": "手持平稳跟拍",
-    "PAN": "镜头横摇",
-    "TILT": "镜头纵摇",
-    "FOLLOW": "镜头跟随主体",
-    "ORBIT": "镜头环绕主体",
-    "CRANE_UP": "镜头升高",
-    "CRANE_DOWN": "镜头降低",
-    "ZOOM_IN": "镜头光学变焦推近",
-    "ZOOM_OUT": "镜头光学变焦拉远",
-}
 PROMPT_STATUSES = {"SAVED", "LOCKED", "USED"}
 TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
@@ -1550,7 +1524,7 @@ def compile_prompt_version(
             first_frame_asset_id=request.first_frame_asset_id,
         )
 
-        shot_payload = json.loads(str(shot_card["payload_json"]))
+        shot_payload = normalize_consistent_storyboard(json.loads(str(shot_card["payload_json"])))
         source_duration_seconds = shot_timeline_duration(shot_payload)
         from app.h3_prompts import compile_replica_final_text, dialogue, prompt_issues
 
@@ -8141,23 +8115,14 @@ def render_shot_motion_clause(shot: Mapping[str, Any]) -> str:
     旧版拆解结果没有 motion 时回退到 action 文本（行为不劣化）；
     motion 存在时由代码而不是模型措辞决定运动指令的强度。
     """
+    facts_narrative = render_first_frame_motion(shot)
+    if facts_narrative is not None:
+        return facts_narrative
     motion = shot.get("motion")
     if not isinstance(motion, Mapping):
         return str(shot.get("action", ""))
 
-    raw_state = str(motion.get("subject_motion_state") or "").strip()
-    states = parse_subject_motion_states(raw_state) if raw_state else ()
-    state_clauses: list[str] = []
-    for state in states:
-        clause = SUBJECT_MOTION_STATE_CLAUSES.get(state, "")
-        if state == "GESTURING_ONLY" and len(states) > 1:
-            clause = "同时做手势，手部动作与主体动作自然协调"
-        elif state == "TURNING" and any(value in states for value in ("WALKING", "RUNNING")):
-            clause = "人物随行进自然转身，保持步态连续"
-        if clause:
-            state_clauses.append(clause)
-    state_clause = "；".join(state_clauses)
-    direction = SUBJECT_DIRECTION_LABELS.get(str(motion.get("subject_direction", "")), "")
+    state_clause = subject_motion_phrase(motion)
     displacement = str(motion.get("subject_displacement") or "")
     hand_action = str(motion.get("hand_action") or "")
     relative_motion = str(motion.get("relative_motion") or "")
@@ -8167,10 +8132,7 @@ def render_shot_motion_clause(shot: Mapping[str, Any]) -> str:
     if action:
         parts.append(action)
     if state_clause:
-        if direction and direction not in ("无位移方向",):
-            parts.append(f"{state_clause}（{direction}）")
-        else:
-            parts.append(state_clause)
+        parts.append(f"人物{state_clause}")
     if displacement and displacement not in ("无位移", "无人物出镜"):
         parts.append(f"位移：{displacement}")
     if hand_action and hand_action not in ("无人物出镜",):
@@ -8184,7 +8146,7 @@ def shot_camera_motion_text(shot: Mapping[str, Any]) -> str:
     """运镜描述：motion 枚举标签优先，旧数据用自由文本。"""
     motion = shot.get("motion")
     if isinstance(motion, Mapping):
-        label = MOTION_CAMERA_MOTION_LABELS.get(str(motion.get("camera_motion", "")))
+        label = CAMERA_MOTION_LABELS.get(str(motion.get("camera_motion", "")))
         if label:
             return label
     return str(shot.get("camera_motion", ""))
@@ -8269,7 +8231,7 @@ def compile_prompt_text(
     duration_seconds: int,
     resolution: str,
 ) -> str:
-    require_consistent_storyboard(shot_payload)
+    shot_payload = normalize_consistent_storyboard(shot_payload)
     lines = [
         H3_PROMPT_TEMPLATES["intro"].format(
             duration_seconds=duration_seconds,
@@ -8296,11 +8258,11 @@ def compile_prompt_text(
                 start=_format_shot_timestamp(start),
                 end=_format_shot_timestamp(end),
                 shot_type=shot["shot_type"],
-                composition=shot["composition"],
+                composition=anchor_storyboard_presenter(shot["composition"], shot),
                 camera_motion=shot_camera_motion_text(shot),
                 wardrobe_clause=shot_wardrobe_clause(shot),
                 motion_clause=render_shot_motion_clause(shot),
-                scene=shot_scene_text(shot),
+                scene=anchor_storyboard_presenter(shot_scene_text(shot), shot),
                 transition=shot["transition"],
                 spoken=spoken,
             )

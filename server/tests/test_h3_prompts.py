@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
 
@@ -386,7 +389,7 @@ def test_preview_keeps_walking_and_gestures_without_fixed_stance() -> None:
         duration_seconds=4,
         resolution="768P",
     )
-    assert "人物持续行走" in text
+    assert "行走" in text
     assert "同时做手势" in text
     assert "站位固定" not in text and "仅上半身" not in text
 
@@ -409,7 +412,8 @@ def test_static_preview_does_not_instruct_every_person_to_move() -> None:
         duration_seconds=4,
         resolution="768P",
     )
-    assert "保持站位" in text
+    assert "保持静止" in text
+    assert "动作限于口播与手势" not in text
     assert "不得僵立原地" not in text
 
 
@@ -708,8 +712,10 @@ def test_locked_legacy_replica_rechecks_conflicts_before_billing(
     reserve.assert_not_called()
 
 
+@pytest.mark.parametrize("use_facts", [False, True])
 def test_compilation_freezes_review_inputs_and_revision_tracks_the_actual_prompt(
     monkeypatch,
+    use_facts: bool,
 ) -> None:
     """成片复核读取当次输入快照；手改提示词后不能再拿旧稿判定新成片。"""
     import json
@@ -718,7 +724,7 @@ def test_compilation_freezes_review_inputs_and_revision_tracks_the_actual_prompt
     from app import generation
     from app.auth import CurrentUser
 
-    shot = _motion_regression_shot()
+    shot = _confirmed_facts_shot() if use_facts else _motion_regression_shot()
     rows = {
         "script-1": {
             "payload_json": json.dumps({"full_text": "看院子", "shot_card_version_id": "shots-1"})
@@ -784,7 +790,15 @@ def test_compilation_freezes_review_inputs_and_revision_tracks_the_actual_prompt
     )
     payload = json.loads(row["payload_json"])
     expected = payload["replica_expectations"]
-    assert expected["shots"] == [shot]
+    if use_facts:
+        frozen = expected["shots"][0]
+        assert frozen["facts"]["actions"][0] == shot["facts"]["actions"][0]
+        assert frozen["motion"]["subject_motion_state"] == "WALKING+GESTURING_ONLY"
+        assert "过期描述" not in frozen["action"]
+        assert "过期描述" not in payload["prompt_text"]
+        assert json.loads(rows["shots-1"]["payload_json"])["shots"][0] == shot
+    else:
+        assert expected["shots"] == [shot]
     assert expected["source_duration_seconds"] == 4
     assert expected["output_duration_seconds"] == 8
     assert expected["script_text"] == "看院子"
@@ -1060,7 +1074,7 @@ def test_missing_context_preserves_analysis_without_false_ready() -> None:
     assert result["prompt_text"] is None
 
 
-def test_analysis_one_call_keeps_facts_when_prompt_is_invalid() -> None:
+def test_analysis_keeps_facts_and_runs_source_review_when_prompt_is_invalid() -> None:
     import json
 
     from app.analysis import ApilioGemini, FakeGemini, analyze_video
@@ -1068,12 +1082,12 @@ def test_analysis_one_call_keeps_facts_when_prompt_is_invalid() -> None:
     facts = json.loads(FakeGemini().analyze(video_uri="fake", duration_seconds=8).text)
 
     class Transport:
-        calls = 0
+        def __init__(self):
+            self.requests = []
 
         def post(self, url, *, headers, body):
-            self.calls += 1
             request = json.loads(body)
-            assert "analysis-h3.v1" in request["messages"][0]["content"]
+            self.requests.append(request)
             return json.dumps(
                 {
                     "choices": [
@@ -1110,7 +1124,12 @@ def test_analysis_one_call_keeps_facts_when_prompt_is_invalid() -> None:
             "media_info": {"fps": 25, "resolution": "720x1280", "aspect_ratio": "9:16"},
         },
     )
-    assert transport.calls == 1
+    assert len(transport.requests) == 2
+    assert "analysis-h3.v1" in transport.requests[0]["messages"][0]["content"]
+    assert any(
+        item.get("image_url", {}).get("url") == "https://example.test/source.mp4"
+        for item in transport.requests[1]["messages"][1]["content"]
+    )
     assert result.analysis.shots
     assert result.analysis.fps == 25
     assert result.generation_prompt["status"] != "READY"
@@ -1632,3 +1651,296 @@ def test_final_original_dialogue_changes_when_segment_timing_changes() -> None:
     assert prompts[0] != prompts[1]
     assert all(dialogue(text) == script for text in prompts)
     assert "本段口播时间：00:02.000–00:05.000；本段无口播" in prompts[1]
+
+
+def _confirmed_facts_shot() -> dict[str, Any]:
+    shot = _motion_regression_shot("STATIC")
+    shot.update(action="过期描述：人物静止站立", person_count=1, spoken_text="")
+    shot["motion"].update(
+        subject_direction="in_place",
+        subject_displacement="无位移",
+        hand_action="无手势",
+        relative_motion="人物与机位均未移动",
+    )
+    shot["facts"] = {
+        "schema_version": "storyboard.facts.v1",
+        "camera_shot_id": "camera-1",
+        "entry_boundary": "VIDEO_START",
+        "subjects": [
+            {
+                "subject_id": "p1",
+                "label": "主讲人",
+                "kind": "PERSON",
+                "visibility": "VISIBLE",
+            }
+        ],
+        "primary_subject_id": "p1",
+        "actions": [
+            {
+                "subject_id": "p1",
+                "translation": "MOVING",
+                "gait": "WALKING",
+                "turning": "NONE",
+                "gesture": "GESTURING",
+                "direction": "away_from_camera",
+                "path": "从院子走到门口",
+                "hand_detail": "右手抬起指向门口",
+                "description": "主讲人边走边抬手介绍",
+            }
+        ],
+        "camera": {"motion": "STATIC", "detail": ""},
+        "relative_motion": "主讲人逐渐远离固定机位",
+        "evidence": [
+            {
+                "source": "VIDEO",
+                "fields": ["actions", "camera"],
+                "start_time": 0,
+                "end_time": 4,
+                "observation": "连续迈步走向门口并抬起右手，背景位置固定",
+            }
+        ],
+    }
+    return shot
+
+
+def _compile_confirmed_facts(shots: list[dict[str, Any]], compiler: str) -> str:
+    from app.generation import compile_prompt_text
+    from app.h3_prompts import compile_replica_final_text
+
+    duration = int(shots[-1]["end_time"])
+    payload = {"shots": shots, "original_script": ""}
+    if compiler == "preview":
+        return compile_prompt_text(
+            shot_payload=payload,
+            script_payload={"full_text": ""},
+            source_duration_seconds=duration,
+            duration_seconds=duration,
+            resolution="768P",
+        )
+    return compile_replica_final_text(
+        shot_payload=payload,
+        script_text="",
+        source_duration=duration,
+        duration=duration,
+        timeline_policy="preserve",
+        source_frame_time=0,
+    )
+
+
+@pytest.mark.parametrize("compiler", ["preview", "final"])
+def test_compilers_use_confirmed_facts_without_stale_derived_motion(compiler: str) -> None:
+    shot = _confirmed_facts_shot()
+    before = deepcopy(shot)
+    text = _compile_confirmed_facts([shot], compiler)
+
+    assert "从院子走到门口" in text
+    assert "右手抬起" in text
+    assert "过期描述" not in text and "人物与机位均未移动" not in text
+    assert shot == before
+
+
+@pytest.mark.parametrize("compiler", ["preview", "final"])
+def test_compilers_preserve_in_place_walking_without_forcing_displacement(compiler: str) -> None:
+    shot = _confirmed_facts_shot()
+    action = shot["facts"]["actions"][0]
+    action.update(
+        translation="STATIONARY",
+        gait="WALKING",
+        gesture="NONE",
+        direction="in_place",
+        path="在跑步机上原地踏步",
+        hand_detail="双臂随步态摆动",
+        description="主讲人在跑步机上原地行走",
+    )
+    shot["facts"]["relative_motion"] = "人物场景位置和画面占比稳定"
+    text = _compile_confirmed_facts([shot], compiler)
+
+    assert "原地" in text and "跑步机" in text
+    assert "双脚位置不变" not in text and "不得僵立原地" not in text
+    assert "从院子走到门口" not in text
+
+
+def test_one_camera_shot_with_multiple_fact_phases_does_not_create_extra_cuts() -> None:
+    walking = _confirmed_facts_shot()
+    walking["end_time"] = 2
+    walking["facts"]["evidence"][0]["end_time"] = 2
+    stopped = deepcopy(walking)
+    stopped.update(shot_id="stopped", start_time=2, end_time=4, segment_kind="SHOT_CUT")
+    stopped["facts"]["entry_boundary"] = "CONTINUOUS"
+    stopped["facts"]["actions"][0].update(
+        translation="STATIONARY",
+        gait="NONE",
+        direction="in_place",
+        path="停在门口原地",
+        description="主讲人在门口原地做手势",
+    )
+    stopped["facts"]["relative_motion"] = "人物站位稳定，摄影机固定"
+    stopped["facts"]["evidence"][0].update(
+        start_time=2, end_time=4, observation="人物到门口停下，抬手继续介绍"
+    )
+    text = _compile_confirmed_facts([walking, stopped], "final")
+
+    assert "[Shot 2]" not in text
+    assert "00:00.000–00:02.000" in text and "00:02.000–00:04.000" in text
+    assert "停在门口原地" in text
+
+
+@pytest.mark.parametrize("compiler", ["preview", "final"])
+def test_compile_rejects_fact_actions_that_reference_missing_subject(compiler: str) -> None:
+    from fastapi import HTTPException
+
+    shot = _confirmed_facts_shot()
+    shot["facts"]["actions"][0]["subject_id"] = "missing-person"
+    with pytest.raises(HTTPException) as exc:
+        _compile_confirmed_facts([shot], compiler)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "STORYBOARD_CONSISTENCY_REQUIRED"
+
+
+def test_final_compiler_preserves_confirmed_dissolve_boundary() -> None:
+    first = _confirmed_facts_shot()
+    first["end_time"] = 2
+    first["facts"]["evidence"][0]["end_time"] = 2
+    second = deepcopy(first)
+    second.update(shot_id="second", start_time=2, end_time=4)
+    second["facts"].update(camera_shot_id="camera-2", entry_boundary="DISSOLVE")
+    second["facts"]["evidence"][0].update(start_time=2, end_time=4)
+    text = _compile_confirmed_facts([first, second], "final")
+    assert "[Shot 2] At 00:02.000" in text
+    assert "叠化进入本镜头" in text
+
+
+def test_final_compiler_keeps_unknown_boundary_explicit_without_inventing_a_cut() -> None:
+    shot = _confirmed_facts_shot()
+    shot["facts"]["entry_boundary"] = "UNKNOWN"
+    text = _compile_confirmed_facts([shot], "final")
+    assert "00:00.000–00:04.000" in text
+    assert "剪辑边界尚未确认" in text
+    assert "[Shot 2]" not in text
+
+
+def test_scene_replacement_checks_all_subjects_confirmed_paths() -> None:
+    from fastapi import HTTPException
+
+    from app.h3_prompts import compile_replica_final_text
+
+    shot = _confirmed_facts_shot()
+    shot["facts"]["subjects"].append(
+        {"subject_id": "p2", "label": "路人", "kind": "PERSON", "visibility": "VISIBLE"}
+    )
+    action = deepcopy(shot["facts"]["actions"][0])
+    action.update(subject_id="p2", description="路人走向原视频大门", path="走向原视频大门")
+    shot["facts"]["actions"].append(action)
+    with pytest.raises(HTTPException) as exc:
+        compile_replica_final_text(
+            shot_payload={"shots": [shot]},
+            script_text="",
+            source_duration=4,
+            duration=4,
+            timeline_policy="preserve",
+            source_frame_time=0,
+            replace_scene=True,
+        )
+    assert exc.value.detail["code"] == "SCENE_ACTION_REVIEW_REQUIRED"
+
+
+@pytest.mark.parametrize("compiler", ["preview", "final"])
+def test_facts_anchor_only_primary_presenter_and_keep_other_presenters_distinct(
+    compiler: str,
+) -> None:
+    shot = _confirmed_facts_shot()
+    shot["facts"]["actions"][0]["description"] = "女主讲人边走边看向另一女主持人"
+    shot["facts"]["relative_motion"] = "女主讲人远离镜头，另一女主持人保持原地"
+    shot["composition"] = "女主讲人在中间，另一女主持人在画面右侧"
+    shot["facts"]["subjects"].append(
+        {"subject_id": "p2", "label": "另一女主持人", "kind": "PERSON", "visibility": "VISIBLE"}
+    )
+    shot["facts"]["actions"].append(
+        {
+            "subject_id": "p2",
+            "translation": "STATIONARY",
+            "gait": "NONE",
+            "turning": "NONE",
+            "gesture": "NONE",
+            "direction": "in_place",
+            "path": "在门口保持原地",
+            "hand_detail": "无手势",
+            "description": "另一女主持人静止站立",
+        }
+    )
+    text = _compile_confirmed_facts([shot], compiler)
+    assert "另一女主持人静止站立" in text
+    assert "另一首帧中的主讲人" not in text
+    assert "女首帧中的主讲人" not in text
+    assert "女主讲人" not in text
+    assert "首帧中的主讲人边走" in text
+
+
+def test_secondary_actor_keeps_identity_when_referring_to_replaced_primary() -> None:
+    shot = _confirmed_facts_shot()
+    shot["facts"]["subjects"][0]["label"] = "女主持人"
+    shot["facts"]["subjects"].append(
+        {"subject_id": "p2", "label": "同行人", "kind": "PERSON", "visibility": "VISIBLE"}
+    )
+    secondary = deepcopy(shot["facts"]["actions"][0])
+    secondary.update(
+        subject_id="p2",
+        description="同行人跟随女主持人走向门口",
+        hand_detail="同行人抬起左手",
+        path="同行人从院子走向门口",
+    )
+    shot["facts"]["actions"].append(secondary)
+    text = _compile_confirmed_facts([shot], "final")
+    assert "同行人跟随首帧中的主讲人走向门口" in text
+    assert "同行人抬起左手" in text
+    assert "女主持人" not in text
+
+
+@pytest.mark.parametrize("compiler", ["preview", "final"])
+def test_confirmed_absence_of_gait_turning_and_gestures_is_not_lost_in_rendering(
+    compiler: str,
+) -> None:
+    shot = _confirmed_facts_shot()
+    shot["facts"]["actions"][0].update(
+        translation="STATIONARY",
+        gait="NONE",
+        turning="NONE",
+        gesture="NONE",
+        direction="in_place",
+        path="",
+        hand_detail="",
+        description="",
+    )
+    shot["facts"]["relative_motion"] = "人物和机位保持相对位置"
+    text = _compile_confirmed_facts([shot], compiler)
+    assert "没有行走或跑动" in text
+    assert "没有转身动作" in text
+    assert "没有独立手势" in text
+    assert "动作限于口播与手势" not in text
+
+
+def test_confirmed_opening_replaces_old_camera_instruction_as_well_as_person_motion() -> None:
+    from app.h3_prompts import compile_replica_final_text
+
+    opening = "从确认首帧起身，摄影机向后移动拉远"
+    text = compile_replica_final_text(
+        shot_payload={"shots": [_confirmed_facts_shot()]},
+        script_text="",
+        source_duration=4,
+        duration=4,
+        timeline_policy="preserve",
+        source_frame_time=1,
+        opening_action=opening,
+    )
+    assert opening in text
+    assert "固定机位" not in text and "从院子走到门口" not in text
+
+
+@pytest.mark.parametrize("compiler", ["preview", "final"])
+def test_compilers_reject_corrupt_shot_rows_with_a_recoverable_error(compiler: str) -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _compile_confirmed_facts([None, _confirmed_facts_shot()], compiler)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "STORYBOARD_CONSISTENCY_REQUIRED"

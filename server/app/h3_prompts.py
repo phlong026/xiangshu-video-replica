@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,8 +15,13 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.storyboard_consistency import (
-    parse_subject_motion_states,
     storyboard_consistency_issues,
+)
+from app.storyboard_facts import (
+    CAMERA_MOTION_LABELS,
+    normalize_storyboard_shots,
+    render_storyboard_motion,
+    subject_motion_phrase,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +98,61 @@ def _anchor_presenter_to_first_frame(value: object) -> str:
     return text.replace(marker, "首帧中的主讲人")
 
 
+def anchor_storyboard_presenter(
+    value: object, shot: Mapping[str, Any], *, exact_primary_only: bool = False
+) -> str:
+    """新事实按主体归属绑定首帧；不能把“另一主持人”也替换成主角。"""
+    facts = shot.get("facts")
+    if not isinstance(facts, dict):
+        return _anchor_presenter_to_first_frame(value)
+    subjects = facts.get("subjects", [])
+    primary_id = facts.get("primary_subject_id")
+    primary = next((s for s in subjects if s.get("subject_id") == primary_id), None)
+    if primary is None or primary.get("kind") != "PERSON":
+        return str(value)
+    text = str(value)
+    protected: dict[str, str] = {}
+    labels = sorted(
+        {s["label"] for s in subjects if s.get("subject_id") != primary_id and s.get("label")},
+        key=len,
+        reverse=True,
+    )
+    for index, label in enumerate(labels):
+        marker = f"__OTHER_SUBJECT_{index}__"
+        protected[marker] = label
+        text = text.replace(label, marker)
+    if primary.get("label") and primary["label"] not in labels:
+        text = re.sub(rf"(?:女性|男性|女|男)?{re.escape(primary['label'])}", "首帧中的主讲人", text)
+    if not exact_primary_only:
+        text = _anchor_presenter_to_first_frame(text)
+    for marker, label in protected.items():
+        text = text.replace(marker, label)
+    return text
+
+
+def render_first_frame_motion(shot: Mapping[str, Any]) -> str | None:
+    """两套提示词从同一事实渲染，仅主角文字按用户确认的首帧绑定。"""
+    if not isinstance(shot.get("facts"), dict):
+        return render_storyboard_motion(shot)
+    anchored = deepcopy(dict(shot))
+    facts = anchored["facts"]
+    primary_id = facts["primary_subject_id"]
+    for subject in facts["subjects"]:
+        if subject["subject_id"] == primary_id and subject["kind"] == "PERSON":
+            subject["label"] = "首帧中的主讲人"
+    for action in facts["actions"]:
+        for key in ("description", "path", "hand_detail"):
+            # 配角可以与主角互动；仅替换其明确提及的主角称呼，不重写配角别称。
+            action[key] = anchor_storyboard_presenter(
+                action.get(key, ""),
+                shot,
+                exact_primary_only=action["subject_id"] != primary_id,
+            )
+    facts["relative_motion"] = anchor_storyboard_presenter(facts["relative_motion"], shot)
+    facts["camera"]["detail"] = anchor_storyboard_presenter(facts["camera"]["detail"], shot)
+    return render_storyboard_motion(anchored)
+
+
 class Issue(BaseModel):
     model_config = ConfigDict(extra="forbid")
     code: str
@@ -161,81 +222,6 @@ def protected_dialogue(text: str) -> str | None:
     return re.sub(r"\s", "", "".join(parts)) if parts else None
 
 
-# 供应商指南要求镜头描述是自然叙事句，而不是把枚举堆成 ``key: value`` 标签
-# （「Camera motion should be written as a natural English action within the
-# shot, rather than stacked as separate labels」）。下面这组映射把 motion 枚举
-# 确定性渲染成中文叙事片段。
-# 注意：generation.py 的 render_shot_motion_clause 是面向另一套模板的祈使句
-# （「不得僵立原地」），两者服务不同模板，措辞不可互换，故分开维护。
-_MOTION_STATE_TEXT = {
-    "STATIC": "保持静止",
-    "WALKING": "行走",
-    "RUNNING": "奔跑",
-    "TURNING": "转身",
-    "GESTURING_ONLY": "仅做手势",
-    "OBJECT_MOTION": "物体位移",
-    "NO_PERSON": "无人物出镜",
-    "UNKNOWN": "运动状态无法判断",
-}
-# 只有位移类状态可以前置方向（「朝镜头方向行走」）。静止/无人物/物体位移这类
-# 状态自带完整语义，前置方向会读成病句（「无位移方向无人物出镜」），因此不在
-# 白名单里——白名单本身就是「不给这些状态加方向」的实现。
-_DIRECTION_PREFIXABLE_STATES = frozenset({"WALKING", "RUNNING", "TURNING"})
-_MOTION_DIRECTION_TEXT = {
-    "toward_camera": "朝镜头方向",
-    "away_from_camera": "背离镜头方向",
-    "left": "向画面左",
-    "right": "向画面右",
-    "lateral": "横向",
-    "in_place": "原地",
-    "none": "",
-    "unknown": "",
-}
-_CAMERA_MOTION_TEXT = {
-    "STATIC": "固定机位",
-    "PUSH_IN": "推近",
-    "PULL_BACK": "拉远",
-    "HANDHELD_TRACKING": "手持跟拍",
-    "PAN": "横摇",
-    "TILT": "纵摇",
-    "FOLLOW": "跟随",
-    "ORBIT": "环绕",
-    "CRANE_UP": "升镜",
-    "CRANE_DOWN": "降镜",
-    "ZOOM_IN": "变焦推近",
-    "ZOOM_OUT": "变焦拉远",
-    "UNKNOWN": "机位运动无法判断",
-}
-
-
-def _subject_motion_clause(motion: dict[str, Any]) -> str:
-    """把人物的运动状态（含并列主态）与位移方向渲染成一个叙事短语。"""
-    raw_state = str(motion.get("subject_motion_state") or "").strip()
-    states = parse_subject_motion_states(raw_state) if raw_state else ()
-    raw_direction = str(motion.get("subject_direction") or "")
-    direction = _MOTION_DIRECTION_TEXT.get(raw_direction, "")
-    direction_state = next(
-        (state for state in states if state in {"WALKING", "RUNNING"}),
-        "TURNING",
-    )
-
-    clauses: list[str] = []
-    for state in states:
-        text = _MOTION_STATE_TEXT.get(state, "")
-        if not text:
-            continue
-        # “仅手势”只适用于单一主态；边走边做手势不能再要求“仅”做手势。
-        if state == "GESTURING_ONLY" and len(states) > 1:
-            text = "做手势"
-        if direction and state == direction_state and state in _DIRECTION_PREFIXABLE_STATES:
-            text = f"{direction}{text}"
-        clauses.append(text)
-    if not clauses and direction:
-        clauses.append(direction)
-    # 并列主态用「，同时」连接，读起来仍是一句话而不是标签堆叠。
-    return "，同时".join(clauses)
-
-
 def _shot_action_motion_narrative(shot: dict[str, Any]) -> str:
     """动作 + motion 合成官方指南式叙事句：动作起点 → 连续发展 → 结束状态。
 
@@ -244,6 +230,9 @@ def _shot_action_motion_narrative(shot: dict[str, Any]) -> str:
     放在静态字段之前下发，模型因此先读到「人物在动」再读到景别/构图等参数。
     缺少 motion 的旧拆解结果只渲染 action，不劣化既有行为。
     """
+    facts_narrative = render_first_frame_motion(shot)
+    if facts_narrative is not None:
+        return facts_narrative
     segments: list[str] = []
     action = str(shot.get("action") or "").strip()
     if action:
@@ -251,7 +240,7 @@ def _shot_action_motion_narrative(shot: dict[str, Any]) -> str:
 
     motion = shot.get("motion")
     if isinstance(motion, dict):
-        head = _subject_motion_clause(motion)
+        head = subject_motion_phrase(motion)
         person_parts = [head] if head else []
         for key in ("subject_displacement", "hand_action"):
             value = str(motion.get(key) or "").strip()
@@ -261,7 +250,7 @@ def _shot_action_motion_narrative(shot: dict[str, Any]) -> str:
             segments.append("人物" + "，".join(person_parts))
 
         camera_parts: list[str] = []
-        camera = _CAMERA_MOTION_TEXT.get(str(motion.get("camera_motion") or ""), "")
+        camera = CAMERA_MOTION_LABELS.get(str(motion.get("camera_motion") or ""), "")
         if camera:
             camera_parts.append(f"镜头{camera}")
         relative = str(motion.get("relative_motion") or "").strip()
@@ -278,6 +267,22 @@ def require_consistent_storyboard(shot_payload: Mapping[str, Any]) -> None:
     shots = shot_payload.get("shots")
     if not isinstance(shots, list):
         return
+    if any(not isinstance(shot, Mapping) for shot in shots):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "STORYBOARD_CONSISTENCY_REQUIRED",
+                "shot_id": "",
+                "message": "分镜记录格式损坏，请修正后再继续生成。",
+                "issues": [
+                    {
+                        "code": "STORYBOARD_FORMAT_INVALID",
+                        "shot_id": "",
+                        "message": "分镜记录必须是对象。",
+                    }
+                ],
+            },
+        )
     original_script = shot_payload.get("original_script")
     issues = storyboard_consistency_issues(
         shots,
@@ -298,6 +303,15 @@ def require_consistent_storyboard(shot_payload: Mapping[str, Any]) -> None:
             "issues": issues,
         },
     )
+
+
+def normalize_consistent_storyboard(shot_payload: dict[str, Any]) -> dict[str, Any]:
+    """每个编译入口统一派生字段；不修改版本快照，也不信任旧的检查标记。"""
+    require_consistent_storyboard(shot_payload)
+    shots = shot_payload.get("shots")
+    if not isinstance(shots, list):
+        return dict(shot_payload)
+    return {**shot_payload, "shots": normalize_storyboard_shots(shots)}
 
 
 _SOURCE_FIXTURE_REFERENCE = re.compile(
@@ -377,7 +391,7 @@ def compile_replica_final_text(
             "FIRST_FRAME_ALIGNMENT_REQUIRED",
             "首帧来自视频中段或缺少开场时间记录，请选择开场帧或填写动作衔接方案。",
         )
-    require_consistent_storyboard(shot_payload)
+    shot_payload = normalize_consistent_storyboard(shot_payload)
     if replace_scene:
         _require_scene_actions_reviewed(shot_payload["shots"], opening_action=opening_action)
     # 口播长度不设门禁。曾有两条：15 秒专属的 60–90 字区间，以及通用的
@@ -468,6 +482,8 @@ def compile_replica_final_text(
             shot_number += 1
             start = float(shot["start_time"]) * scale
             lines.append(f"[Shot {shot_number}] At {int(start // 60):02d}:{start % 60:06.3f}")
+            if isinstance(shot.get("facts"), dict):
+                lines.append(f"镜头衔接：{shot['transition']}进入本镜头。")
         if shot.get("segment_kind") == "ACTION_BEAT" and (
             shot.get("action") or (index == 0 and opening_action.strip())
         ):
@@ -475,6 +491,12 @@ def compile_replica_final_text(
                 f"连续动作时间：{_motion_timestamp(float(shot['start_time']) * scale)}–"
                 f"{_motion_timestamp(float(shot['end_time']) * scale)}；"
                 "保持本镜头的动作、空间与机位连续，不新增切镜。"
+            )
+        elif isinstance(shot.get("facts"), dict) and shot.get("segment_kind") is None:
+            lines.append(
+                f"动作参考时间：{_motion_timestamp(float(shot['start_time']) * scale)}–"
+                f"{_motion_timestamp(float(shot['end_time']) * scale)}；"
+                "剪辑边界尚未确认，不据此新增切镜。"
             )
         # 官方指南的镜头结构是「首帧锚点 → 动作起点 → 连续发展 → 结束状态」，
         # 动作与运动因此在静态字段之前下发：模型先读到人物在动，再读到景别、
@@ -505,8 +527,11 @@ def compile_replica_final_text(
             )
         )
         for key in shot_keys:
+            # 开场方案可以同时改人物与机位；旧机位不能否定用户确认的新衔接。
+            if index == 0 and opening_action.strip() and key == "camera_motion":
+                continue
             if shot.get(key):
-                lines.append(f"{key}: {_anchor_presenter_to_first_frame(shot[key])}")
+                lines.append(f"{key}: {anchor_storyboard_presenter(shot[key], shot)}")
         if preserve_source_speech_timing:
             time_range = (
                 f"{_motion_timestamp(float(shot['start_time']) * scale)}–"

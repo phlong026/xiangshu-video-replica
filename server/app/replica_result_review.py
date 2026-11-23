@@ -6,8 +6,11 @@ import json
 import logging
 import math
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
+
+from app.storyboard_facts import normalize_storyboard_shots, storyboard_facts_issues
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,13 @@ def _target_segments(
     shots = expected.get("shots")
     if not isinstance(shots, list) or not shots:
         raise ValueError("验收输入没有分镜")
+    if any(not isinstance(shot, dict) for shot in shots):
+        raise ValueError("验收分镜格式无效")
     revised = expected.get("prompt_revised") is True or expected["prompt_text"] != prompt_text
+    if not revised:
+        if storyboard_facts_issues(shots):
+            raise ValueError("验收分镜事实相互矛盾或结构无效")
+        shots = normalize_storyboard_shots(shots)
     seen: set[str] = set()
     previous_end = 0.0
     segments: list[dict[str, Any]] = []
@@ -107,9 +116,18 @@ def _target_segments(
             for key in ("action", "camera_motion", "motion", "segment_kind"):
                 if key in shot:
                     segment[key] = shot[key]
+            if isinstance(shot.get("facts"), dict):
+                # 原片证据只证明预期来源，不能作为成片已经达标的观察。
+                segment["expected_facts"] = {
+                    key: deepcopy(value)
+                    for key, value in shot["facts"].items()
+                    if key != "evidence"
+                }
             if index == 0 and expected["opening_action"].strip():
                 segment["action"] = expected["opening_action"]
                 segment.pop("motion", None)
+                segment.pop("expected_facts", None)
+                segment.pop("camera_motion", None)
         segments.append(segment)
     if abs(previous_end - source_duration) > 0.05:
         raise ValueError("验收分镜未覆盖完整源时间轴")
@@ -119,6 +137,8 @@ def _target_segments(
 _INSTRUCTIONS = (
     "观察本次实际生成的视频，只返回一个JSON对象。最终实际提示词是验收依据；"
     "分镜只辅助定位，不得把旧分镜或预期文字当成已经看到的事实。"
+    "expected_facts仅是按主体编号归属的预期，必须重新观察成片取证；"
+    "主体编号只用于区分本段人物或物体，不是现实人物身份。"
     "只检查动作、摄影机运动、动作与切镜节拍、台词；人物位置与画面占比不变不能证明静止，"
     "固定机位也不能证明人物不动，行走与手势可以同时发生。"
     "开场衔接已替代首段旧动作；换景时不得要求恢复源场景、原道具或源人物身份。"

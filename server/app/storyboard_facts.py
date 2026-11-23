@@ -246,14 +246,20 @@ def _action_description(
         )
     elif action.gait == "UNKNOWN" and subject.kind == "PERSON":
         parts.append("步态无法判断")
+    elif action.gait == "NONE" and subject.kind == "PERSON":
+        parts.append("没有行走或跑动")
     if action.turning == "TURNING":
         parts.append("转身")
     elif action.turning == "UNKNOWN":
         parts.append("转身情况无法判断")
+    elif action.turning == "NONE" and subject.kind == "PERSON":
+        parts.append("没有转身动作")
     if action.gesture == "GESTURING":
         parts.append("做手势")
     elif action.gesture == "UNKNOWN" and subject.kind == "PERSON":
         parts.append("手势情况无法判断")
+    elif action.gesture == "NONE" and subject.kind == "PERSON":
+        parts.append("没有独立手势")
     if action.direction in _DIRECTIONS and action.direction != "in_place":
         parts.append(_DIRECTIONS[action.direction])
     if action.path.strip():
