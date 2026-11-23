@@ -367,6 +367,15 @@ export type StudioPublishDraft = {
   id: string;
   assetId: string;
   coverId?: string;
+  /** 未单独填写时跟随发布标题；独立标题不反改发布文案。 */
+  coverTitleOverride?: string;
+  coverTemplateId?: string;
+  /** 只保存已应用图片的输入快照，用于重开草稿后识别过期封面。 */
+  appliedCoverGeneration?: {
+    assetId: string;
+    templateId: string;
+    title: string;
+  };
   platform: "抖音" | "视频号" | "小红书" | "快手";
   /** Server-side publish account id (publish_browser_accounts); "" when unset. */
   account: string;
