@@ -2686,7 +2686,7 @@
 .content-cover-generated {
   border: 1px solid #292a27;
   border-radius: 8px;
-  max-height: 220px;
-  object-fit: cover;
+  max-height: 360px;
+  object-fit: contain;
   width: 100%;
 }
