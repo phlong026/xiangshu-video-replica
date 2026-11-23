@@ -75,6 +75,8 @@ const {
   resolveMaterials,
   createGenerationTaskPreviewUrl,
   createPublishRecord,
+  fetchCoverStyles,
+  generateCoverFromTemplate,
   listPublishRecords,
   cancelPublishRecord,
   retryPublishRecord,
@@ -191,6 +193,8 @@ const {
   ),
   createGenerationTaskPreviewUrl: vi.fn(),
   createPublishRecord: vi.fn(),
+  fetchCoverStyles: vi.fn(),
+  generateCoverFromTemplate: vi.fn(),
   listPublishRecords: vi.fn(async (): Promise<unknown[]> => []),
   cancelPublishRecord: vi.fn(),
   retryPublishRecord: vi.fn(),
@@ -257,6 +261,8 @@ vi.mock("../api", () => ({
   resolveMaterials,
   createGenerationTaskPreviewUrl,
   createPublishRecord,
+  fetchCoverStyles,
+  generateCoverFromTemplate,
   listPublishRecords,
   cancelPublishRecord,
   retryPublishRecord,
@@ -354,6 +360,7 @@ import { saveReplicaPreference } from "./AdaptiveReplicaSetup";
 import {
   MaterialsPage,
   PublishPage,
+  parsePublishDrafts,
   ViralCard,
   ViralDetailPage,
   ViralFavoriteButton,
@@ -546,6 +553,27 @@ function StatefulViralPage({ value }: { value: StudioContextValue }) {
     updateData,
   });
   return <ViralPage />;
+}
+
+function StatefulPublishPage({ value }: { value: StudioContextValue }) {
+  const [state, setState] = useState(value.state);
+  const [data, setData] = useState(value.data);
+  const patchState = useCallback(
+    (patch: Partial<StudioState>) => {
+      value.patchState(patch);
+      setState((current) => ({ ...current, ...patch }));
+    },
+    [value.patchState],
+  );
+  const updateData = useCallback(
+    (update: (current: StudioData) => StudioData) => {
+      value.updateData(update);
+      setData(update);
+    },
+    [value.updateData],
+  );
+  useStudio.mockReturnValue({ ...value, state, data, patchState, updateData });
+  return <PublishPage />;
 }
 
 function RenderWindowTrigger({ onLayout }: { onLayout?: () => void }) {
@@ -5985,5 +6013,497 @@ describe("全自动复刻入口（M8 v1）", () => {
         button.closest(".content-material-card__actions"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("发布封面标题与确认", () => {
+  const generatedImage = {
+    coverId: "provider-cover",
+    url: "https://provider.test/cover.jpg",
+    imageBase64: "aW1hZ2U=",
+  };
+  const drafts: StudioPublishDraft[] = ["A", "B"].map((name) => ({
+    id: `publish-video-${name}`,
+    assetId: `video-${name}`,
+    coverId: `video-${name}`,
+    platform: "抖音",
+    account: "account-1",
+    title: `发布 ${name}`,
+    description: "",
+    tags: [],
+  }));
+
+  function workspace() {
+    const base = studio();
+    return studio({
+      review: false,
+      user: { ...base.user, id: "user-A", role: "customer" },
+      state: { ...base.state, selectedAssetId: "video-A" },
+      data: {
+        ...base.data,
+        assets: ["A", "B"].map((name) => ({
+          id: `video-${name}`,
+          assetId: `video-${name}`,
+          materialId: `asset:video-${name}`,
+          name: `视频 ${name}`,
+          kind: "video" as const,
+          group: "成片",
+          source: "任务中心",
+          saved: true,
+        })),
+      },
+    });
+  }
+
+  function pending<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((complete) => {
+      resolve = complete;
+    });
+    return { promise, resolve };
+  }
+
+  async function openTemplates() {
+    await waitFor(() =>
+      expect(screen.getByLabelText("发布标题")).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "模板封面" }));
+    const template = await screen.findByRole("button", {
+      name: "选择模板 简洁",
+    });
+    fireEvent.click(template);
+  }
+
+  async function generatePreview() {
+    fireEvent.click(screen.getByRole("button", { name: "生成封面" }));
+    await screen.findByAltText("生成的封面预览");
+  }
+
+  beforeEach(() => {
+    useStudio.mockReset();
+    tauriNative.isTauri.mockReturnValue(false);
+    publishAccounts.canUseLocalPublishAccounts.mockReturnValue(false);
+    publishAccounts.listCloudPublishAccounts.mockReset().mockResolvedValue([
+      {
+        id: "account-1",
+        platform: "douyin",
+        username: "发布账号",
+        platform_user_id: "platform-user",
+        status: "connected",
+        source: "cloud",
+      },
+    ]);
+    getStudioDraft.mockReset().mockResolvedValue({
+      revision: 1,
+      payload: { drafts },
+    });
+    saveStudioDraft.mockReset().mockResolvedValue({ revision: 2 });
+    resolveMaterials.mockReset().mockResolvedValue({
+      items: [
+        ...["A", "B"].map((name) =>
+          material(`video-${name}`, {
+            title: `视频 ${name}`,
+            media_type: "video",
+            content_type: "video/mp4",
+          }),
+        ),
+        material("generated-cover", { group: "发布封面" }),
+      ],
+    });
+    fetchCoverStyles.mockReset().mockResolvedValue([
+      { id: "simple", title: "简洁", url: "https://provider.test/simple.jpg" },
+      { id: "bold", title: "醒目", url: "https://provider.test/bold.jpg" },
+    ]);
+    generateCoverFromTemplate.mockReset().mockResolvedValue(generatedImage);
+    createMaterialUploadIntent.mockReset().mockResolvedValue({
+      asset_id: "generated-cover",
+      material_id: "asset:generated-cover",
+    });
+    putMaterial
+      .mockReset()
+      .mockResolvedValue(material("generated-cover", { group: "发布封面" }));
+    getAssetDownloadUrl.mockReset().mockResolvedValue({
+      url: "https://storage.test/selected-cover.jpg",
+    });
+    createPublishRecord.mockReset().mockResolvedValue({
+      id: "publish-record",
+      platform: "douyin",
+      status: "queued",
+      scheduled_at: null,
+    });
+    listPublishRecords.mockReset().mockResolvedValue([]);
+  });
+
+  it("默认直接显示发布标题，独立编辑后可恢复跟随且保留所选模板", async () => {
+    render(<StatefulPublishPage value={workspace()} />);
+    await openTemplates();
+    expect(screen.getByLabelText("封面标题")).toHaveValue("发布 A");
+    fireEvent.change(screen.getByLabelText("发布标题"), {
+      target: { value: "新的发布标题" },
+    });
+    expect(screen.getByLabelText("封面标题")).toHaveValue("新的发布标题");
+    fireEvent.change(screen.getByLabelText("封面标题"), {
+      target: { value: "单独的封面标题" },
+    });
+    expect(screen.getByLabelText("发布标题")).toHaveValue("新的发布标题");
+    fireEvent.change(screen.getByLabelText("发布标题"), {
+      target: { value: "再次修改发布标题" },
+    });
+    expect(screen.getByLabelText("封面标题")).toHaveValue("单独的封面标题");
+    fireEvent.click(screen.getByRole("button", { name: "使用发布标题" }));
+    expect(screen.getByLabelText("封面标题")).toHaveValue("再次修改发布标题");
+    await generatePreview();
+    expect(generateCoverFromTemplate).toHaveBeenCalledWith({
+      template: "simple",
+      content: "再次修改发布标题",
+      canvasPreset: "9:16",
+    });
+  });
+
+  it("独立封面标题与模板保存到云端，重开保留且旧草稿仍可解析", async () => {
+    const view = render(<StatefulPublishPage value={workspace()} />);
+    await openTemplates();
+    fireEvent.change(screen.getByLabelText("封面标题"), {
+      target: { value: "独立保存的封面标题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await screen.findByText("已保存到云端，可在刷新后继续编辑。");
+    const payload = saveStudioDraft.mock.calls[0][1];
+    expect(payload.drafts[0]).toMatchObject({
+      title: "发布 A",
+      coverTitleOverride: "独立保存的封面标题",
+      coverTemplateId: "simple",
+    });
+    expect(parsePublishDrafts(drafts)).toEqual(drafts);
+    getStudioDraft.mockResolvedValue({ revision: 2, payload });
+    view.unmount();
+    render(<StatefulPublishPage value={workspace()} />);
+    await openTemplates();
+    expect(screen.getByLabelText("封面标题")).toHaveValue("独立保存的封面标题");
+    expect(screen.getByLabelText("发布标题")).toHaveValue("发布 A");
+  });
+
+  it.each(["   ", "字".repeat(501)])(
+    "拒绝空白或过长封面标题",
+    async (title) => {
+      render(<StatefulPublishPage value={workspace()} />);
+      await openTemplates();
+      fireEvent.change(screen.getByLabelText("封面标题"), {
+        target: { value: title },
+      });
+      expect(screen.getByLabelText("封面标题")).toHaveValue(title);
+      expect(screen.getByLabelText("封面标题")).not.toHaveAttribute(
+        "maxlength",
+      );
+      const generate = screen.getByRole("button", { name: "生成封面" });
+      expect(generate).toBeDisabled();
+      fireEvent.click(generate);
+      expect(generateCoverFromTemplate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("传实际封面标题生成真实预览，确认前不上传，使用后才传入发布记录", async () => {
+    const value = workspace();
+    render(<StatefulPublishPage value={value} />);
+    await openTemplates();
+    expect(screen.getByAltText("简洁")).toHaveAttribute(
+      "src",
+      "https://provider.test/simple.jpg",
+    );
+    fireEvent.change(screen.getByLabelText("封面标题"), {
+      target: { value: "  预算先看这三项  " },
+    });
+    await generatePreview();
+    expect(generateCoverFromTemplate).toHaveBeenCalledWith({
+      template: "simple",
+      content: "预算先看这三项",
+      canvasPreset: "9:16",
+    });
+    expect(screen.getByAltText("生成的封面预览")).toHaveAttribute(
+      "src",
+      `data:image/jpeg;base64,${generatedImage.imageBase64}`,
+    );
+    expect(screen.getByText("封面标题：预算先看这三项")).toBeInTheDocument();
+    expect(screen.getByText("模板：简洁")).toBeInTheDocument();
+    expect(screen.getByText("对应成片：视频 A")).toBeInTheDocument();
+    expect(createMaterialUploadIntent).not.toHaveBeenCalled();
+    expect(value.notify).not.toHaveBeenCalledWith(
+      expect.stringMatching(/已应用/),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "使用此封面" }));
+    await screen.findByRole("button", { name: "已使用此封面" });
+    expect(putMaterial).toHaveBeenCalledOnce();
+    const selected = screen.getByRole("button", {
+      name: "选择封面 generated-cover.png",
+    });
+    expect(selected).toHaveClass("is-selected");
+    expect(selected.querySelector("img")).toHaveAttribute(
+      "src",
+      "https://storage.test/selected-cover.jpg",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+    await waitFor(() =>
+      expect(createPublishRecord).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cover_material_id: "asset:generated-cover",
+          title: "发布 A",
+        }),
+      ),
+    );
+  });
+
+  it.each(["标题", "模板"])(
+    "生成期间修改%s，旧回包保留旧快照且不能应用",
+    async (change) => {
+      const result = pending<typeof generatedImage>();
+      generateCoverFromTemplate.mockReturnValueOnce(result.promise);
+      render(<StatefulPublishPage value={workspace()} />);
+      await openTemplates();
+      fireEvent.click(screen.getByRole("button", { name: "生成封面" }));
+      expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+      if (change === "标题")
+        fireEvent.change(screen.getByLabelText("封面标题"), {
+          target: { value: "更新后的标题" },
+        });
+      else
+        fireEvent.click(screen.getByRole("button", { name: "选择模板 醒目" }));
+      await act(async () => result.resolve(generatedImage));
+      expect(screen.getByText("封面标题：发布 A")).toBeInTheDocument();
+      expect(screen.getByText("模板：简洁")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "使用此封面" })).toBeDisabled();
+      expect(createMaterialUploadIntent).not.toHaveBeenCalled();
+      expect(
+        screen.getByText("封面标题或模板已变化，请重新生成。"),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("已应用封面过期后保存重开仍阻止发布，选择成片预览图可继续", async () => {
+    const view = render(<StatefulPublishPage value={workspace()} />);
+    await openTemplates();
+    await generatePreview();
+    fireEvent.click(screen.getByRole("button", { name: "使用此封面" }));
+    await screen.findByRole("button", { name: "已使用此封面" });
+    fireEvent.change(screen.getByLabelText("发布标题"), {
+      target: { value: "发布标题已改变" },
+    });
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await screen.findByText("已保存到云端，可在刷新后继续编辑。");
+    const payload = saveStudioDraft.mock.calls[0][1];
+    expect(payload.drafts[0].appliedCoverGeneration).toEqual({
+      assetId: "generated-cover",
+      templateId: "simple",
+      title: "发布 A",
+    });
+    expect(JSON.stringify(payload)).not.toContain(generatedImage.imageBase64);
+    getStudioDraft.mockResolvedValue({ revision: 2, payload });
+    view.unmount();
+    render(<StatefulPublishPage value={workspace()} />);
+    await screen.findByText(/当前封面的标题或模板已变化/);
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "选择封面 视频 A" }));
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+    await waitFor(() =>
+      expect(createPublishRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ cover_material_id: null }),
+      ),
+    );
+  });
+
+  it("上传失败保留候选且不报成功，重试应用无需重新生成", async () => {
+    const value = workspace();
+    putMaterial.mockRejectedValueOnce(new Error("上传暂时失败"));
+    render(<StatefulPublishPage value={value} />);
+    await openTemplates();
+    await generatePreview();
+    fireEvent.click(screen.getByRole("button", { name: "使用此封面" }));
+    await screen.findByText("上传暂时失败");
+    expect(screen.getByAltText("生成的封面预览")).toBeInTheDocument();
+    expect(value.notify).not.toHaveBeenCalledWith(
+      expect.stringMatching(/已应用/),
+    );
+    const apply = screen.getByRole("button", { name: "使用此封面" });
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+    await screen.findByRole("button", { name: "已使用此封面" });
+    expect(generateCoverFromTemplate).toHaveBeenCalledOnce();
+    expect(putMaterial).toHaveBeenCalledTimes(2);
+    expect(value.notify).toHaveBeenCalledExactlyOnceWith(
+      "封面已应用，可继续发布。",
+    );
+  });
+
+  it.each(["拒绝签名", "空地址"])(
+    "上传后%s仍不应用，可保留候选重试",
+    async (failure) => {
+      const value = workspace();
+      render(<StatefulPublishPage value={value} />);
+      await openTemplates();
+      await generatePreview();
+      if (failure === "拒绝签名")
+        getAssetDownloadUrl.mockRejectedValueOnce(new Error("签名读取失败"));
+      else getAssetDownloadUrl.mockResolvedValueOnce({ url: "" });
+      fireEvent.click(screen.getByRole("button", { name: "使用此封面" }));
+      await screen.findByText(
+        failure === "拒绝签名" ? "签名读取失败" : "读取封面预览失败，请重试。",
+      );
+      expect(
+        screen.getByRole("button", { name: "选择封面 视频 A" }),
+      ).toHaveClass("is-selected");
+      expect(value.notify).not.toHaveBeenCalled();
+      expect(screen.getByAltText("生成的封面预览")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "使用此封面" }));
+      await screen.findByRole("button", { name: "已使用此封面" });
+      expect(generateCoverFromTemplate).toHaveBeenCalledOnce();
+      expect(value.notify).toHaveBeenCalledExactlyOnceWith(
+        "封面已应用，可继续发布。",
+      );
+    },
+  );
+
+  it("切换草稿后旧生成返回不覆盖新草稿的结果，也不提前释放新操作", async () => {
+    const first = pending<typeof generatedImage>();
+    const second = pending<typeof generatedImage>();
+    generateCoverFromTemplate
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    render(<StatefulPublishPage value={workspace()} />);
+    await openTemplates();
+    fireEvent.click(screen.getByRole("button", { name: "生成封面" }));
+    fireEvent.click(
+      screen.getByText("发布 B").closest("button") as HTMLButtonElement,
+    );
+    expect(screen.getByLabelText("封面标题")).toHaveValue("发布 B");
+    fireEvent.click(screen.getByRole("button", { name: "选择模板 醒目" }));
+    fireEvent.click(screen.getByRole("button", { name: "生成封面" }));
+    await act(async () => first.resolve(generatedImage));
+    expect(screen.queryByAltText("生成的封面预览")).toBeNull();
+    expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+    await act(async () =>
+      second.resolve({ ...generatedImage, imageBase64: "bmV3" }),
+    );
+    expect(screen.getByText("对应成片：视频 B")).toBeInTheDocument();
+    expect(screen.getByText("封面标题：发布 B")).toBeInTheDocument();
+    expect(screen.getByAltText("生成的封面预览")).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,bmV3",
+    );
+    expect(createMaterialUploadIntent).not.toHaveBeenCalled();
+  });
+
+  it.each(["切换用户", "卸载", "重载草稿", "改为只读角色"])(
+    "%s后丢弃旧生成返回",
+    async (action) => {
+      const value = workspace();
+      const result = pending<typeof generatedImage>();
+      generateCoverFromTemplate.mockReturnValueOnce(result.promise);
+      const view = render(<StatefulPublishPage value={value} />);
+      await openTemplates();
+      fireEvent.click(screen.getByRole("button", { name: "生成封面" }));
+      if (action === "切换用户")
+        view.rerender(
+          <StatefulPublishPage
+            value={{
+              ...value,
+              user: { ...value.user, id: "user-B" },
+            }}
+          />,
+        );
+      else if (action === "卸载") view.unmount();
+      else if (action === "改为只读角色")
+        view.rerender(
+          <StatefulPublishPage
+            value={{
+              ...value,
+              user: { ...value.user, role: "auditor" },
+            }}
+          />,
+        );
+      else
+        fireEvent.click(
+          screen.getByRole("button", { name: "重新加载云端草稿与本机账号" }),
+        );
+      await act(async () => result.resolve(generatedImage));
+      expect(screen.queryByAltText("生成的封面预览")).toBeNull();
+      expect(createMaterialUploadIntent).not.toHaveBeenCalled();
+      expect(value.notify).not.toHaveBeenCalled();
+      if (action === "改为只读角色")
+        expect(screen.getByRole("button", { name: "生成封面" })).toBeDisabled();
+    },
+  );
+
+  it("应用上传中切换用户会中止传输，迟到返回不绑定到新用户", async () => {
+    const value = workspace();
+    const upload = pending<MaterialItem>();
+    putMaterial.mockReturnValueOnce(upload.promise);
+    const view = render(<StatefulPublishPage value={value} />);
+    await openTemplates();
+    await generatePreview();
+    fireEvent.click(screen.getByRole("button", { name: "使用此封面" }));
+    await waitFor(() => expect(putMaterial).toHaveBeenCalledOnce());
+    const signal = putMaterial.mock.calls[0][3] as AbortSignal;
+    view.rerender(
+      <StatefulPublishPage
+        value={{
+          ...value,
+          user: { ...value.user, id: "user-B" },
+        }}
+      />,
+    );
+    expect(signal.aborted).toBe(true);
+    await act(async () =>
+      upload.resolve(material("late-cover", { group: "发布封面" })),
+    );
+    expect(
+      screen.queryByRole("button", { name: "选择封面 late-cover.png" }),
+    ).toBeNull();
+    expect(value.notify).not.toHaveBeenCalled();
+  });
+
+  it("手动上传同图复用素材ID也可替代过期生成封面，改标题不阻止发布", async () => {
+    getStudioDraft.mockResolvedValue({
+      revision: 1,
+      payload: {
+        drafts: [
+          {
+            ...drafts[0],
+            coverId: "generated-cover",
+            coverTemplateId: "simple",
+            appliedCoverGeneration: {
+              assetId: "generated-cover",
+              templateId: "simple",
+              title: "旧标题",
+            },
+          },
+        ],
+      },
+    });
+    putMaterial.mockResolvedValue(
+      material("generated-cover", { group: "发布封面" }),
+    );
+    render(<StatefulPublishPage value={workspace()} />);
+    await screen.findByText(/当前封面的标题或模板已变化/);
+    fireEvent.change(screen.getByLabelText("上传发布封面"), {
+      target: {
+        files: [new File(["cover"], "自定义.jpg", { type: "image/jpeg" })],
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "立即发布" })).toBeEnabled(),
+    );
+    fireEvent.change(screen.getByLabelText("发布标题"), {
+      target: { value: "再改发布标题" },
+    });
+    expect(screen.getByRole("button", { name: "立即发布" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
+    await waitFor(() =>
+      expect(createPublishRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ cover_material_id: "asset:generated-cover" }),
+      ),
+    );
   });
 });
