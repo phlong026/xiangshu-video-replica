@@ -427,10 +427,12 @@ export function StudioDialog({
   title,
   children,
   onClose,
+  canClose = true,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
+  canClose?: boolean;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -446,11 +448,19 @@ export function StudioDialog({
       ref={dialogRef}
       className="studio-dialog"
       aria-label={title}
-      onCancel={onClose}
+      onCancel={(event) => {
+        event.preventDefault();
+        if (canClose) onClose();
+      }}
     >
       <header>
         <h2>{title}</h2>
-        <button type="button" aria-label="关闭" onClick={onClose}>
+        <button
+          type="button"
+          aria-label="关闭"
+          disabled={!canClose}
+          onClick={onClose}
+        >
           <Icon name="close" />
         </button>
       </header>

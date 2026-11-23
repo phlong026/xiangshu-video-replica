@@ -1,3 +1,4 @@
+import { webcrypto } from "node:crypto";
 import {
   act,
   fireEvent,
@@ -24,6 +25,12 @@ import type {
 
 const {
   useStudio,
+  createOralTask,
+  createScriptFromAudioTask,
+  getLatestScriptFromAudioTask,
+  getOralPrice,
+  listOralAvatars,
+  listOralVoices,
   fetchViralVideoMedia,
   fetchViralVideoStatistics,
   fetchViralVideo,
@@ -76,6 +83,12 @@ const {
   deletePublishRecord,
 } = vi.hoisted(() => ({
   useStudio: vi.fn(),
+  createOralTask: vi.fn(),
+  createScriptFromAudioTask: vi.fn(),
+  getLatestScriptFromAudioTask: vi.fn(),
+  getOralPrice: vi.fn(),
+  listOralAvatars: vi.fn(),
+  listOralVoices: vi.fn(),
   fetchViralVideoMedia: vi.fn(),
   fetchViralVideoStatistics: vi.fn(),
   fetchViralVideo: vi.fn(),
@@ -187,6 +200,14 @@ const {
 }));
 vi.mock("./context", () => ({ useStudio }));
 vi.mock("../api", () => ({
+  createOralTask,
+  createScriptFromAudioTask,
+  getLatestScriptFromAudioTask,
+  getOralPrice,
+  listOralAvatars,
+  listOralVoices,
+  customerVisibleErrorMessage: (cause: unknown, fallback: string) =>
+    cause instanceof Error ? cause.message : fallback,
   fetchViralVideoMedia,
   fetchViralVideoStatistics,
   fetchViralVideo,
@@ -355,6 +376,15 @@ describe("素材分页窗口化", () => {
     expect(visiblePageButtons(13, 13)).toEqual([1, "…", 12, 13]);
   });
 });
+
+function finishAdaptiveGuide() {
+  const guide = within(
+    screen.getByRole("dialog", { name: "一键复刻使用教程" }),
+  );
+  fireEvent.click(guide.getByRole("button", { name: "下一步" }));
+  fireEvent.click(guide.getByRole("button", { name: "下一步" }));
+  fireEvent.click(guide.getByRole("button", { name: "知道了" }));
+}
 
 function studio(
   overrides: Partial<StudioContextValue> = {},
@@ -3763,6 +3793,7 @@ describe("V1.4 内容与运营页面", () => {
       );
       const value = studio({
         review: false,
+        user: { ...base.user, id: `fresh-detail-${intent}` },
         data: {
           ...base.data,
           videos: [{ ...base.data.videos[0], durationMs: 10_000 }],
@@ -3802,14 +3833,21 @@ describe("V1.4 内容与运营页面", () => {
           ),
         );
       });
-      await waitFor(() =>
-        expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
-          "douyin",
-          "native-dy-1",
-          intent === "viralExtractIntent" ? "copy" : "replica",
-          expect.any(String),
-        ),
-      );
+      if (intent === "viralReplicateIntent") {
+        expect(
+          await screen.findByRole("dialog", { name: "一键复刻使用教程" }),
+        ).toBeInTheDocument();
+        expect(createViralImportTask).not.toHaveBeenCalled();
+      } else {
+        await waitFor(() =>
+          expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
+            "douyin",
+            "native-dy-1",
+            "copy",
+            expect.any(String),
+          ),
+        );
+      }
       expect(value.patchState).toHaveBeenCalledWith({ [intent]: false });
     },
   );
@@ -3887,6 +3925,7 @@ describe("V1.4 内容与运营页面", () => {
       };
       let current = studio({
         review: false,
+        user: { ...base.user, id: `switch-detail-${intent}` },
         data: { ...base.data, videos: [base.data.videos[0], second] },
         state: {
           ...base.state,
@@ -3938,14 +3977,21 @@ describe("V1.4 内容与运营页面", () => {
         }),
       };
       view.rerender(<ViralDetailPage />);
-      await waitFor(() =>
-        expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
-          "douyin",
-          "native-dy-2",
-          intent === "viralExtractIntent" ? "copy" : "replica",
-          expect.any(String),
-        ),
-      );
+      if (intent === "viralReplicateIntent") {
+        expect(
+          await screen.findByRole("dialog", { name: "一键复刻使用教程" }),
+        ).toBeInTheDocument();
+        expect(createViralImportTask).not.toHaveBeenCalled();
+      } else {
+        await waitFor(() =>
+          expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
+            "douyin",
+            "native-dy-2",
+            "copy",
+            expect.any(String),
+          ),
+        );
+      }
     },
   );
 
@@ -4956,13 +5002,18 @@ describe("全自动复刻入口（M8 v1）", () => {
     fetchReplicaPipeline.mockReset();
   });
 
-  it.each(["庭院案例", "管理员上传"])(
-    "%s 详情保留任务恢复与复刻入口",
-    async (category) => {
+  it.each([
+    ["庭院案例", 4_000],
+    ["管理员上传", 30_000],
+    ["管理员上传", 30_001],
+  ] as const)(
+    "%s %i 毫秒详情保留任务恢复与复刻入口",
+    async (category, durationMs) => {
       const nativeId = "replica-native-1";
       const base = studio();
       const value = studio({
         review: false,
+        user: { ...base.user, id: `ai-${durationMs}` },
         state: { ...base.state, selectedVideoId: `douyin-${nativeId}` },
         data: {
           ...base.data,
@@ -4974,8 +5025,8 @@ describe("全自动复刻入口（M8 v1）", () => {
               platform: "抖音",
               category,
               poster: "",
-              duration: "00:08",
-              durationMs: 8_000,
+              duration: `00:${String(durationMs / 1000).padStart(2, "0")}`,
+              durationMs,
               likes: 123,
               comments: 4,
               shares: 5,
@@ -4997,7 +5048,7 @@ describe("全自动复刻入口（M8 v1）", () => {
           authorAvatar: null,
           verified: false,
           coverUrl: null,
-          durationMs: 8_000,
+          durationMs,
           likes: 123,
           comments: 4,
           shares: 5,
@@ -5027,12 +5078,35 @@ describe("全自动复刻入口（M8 v1）", () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
       useStudio.mockReturnValue(value);
       const view = render(<ViralDetailPage />);
+      if (durationMs > 30_000) {
+        expect(
+          await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+        ).toBeEnabled();
+        expect(
+          screen.queryByRole("button", { name: "全自动复刻" }),
+        ).not.toBeInTheDocument();
+        expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+        confirmSpy.mockRestore();
+        view.unmount();
+        return;
+      }
       const entry = await screen.findByRole("button", { name: "全自动复刻" });
       await waitFor(() => expect(entry).toBeEnabled());
       expect(
         screen.queryByRole("button", { name: "刷新资源（按次计费）" }),
       ).not.toBeInTheDocument();
       fireEvent.click(entry);
+      expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+      finishAdaptiveGuide();
+      const setup = await screen.findByRole("dialog", {
+        name: "设置 AI 视频默认人物",
+      });
+      fireEvent.change(within(setup).getByLabelText("人物版本"), {
+        target: { value: "cv-1" },
+      });
+      fireEvent.click(
+        within(setup).getByRole("button", { name: "保存默认人物并继续" }),
+      );
       expect(confirmSpy).toHaveBeenCalledOnce();
       confirmSpy.mockRestore();
       await waitFor(() =>
@@ -5097,6 +5171,200 @@ describe("全自动复刻入口（M8 v1）", () => {
       failedRecovery.unmount();
     },
   );
+  it("30.001 秒自动转写、复用默认素材，改稿后重新报价，只有确认才生成", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: "oral-adaptive-test" },
+      state: {
+        ...base.state,
+        selectedVideoId: "dy-1",
+        viralReplicateIntent: true,
+      },
+      data: {
+        ...base.data,
+        people: [
+          {
+            id: "person-1",
+            name: "本人",
+            role: "",
+            version: 1,
+            scope: "",
+            audience: "",
+            expression: "",
+            sceneLookCount: 0,
+            photoIds: [],
+            avatars: [
+              {
+                id: "a-1",
+                name: "默认分身",
+                imageId: "asset-1",
+                ready: true,
+                origin: "视频制作",
+                duration: "00:15",
+              },
+            ],
+            voices: [
+              { id: "v-1", name: "默认声音", confirmed: true, status: "READY" },
+              { id: "v-2", name: "未确认声音", confirmed: false },
+            ],
+          },
+        ],
+      },
+    });
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(viralItem(1, { durationMs: 30_001 })),
+    );
+    listOralAvatars.mockResolvedValue([
+      { id: "a-1", status: "READY", source_kind: "VIDEO" },
+    ]);
+    listOralVoices.mockResolvedValue([
+      { id: "v-1", status: "READY", confirmed: 1, demo_asset_id: "demo" },
+    ]);
+    createViralImportTask.mockResolvedValue({
+      status: "SUCCEEDED",
+      canTranscribe: true,
+      projectId: "p-oral",
+      sourceAssetId: "asset-oral",
+    });
+    const transcript = {
+      id: "asr-1",
+      status: "SUCCEEDED",
+      source_asset_id: "asset-oral",
+      result: { text: "已转写的内容" },
+    };
+    getLatestScriptFromAudioTask
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(transcript);
+    createScriptFromAudioTask.mockResolvedValue(transcript);
+    const quoteFixture = "fixture-quote";
+    getOralPrice.mockResolvedValue({
+      quote_token: quoteFixture,
+      quote_expires_at: Math.floor(Date.now() / 1000) + 120,
+      max_credits: 18,
+      estimated_credits: 18,
+    });
+    createOralTask
+      .mockRejectedValueOnce(new Error("网络断开"))
+      .mockResolvedValue({ id: "oral-1", status: "PENDING" });
+    const digest = vi
+      .spyOn(crypto, "subtle", "get")
+      .mockReturnValue(webcrypto.subtle as SubtleCrypto);
+    useStudio.mockReturnValue(value);
+    const view = render(<ViralDetailPage />);
+    await screen.findByRole("dialog", { name: "一键复刻使用教程" });
+    finishAdaptiveGuide();
+    const setup = await screen.findByRole("dialog", {
+      name: "设置数字人口播默认素材",
+    });
+    fireEvent.change(within(setup).getByLabelText("人物"), {
+      target: { value: "person-1" },
+    });
+    expect(within(setup).queryByText("未确认声音")).not.toBeInTheDocument();
+    fireEvent.change(within(setup).getByLabelText("视频分身"), {
+      target: { value: "a-1" },
+    });
+    fireEvent.change(within(setup).getByLabelText("口播声音"), {
+      target: { value: "v-1" },
+    });
+    fireEvent.click(
+      within(setup).getByRole("button", { name: "保存默认素材并继续" }),
+    );
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认并提取口播" }));
+    const generate = await screen.findByRole("button", {
+      name: "确认并生成口播",
+    });
+    expect(createViralImportTask).toHaveBeenCalledWith(
+      "douyin",
+      "native-dy-1",
+      "copy",
+      expect.any(String),
+    );
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+    expect(createOralTask).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "改好的文案" },
+    });
+    expect(generate).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "获取口播报价" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认并生成口播" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("网络断开");
+    expect(value.navigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认并生成口播" }));
+    await waitFor(() => expect(value.navigate).toHaveBeenCalledWith("tasks"));
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    expect(createOralTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        identityId: "person-1",
+        avatarId: "a-1",
+        voiceId: "v-1",
+        scriptText: "改好的文案",
+        quoteToken: "fixture-quote",
+        maxCredits: 18,
+        idempotencyKey: expect.any(String),
+      }),
+    );
+    expect(createOralTask.mock.calls[1]?.[0].idempotencyKey).toEqual(
+      createOralTask.mock.calls[0]?.[0].idempotencyKey,
+    );
+    view.unmount();
+    render(<ViralDetailPage />);
+    await screen.findByRole("dialog", { name: "用数字人口播复刻" });
+    expect(
+      screen.queryByRole("dialog", { name: "一键复刻使用教程" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("dialog", { name: "设置数字人口播默认素材" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "确认并提取口播" }));
+    await screen.findByRole("button", { name: "确认并生成口播" });
+    expect(createScriptFromAudioTask).toHaveBeenCalledOnce();
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    digest.mockRestore();
+  });
+
+  it("首次关闭教程后不再自动弹出，仍允许手动查看", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: "adaptive-guide-dismiss" },
+      state: { ...base.state, selectedVideoId: "dy-1" },
+    });
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(viralItem(1, { durationMs: 30_001 })),
+    );
+    useStudio.mockReturnValue(value);
+    const view = render(<ViralDetailPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
+    );
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    view.unmount();
+    render(<ViralDetailPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "设置数字人口播默认素材" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "一键复刻使用教程" }),
+    ).toBeNull();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "使用教程" }));
+    expect(
+      screen.getByRole("dialog", { name: "一键复刻使用教程" }),
+    ).toBeInTheDocument();
+  });
+
   it("培训下载重新签发地址并保留工作台页面", async () => {
     useStudio.mockReturnValue(studio());
     trainingMaterialDownloadUrl

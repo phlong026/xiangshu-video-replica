@@ -32,10 +32,10 @@ import {
   openViralVideoDetail,
   putMaterial,
   quoteReplicaPipeline,
+  type ReplicaPipelineCharacter,
   type ReplicaPipelineQuote,
   type ReplicaPipelineStatus,
   removeViralFavorite,
-  replicaPipelineIdempotencyKey,
   resolveMaterials,
   saveStudioDraft,
   saveViralFavorite,
@@ -43,6 +43,11 @@ import {
 } from "../api";
 import { openWalletIfInsufficientCredits } from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
+import {
+  AdaptiveReplicaGuide,
+  replicaPreference,
+  saveReplicaPreference,
+} from "./AdaptiveReplicaSetup";
 import { useStudio } from "./context";
 import { studioAssetFromMaterial, studioVideoFromViral } from "./live";
 import {
@@ -54,6 +59,7 @@ import {
   onPublishAccountsChanged,
   openLocalPublishAccount,
 } from "./localPublishAccounts";
+import { OralReplicaControl } from "./OralReplicaControl";
 import {
   AccountAvatar,
   PlatformLogo,
@@ -74,6 +80,7 @@ import {
   Icon,
   Media,
   Panel,
+  StudioDialog,
 } from "./ui";
 import {
   awaitViralCacheReady,
@@ -463,10 +470,19 @@ export const REPLICA_STAGE_LABELS: Record<string, string> = {
  *
  * 一键发起：导入→拆解→首帧→合成提示词全程自动；到达确认点显示预估积分，
  * 用户确认后才建批次扣费（资金闸门在前端只做展示与确认，校验在服务端）。
- * v1 简化（M8b 迭代）：人物候选自动取第一个（多人物选择弹层待做）、
- * 300s 报价倒计时未做（过期确认会被服务端拒绝并要求重核价）。
+ * 复用本账号默认人物，但每次启动前重新读取可用版本；失效时要求重选。
  */
-function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
+function ReplicaPipelineControl({
+  video,
+  requested,
+  onRequest,
+  onHandled,
+}: {
+  video: StudioVideo;
+  requested: boolean;
+  onRequest: () => void;
+  onHandled: () => void;
+}) {
   const { notify, user } = useStudio();
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [status, setStatus] = useState<ReplicaPipelineStatus | null>(null);
@@ -474,9 +490,19 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteAgeMs, setQuoteAgeMs] = useState(0);
   const [busy, setBusy] = useState(false);
-  // 幂等键按「尝试」生成（评审 M8-r1#6）：同一 busy 周期内网络重试复用，
-  // 放弃/终态后清空，下一次点击是新尝试（不会重放原终态）。
-  const attemptKeyRef = useRef<string | null>(null);
+  const [characters, setCharacters] = useState<
+    ReplicaPipelineCharacter[] | null
+  >(null);
+  const [characterId, setCharacterId] = useState("");
+  const [editDefaultsOnly, setEditDefaultsOnly] = useState(false);
+  const startRef = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [recovering, setRecovering] = useState(true);
   const [recoveryError, setRecoveryError] = useState(false);
   const [recoveryAttempt, setRecoveryAttempt] = useState(0);
@@ -555,45 +581,77 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
     return () => window.clearInterval(timer);
   }, [quote]);
 
-  const begin = async () => {
-    if (!video.platformKey || !video.nativeId) {
-      notify("该视频缺少平台标识，无法发起全自动复刻");
-      return;
-    }
-    // 预处理费用披露（评审 M8-r1#1）：拆解与首帧在确认点之前就会产生费用。
+  const submitPreparation = async (characterVersionId: string) => {
+    if (!video.platformKey || !video.nativeId || startRef.current) return;
     const acknowledged = window.confirm(
-      [
-        "全自动复刻说明：",
-        "1. 系统将自动完成：导入参考素材 → 拆解分镜与文案 → 生成 3 张首帧候选并选定 → 合成最终提示词。",
-        "2. 拆解与首帧生成会按现有计费口径产生费用（具体以账单为准），每个环节失败自动重试至多 2 次。",
-        "3. 提示词就绪后**不会自动扣费生成**：会先展示费用明细，需要你确认一次才开始生成视频。",
-        "是否继续？",
-      ].join("\n"),
+      "系统将自动导入、拆解并生成首帧。拆解与首帧按现有规则计费，失败可能重试；成片生成前会另行报价并请你确认。是否继续？",
     );
     if (!acknowledged) return;
+    setCharacters(null);
+    startRef.current = true;
     setBusy(true);
     try {
-      const { characters } = await listReplicaPipelineCharacters();
-      const character = characters[0];
-      if (!character) {
-        notify("请先在人物库创建一个可用角色后再使用全自动复刻");
-        return;
-      }
-      attemptKeyRef.current ??= `${replicaPipelineIdempotencyKey(user.id, video.platformKey, video.nativeId)}:${Date.now()}`;
+      // 同一次网络重试使用相同请求，不能用同一个键替换人物。
+      const scope = `adaptive-short:${video.platformKey}:${video.nativeId}:${characterVersionId}`;
+      const attemptKey = viralImportIdempotencyKey(user.id, scope);
       const created = await initiateReplicaPipeline({
         platform: video.platformKey,
         videoId: video.nativeId,
-        characterVersionId: character.characterVersionId,
-        idempotencyKey: attemptKeyRef.current,
+        characterVersionId,
+        idempotencyKey: attemptKey,
       });
+      clearViralImportIdempotencyKey(user.id, scope, attemptKey);
+      if (!mounted.current) return;
       setPipelineId(created.id);
-      notify("全自动复刻已启动：完成后会请你确认费用再生成");
+      notify("AI 视频复刻已启动，准备完成后会请你确认成片费用。");
     } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "全自动复刻发起失败");
+      if (mounted.current)
+        notify(cause instanceof Error ? cause.message : "全自动复刻发起失败");
     } finally {
-      setBusy(false);
+      startRef.current = false;
+      if (mounted.current) setBusy(false);
     }
   };
+
+  const loadCharacters = async (choose: boolean) => {
+    if (startRef.current) return;
+    startRef.current = true;
+    setBusy(true);
+    try {
+      const result = await listReplicaPipelineCharacters();
+      if (!mounted.current) return;
+      const saved = replicaPreference(user.id, "short-character");
+      const validated = result.characters.find(
+        (item) => item.characterVersionId === saved,
+      );
+      if (!choose && validated) {
+        startRef.current = false;
+        await submitPreparation(validated.characterVersionId);
+        return;
+      }
+      setCharacterId(validated?.characterVersionId ?? "");
+      setEditDefaultsOnly(choose);
+      setCharacters(result.characters);
+    } catch (cause) {
+      if (mounted.current)
+        notify(
+          cause instanceof Error ? cause.message : "人物列表暂不可用，请重试。",
+        );
+    } finally {
+      startRef.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const startWhenReady = useRef(() => {});
+  startWhenReady.current = () => {
+    onHandled();
+    if (!pipelineId && !recoveryError && !characters)
+      void loadCharacters(false);
+  };
+  useEffect(() => {
+    if (requested && !recovering) startWhenReady.current();
+  }, [requested, recovering]);
 
   const confirmGeneration = async () => {
     if (!pipelineId || !quote) return;
@@ -634,7 +692,6 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
     try {
       await cancelReplicaPipeline(pipelineId);
       notify("已放弃全自动复刻（已产出内容保留在项目中）");
-      attemptKeyRef.current = null;
       setPipelineId(null);
       setStatus(null);
       setQuote(null);
@@ -661,9 +718,66 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
       );
     }
     return (
-      <Button disabled={busy || recovering} variant="outline" onClick={begin}>
-        {busy ? "准备中…" : "全自动复刻"}
-      </Button>
+      <>
+        <Button
+          disabled={busy || recovering}
+          variant="primary"
+          onClick={onRequest}
+        >
+          {busy ? "准备中…" : "全自动复刻"}
+        </Button>
+        <Button
+          disabled={busy || recovering}
+          variant="quiet"
+          onClick={() => void loadCharacters(true)}
+        >
+          更换默认人物
+        </Button>
+        {characters && (
+          <StudioDialog
+            title="设置 AI 视频默认人物"
+            onClose={() => setCharacters(null)}
+          >
+            {characters.length ? (
+              <>
+                <Field label="人物版本">
+                  <select
+                    value={characterId}
+                    onChange={(event) => setCharacterId(event.target.value)}
+                  >
+                    <option value="">请选择</option>
+                    {characters.map((item) => (
+                      <option
+                        key={item.characterVersionId}
+                        value={item.characterVersionId}
+                      >
+                        {item.name} · 版本 {item.versionNumber}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Button
+                  variant="primary"
+                  disabled={!characterId || busy}
+                  onClick={() => {
+                    saveReplicaPreference(
+                      user.id,
+                      "short-character",
+                      characterId,
+                    );
+                    if (editDefaultsOnly) setCharacters(null);
+                    else void submitPreparation(characterId);
+                  }}
+                >
+                  {editDefaultsOnly ? "保存默认人物" : "保存默认人物并继续"}
+                </Button>
+              </>
+            ) : (
+              <p>没有可用人物版本，请先在人物库创建并发布人物。</p>
+            )}
+          </StudioDialog>
+        )}
+      </>
     );
   }
   const label = status
@@ -735,7 +849,6 @@ function ReplicaPipelineControl({ video }: { video: StudioVideo }) {
               // 重新发起 = 新尝试（评审 M8-r2#6/M8-r3#5）：换幂等键并清空
               // 状态与报价，回到入口按钮；网络结果不确定时用户可先留在
               // 本页重试原键（放弃路径亦会清键）。
-              attemptKeyRef.current = null;
               setPipelineId(null);
               setStatus(null);
               setQuote(null);
@@ -1068,7 +1181,7 @@ export function ViralCard({
             onClick={() => {
               navigate("viral-detail", {
                 selectedVideoId: video.id,
-                returnTo: "viral",
+                returnTo: detailReturnTo,
                 viralReplicateIntent: true,
               });
               persistViralDetailUrl(video);
@@ -1893,7 +2006,7 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
     start: async (
       video: StudioVideo,
       purpose: ViralImportPurpose,
-      onReady: (task: ViralImportTask) => void,
+      onReady?: (task: ViralImportTask) => void,
     ) => {
       if (video.id !== sourceRef.current || accountId !== accountRef.current)
         return;
@@ -1944,7 +2057,8 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
           throw new Error("该来源暂不支持视频复刻");
         }
         setState({ status: "ready", message: "参考素材已导入" });
-        onReady(completed);
+        onReady?.(completed);
+        return completed;
       } catch (error) {
         if (request !== requestRef.current) return;
         if (shouldClearViralImportIdempotencyKey(error)) clearKey();
@@ -1955,6 +2069,87 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
       }
     },
   };
+}
+
+function AdaptiveReplicaControl({ video }: { video: StudioVideo }) {
+  const { state, user, patchState, notify } = useStudio();
+  const [guide, setGuide] = useState<"first" | "manual" | null>(null);
+  const [requested, setRequested] = useState(false);
+  const { start, importState } = useViralImport(video.id, user.id);
+  const duration = video.durationMs;
+  const supported =
+    typeof duration === "number" &&
+    Number.isFinite(duration) &&
+    duration >= 4_000;
+  const canStart = supported && Boolean(video.platformKey && video.nativeId);
+
+  const onRequest = useCallback(() => {
+    if (!canStart) {
+      notify("视频时长未知、不足 4 秒或缺少来源信息；可手动提取文案。");
+      return;
+    }
+    if (!replicaPreference(user.id, "guide-v1")) {
+      saveReplicaPreference(user.id, "guide-v1", "1");
+      setGuide("first");
+    } else {
+      setRequested(true);
+    }
+  }, [canStart, notify, user.id]);
+
+  const consumedIntent = useRef(false);
+  useEffect(() => {
+    if (!state.viralReplicateIntent) {
+      consumedIntent.current = false;
+      return;
+    }
+    if (consumedIntent.current) return;
+    consumedIntent.current = true;
+    patchState({ viralReplicateIntent: false });
+    onRequest();
+  }, [state.viralReplicateIntent, patchState, onRequest]);
+
+  return (
+    <>
+      {canStart &&
+        (duration > 30_000 ? (
+          <OralReplicaControl
+            video={video}
+            requested={requested}
+            onRequest={onRequest}
+            onHandled={() => setRequested(false)}
+            importVideo={() => start(video, "copy")}
+            importError={
+              importState.status === "error" ? importState.message : undefined
+            }
+          />
+        ) : (
+          <ReplicaPipelineControl
+            video={video}
+            requested={requested}
+            onRequest={onRequest}
+            onHandled={() => setRequested(false)}
+          />
+        ))}
+      <Button
+        variant="quiet"
+        onClick={() => {
+          saveReplicaPreference(user.id, "guide-v1", "1");
+          setGuide("manual");
+        }}
+      >
+        使用教程
+      </Button>
+      {guide && (
+        <AdaptiveReplicaGuide
+          onClose={() => setGuide(null)}
+          onComplete={() => {
+            if (guide === "first") setRequested(true);
+            setGuide(null);
+          }}
+        />
+      )}
+    </>
+  );
 }
 
 export function ViralDetailPage() {
@@ -1974,7 +2169,14 @@ export function ViralDetailPage() {
   const selectedVideo = state.selectedVideoId
     ? data.videos.find((item) => item.id === state.selectedVideoId)
     : undefined;
-  const [remoteVideo, setRemoteVideo] = useState<StudioVideo>();
+  const [remoteDetail, setRemoteDetail] = useState<{
+    accountId: string;
+    video: StudioVideo;
+  }>();
+  const remoteVideo =
+    remoteDetail && remoteDetail.accountId === accountId
+      ? remoteDetail.video
+      : undefined;
   const [detailStatus, setDetailStatus] = useState<
     "idle" | "loading" | "error"
   >("idle");
@@ -1995,7 +2197,7 @@ export function ViralDetailPage() {
   const { importState, start } = useViralImport(video?.id, accountId);
 
   useEffect(() => {
-    setRemoteVideo(undefined);
+    setRemoteDetail(undefined);
     setDetailFavorite(undefined);
     setDetailAvailability(review ? "available" : "unavailable");
     setDetailError(undefined);
@@ -2015,7 +2217,7 @@ export function ViralDetailPage() {
         const restored = studioVideoFromViral(item);
         setDetailAvailability(item.availability ?? "available");
         setDetailFavorite(Boolean(item.isFavorite));
-        setRemoteVideo(restored);
+        setRemoteDetail({ accountId: requestAccountId, video: restored });
         setDetailStatus("idle");
         updateData((current) => ({
           ...current,
@@ -2046,51 +2248,7 @@ export function ViralDetailPage() {
 
   // 互动数据随免费详情响应下发，客户页面不触发源站补采。
   const { playback, play, retry, markFailed } = useViralPlayback(video);
-  const beginReplicateRef = useRef<() => void>(() => {});
   const requestExtractRef = useRef<() => void>(() => {});
-  // ADM-17 卡片「去复刻」直达：意图即焚；handler 经 ref 晚绑定，保持 hook
-  // 顺序稳定（beginReplicate 的定义在组件 early return 之后）。
-  useEffect(() => {
-    if (
-      !state.viralReplicateIntent ||
-      !video ||
-      detailStatus !== "idle" ||
-      detailAvailability !== "available"
-    )
-      return;
-    patchState({ viralReplicateIntent: false });
-    // 卡片一键复刻对超限视频的降级提示：讲清替代方向而不是干巴巴的拒绝。
-    // >30s 平台视频暂不能自动走长视频拆解（服务端 canAnalyze 门禁 4–30s），
-    // 服务端放开后这里接 handOffLongReplicaSource 路由。
-    if (typeof video.durationMs !== "number") {
-      notify(
-        "该视频时长未知，暂不支持自动复刻；可在本页「提取文案」后由口播数字人翻拍。",
-      );
-      return;
-    }
-    if (video.durationMs > 30_000) {
-      // 一键复刻爆款按时长分流（用户拍板 2026-11-15）：>30s 直接走数字人口
-      // 播路线——导入转写后落文案页确认，确认终稿即可口播；不再弹「暂不支持」。
-      if (!video.platformKey || !video.nativeId) {
-        notify("该视频缺少平台标识，无法复刻");
-        return;
-      }
-      requestExtractRef.current();
-      return;
-    }
-    if (video.durationMs < 4_000) {
-      notify("该视频不足 4 秒，请走「提取文案」方向");
-      return;
-    }
-    beginReplicateRef.current();
-  }, [
-    state.viralReplicateIntent,
-    video,
-    notify,
-    patchState,
-    detailStatus,
-    detailAvailability,
-  ]);
   // 卡片「提取文案」直达：与复刻意图同款即焚消费，复用下方 requestExtract
   // 的服务端导入 → 转写链路。
   useEffect(() => {
@@ -2179,9 +2337,6 @@ export function ViralDetailPage() {
     typeof video.durationMs === "number" &&
     video.durationMs >= 4_000 &&
     video.durationMs <= 30_000;
-  // 全自动复刻单独门禁 4–15 秒（评审 M8-r2#2）：自动生成批次上限 15 秒，
-  // 16–30 秒走手动复刻分段，避免先收费拆解/首帧再必然失败。
-  const canReplicaAuto = canReplicate && (video.durationMs ?? 0) <= 15_000;
   const goReplica = (task: ViralImportTask) => {
     if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
       notify("该来源暂不支持视频复刻");
@@ -2204,7 +2359,6 @@ export function ViralDetailPage() {
     }
     void start(video, "replica", goReplica);
   };
-  beginReplicateRef.current = beginReplicate;
   return (
     <section className="content-page content-detail">
       <header className="content-detail-heading">
@@ -2326,13 +2480,16 @@ export function ViralDetailPage() {
                 </Button>
               </div>
             )}
-            {canReplicaAuto &&
-              !review &&
+            {!review &&
+              user.role !== "auditor" &&
               detailStatus === "idle" &&
-              detailAvailability === "available" && (
+              detailAvailability === "available" &&
+              remoteVideo?.platformKey === targetPlatform &&
+              remoteVideo?.nativeId === targetVideoId &&
+              remoteVideo && (
                 <div className="content-detail-action">
-                  <ReplicaPipelineControl
-                    key={`${user.id}:${video.platformKey}:${video.nativeId}`}
+                  <AdaptiveReplicaControl
+                    key={`${user.id}:${viralIdentity(video)}`}
                     video={video}
                   />
                 </div>
