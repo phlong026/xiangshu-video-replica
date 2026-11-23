@@ -516,6 +516,29 @@ def get_viral_video(conn: BusinessConnection, *, platform: str, video_id: str) -
     return _row_to_video(row) if row is not None else None
 
 
+def apply_customer_resolution(
+    conn: BusinessConnection, video: ViralVideo, *, user_id: str
+) -> ViralVideo:
+    """本人创作使用最近成功解析的元数据；不改共享行，也不授予素材访问权。"""
+    receipt = conn.execute(
+        "SELECT response_json::jsonb->'item' AS item FROM viral_link_resolution_receipts "
+        "WHERE owner_user_id=%s AND status='SUCCEEDED' "
+        "AND response_json::jsonb->'item'->>'platform'=%s "
+        "AND response_json::jsonb->'item'->>'videoId'=%s "
+        "ORDER BY updated_at DESC, id DESC LIMIT 1",
+        (user_id, video.platform, video.video_id),
+    ).fetchone()
+    if receipt is None:
+        return video
+    item = receipt["item"]
+    title, duration = item.get("title"), item.get("durationMs")
+    return replace(
+        video,
+        title=title if isinstance(title, str) else video.title,
+        duration_ms=duration if type(duration) is int and duration > 0 else video.duration_ms,
+    )
+
+
 def viral_publication_clock(
     conn: BusinessConnection, *, platform: str, featured_only: bool
 ) -> tuple[str, str | None]:

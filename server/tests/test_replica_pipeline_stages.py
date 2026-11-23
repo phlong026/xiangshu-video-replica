@@ -120,7 +120,7 @@ def _stub_domains(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """桩掉全部域原语；测试按需覆盖 registry 里的桩."""
     registry: dict[str, Any] = {}
 
-    def fake_duration(conn: object, platform: str, video_id: str) -> int:
+    def fake_duration(conn: object, platform: str, video_id: str, **kwargs: Any) -> int:
         return registry.get("duration_ms", 8000)
 
     def fake_enqueue_import(conn: object, **kwargs: Any) -> dict[str, Any]:
@@ -299,6 +299,72 @@ def _seed_uploaded_pipeline(
         (f"u-{slot}", credits),
     )
     return pipeline_id, asset_id
+
+
+@pytest.mark.parametrize("has_imported_duration", [False, True])
+def test_link_analysis_uses_personal_source_duration_without_changing_catalog(
+    biz: BusinessConnection,
+    _stub_domains: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    has_imported_duration: bool,
+) -> None:
+    from app.analysis import enqueue_analysis_task
+
+    slot = f"personal-duration-{has_imported_duration}"
+    pipeline_id, asset_id = _seed_uploaded_pipeline(
+        biz, slot=slot, status=rp.STATUS_IMPORTING, seconds=20
+    )
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET platform='douyin', video_id=%s, "
+        "import_task_id='personal-import' WHERE id=%s",
+        (slot, pipeline_id),
+    )
+    if not has_imported_duration:
+        # 兼容尚未记录时长的旧导入资产，回落本人的成功解析回执。
+        biz.execute("UPDATE assets SET metadata_json='{}' WHERE id=%s", (asset_id,))
+    biz.execute(
+        "INSERT INTO viral_videos (platform, video_id, title, duration_ms) "
+        "VALUES ('douyin', %s, '运营标题', 6000)",
+        (slot,),
+    )
+    biz.execute(
+        "INSERT INTO viral_link_resolution_receipts (id, owner_user_id, "
+        "idempotency_key, normalized_url, purpose, request_hash, status, "
+        "lease_owner, lease_expires_at, response_json) "
+        "VALUES (%s, %s, %s, 'https://example.com/video', 'replica', 'hash', "
+        "'SUCCEEDED', 'test', now(), %s)",
+        (
+            f"receipt-{slot}",
+            f"u-{slot}",
+            f"receipt-{slot}",
+            json.dumps(
+                {
+                    "item": {
+                        "platform": "douyin",
+                        "videoId": slot,
+                        "durationMs": 31000 if has_imported_duration else 20000,
+                    }
+                }
+            ),
+        ),
+    )
+    monkeypatch.setattr(stages, "_video_duration_ms", real_video_duration_ms)
+    monkeypatch.setattr(stages, "enqueue_analysis_task", enqueue_analysis_task)
+    _stub_domains["sub_status"] = {
+        ("viral_import_tasks", "personal-import"): ("SUCCEEDED", {"source_asset_id": asset_id})
+    }
+    result = stages.run_pipeline_stage(biz, _acquire(biz, slot=slot))
+    assert result.kind == "advanced"
+    task = biz.execute(
+        "SELECT duration_seconds FROM analysis_tasks WHERE project_id=%s", (f"p-{slot}",)
+    ).fetchone()
+    # 导入已完成后再次解析得到其他时长，不能改写本次素材的分析/计费长度。
+    assert task is not None and float(task["duration_seconds"]) == 20
+    shared = biz.execute(
+        "SELECT title, duration_ms FROM viral_videos WHERE platform='douyin' AND video_id=%s",
+        (slot,),
+    ).fetchone()
+    assert shared is not None and shared["title"] == "运营标题" and shared["duration_ms"] == 6000
 
 
 def test_uploaded_worker_skips_import_and_recovers_completed_analysis_without_recharging(

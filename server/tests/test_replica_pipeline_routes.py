@@ -354,6 +354,126 @@ def test_initiation_checks_thirty_second_price_before_work_and_preserves_replay(
     assert replay["replay"] is True and replay["id"] == original["id"]
 
 
+@pytest.mark.parametrize(
+    ("shared_duration_ms", "personal_duration_ms", "expected_code"),
+    [
+        (0, 6000, None),
+        (6000, 20000, "LONG_DURATION_TIER_DISABLED"),
+        (6000, 31000, "SOURCE_TOO_LONG_FOR_GENERATION"),
+        (6000, None, None),
+    ],
+)
+def test_personal_resolution_controls_pipeline_preflight_without_changing_catalog(
+    dsn: str,
+    monkeypatch: pytest.MonkeyPatch,
+    shared_duration_ms: int,
+    personal_duration_ms: int | None,
+    expected_code: str | None,
+) -> None:
+    from contextlib import contextmanager
+    from typing import cast
+
+    from fastapi import HTTPException
+
+    from app.auth import CurrentUser
+    from app.customer_fence import BusinessDb
+    from app.replica_pipeline_routes import (
+        ReplicaPipelineInitiateRequest,
+        initiate_replica_pipeline,
+    )
+
+    suffix = uuid4().hex[:12]
+    owner, other, video_id = f"owner-{suffix}", f"other-{suffix}", f"video-{suffix}"
+    actor = CurrentUser(id=owner, username=owner, display_name="本人", role="customer")
+
+    class RouteDb:
+        @contextmanager
+        def write(self) -> Iterator[tuple[BusinessConnection, CurrentUser]]:
+            with psycopg.connect(dsn) as raw:
+                yield BusinessConnection.postgres(raw), actor
+
+    monkeypatch.setattr(
+        "app.project_character_selection.list_available_project_character_versions",
+        lambda *args, **kwargs: [object()],
+    )
+    with psycopg.connect(dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_user(conn, owner)
+        _seed_user(conn, other)
+        conn.execute(
+            "INSERT INTO runtime_settings (id, replica_pipeline_enabled) VALUES (1, true) "
+            "ON CONFLICT (id) DO UPDATE SET replica_pipeline_enabled = true"
+        )
+        conn.execute(
+            "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_rounding) "
+            "VALUES ('video_768p_long', false, 2, 'ceil') "
+            "ON CONFLICT (service) DO UPDATE SET enabled = false"
+        )
+        conn.execute(
+            "INSERT INTO viral_videos (platform, video_id, title, duration_ms) "
+            "VALUES ('douyin', %s, '运营标题', %s)",
+            (video_id, shared_duration_ms),
+        )
+        receipts = [
+            (other, "SUCCEEDED", "douyin", video_id, 31000),
+            (owner, "FAILED_SAFE", "douyin", video_id, 31000),
+            (owner, "SUCCEEDED", "xiaohongshu", video_id, 31000),
+            (owner, "SUCCEEDED", "douyin", f"other-{video_id}", 31000),
+        ]
+        if personal_duration_ms is not None:
+            receipts.insert(0, (owner, "SUCCEEDED", "douyin", video_id, personal_duration_ms))
+        for index, (user_id, status, platform, receipt_video_id, duration) in enumerate(receipts):
+            receipt_id = f"receipt-{suffix}-{index}"
+            conn.execute(
+                "INSERT INTO viral_link_resolution_receipts (id, owner_user_id, "
+                "idempotency_key, normalized_url, purpose, request_hash, status, "
+                "lease_owner, lease_expires_at, response_json, updated_at) "
+                "VALUES (%s, %s, %s, 'https://example.com/video', 'replica', 'hash', "
+                "%s, 'test', now(), %s, now() + %s * interval '1 second')",
+                (
+                    receipt_id,
+                    user_id,
+                    receipt_id,
+                    status,
+                    json.dumps(
+                        {
+                            "item": {
+                                "platform": platform,
+                                "videoId": receipt_video_id,
+                                "title": "本次解析标题",
+                                "durationMs": duration,
+                            }
+                        }
+                    ),
+                    index,
+                ),
+            )
+    request = ReplicaPipelineInitiateRequest(
+        platform="douyin",
+        video_id=video_id,
+        character_version_id="test-person",
+        idempotency_key=f"start-{suffix}",
+        preprocess_acknowledged=True,
+    )
+    if expected_code is None:
+        result = initiate_replica_pipeline(request, cast(BusinessDb, RouteDb()))
+        assert result["status"] == rp.STATUS_ENQUEUED
+    else:
+        with pytest.raises(HTTPException) as rejected:
+            initiate_replica_pipeline(request, cast(BusinessDb, RouteDb()))
+        assert rejected.value.status_code == 422
+        assert rejected.value.detail["code"] == expected_code
+    with psycopg.connect(dsn) as raw:
+        assert raw.execute(
+            "SELECT title, duration_ms FROM viral_videos WHERE platform='douyin' AND video_id=%s",
+            (video_id,),
+        ).fetchone() == ("运营标题", shared_duration_ms)
+        count = raw.execute(
+            "SELECT count(*) FROM replica_pipeline_tasks WHERE owner_user_id=%s", (owner,)
+        ).fetchone()[0]
+        assert count == (1 if expected_code is None else 0)
+
+
 @pytest.fixture
 def uploaded_source(dsn: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     from cryptography.fernet import Fernet

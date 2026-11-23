@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import uuid4
@@ -26,6 +26,7 @@ from app.storage import (
 from app.viral_media import ViralMediaPipeline
 from app.viral_media_preparation import ViralMediaBusy
 from app.viral_store import (
+    apply_customer_resolution,
     get_viral_video,
     is_customer_visible_viral_video,
     viral_video_availability,
@@ -141,23 +142,7 @@ def _require_import_video(
         raise _error(404, "VIRAL_VIDEO_NOT_FOUND", "爆款视频不存在或已下架。", retryable=False)
     # 客户重新解析不覆盖共享运营行；本人任务使用其最近成功回执中的时长和
     # 标题。访问守卫先行，回执不能绕过下架、隐藏或排期限制。
-    receipt = conn.execute(
-        "SELECT response_json::jsonb->'item' AS item FROM viral_link_resolution_receipts "
-        "WHERE owner_user_id=%s AND status='SUCCEEDED' "
-        "AND response_json::jsonb->'item'->>'platform'=%s "
-        "AND response_json::jsonb->'item'->>'videoId'=%s "
-        "ORDER BY updated_at DESC, id DESC LIMIT 1",
-        (user_id, platform, video_id),
-    ).fetchone()
-    if receipt is not None:
-        item = receipt["item"]
-        title, duration = item.get("title"), item.get("durationMs")
-        return replace(
-            video,
-            title=title if isinstance(title, str) else video.title,
-            duration_ms=duration if type(duration) is int and duration > 0 else video.duration_ms,
-        )
-    return video
+    return apply_customer_resolution(conn, video, user_id=user_id)
 
 
 def enqueue_viral_import_task(
