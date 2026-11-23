@@ -85,21 +85,6 @@ def initiate_replica_pipeline(
             rp.require_pipeline_enabled(conn)
         except rp.ReplicaPipelineError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code, "message": exc.message})
-        # 自动生成只支持 4–15 秒输出（批次请求硬约束）：超长源片在此拒绝，
-        # 避免先收费拆解/首帧、再在 COMPOSING 必然失败（评审 M8-r2#2）。
-        video_row = conn.execute(
-            "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
-            (request.platform, request.video_id),
-        ).fetchone()
-        if video_row is not None and video_row["duration_ms"] is not None:
-            if int(video_row["duration_ms"]) > 15_000:
-                raise HTTPException(
-                    422,
-                    detail={
-                        "code": "SOURCE_TOO_LONG_FOR_GENERATION",
-                        "message": "该视频超过 15 秒，暂不支持全自动生成，请转手动复刻。",
-                    },
-                )
         request_hash = hashlib.sha256(
             f"{request.platform}|{request.video_id}|{request.character_version_id}".encode()
         ).hexdigest()
@@ -115,6 +100,28 @@ def initiate_replica_pipeline(
             )
         except rp.ReplicaPipelineError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code, "message": exc.message})
+        if result["replay"] is False:
+            # 新任务与项目仍未提交。先核对源片和长档价目，失败时整笔回滚，
+            # 避免启动收费拆解/首帧；同键重放不受当前目录或价目修改影响。
+            video_row = conn.execute(
+                "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
+                (request.platform, request.video_id),
+            ).fetchone()
+            duration_ms = None if video_row is None else video_row["duration_ms"]
+            try:
+                duration = rp.require_output_duration(
+                    int(duration_ms) if duration_ms is not None else None
+                )
+            except rp.ReplicaPipelineError as exc:
+                raise HTTPException(
+                    exc.status_code, detail={"code": exc.code, "message": exc.message}
+                ) from exc
+            if duration > 15:
+                from app.generation import generation_price_quote
+
+                generation_price_quote(
+                    conn, resolution="768P", duration_seconds=duration, quantity=1, user_id=actor.id
+                )
         # 人物可用性校验（评审 B-r3#1：复用既有人物域判定，而非自造 SQL）：
         # enqueue 已在**同一事务**建好项目，用项目上下文跑权威校验——
         # 发布快照/参考图/授权凭据不满足时抛 HTTPException，事务整体回滚

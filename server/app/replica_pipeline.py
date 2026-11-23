@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -231,6 +232,19 @@ def effective_elapsed_seconds(row: BusinessRow, *, now: datetime) -> float:
             suspended_at = datetime.fromisoformat(suspended_at)
         elapsed -= (now - suspended_at).total_seconds()
     return float(elapsed)
+
+
+def require_output_duration(duration_ms: int | float | None) -> int:
+    """先校验真实时长，再向上取整；preserve 编译不能静默截短小数秒。"""
+    if duration_ms is None or not math.isfinite(duration_ms) or duration_ms < 4_000:
+        raise ReplicaPipelineError(
+            422, "SOURCE_TOO_SHORT_FOR_GENERATION", "全自动复刻需要至少 4 秒且时长已知的视频。"
+        )
+    if duration_ms > 30_000:
+        raise ReplicaPipelineError(
+            422, "SOURCE_TOO_LONG_FOR_GENERATION", "该视频超过 30 秒，请使用长视频拆解。"
+        )
+    return math.ceil(duration_ms / 1000)
 
 
 def enqueue_replica_pipeline(

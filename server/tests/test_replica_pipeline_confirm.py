@@ -443,3 +443,59 @@ def test_regenerate_uses_paid_regeneration_primitive(
     ).fetchone()
     assert row is not None
     assert row["status"] == rp.STATUS_GENERATING and row["batch_id"] == "batch-regen"
+
+
+@pytest.mark.parametrize("seconds", [4, 16, 17, 30])
+def test_confirm_uses_exact_compiled_duration_quote(
+    biz: BusinessConnection,
+    _stub_domains: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    seconds: int,
+) -> None:
+    from types import SimpleNamespace
+
+    def quote(conn: object, **kwargs: Any) -> SimpleNamespace:
+        assert (kwargs["resolution"], kwargs["duration_seconds"], kwargs["quantity"]) == (
+            "768P",
+            seconds,
+            1,
+        )
+        return SimpleNamespace(
+            price_tier="16-30s" if seconds > 15 else "4-15s",
+            unit_credits=2.0,
+            estimated_credits=seconds * 2,
+            estimated_price_fen=seconds * 100,
+        )
+
+    monkeypatch.setattr("app.generation.generation_price_quote", quote)
+    pipeline_id = _seed_pipeline(biz, status=rp.STATUS_AWAIT_CONFIRM, slot="long")
+    row = biz.execute(
+        "SELECT * FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None
+    snapshot = confirm.freeze_confirm_quote(
+        biz, row=row, owner_user_id="u-long", duration_seconds=seconds
+    )
+    assert snapshot["durationSeconds"] == seconds and snapshot["maxCredits"] == seconds * 2
+    import json
+
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET quote_snapshot = %s WHERE id = %s",
+        (json.dumps(snapshot), pipeline_id),
+    )
+    result = confirm.confirm_pipeline(
+        biz,
+        pipeline_id=pipeline_id,
+        owner_user_id="u-long",
+        quote_token="qt-long",
+        max_credits=seconds * 2,
+        expected_fingerprint=str(snapshot["fingerprint"]),
+    )
+    assert result["batchId"] == "batch-new"
+    request = _stub_domains["batch_kwargs"]["request"]
+    assert (request.output_duration_seconds, request.resolution, request.quantity) == (
+        seconds,
+        "768P",
+        1,
+    )
+    assert request.max_credits == seconds * 2 and request.quote_token == "qt-long"

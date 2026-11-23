@@ -242,3 +242,109 @@ def test_active_lookup_is_owner_and_video_scoped(biz: BusinessConnection) -> Non
         "UPDATE replica_pipeline_tasks SET status = 'FAILED' WHERE owner_user_id = %s", (actor.id,)
     )
     assert find_active_replica_pipeline("douyin", "v1", biz, actor) == {"pipelineId": None}
+
+
+def test_initiation_checks_thirty_second_price_before_work_and_preserves_replay(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实受理/事务与价目；不访问人物素材、生成供应商或真实钱包。"""
+    from contextlib import contextmanager
+    from typing import cast
+
+    from cryptography.fernet import Fernet
+    from fastapi import HTTPException
+
+    from app.auth import CurrentUser
+    from app.customer_fence import BusinessDb
+    from app.replica_pipeline_routes import (
+        ReplicaPipelineInitiateRequest,
+        initiate_replica_pipeline,
+    )
+
+    owner = "u-range"
+    actor = CurrentUser(id=owner, username=owner, display_name="测试", role="customer")
+
+    class RouteDb:
+        @contextmanager
+        def write(self) -> Iterator[tuple[BusinessConnection, CurrentUser]]:
+            with psycopg.connect(dsn) as raw:
+                yield BusinessConnection.postgres(raw), actor
+
+    monkeypatch.setattr(
+        "app.project_character_selection.list_available_project_character_versions",
+        lambda *args, **kwargs: [object()],
+    )
+    test_cipher = Fernet(Fernet.generate_key())
+    monkeypatch.setattr("app.quote_contracts._cipher", lambda: test_cipher)
+
+    def seed(enabled: bool) -> None:
+        with psycopg.connect(dsn) as raw:
+            conn = BusinessConnection.postgres(raw)
+            _seed_user(conn, owner)
+            conn.execute(
+                "INSERT INTO runtime_settings (id, replica_pipeline_enabled) VALUES (1, true) "
+                "ON CONFLICT (id) DO UPDATE SET replica_pipeline_enabled = true"
+            )
+            conn.execute(
+                "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_rounding) "
+                "VALUES ('video_768p_long', %s, 2, 'ceil') "
+                "ON CONFLICT (service) DO UPDATE SET enabled = EXCLUDED.enabled",
+                (enabled,),
+            )
+            for video_id, duration_ms in [
+                ("zero", 0),
+                ("short", 3999),
+                ("fraction-tier", 15001),
+                ("fraction-161", 16100),
+                ("fraction-165", 16500),
+                ("fraction-294", 29400),
+                ("edge", 30000),
+                ("long", 30001),
+            ]:
+                conn.execute(
+                    "INSERT INTO viral_videos (platform, video_id, title, duration_ms) "
+                    "VALUES ('douyin', %s, '测试视频', %s) ON CONFLICT DO NOTHING",
+                    (video_id, duration_ms),
+                )
+
+    def start(video_id: str) -> dict[str, object]:
+        return initiate_replica_pipeline(
+            ReplicaPipelineInitiateRequest(
+                platform="douyin",
+                video_id=video_id,
+                character_version_id="test-person",
+                idempotency_key=f"range-{video_id}-001",
+                preprocess_acknowledged=True,
+            ),
+            cast(BusinessDb, RouteDb()),
+        )
+
+    seed(False)
+    for video_id, code in [
+        ("unknown", "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ("zero", "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ("short", "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ("long", "SOURCE_TOO_LONG_FOR_GENERATION"),
+        ("fraction-tier", "LONG_DURATION_TIER_DISABLED"),
+        ("fraction-161", "LONG_DURATION_TIER_DISABLED"),
+        ("fraction-165", "LONG_DURATION_TIER_DISABLED"),
+        ("fraction-294", "LONG_DURATION_TIER_DISABLED"),
+        ("edge", "LONG_DURATION_TIER_DISABLED"),
+    ]:
+        with pytest.raises(HTTPException) as rejected:
+            start(video_id)
+        assert rejected.value.status_code == 422 and rejected.value.detail["code"] == code
+    with psycopg.connect(dsn) as raw:
+        assert (
+            raw.execute("SELECT id FROM projects WHERE owner_user_id = %s", (owner,)).fetchall()
+            == []
+        )
+
+    seed(True)
+    original = start("edge")
+    assert original["status"] == rp.STATUS_ENQUEUED and original["replay"] is False
+    seed(False)
+    with psycopg.connect(dsn) as raw:
+        raw.execute("DELETE FROM viral_videos WHERE platform = 'douyin' AND video_id = 'edge'")
+    replay = start("edge")
+    assert replay["replay"] is True and replay["id"] == original["id"]

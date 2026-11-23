@@ -32,6 +32,7 @@ from app.generation import (
     ScriptRequest,
     compile_prompt_version,
     create_script_version,
+    shot_timeline_duration,
 )
 from app.image_tasks import enqueue_first_frame_task
 from app.project_character_selection import choose_project_character_version
@@ -120,6 +121,23 @@ def _version_payload(conn: BusinessConnection, version_id: str) -> dict[str, obj
         return None
     payload = json.loads(str(row["payload_json"]))
     return cast(dict[str, object], payload) if isinstance(payload, dict) else {}
+
+
+def _shot_output_duration(conn: BusinessConnection, detail: dict[str, object]) -> int:
+    """和编译器使用同一分镜时间轴，避免目录估算时长覆盖实际媒体时长。"""
+    from fastapi import HTTPException
+
+    version_id = detail.get("shotCardVersionId")
+    payload = _version_payload(conn, version_id) if isinstance(version_id, str) else None
+    if payload is None:
+        raise rp.ReplicaPipelineError(422, "SHOT_CARD_TIMELINE_INVALID", "缺少有效分镜时长。")
+    try:
+        duration_seconds = shot_timeline_duration(payload)
+    except HTTPException as exc:
+        raise rp.ReplicaPipelineError(
+            422, "SHOT_CARD_TIMELINE_INVALID", "缺少有效分镜时长。"
+        ) from exc
+    return rp.require_output_duration(duration_seconds * 1000)
 
 
 def _sub_task_status(
@@ -488,6 +506,19 @@ def _first_frame_candidates(
         from fastapi import HTTPException
 
         try:
+            # 拆解会用实际媒体时长校正目录估算；新付费首帧前复查，
+            # 已有在途候选只观察，不因价目变化重复提交或丢弃产物。
+            duration_seconds = _shot_output_duration(conn, detail)
+            if duration_seconds > 15:
+                from app.generation import generation_price_quote
+
+                generation_price_quote(
+                    conn,
+                    resolution="768P",
+                    duration_seconds=duration_seconds,
+                    quantity=1,
+                    user_id=lease.owner_user_id,
+                )
             character_version_id, reference_selection_id = _resolve_character_binding(
                 conn, lease, selection_id, actor=actor
             )
@@ -496,13 +527,15 @@ def _first_frame_candidates(
             # driver（评审 A-r2#7：穿透就不会 settle_failure，「转手动」不落库）。
             return _failed(exc.code, exc.message, retryable=False)
         except HTTPException as exc:
-            # 参考选择过期等域异常同样是确定性失败（评审 A-r3）：不能穿透
-            # driver，否则失败状态不落库。
+            # 档位不可用或参考选择过期等域异常不能穿透 driver，
+            # 否则失败状态不落库。
             detail_code = exc.detail
             code = "REPLICA_PIPELINE_CHARACTER_STALE"
-            message = "人物参考图选择已过期，请转手动处理。"
+            message = "生成前置检查未通过，请转手动处理。"
             if isinstance(detail_code, dict) and isinstance(detail_code.get("code"), str):
                 code = detail_code["code"]
+            if code == "LONG_DURATION_TIER_DISABLED":
+                message = "当前未开放 16–30 秒生成，请转手动处理。"
             return _failed(code, message, retryable=False)
         key = rp.stage_operation_key(
             lease.id, f"{rp.STAGE_FIRST_FRAME}:candidates", lease.stage_retry_no
@@ -690,17 +723,10 @@ def _stage_compose(
         script_version_id = str(row["script_version_id"] or "")
     if not isinstance(shot_card_version_id, str) or not isinstance(first_frame_asset_id, str):
         return _failed("COMPOSE_INPUT_MISSING", "编译输入缺失。")
-    duration_ms = _video_duration_ms(conn, lease.platform, lease.video_id)
-    duration_seconds = round(duration_ms / 1000) if duration_ms > 0 else 0
-    if duration_seconds > 15:
-        # 批次请求限 4–15 秒（GenerationBatchRequest）：>15 秒源片在 v1 不支持
-        # 自动生成——显式失败转手动，不静默 clamp（否则编译 30s、报价 15s、
-        # 建批次 PROMPT_PARAMETERS_MISMATCH，评审 A-r1#11）。
-        return _failed(
-            "SOURCE_TOO_LONG_FOR_GENERATION",
-            "源片超过 15 秒，暂不支持自动生成；请转手动分段处理。",
-        )
-    duration_seconds = max(4, duration_seconds)
+    try:
+        duration_seconds = _shot_output_duration(conn, detail)
+    except rp.ReplicaPipelineError as exc:
+        return _failed(exc.code, exc.message)
     actor = _pipeline_actor(conn, lease.owner_user_id)
     request = PromptCompileRequest(
         script_version_id=script_version_id,
@@ -729,7 +755,17 @@ def _stage_compose(
     from app.replica_pipeline_confirm import freeze_confirm_quote
 
     row_after = _load_row(conn, lease)
-    snapshot = freeze_confirm_quote(conn, row=row_after, owner_user_id=lease.owner_user_id)
+    try:
+        snapshot = freeze_confirm_quote(
+            conn,
+            row=row_after,
+            owner_user_id=lease.owner_user_id,
+            duration_seconds=duration_seconds,
+        )
+    except HTTPException as exc:
+        if isinstance(exc.detail, dict) and exc.detail.get("code") == "LONG_DURATION_TIER_DISABLED":
+            return _failed("LONG_DURATION_TIER_DISABLED", "当前未开放 16–30 秒生成，请转手动处理。")
+        raise
     conn.execute(
         "UPDATE replica_pipeline_tasks SET quote_snapshot = %s, "
         "awaiting_since = now() WHERE id = %s",

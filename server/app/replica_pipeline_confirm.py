@@ -71,12 +71,11 @@ def freeze_confirm_quote(
     *,
     row: BusinessRow,
     owner_user_id: str,
+    duration_seconds: int,
 ) -> dict[str, object]:
     """进入 AWAIT_CONFIRM 前冻结授权基准（金额上限/档位/名额/指纹/报价凭证）.
 
-    固定策略（方案 §3.4）：768P、单任务、时长=源片时长（4–15 秒为可成交口径，
-    超出 15 秒的源片在 COMPOSING 已按失败出口转手动——批次请求限 4–15 秒，
-    30 秒复刻走既有两段方案，不由本管道自动代答）。
+    使用本次实际编译的时长，不因素材库元数据刷新而生成另一份报价。
     """
     from app.generation import generation_price_quote
 
@@ -94,7 +93,6 @@ def freeze_confirm_quote(
         and isinstance(first_frame_asset_id, str)
     ):
         raise _confirm_error("CONFIRM_INPUT_INCOMPLETE", "确认点输入不完整。")
-    duration_seconds = _output_duration_seconds(conn, row)
     quote = generation_price_quote(
         conn,
         resolution="768P",
@@ -124,20 +122,6 @@ def freeze_confirm_quote(
         "frozenAt": datetime.now(UTC).isoformat(),
     }
     return snapshot
-
-
-def _output_duration_seconds(conn: BusinessConnection, row: BusinessRow) -> int:
-    """输出时长=源片时长（4–15 秒）。>15 秒源片不自动生成（见模块注释）."""
-    duration_ms = conn.execute(
-        "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
-        (str(row["platform"]), str(row["video_id"])),
-    ).fetchone()
-    source_seconds = (
-        0
-        if duration_ms is None or duration_ms["duration_ms"] is None
-        else round(int(duration_ms["duration_ms"]) / 1000)
-    )
-    return max(4, min(15, source_seconds or 4))
 
 
 def confirm_pipeline(
