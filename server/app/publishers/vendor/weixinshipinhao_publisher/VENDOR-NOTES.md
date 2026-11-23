@@ -41,3 +41,10 @@
   `app/publish_credentials.py` 从扫码账号 `storage_state` 按 `weixin.qq.com` / `qq.com` 域过滤拼接，不再手工粘贴。
 - `schedule` 参数未使用——定时由本仓 `publish_records.scheduled_at` 在 worker 侧到点投递。`post_list` / `get_object_short_link`
   的结果回收在 PR-B（PUBLISH-FALLBACK-SYNC）接入。
+
+## 2026-11-23 发布封面保留修复
+
+- `publish()` 显式收到 `cover_path` 时，保留已上传图片的 `thumb_url` 与 `cover_url`，避免
+  裁剪结果中的自动封面覆盖用户选定的封面；未传封面时仍采用裁剪结果的默认封面。
+- 视频地址、尺寸、时长、大小及用于发布链接匹配的媒体 MD5 继续采用裁剪结果；
+  发布参数 `md5sum` 仍使用上传任务 UUID。
