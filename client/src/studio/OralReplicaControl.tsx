@@ -24,13 +24,79 @@ import {
 } from "./quoteConfirmation";
 import type { StudioPerson, StudioVideo } from "./types";
 import { Button, Field, StudioDialog } from "./ui";
-import {
-  clearViralImportIdempotencyKey,
-  viralImportIdempotencyKey,
-} from "./viralImport";
+import { viralImportIdempotencyKey } from "./viralImport";
 
 type OralDefaults = { identityId: string; avatarId: string; voiceId: string };
+type OralRequestSnapshot = OralDefaults & {
+  title: string;
+  mode: "TTS";
+  scriptText: string;
+};
+type OralAttempt = {
+  request: OralRequestSnapshot;
+  idempotencyKey: string;
+  receipt?: { id: string; status: string };
+};
 const EMPTY: OralDefaults = { identityId: "", avatarId: "", voiceId: "" };
+
+function attemptField(video: StudioVideo) {
+  return `oral-attempt:${video.id}`;
+}
+
+function readAttempt(
+  accountId: string,
+  video: StudioVideo,
+): OralAttempt | null {
+  try {
+    const raw = replicaPreference(accountId, attemptField(video));
+    if (!raw) return null;
+    const attempt = JSON.parse(raw) as Partial<OralAttempt> | null;
+    const request = attempt?.request;
+    if (
+      request?.mode !== "TTS" ||
+      typeof request.identityId !== "string" ||
+      typeof request.avatarId !== "string" ||
+      typeof request.voiceId !== "string" ||
+      typeof request.title !== "string" ||
+      typeof request.scriptText !== "string" ||
+      typeof attempt?.idempotencyKey !== "string" ||
+      !attempt.idempotencyKey
+    )
+      return null;
+    return {
+      request: {
+        identityId: request.identityId,
+        avatarId: request.avatarId,
+        voiceId: request.voiceId,
+        title: request.title,
+        mode: "TTS",
+        scriptText: request.scriptText,
+      },
+      idempotencyKey: attempt.idempotencyKey,
+      ...(typeof attempt.receipt?.id === "string" &&
+      typeof attempt.receipt.status === "string"
+        ? {
+            receipt: { id: attempt.receipt.id, status: attempt.receipt.status },
+          }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveAttempt(
+  accountId: string,
+  video: StudioVideo,
+  attempt: OralAttempt | null,
+) {
+  // 报价仅在当前页面有效；持久化的请求只用于同键恢复，不携带报价令牌。
+  return saveReplicaPreference(
+    accountId,
+    attemptField(video),
+    attempt ? JSON.stringify(attempt) : "",
+  );
+}
 
 function availableAvatars(person: StudioPerson | undefined) {
   return (
@@ -81,9 +147,9 @@ export function OralReplicaControl({
   importError?: string;
 }) {
   const { user, data, notify, navigate, refresh, openLive } = useStudio();
-  const [stage, setStage] = useState<"settings" | "prepare" | "compose" | null>(
-    null,
-  );
+  const [stage, setStage] = useState<
+    "settings" | "prepare" | "compose" | "receipt" | null
+  >(null);
   const [editDefaultsOnly, setEditDefaultsOnly] = useState(false);
   const [choice, setChoice] = useState(() => readDefaults(user.id));
   const [script, setScript] = useState("");
@@ -91,6 +157,8 @@ export function OralReplicaControl({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [preparing, setPreparing] = useState(false);
+  const [attempt, setAttempt] = useState(() => readAttempt(user.id, video));
+  const pendingAttempt = Boolean(attempt && !attempt.receipt);
   const mounted = useRef(false);
   const locking = useRef(false);
   const person = data.people.find((item) => item.id === choice.identityId);
@@ -130,12 +198,29 @@ export function OralReplicaControl({
     }
   };
 
+  const restoreAttempt = (saved: OralAttempt) => {
+    setAttempt(saved);
+    setChoice({
+      identityId: saved.request.identityId,
+      avatarId: saved.request.avatarId,
+      voiceId: saved.request.voiceId,
+    });
+    setScript(saved.request.scriptText);
+    setQuote(null);
+    setStage(saved.receipt ? "receipt" : "compose");
+  };
+
   const enter = useRef(() => {});
   enter.current = () => {
     onHandled();
     if (!stage && !locking.current) {
       setError("");
       setEditDefaultsOnly(false);
+      const saved = readAttempt(user.id, video);
+      if (saved) {
+        restoreAttempt(saved);
+        return;
+      }
       setStage(valid ? "prepare" : "settings");
     }
   };
@@ -235,42 +320,84 @@ export function OralReplicaControl({
       }
     });
 
-  const loadQuote = () => void run(() => quoteScript(script.trim()));
+  const loadQuote = () =>
+    void run(async () => {
+      const saved = readAttempt(user.id, video);
+      if (saved?.receipt) {
+        restoreAttempt(saved);
+        return;
+      }
+      if (saved) restoreAttempt(saved);
+      await quoteScript(saved?.request.scriptText ?? script.trim());
+    });
 
   const submit = () =>
     void run(async () => {
-      if (!isCurrentQuote(quote) || !valid) {
+      const saved = readAttempt(user.id, video);
+      if (
+        saved?.receipt ||
+        (saved && saved.idempotencyKey !== attempt?.idempotencyKey)
+      ) {
+        restoreAttempt(saved);
+        return;
+      }
+      if (!isCurrentQuote(quote) || (!saved && !valid)) {
         setQuote(null);
         throw new Error("口播报价已失效或默认素材不可用，请重新核对。");
       }
-      const request = {
-        ...choice,
-        title,
-        mode: "TTS" as const,
-        scriptText: script.trim(),
+      const submitted: OralAttempt = saved ?? {
+        request: {
+          ...choice,
+          title,
+          mode: "TTS",
+          scriptText: script.trim(),
+        },
+        idempotencyKey: crypto.randomUUID(),
       };
-      // 客户端只保存哈希对应的请求键，不保存用户文案；回包丢失或刷新仍重放原任务。
-      const fingerprint = await crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(JSON.stringify(request)),
-      );
+      if (!saveAttempt(user.id, video, submitted)) {
+        throw new Error("无法保存任务恢复信息，请检查浏览器本地存储后重试。");
+      }
+      setAttempt(submitted);
+      let result: Awaited<ReturnType<typeof createOralTask>>;
+      try {
+        result = await createOralTask({
+          ...submitted.request,
+          idempotencyKey: submitted.idempotencyKey,
+          quoteToken: quote.quote_token,
+          maxCredits: quote.max_credits,
+        });
+      } catch (cause) {
+        // 首次请求的明确拒绝允许修正；已有不确定请求仍冻结，不能重造另一个任务。
+        const current = readAttempt(user.id, video);
+        if (
+          !saved &&
+          current?.idempotencyKey === submitted.idempotencyKey &&
+          !current.receipt &&
+          cause &&
+          typeof cause === "object" &&
+          (("code" in cause && cause.code === "ORAL_REQUEST_INVALID") ||
+            isQuoteRejection(cause) ||
+            isInsufficientCredits(cause))
+        ) {
+          saveAttempt(user.id, video, null);
+          if (mounted.current) setAttempt(null);
+        }
+        throw cause;
+      }
+      // 离页后成功回执仍先保存任务号；只有用户明确新建版本才结束这个幂等周期。
+      const current = readAttempt(user.id, video);
+      if (current?.idempotencyKey !== submitted.idempotencyKey) return;
+      const received = {
+        ...submitted,
+        receipt: { id: result.id, status: result.status },
+      };
+      saveAttempt(user.id, video, received);
       if (!mounted.current) return;
-      const scope = `adaptive-oral:${video.platformKey}:${video.nativeId}:${Array.from(new Uint8Array(fingerprint)).join(".")}`;
-      const key = viralImportIdempotencyKey(user.id, scope);
-      const result = await createOralTask({
-        ...request,
-        idempotencyKey: key,
-        quoteToken: quote.quote_token,
-        maxCredits: quote.max_credits,
-      });
-      clearViralImportIdempotencyKey(user.id, scope, key);
-      if (!mounted.current) return;
-      if (result.status === "FAILED")
-        throw new Error("口播任务提交未成功，请核对素材后重试。");
-      setStage(null);
+      setAttempt(received);
+      setStage("receipt");
       setQuote(null);
-      setScript("");
       refresh();
+      if (result.status === "FAILED" || result.status === "CANCELLED") return;
       notify("数字人口播复刻已提交，可在任务中心查看进度。");
       navigate("tasks");
     });
@@ -284,7 +411,7 @@ export function OralReplicaControl({
       </Button>
       <Button
         variant="quiet"
-        disabled={busy}
+        disabled={busy || pendingAttempt}
         onClick={() => {
           setError("");
           setEditDefaultsOnly(true);
@@ -389,11 +516,16 @@ export function OralReplicaControl({
           onClose={close}
           canClose={!busy}
         >
+          {pendingAttempt && (
+            <p role="status">
+              上次提交结果待核对，已保留原请求。文案与素材暂时锁定；继续操作只会恢复同一次任务。
+            </p>
+          )}
           <Field label="口播文案">
             <textarea
               rows={8}
               value={script}
-              disabled={busy}
+              disabled={busy || pendingAttempt}
               onChange={(event) => {
                 setScript(event.target.value);
                 setQuote(null);
@@ -412,7 +544,7 @@ export function OralReplicaControl({
                 积分，按服务端结算规则计费。
               </p>
               <Button variant="primary" disabled={busy} onClick={submit}>
-                确认并生成口播
+                {pendingAttempt ? "继续核对原口播任务" : "确认并生成口播"}
               </Button>
             </>
           ) : (
@@ -428,6 +560,35 @@ export function OralReplicaControl({
               获取口播报价
             </Button>
           )}
+        </StudioDialog>
+      )}
+      {stage === "receipt" && attempt?.receipt && (
+        <StudioDialog title="口播任务已受理" onClose={close}>
+          <p>任务编号：{attempt.receipt.id}</p>
+          <p>本次请求已保存，回到本视频不会重复创建任务。</p>
+          {["FAILED", "CANCELLED"].includes(attempt.receipt.status) && (
+            <p role="alert">原任务已结束，请在任务中心核对结果和积分。</p>
+          )}
+          {error && <p role="alert">{error}</p>}
+          <footer className="replica-pipeline-actions">
+            <Button variant="primary" onClick={() => navigate("tasks")}>
+              查看任务
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                if (!saveAttempt(user.id, video, null)) {
+                  setError("无法保存新版本状态，请检查浏览器本地存储后重试。");
+                  return;
+                }
+                setAttempt(null);
+                setQuote(null);
+                setStage("compose");
+              }}
+            >
+              新建一个口播版本
+            </Button>
+          </footer>
         </StudioDialog>
       )}
     </>

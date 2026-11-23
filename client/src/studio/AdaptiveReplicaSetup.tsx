@@ -18,12 +18,15 @@ export function saveReplicaPreference(
   value: string,
 ) {
   const key = JSON.stringify(["studio:adaptive-replica", accountId, field]);
+  let persisted = false;
   try {
     window.localStorage.setItem(key, value);
+    persisted = true;
   } catch {
     // 禁止本地存储时，同一会话仍只自动打开一次。
   }
   preferences.set(key, value);
+  return persisted;
 }
 
 const guide = [
