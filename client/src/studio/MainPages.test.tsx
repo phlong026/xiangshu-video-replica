@@ -515,7 +515,8 @@ describe("V1.4 任务详情真实成片预览", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "调整脚本" }));
 
-    expect(value.patchState).toHaveBeenCalledWith({
+    expect(value.navigate).toHaveBeenCalledWith("copy", {
+      returnTo: "task-detail",
       draft: expect.objectContaining({
         ipId: "person-a",
         avatarId: "avatar-a",
@@ -525,9 +526,6 @@ describe("V1.4 任务详情真实成片预览", () => {
           confirmed: false,
         }),
       }),
-    });
-    expect(value.navigate).toHaveBeenCalledWith("copy", {
-      returnTo: "task-detail",
     });
     expect(value.openLive).not.toHaveBeenCalled();
   });
@@ -553,8 +551,6 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(screen.getByText("完整口播音频")).toBeInTheDocument();
     expect(value.navigate).toHaveBeenCalledWith("oral", {
       returnTo: "task-detail",
-    });
-    expect(value.patchState).toHaveBeenCalledWith({
       draft: expect.objectContaining({
         driverMode: "text",
         ipId: "person-a",
@@ -1907,6 +1903,9 @@ describe("V1.4 工作台上传与创作入口", () => {
       expect.objectContaining({ sourceDurationSeconds: 30.001 }),
       { persistNow: true },
     );
+    fireEvent.click(screen.getByRole("button", { name: "手动拆解原视频" }));
+    expect(audioValue.navigate).toHaveBeenCalledWith("long-replica");
+    expect(uploadWorkbenchSourceVideo).toHaveBeenCalledTimes(2);
   });
 
   it("同页换来源和放弃草稿后，不再使用上次上传的项目", async () => {

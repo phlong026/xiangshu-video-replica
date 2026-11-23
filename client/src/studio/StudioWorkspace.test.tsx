@@ -1200,10 +1200,13 @@ describe("V1.4 workspace integration", () => {
     fireEvent.click(
       within(screen.getByRole("region", { name: "我的成片" })).getByRole(
         "button",
-        { name: "查看全部任务" },
+        { name: "查看全部成片" },
       ),
     );
-    expect(window.location.hash).toBe("#studio/tasks");
+    expect(window.location.hash).toBe("#studio/works");
+    expect(
+      screen.getByRole("heading", { name: "全部成片" }),
+    ).toBeInTheDocument();
     expect(tasks).toHaveAttribute("aria-current", "page");
   });
   it("任务详情与人物子页把对象和返回位置写入可恢复 URL", async () => {
@@ -1704,6 +1707,28 @@ describe("V1.4 workspace integration", () => {
         expect(screen.getByLabelText("二创文案")).toBeInTheDocument(),
       );
     }
+
+    it("云草稿读取失败后显示可重试状态；重试只提供恢复提示", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft
+        .mockRejectedValueOnce(new Error("temporary offline"))
+        .mockResolvedValue({
+          draft: restoredDraft(),
+          updatedAt: freshUpdatedAt(),
+          revision: 1,
+        });
+      render(<StudioWorkspace currentUser={reviewUser} />);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "重试读取草稿" }),
+      );
+      expect(
+        await screen.findByRole("button", { name: RESTORE }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "重试读取草稿" }),
+      ).not.toBeInTheDocument();
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
+    });
 
     it("点「恢复上次内容」后才回填云端草稿，我的文案列表照常加载", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);

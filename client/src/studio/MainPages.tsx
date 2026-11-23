@@ -1355,7 +1355,9 @@ export function TasksPage({ worksOnly = false }: { worksOnly?: boolean }) {
         </div>
       </div>
       <p className="studio-result-count" role="status">
-        已加载 {tasks.length} 条{worksOnly ? "成片记录" : "任务"}
+        {worksOnly
+          ? `已加载 ${tasks.length} 条成片记录`
+          : `共 ${tasks.length} 条任务`}
       </p>
       <div className="studio-table-wrap">
         <table className="studio-table">
