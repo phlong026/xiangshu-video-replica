@@ -2784,9 +2784,7 @@ export function MaterialsPage() {
           value={search}
         />
         {!loading ? (
-          <span className="content-material-total">
-            共 {total} 个素材
-          </span>
+          <span className="content-material-total">共 {total} 个素材</span>
         ) : null}
       </div>
       {tagFacet.length > 0 ? (
