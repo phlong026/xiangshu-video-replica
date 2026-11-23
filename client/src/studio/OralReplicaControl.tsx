@@ -22,7 +22,7 @@ import {
   isQuoteRejection,
   watchQuoteExpiry,
 } from "./quoteConfirmation";
-import type { StudioPerson, StudioVideo } from "./types";
+import type { ReplicaSource, StudioPerson } from "./types";
 import { Button, Field, StudioDialog } from "./ui";
 import { viralImportIdempotencyKey } from "./viralImport";
 
@@ -41,7 +41,7 @@ type OralAttempt = {
 };
 const EMPTY: OralDefaults = { identityId: "", avatarId: "", voiceId: "" };
 
-function readDraft(accountId: string, video: StudioVideo): OralDraft | null {
+function readDraft(accountId: string, video: ReplicaSource): OralDraft | null {
   try {
     const raw = replicaPreference(accountId, `oral-draft:${video.id}`);
     if (!raw) return null;
@@ -68,13 +68,13 @@ function readDraft(accountId: string, video: StudioVideo): OralDraft | null {
   }
 }
 
-function attemptField(video: StudioVideo) {
+function attemptField(video: ReplicaSource) {
   return `oral-attempt:${video.id}`;
 }
 
 function readAttempt(
   accountId: string,
-  video: StudioVideo,
+  video: ReplicaSource,
 ): OralAttempt | null {
   try {
     const raw = replicaPreference(accountId, attemptField(video));
@@ -117,7 +117,7 @@ function readAttempt(
 
 function saveAttempt(
   accountId: string,
-  video: StudioVideo,
+  video: ReplicaSource,
   attempt: OralAttempt | null,
 ) {
   // 报价仅在当前页面有效；持久化的请求只用于同键恢复，不携带报价令牌。
@@ -169,11 +169,13 @@ export function OralReplicaControl({
   importVideo,
   importError,
 }: {
-  video: StudioVideo;
+  video: ReplicaSource;
   requested: boolean;
   onRequest: () => void;
   onHandled: () => void;
-  importVideo: () => Promise<ViralImportTask | undefined>;
+  importVideo: () => Promise<
+    Pick<ViralImportTask, "projectId" | "sourceAssetId"> | undefined
+  >;
   importError?: string;
 }) {
   const { user, data, notify, navigate, refresh, openLive } = useStudio();

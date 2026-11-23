@@ -10,7 +10,10 @@ test_replica_pipeline_* 套件覆盖。本套件验证三层：
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from typing import Any
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -66,6 +69,7 @@ def test_routes_registered_on_main_app() -> None:
 
     paths = app.openapi()["paths"]
     assert "post" in paths["/api/viral/replica-pipelines"]
+    assert "post" in paths["/api/viral/replica-pipelines/upload"]
     assert "get" in paths["/api/viral/replica-pipelines/active"]
     assert "get" in paths["/api/viral/replica-pipelines/{pipeline_id}"]
     for suffix in ("confirm", "cancel", "regenerate", "accept-partial"):
@@ -348,3 +352,251 @@ def test_initiation_checks_thirty_second_price_before_work_and_preserves_replay(
         raw.execute("DELETE FROM viral_videos WHERE platform = 'douyin' AND video_id = 'edge'")
     replay = start("edge")
     assert replay["replay"] is True and replay["id"] == original["id"]
+
+
+@pytest.fixture
+def uploaded_source(dsn: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    from cryptography.fernet import Fernet
+
+    suffix = uuid4().hex[:12]
+    source = {
+        "owner": f"upload-owner-{suffix}",
+        "project": f"upload-project-{suffix}",
+        "asset": f"upload-asset-{suffix}",
+    }
+    with psycopg.connect(dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        _seed_user(conn, source["owner"])
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name, status) "
+            "VALUES (%s, %s, '原上传项目', 'REFERENCE_READY')",
+            (source["project"], source["owner"]),
+        )
+        conn.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, metadata_json, created_by_user_id) "
+            "VALUES (%s, %s, 'reference_video', %s, 'test-hash', 100, 'video/mp4', %s, %s)",
+            (
+                source["asset"],
+                source["project"],
+                f"local://test/{source['asset']}.mp4",
+                json.dumps({"duration_seconds": 8, "upload_status": "COMPLETE"}),
+                source["owner"],
+            ),
+        )
+        conn.execute(
+            "INSERT INTO runtime_settings (id, replica_pipeline_enabled) VALUES (1, true) "
+            "ON CONFLICT (id) DO UPDATE SET replica_pipeline_enabled = true"
+        )
+        conn.execute(
+            "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_rounding) "
+            "VALUES ('video_768p_long', true, 2, 'ceil') ON CONFLICT (service) "
+            "DO UPDATE SET enabled = true, unit_credits = 2"
+        )
+    monkeypatch.setattr(
+        "app.project_character_selection.list_available_project_character_versions",
+        lambda *args, **kwargs: [object()],
+    )
+    cipher = Fernet(Fernet.generate_key())
+    monkeypatch.setattr("app.quote_contracts._cipher", lambda: cipher)
+    return source
+
+
+def _start_uploaded_pipeline(dsn: str, source: dict[str, str], **changes: Any) -> dict[str, object]:
+    from contextlib import contextmanager
+    from typing import cast
+
+    from app.auth import CurrentUser
+    from app.customer_fence import BusinessDb
+    from app.replica_pipeline_routes import (
+        UploadedReplicaPipelineRequest,
+        initiate_uploaded_replica_pipeline,
+    )
+
+    actor = CurrentUser(
+        id=source["owner"], username=source["owner"], display_name="测试", role="customer"
+    )
+
+    class RouteDb:
+        @contextmanager
+        def write(self) -> Iterator[tuple[BusinessConnection, CurrentUser]]:
+            with psycopg.connect(dsn) as raw:
+                yield BusinessConnection.postgres(raw), actor
+
+    payload = {
+        "project_id": source["project"],
+        "source_asset_id": source["asset"],
+        "character_version_id": "test-person",
+        "idempotency_key": "upload-request-one",
+        "preprocess_acknowledged": True,
+        **changes,
+    }
+    return initiate_uploaded_replica_pipeline(
+        UploadedReplicaPipelineRequest.model_validate(payload), cast(BusinessDb, RouteDb())
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("foreign-project", "PROJECT_NOT_FOUND"),
+        ("foreign-asset", "ASSET_NOT_FOUND"),
+        ("other-own-project", "ASSET_PROJECT_MISMATCH"),
+        ("pending", "REFERENCE_VIDEO_NOT_READY"),
+        ("audio", "ANALYSIS_ASSET_NOT_REFERENCE_VIDEO"),
+        ("unknown", "ANALYSIS_DURATION_UNAVAILABLE"),
+        ("short", "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ("zero", "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ("long", "SOURCE_TOO_LONG_FOR_GENERATION"),
+        ("long-tier-disabled", "LONG_DURATION_TIER_DISABLED"),
+        ("unacknowledged", "REPLICA_PREPROCESS_NOT_ACKNOWLEDGED"),
+        ("character-unavailable", "REPLICA_CHARACTER_NOT_FOUND"),
+    ],
+)
+def test_uploaded_pipeline_rejects_invalid_source_without_side_effects(
+    dsn: str,
+    uploaded_source: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    code: str,
+) -> None:
+    from fastapi import HTTPException
+
+    changes: dict[str, Any] = {}
+    source = uploaded_source
+    with psycopg.connect(dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        if case in {"foreign-project", "foreign-asset", "other-own-project"}:
+            other_owner = source["owner"] + "-other"
+            _seed_user(conn, other_owner)
+            other_project = source["project"] + "-other"
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, '其他项目')",
+                (
+                    other_project,
+                    source["owner"] if case == "other-own-project" else other_owner,
+                ),
+            )
+            if case == "foreign-asset":
+                conn.execute(
+                    "UPDATE assets SET project_id = %s WHERE id = %s",
+                    (other_project, source["asset"]),
+                )
+            else:
+                changes["project_id"] = other_project
+        elif case == "pending":
+            conn.execute(
+                "UPDATE assets SET sha256 = '', size_bytes = 0 WHERE id = %s", (source["asset"],)
+            )
+        elif case == "audio":
+            conn.execute(
+                "UPDATE assets SET kind = 'reference_audio', content_type = 'audio/mpeg' "
+                "WHERE id = %s",
+                (source["asset"],),
+            )
+        elif case in {"unknown", "short", "zero", "long", "long-tier-disabled"}:
+            durations = {"short": 3.9995, "zero": 0, "long": 30.001, "long-tier-disabled": 15.001}
+            metadata = {} if case == "unknown" else {"duration_seconds": durations[case]}
+            conn.execute(
+                "UPDATE assets SET metadata_json = %s WHERE id = %s",
+                (json.dumps(metadata), source["asset"]),
+            )
+            if case == "long-tier-disabled":
+                conn.execute(
+                    "UPDATE billing_tariffs SET enabled = false WHERE service = 'video_768p_long'"
+                )
+        elif case == "unacknowledged":
+            changes["preprocess_acknowledged"] = False
+        elif case == "character-unavailable":
+            monkeypatch.setattr(
+                "app.project_character_selection.list_available_project_character_versions",
+                lambda *args, **kwargs: [],
+            )
+    with pytest.raises(HTTPException) as rejected:
+        _start_uploaded_pipeline(dsn, source, **changes)
+    assert rejected.value.detail["code"] == code
+    with psycopg.connect(dsn) as raw:
+        for table, owner_column in (
+            ("replica_pipeline_tasks", "owner_user_id"),
+            ("analysis_tasks", "created_by_user_id"),
+            ("viral_import_tasks", "owner_user_id"),
+        ):
+            assert (
+                raw.execute(
+                    f"SELECT count(*) FROM {table} WHERE {owner_column} = %s", (source["owner"],)
+                ).fetchone()[0]
+                == 0
+            )
+        assert (
+            raw.execute("SELECT name FROM projects WHERE id = %s", (source["project"],)).fetchone()[
+                0
+            ]
+            == "原上传项目"
+        )
+        assert raw.execute("SELECT id FROM assets WHERE id = %s", (source["asset"],)).fetchone()
+
+
+@pytest.mark.parametrize("seconds", [4.0, 16.1, 30.0])
+def test_uploaded_pipeline_reuses_source_and_replays_without_new_work(
+    dsn: str,
+    uploaded_source: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    seconds: float,
+) -> None:
+    from app.auth import CurrentUser
+    from app.replica_pipeline_routes import find_active_replica_pipeline
+
+    source = uploaded_source
+    with psycopg.connect(dsn) as raw:
+        raw.execute(
+            "UPDATE assets SET metadata_json = %s WHERE id = %s",
+            (json.dumps({"duration_seconds": seconds}), source["asset"]),
+        )
+    original = _start_uploaded_pipeline(dsn, source)
+    assert original["projectId"] == source["project"] and original["replay"] is False
+    with psycopg.connect(dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        row = conn.execute(
+            "SELECT stage_detail FROM replica_pipeline_tasks WHERE id = %s", (original["id"],)
+        ).fetchone()
+        assert row is not None
+        assert row["stage_detail"]["sourceAssetId"] == source["asset"]
+        assert row["stage_detail"]["sourceDurationMs"] == seconds * 1000
+        actor = CurrentUser(id=source["owner"], username="u", display_name="u", role="customer")
+        assert find_active_replica_pipeline("upload", source["asset"], conn, actor) == {
+            "pipelineId": original["id"]
+        }
+        conn.execute("UPDATE runtime_settings SET replica_pipeline_enabled = false WHERE id = 1")
+        conn.execute("UPDATE billing_tariffs SET enabled = false WHERE service = 'video_768p_long'")
+        conn.execute("UPDATE assets SET metadata_json = '{}' WHERE id = %s", (source["asset"],))
+
+    def do_not_revalidate(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("同键重放不得重新检查已经受理的人物")
+
+    monkeypatch.setattr(
+        "app.project_character_selection.list_available_project_character_versions",
+        do_not_revalidate,
+    )
+    replay = _start_uploaded_pipeline(dsn, source)
+    assert replay["replay"] is True and replay["id"] == original["id"]
+    with psycopg.connect(dsn) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM projects WHERE owner_user_id = %s", (source["owner"],)
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM replica_pipeline_tasks WHERE owner_user_id = %s",
+                (source["owner"],),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM analysis_tasks WHERE created_by_user_id = %s",
+                (source["owner"],),
+            ).fetchone()[0]
+            == 0
+        )

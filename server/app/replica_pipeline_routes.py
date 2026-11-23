@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 from typing import Literal
 
 from fastapi import APIRouter
@@ -46,6 +48,14 @@ class ReplicaPipelineConfirmRequest(BaseModel):
     quote_token: str = Field(min_length=1, max_length=8192)
     max_credits: int = Field(ge=1, le=2_147_483_647)
     fingerprint: str = Field(min_length=8, max_length=128)
+
+
+class UploadedReplicaPipelineRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    source_asset_id: str = Field(min_length=1, max_length=200)
+    character_version_id: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    preprocess_acknowledged: bool
 
 
 class ReplicaPipelineRegenerateRequest(BaseModel):
@@ -147,6 +157,94 @@ def initiate_replica_pipeline(
                     "message": "所选人物不存在或不可用。",
                 },
             )
+        return result
+
+
+@router.post("/replica-pipelines/upload", status_code=202)
+def initiate_uploaded_replica_pipeline(
+    request: UploadedReplicaPipelineRequest, db: BusinessDbDep
+) -> dict[str, object]:
+    """已上传来源直接接自动编排；不新建项目、不再次下载或上传原片。"""
+    from fastapi import HTTPException
+
+    from app.analysis_routes import CreateAnalysisRequest, validate_analysis_enqueue
+    from app.generation import generation_price_quote
+    from app.project_character_selection import list_available_project_character_versions
+
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="replica_pipeline.initiate",
+            entity_type="project",
+            entity_id=request.project_id,
+        )
+        if not request.preprocess_acknowledged:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "REPLICA_PREPROCESS_NOT_ACKNOWLEDGED",
+                    "message": "请先确认预处理费用说明。",
+                },
+            )
+        request_hash = hashlib.sha256(
+            f"upload|{request.project_id}|{request.source_asset_id}|"
+            f"{request.character_version_id}".encode()
+        ).hexdigest()
+        try:
+            result = rp.enqueue_replica_pipeline(
+                conn,
+                owner_user_id=actor.id,
+                platform="upload",
+                video_id=request.source_asset_id,
+                character_version_id=request.character_version_id,
+                idempotency_key=request.idempotency_key,
+                request_hash=request_hash,
+                existing_project_id=request.project_id,
+                source_asset_id=request.source_asset_id,
+            )
+            if result["replay"] is False:
+                rp.require_pipeline_enabled(conn)
+                # 复用分析域的归属、视频类型和完成上传校验；时长只信服务端实测值。
+                _asset, measured_duration = validate_analysis_enqueue(
+                    conn,
+                    actor=actor,
+                    project_id=request.project_id,
+                    request=CreateAnalysisRequest(asset_id=request.source_asset_id),
+                )
+                if not math.isfinite(measured_duration):
+                    raise rp.ReplicaPipelineError(
+                        422, "ANALYSIS_DURATION_UNAVAILABLE", "视频时长不可用，请重新上传。"
+                    )
+                duration = rp.require_output_duration(measured_duration * 1000)
+                if duration > 15:
+                    generation_price_quote(
+                        conn,
+                        resolution="768P",
+                        duration_seconds=duration,
+                        quantity=1,
+                        user_id=actor.id,
+                    )
+                if not list_available_project_character_versions(
+                    conn,
+                    actor=actor,
+                    project_id=request.project_id,
+                    character_version_id=request.character_version_id,
+                ):
+                    raise HTTPException(
+                        422,
+                        detail={
+                            "code": "REPLICA_CHARACTER_NOT_FOUND",
+                            "message": "所选人物不存在或不可用。",
+                        },
+                    )
+                conn.execute(
+                    "UPDATE replica_pipeline_tasks SET stage_detail = stage_detail || %s::jsonb "
+                    "WHERE id = %s",
+                    (json.dumps({"sourceDurationMs": measured_duration * 1000}), result["id"]),
+                )
+        except rp.ReplicaPipelineError as exc:
+            raise HTTPException(exc.status_code, detail={"code": exc.code, "message": exc.message})
         return result
 
 
@@ -276,7 +374,7 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
 
 @router.get("/replica-pipelines/active")
 def find_active_replica_pipeline(
-    platform: Literal["douyin", "xiaohongshu", "wechat_channels"],
+    platform: Literal["douyin", "xiaohongshu", "wechat_channels", "upload"],
     video_id: str,
     conn: ReadDatabase,
     actor: ShortAuthUser,

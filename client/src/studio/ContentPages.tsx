@@ -25,6 +25,7 @@ import {
   getStudioDraft,
   getViralImportTask,
   initiateReplicaPipeline,
+  initiateUploadedReplicaPipeline,
   listReplicaPipelineCharacters,
   listTrainingMaterials,
   listViralFavorites,
@@ -70,7 +71,12 @@ import {
   PublishRecordsPanel,
 } from "./PublishRecordsPanel";
 import { taskHasDeliverable } from "./taskResults";
-import type { StudioAsset, StudioPublishDraft, StudioVideo } from "./types";
+import type {
+  ReplicaSource,
+  StudioAsset,
+  StudioPublishDraft,
+  StudioVideo,
+} from "./types";
 import {
   Button,
   Empty,
@@ -474,16 +480,20 @@ export const REPLICA_STAGE_LABELS: Record<string, string> = {
  */
 function ReplicaPipelineControl({
   video,
+  uploadedSource,
   requested,
   onRequest,
   onHandled,
 }: {
-  video: StudioVideo;
+  video: ReplicaSource;
+  uploadedSource?: { projectId: string; assetId: string };
   requested: boolean;
   onRequest: () => void;
   onHandled: () => void;
 }) {
   const { notify, user } = useStudio();
+  const sourcePlatform = uploadedSource ? "upload" : video.platformKey;
+  const sourceId = uploadedSource?.assetId ?? video.nativeId;
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [status, setStatus] = useState<ReplicaPipelineStatus | null>(null);
   const [quote, setQuote] = useState<ReplicaPipelineQuote | null>(null);
@@ -512,11 +522,11 @@ function ReplicaPipelineControl({
     let cancelled = false;
     setRecovering(true);
     setRecoveryError(false);
-    if (!video.platformKey || !video.nativeId) {
+    if (!sourcePlatform || !sourceId) {
       setRecovering(false);
       return;
     }
-    void findActiveReplicaPipeline(video.platformKey, video.nativeId)
+    void findActiveReplicaPipeline(sourcePlatform, sourceId)
       .then((result) => {
         if (!cancelled) setPipelineId(result.pipelineId);
       })
@@ -529,7 +539,7 @@ function ReplicaPipelineControl({
     return () => {
       cancelled = true;
     };
-  }, [video.platformKey, video.nativeId, recoveryAttempt]);
+  }, [sourcePlatform, sourceId, recoveryAttempt]);
 
   useEffect(() => {
     if (!pipelineId) return;
@@ -582,7 +592,7 @@ function ReplicaPipelineControl({
   }, [quote]);
 
   const submitPreparation = async (characterVersionId: string) => {
-    if (!video.platformKey || !video.nativeId || startRef.current) return;
+    if (!sourcePlatform || !sourceId || startRef.current) return;
     const acknowledged = window.confirm(
       "系统将自动导入、拆解并生成首帧。拆解与首帧按现有规则计费，失败可能重试；成片生成前会另行报价并请你确认。是否继续？",
     );
@@ -592,14 +602,21 @@ function ReplicaPipelineControl({
     setBusy(true);
     try {
       // 同一次网络重试使用相同请求，不能用同一个键替换人物。
-      const scope = `adaptive-short:${video.platformKey}:${video.nativeId}:${characterVersionId}`;
+      const scope = `adaptive-short:${sourcePlatform}:${sourceId}:${characterVersionId}`;
       const attemptKey = viralImportIdempotencyKey(user.id, scope);
-      const created = await initiateReplicaPipeline({
-        platform: video.platformKey,
-        videoId: video.nativeId,
-        characterVersionId,
-        idempotencyKey: attemptKey,
-      });
+      const created = uploadedSource
+        ? await initiateUploadedReplicaPipeline({
+            projectId: uploadedSource.projectId,
+            sourceAssetId: uploadedSource.assetId,
+            characterVersionId,
+            idempotencyKey: attemptKey,
+          })
+        : await initiateReplicaPipeline({
+            platform: sourcePlatform,
+            videoId: sourceId,
+            characterVersionId,
+            idempotencyKey: attemptKey,
+          });
       clearViralImportIdempotencyKey(user.id, scope, attemptKey);
       if (!mounted.current) return;
       setPipelineId(created.id);
@@ -2004,7 +2021,7 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
   return {
     importState: state,
     start: async (
-      video: StudioVideo,
+      video: ReplicaSource,
       purpose: ViralImportPurpose,
       onReady?: (task: ViralImportTask) => void,
     ) => {
@@ -2071,7 +2088,13 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
   };
 }
 
-function AdaptiveReplicaControl({ video }: { video: StudioVideo }) {
+export function AdaptiveReplicaControl({
+  video,
+  uploadedSource,
+}: {
+  video: ReplicaSource;
+  uploadedSource?: { projectId: string; assetId: string };
+}) {
   const { state, user, patchState, notify } = useStudio();
   const [guide, setGuide] = useState<"first" | "manual" | null>(null);
   const [requested, setRequested] = useState(false);
@@ -2081,7 +2104,9 @@ function AdaptiveReplicaControl({ video }: { video: StudioVideo }) {
     typeof duration === "number" &&
     Number.isFinite(duration) &&
     duration >= 4_000;
-  const canStart = supported && Boolean(video.platformKey && video.nativeId);
+  const canStart =
+    supported &&
+    Boolean(uploadedSource || (video.platformKey && video.nativeId));
 
   const onRequest = useCallback(() => {
     if (!canStart) {
@@ -2098,6 +2123,7 @@ function AdaptiveReplicaControl({ video }: { video: StudioVideo }) {
 
   const consumedIntent = useRef(false);
   useEffect(() => {
+    if (uploadedSource) return;
     if (!state.viralReplicateIntent) {
       consumedIntent.current = false;
       return;
@@ -2106,7 +2132,7 @@ function AdaptiveReplicaControl({ video }: { video: StudioVideo }) {
     consumedIntent.current = true;
     patchState({ viralReplicateIntent: false });
     onRequest();
-  }, [state.viralReplicateIntent, patchState, onRequest]);
+  }, [state.viralReplicateIntent, patchState, onRequest, uploadedSource]);
 
   return (
     <>
@@ -2117,7 +2143,14 @@ function AdaptiveReplicaControl({ video }: { video: StudioVideo }) {
             requested={requested}
             onRequest={onRequest}
             onHandled={() => setRequested(false)}
-            importVideo={() => start(video, "copy")}
+            importVideo={() =>
+              uploadedSource
+                ? Promise.resolve({
+                    projectId: uploadedSource.projectId,
+                    sourceAssetId: uploadedSource.assetId,
+                  })
+                : start(video, "copy")
+            }
             importError={
               importState.status === "error" ? importState.message : undefined
             }
@@ -2125,6 +2158,7 @@ function AdaptiveReplicaControl({ video }: { video: StudioVideo }) {
         ) : (
           <ReplicaPipelineControl
             video={video}
+            uploadedSource={uploadedSource}
             requested={requested}
             onRequest={onRequest}
             onHandled={() => setRequested(false)}

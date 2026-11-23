@@ -257,6 +257,8 @@ def enqueue_replica_pipeline(
     idempotency_key: str,
     request_hash: str,
     pipeline_id: str | None = None,
+    existing_project_id: str | None = None,
+    source_asset_id: str | None = None,
 ) -> dict[str, object]:
     """发起全自动复刻：幂等受理 + 项目同事务创建（project_id NOT NULL 落库）.
 
@@ -267,8 +269,23 @@ def enqueue_replica_pipeline(
     replay_or_none = _replay_if_exists(conn, scoped_key, request_hash)
     if replay_or_none is not None:
         return replay_or_none
+    if platform == "upload":
+        if not existing_project_id or not source_asset_id or video_id != source_asset_id:
+            raise ReplicaPipelineError(422, "REPLICA_SOURCE_INVALID", "上传来源不完整。")
+    elif existing_project_id is not None or source_asset_id is not None:
+        raise ReplicaPipelineError(422, "REPLICA_SOURCE_INVALID", "来源类型与项目不匹配。")
     new_id = pipeline_id or f"rplc-{uuid.uuid4().hex[:16]}"
-    project_id = f"proj-{uuid.uuid4().hex[:16]}"
+    project_id = existing_project_id or f"proj-{uuid.uuid4().hex[:16]}"
+    detail: dict[str, object] = {"strategy": "fixed_v1"}
+    if existing_project_id is not None:
+        # 上传来源复用原项目；与项目删除持相同的行锁，避免受理后来源被并发删除。
+        project = conn.execute(
+            "SELECT id FROM projects WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (existing_project_id, owner_user_id),
+        ).fetchone()
+        if project is None:
+            raise ReplicaPipelineError(404, "PROJECT_NOT_FOUND", "项目不存在或不可用。")
+        detail["sourceAssetId"] = source_asset_id
     fingerprint = f"{platform}:{video_id}:{character_version_id}:{request_hash}"
     # 并发同键（m2-r2#1）：PG 下 conn.rollback() 是 no-op（commit 权威在外层
     # fenced 事务），冲突后事务仍 aborted、重读会抛 25P02——project 与任务两
@@ -276,10 +293,11 @@ def enqueue_replica_pipeline(
     # project）后外层事务保持可用，再重读赢家给出重放或异参拒绝。
     conn.execute("SAVEPOINT replica_enqueue")
     try:
-        conn.execute(
-            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
-            (project_id, owner_user_id, "全自动复刻"),
-        )
+        if existing_project_id is None:
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                (project_id, owner_user_id, "全自动复刻"),
+            )
         conn.execute(
             """
             INSERT INTO replica_pipeline_tasks (
@@ -300,7 +318,7 @@ def enqueue_replica_pipeline(
                 character_version_id,
                 fingerprint,
                 scoped_key,
-                json.dumps({"strategy": "fixed_v1"}),
+                json.dumps(detail),
             ),
         )
     except IntegrityConstraintError as exc:

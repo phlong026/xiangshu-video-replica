@@ -85,6 +85,7 @@ describe("V1.4 交接合同", () => {
       ...createDraft(),
       sourceId: "asset-a",
       sourceAssetId: "asset-a",
+      sourceDurationSeconds: 60,
       projectId: "project-a",
       ipId: "person-a",
       originalImageId: "original-a",
@@ -111,6 +112,7 @@ describe("V1.4 交接合同", () => {
     for (const key of [
       "projectId",
       "sourceAssetId",
+      "sourceDurationSeconds",
       "originalImageId",
       "firstFrameId",
       "firstFrameSelectionVersionId",

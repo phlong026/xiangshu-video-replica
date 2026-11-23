@@ -252,6 +252,227 @@ def test_enqueued_enqueues_import_and_advances(
     assert kwargs["idempotency_key"] == f"pipeline:{pipeline_id}:import:0"
 
 
+def _seed_uploaded_pipeline(
+    biz: BusinessConnection,
+    *,
+    slot: str,
+    status: str,
+    seconds: float = 8.123456,
+    credits: int = 100,
+) -> tuple[str, str]:
+    asset_id = f"upload-source-{slot}"
+    pipeline_id = _seed_pipeline(
+        biz,
+        status=status,
+        slot=slot,
+        stage_detail={"sourceAssetId": asset_id, "sourceDurationMs": seconds * 1000},
+    )
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET platform = 'upload', video_id = %s WHERE id = %s",
+        (asset_id, pipeline_id),
+    )
+    biz.execute(
+        "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+        "content_type, metadata_json, created_by_user_id) VALUES "
+        "(%s, %s, 'reference_video', %s, 'test-hash', 100, 'video/mp4', %s, %s) "
+        "ON CONFLICT (id) DO UPDATE SET sha256 = 'test-hash', size_bytes = 100, "
+        "metadata_json = EXCLUDED.metadata_json",
+        (
+            asset_id,
+            f"p-{slot}",
+            f"local://test/{asset_id}.mp4",
+            json.dumps({"duration_seconds": seconds, "upload_status": "COMPLETE"}),
+            f"u-{slot}",
+        ),
+    )
+    biz.execute(
+        "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_rounding) "
+        "VALUES ('analysis', true, 2, 'ceil') ON CONFLICT (service) "
+        "DO UPDATE SET enabled = true, unit_credits = 2"
+    )
+    biz.execute(
+        "INSERT INTO wallets (user_id, available_credits, reserved_credits) VALUES (%s, %s, 0) "
+        "ON CONFLICT (user_id) DO UPDATE SET available_credits = EXCLUDED.available_credits, "
+        "reserved_credits = 0",
+        (f"u-{slot}", credits),
+    )
+    return pipeline_id, asset_id
+
+
+def test_uploaded_worker_skips_import_and_recovers_completed_analysis_without_recharging(
+    biz: BusinessConnection, _stub_domains: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.analysis import enqueue_analysis_task
+
+    slot = "upload-resume"
+    pipeline_id, asset_id = _seed_uploaded_pipeline(biz, slot=slot, status=rp.STATUS_ENQUEUED)
+    monkeypatch.setattr(stages, "enqueue_analysis_task", enqueue_analysis_task)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    row = biz.execute(
+        "SELECT status, import_task_id FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert (
+        row is not None and row["status"] == rp.STATUS_IMPORTING and row["import_task_id"] is None
+    )
+    assert "import_enqueue_kwargs" not in _stub_domains
+
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    task = biz.execute(
+        "SELECT * FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+    ).fetchone()
+    assert task is not None and task["asset_id"] == asset_id
+    assert float(task["duration_seconds"]) == 8.123456
+    assert task["request_id"] == f"pipeline:{pipeline_id}:analyze:0"
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM viral_import_tasks WHERE project_id = %s", (f"p-{slot}",)
+        ).fetchone()[0]
+        == 0
+    )
+
+    # 子任务已经成功而父引用丢失：恢复原收据，不重新创建付费分析。
+    biz.execute("UPDATE analysis_tasks SET status = 'SUCCEEDED' WHERE id = %s", (task["id"],))
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET analysis_task_id = NULL WHERE id = %s", (pipeline_id,)
+    )
+    biz.execute("UPDATE assets SET metadata_json = '{}' WHERE id = %s", (asset_id,))
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "waiting"
+    row = biz.execute(
+        "SELECT analysis_task_id, stage_detail FROM replica_pipeline_tasks WHERE id = %s",
+        (pipeline_id,),
+    ).fetchone()
+    assert row is not None and row["analysis_task_id"] == task["id"]
+    assert row["stage_detail"]["sourceAssetId"] == asset_id
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM billing_operations WHERE user_id = %s AND service = 'analysis'",
+            (f"u-{slot}",),
+        ).fetchone()[0]
+        == 1
+    )
+    wallet = biz.execute(
+        "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s", (f"u-{slot}",)
+    ).fetchone()
+    assert (
+        wallet is not None and wallet["available_credits"] == 98 and wallet["reserved_credits"] == 2
+    )
+
+
+@pytest.mark.parametrize("status", [rp.STATUS_IMPORTING, rp.STATUS_ANALYZING])
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("missing", "ASSET_NOT_FOUND"),
+        ("pending", "REFERENCE_VIDEO_NOT_READY"),
+        ("unknown", "ANALYSIS_DURATION_UNAVAILABLE"),
+        ("short", "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ("long", "SOURCE_TOO_LONG_FOR_GENERATION"),
+        ("long-tier-disabled", "LONG_DURATION_TIER_DISABLED"),
+    ],
+)
+def test_uploaded_worker_rechecks_source_before_first_analysis_and_retry(
+    biz: BusinessConnection,
+    _stub_domains: dict[str, Any],
+    status: str,
+    case: str,
+    code: str,
+) -> None:
+    slot = f"upload-check-{status}-{case}"
+    pipeline_id, asset_id = _seed_uploaded_pipeline(biz, slot=slot, status=status)
+    if case == "missing":
+        biz.execute("DELETE FROM assets WHERE id = %s", (asset_id,))
+    elif case == "pending":
+        biz.execute("UPDATE assets SET sha256 = '', size_bytes = 0 WHERE id = %s", (asset_id,))
+    else:
+        duration = {"short": 3.9995, "long": 30.001, "long-tier-disabled": 15.001}.get(case)
+        biz.execute(
+            "UPDATE assets SET metadata_json = %s WHERE id = %s",
+            (json.dumps({} if duration is None else {"duration_seconds": duration}), asset_id),
+        )
+        if case == "long-tier-disabled":
+            biz.execute(
+                "UPDATE billing_tariffs SET enabled = false WHERE service = 'video_768p_long'"
+            )
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "failed"
+    row = biz.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_FAILED
+    assert row["stage_detail"]["failureCode"] == code
+    assert "analysis_enqueue_kwargs" not in _stub_domains
+
+
+def test_uploaded_analysis_credit_rejection_rolls_back_unfunded_child(
+    biz: BusinessConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.analysis import enqueue_analysis_task
+
+    slot = "upload-no-credit"
+    pipeline_id, _asset_id = _seed_uploaded_pipeline(
+        biz, slot=slot, status=rp.STATUS_IMPORTING, credits=0
+    )
+    monkeypatch.setattr(stages, "enqueue_analysis_task", enqueue_analysis_task)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "failed"
+    row = biz.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_FAILED
+    assert row["stage_detail"]["failureCode"] == "INSUFFICIENT_CREDITS"
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM billing_operations WHERE user_id = %s", (f"u-{slot}",)
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_uploaded_analysis_explicit_retry_uses_next_operation_key(
+    biz: BusinessConnection, _stub_domains: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.analysis import enqueue_analysis_task
+
+    slot = "upload-retry"
+    pipeline_id, asset_id = _seed_uploaded_pipeline(biz, slot=slot, status=rp.STATUS_IMPORTING)
+    monkeypatch.setattr(stages, "enqueue_analysis_task", enqueue_analysis_task)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    task = biz.execute(
+        "SELECT * FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+    ).fetchone()
+    assert task is not None
+    biz.execute("UPDATE analysis_tasks SET status = 'FAILED' WHERE id = %s", (task["id"],))
+    _stub_domains["sub_status"] = {
+        ("analysis_tasks", str(task["id"])): (
+            "FAILED",
+            {"error_code": "ANALYSIS_TIMEOUT", "error_message_redacted": "超时", "retryable": 1},
+        )
+    }
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "retrying"
+    _release_for_next_round(biz, pipeline_id)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "waiting"
+    tasks = biz.execute(
+        "SELECT asset_id, request_id FROM analysis_tasks WHERE project_id = %s "
+        "ORDER BY created_at, id",
+        (f"p-{slot}",),
+    ).fetchall()
+    assert len(tasks) == 2 and all(task["asset_id"] == asset_id for task in tasks)
+    assert {task["request_id"] for task in tasks} == {
+        f"pipeline:{pipeline_id}:analyze:0",
+        f"pipeline:{pipeline_id}:analyze:1",
+    }
+
+
 def test_import_running_waits(biz: BusinessConnection, _stub_domains: dict[str, Any]) -> None:
     biz.execute("DELETE FROM replica_pipeline_tasks")
     _seed_pipeline(biz, status=rp.STATUS_IMPORTING, slot="impw")

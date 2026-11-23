@@ -2946,13 +2946,19 @@ describe("uploadWorkbenchSourceVideo 失败清理", () => {
       analysis_task_status: "PENDING",
     });
     api.getAssetDownloadUrl.mockResolvedValue({ url: "/signed/a-dedup.mp4" });
+    api.resolveMaterials.mockResolvedValue({
+      items: [{ asset_id: "a-dedup", duration_seconds: 30.001 }],
+      unavailable_ids: [],
+    });
 
     const result = await live.uploadWorkbenchSourceVideo(file, () => {});
 
     expect(api.uploadReferenceVideo).not.toHaveBeenCalled();
     expect(api.completeVideoUpload).not.toHaveBeenCalled();
+    expect(api.resolveMaterials).toHaveBeenCalledWith(["asset:a-dedup"]);
     expect(result).toMatchObject({
       assetId: "a-dedup",
+      durationSeconds: 30.001,
       analysisTaskId: "analysis-dedup",
       analysisTaskStatus: "PENDING",
     });
