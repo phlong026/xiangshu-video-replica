@@ -3573,7 +3573,8 @@ export async function getLatestProjectAnalysis(
   );
 }
 // 飞影封面模板（发布页「模板封面」来源）：生成是同步接口、实测 60-90s，
-// 超时放宽到 180 秒；服务端把图片转成 base64 内联返回（绕开 CDN 时效/CORS）。
+// 客户端留出生成（180 秒）与下载图片（60 秒）的总预算，再加传输余量。
+// 服务端把图片转成 base64 内联返回（绕开 CDN 时效/CORS）。
 export async function fetchCoverStyles(): Promise<
   Array<{ id: string; title: string; url: string }>
 > {
@@ -3609,7 +3610,7 @@ export async function generateCoverFromTemplate(input: {
       headers: { "Content-Type": "application/json" },
       method: "POST",
     },
-    180000,
+    270000,
   );
   return {
     coverId: response.cover_id,
