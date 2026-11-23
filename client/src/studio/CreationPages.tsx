@@ -37,13 +37,17 @@ import {
   type ProjectMainCharacter,
   readAnalysisPayload,
   readFirstFrameSelectionPayload,
+  readShotConsistencyIssues,
   readSourceFrameCandidates,
+  readSourceReview,
   rewriteProjectScript,
   type SavedPromptItem,
   type ScriptRewriteTask,
   ScriptRewriteTaskError,
   type ShotCard,
   type ShotCardPayload,
+  type ShotConsistencyIssue,
+  type SourceReview,
   saveGenerationPrompt,
   saveShotCards,
   selectCharacterReferences,
@@ -61,6 +65,7 @@ import {
   ShotCardEditor,
 } from "../ShotCardEditor";
 import { SourceFrameSelection } from "../SourceFrameSelection";
+import { SourceReviewNotice } from "../SourceReviewNotice";
 import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { useCopyExtractionProgress } from "./copyExtractionProgress";
@@ -1742,6 +1747,10 @@ export function ReplicaPage() {
   const project = data.projects.find(
     (item) => item.id === state.draft.projectId,
   );
+  const storyboardReview = Boolean(
+    state.storyboardReviewProjectId &&
+      state.storyboardReviewProjectId === state.draft.projectId,
+  );
   const source = findSource(
     data.assets,
     data.videos,
@@ -1772,6 +1781,11 @@ export function ReplicaPage() {
     state.draft.projectId ? "ready" : "source",
   );
   const [shots, setShots] = useState<ShotCard[]>([]);
+  const [shotIssues, setShotIssues] = useState<ShotConsistencyIssue[]>([]);
+  const [sourceReview, setSourceReview] = useState<SourceReview | null>(null);
+  const [shotTableContext, setShotTableContext] = useState<
+    Record<string, unknown>
+  >({});
   const [shotCardVersionId, setShotCardVersionId] = useState<string>();
   const [analysisVersionId, setAnalysisVersionId] = useState<string>();
   const [analysisVersionCreatedAt, setAnalysisVersionCreatedAt] =
@@ -1993,6 +2007,9 @@ export function ReplicaPage() {
     setAnalysisError("");
     setAnalysisStatus(undefined);
     setShots([]);
+    setShotIssues([]);
+    setSourceReview(null);
+    setShotTableContext({});
     shotSaveOperationRef.current += 1;
     setSavingShots(false);
     setShotCardVersionId(undefined);
@@ -2090,9 +2107,17 @@ export function ReplicaPage() {
           return;
         }
 
-        const shotVersion = shotResult.value;
+        const latestShotVersion = shotResult.value;
         const analysisVersion =
           analysisResult.status === "fulfilled" ? analysisResult.value : null;
+        const outdatedShotCard = Boolean(
+          analysisVersion &&
+            latestShotVersion &&
+            latestShotVersion.payload.source_analysis_version_id !==
+              analysisVersion.id,
+        );
+        // 分镜、台词和问题必须属于同一分析；新拆解期间可能短暂读到上一版镜头卡。
+        const shotVersion = outdatedShotCard ? null : latestShotVersion;
         const promptState =
           promptResult.status === "fulfilled"
             ? promptResult.value
@@ -2112,11 +2137,16 @@ export function ReplicaPage() {
         const shotPayload = shotVersion
           ? (shotVersion.payload as ShotCardPayload)
           : null;
-        const restoredShots = shotPayload?.shots ?? [];
         const analysis = analysisVersion
           ? readAnalysisPayload(analysisVersion)
           : null;
-        const original = analysis?.original_script ?? "";
+        const restoredShots =
+          shotPayload?.shots ??
+          (outdatedShotCard ? (analysis?.shots ?? []) : []);
+        const original =
+          typeof shotPayload?.original_script === "string"
+            ? shotPayload.original_script
+            : (analysis?.original_script ?? "");
         const savedPromptText = promptState.version?.payload.prompt_text;
         const savedPrompt =
           !promptState.stale && typeof savedPromptText === "string"
@@ -2142,7 +2172,12 @@ export function ReplicaPage() {
           (currentDraft.promptEdited === true || promptEditedRef.current);
         const blankScript = createDraft().script;
         const script = keepLocalScript
-          ? currentDraft.script
+          ? {
+              ...currentDraft.script,
+              ...(typeof shotPayload?.original_script === "string"
+                ? { original }
+                : {}),
+            }
           : {
               ...blankScript,
               id: savedScript?.id ?? blankScript.id,
@@ -2157,6 +2192,21 @@ export function ReplicaPage() {
         const restoredPrompt = keepLocalPrompt ? promptTextRef.current : prompt;
 
         setShots(restoredShots);
+        setSourceReview(
+          readSourceReview(
+            shotPayload ? shotPayload.source_review : analysis?.source_review,
+          ),
+        );
+        setShotIssues(
+          readShotConsistencyIssues(
+            shotPayload
+              ? shotPayload.consistency_issues
+              : analysis?.consistency_issues,
+          ),
+        );
+        setShotTableContext(
+          shotVersion?.payload ?? analysisVersion?.payload ?? {},
+        );
         setShotCardVersionId(shotVersion?.id || undefined);
         setAnalysisVersionId(
           shotPayload?.source_analysis_version_id ?? analysisVersion?.id,
@@ -2559,26 +2609,32 @@ export function ReplicaPage() {
       const analysisShots: ShotCard[] = analysisVersion
         ? (readAnalysisPayload(analysisVersion)?.shots ?? [])
         : [];
-      const script = analysisVersion
-        ? (readAnalysisPayload(analysisVersion)?.original_script ?? "")
-        : "";
       // 分镜由分析 Worker 原子落库，页面只恢复已完成结果。
-      const shotVersion = await getLatestProjectShotCards(projectId).catch(
-        () => null,
-      );
-      const shotPayload = shotVersion
-        ? (shotVersion.payload as ShotCardPayload)
-        : null;
+      const latestShotVersion = await getLatestProjectShotCards(
+        projectId,
+      ).catch(() => null);
       const shotsFresh =
-        shotPayload &&
-        shotPayload.source_analysis_version_id === analysisVersion?.id;
+        latestShotVersion &&
+        latestShotVersion.payload.source_analysis_version_id ===
+          analysisVersion?.id;
       if (!isCurrentAnalysis()) return;
-      if (!shotsFresh)
+      const shotVersion = shotsFresh ? latestShotVersion : null;
+      if (!shotVersion)
         throw new Error("分镜尚未就绪，请刷新结果；历史项目可重新拆解。");
-      const finalShots = shotVersion
-        ? ((shotVersion.payload as ShotCardPayload).shots ?? [])
-        : analysisShots;
+      const shotPayload = shotVersion.payload as ShotCardPayload;
+      const script =
+        typeof shotPayload?.original_script === "string"
+          ? shotPayload.original_script
+          : analysisVersion
+            ? (readAnalysisPayload(analysisVersion)?.original_script ?? "")
+            : "";
+      const finalShots = shotPayload.shots ?? analysisShots;
       setShots(finalShots);
+      setSourceReview(readSourceReview(shotPayload.source_review));
+      setShotIssues(readShotConsistencyIssues(shotPayload?.consistency_issues));
+      setShotTableContext(
+        shotVersion?.payload ?? analysisVersion?.payload ?? {},
+      );
       setShotCardVersionId(shotVersion?.id || undefined);
       setAnalysisVersionId(analysisVersion?.id);
       setShotsDirty(false);
@@ -2750,19 +2806,42 @@ export function ReplicaPage() {
 
   const updateShot = (index: number, patch: Partial<ShotCard>) => {
     if (readOnly || savingShots) return;
+    const current = shots[index];
+    if (
+      !current ||
+      JSON.stringify(current) === JSON.stringify({ ...current, ...patch })
+    )
+      return;
     setShots((current) =>
       current.map((shot, shotIndex) =>
         shotIndex === index ? { ...shot, ...patch } : shot,
       ),
     );
     setShotsDirty(true);
+    setSourceReview({
+      status: "INCOMPLETE",
+      attempted: false,
+      issues: [
+        {
+          code: "SOURCE_REVIEW_STALE",
+          shot_id: patch.shot_id ?? shots[index]?.shot_id,
+          message: "分镜已人工修改，原片校对结果需重新确认。",
+        },
+      ],
+    });
     setShotSaveError("");
     setFinalSnapshot(null);
     // TODO: H3 草稿功能的 UI 组件
   };
 
   const saveShotEdits = async () => {
-    if (readOnly || savingShots || !analysisVersionId || !shotsDirty) return;
+    if (
+      readOnly ||
+      savingShots ||
+      !analysisVersionId ||
+      (!shotsDirty && !storyboardReview && shotIssues.length === 0)
+    )
+      return;
     if (shots.some((shot) => shot.end_time < shot.start_time)) {
       setShotSaveError("结束时间不能早于开始时间。");
       return;
@@ -2779,12 +2858,39 @@ export function ReplicaPage() {
       )
         return;
       setShotCardVersionId(saved.id);
+      // 保存端会按事实重新派生旧字段；页面和后续复制都使用同一份已保存结果。
+      if (Array.isArray(saved.payload?.shots))
+        setShots(saved.payload.shots as ShotCard[]);
+      setSourceReview(readSourceReview(saved.payload?.source_review));
+      setShotIssues(
+        readShotConsistencyIssues(saved.payload?.consistency_issues),
+      );
+      if (saved.payload) setShotTableContext(saved.payload);
+      if (typeof saved.payload?.original_script === "string") {
+        const original = saved.payload.original_script;
+        const currentScript = latestDraftRef.current.script;
+        setOriginalScript(original);
+        if (currentScript.original !== original) {
+          const untouched = currentScript.text === currentScript.original;
+          patchDraft({
+            script: {
+              ...currentScript,
+              original,
+              ...(untouched ? { text: original, confirmed: false } : {}),
+            },
+            ...(untouched ? { scriptEdited: false } : {}),
+          });
+        }
+      }
       setShotsDirty(false);
       // 分镜换了新版本，之前合成的终稿已不对应，留着只会误导用户去点送生成。
+      const invalidated = invalidateStaleFinalPrompt();
       notify(
-        invalidateStaleFinalPrompt()
-          ? "分镜已保存；上游内容已变化，请重新合成最终提示词。"
-          : "分镜已保存。",
+        storyboardReview
+          ? "分镜已保存，自动复刻将在检查通过后继续。"
+          : invalidated
+            ? "分镜已保存；上游内容已变化，请重新合成最终提示词。"
+            : "分镜已保存。",
       );
     } catch (cause: unknown) {
       if (
@@ -2793,6 +2899,10 @@ export function ReplicaPage() {
       )
         return;
       setShotSaveError(customerVisibleErrorMessage(cause, "分镜保存失败。"));
+      if (cause instanceof Error && "consistencyIssues" in cause) {
+        const issues = readShotConsistencyIssues(cause.consistencyIssues);
+        if (issues.length) setShotIssues(issues);
+      }
     } finally {
       if (operation === shotSaveOperationRef.current) setSavingShots(false);
     }
@@ -2886,7 +2996,10 @@ export function ReplicaPage() {
     }
     try {
       await navigator.clipboard.writeText(
-        formatShotCardsForClipboard(displayShots),
+        formatShotCardsForClipboard(displayShots, {
+          ...shotTableContext,
+          source_review: sourceReview,
+        }),
       );
       notify("分镜表已复制，可直接粘贴到 Excel 或在线表格。");
     } catch {
@@ -3248,11 +3361,21 @@ export function ReplicaPage() {
                         复制分镜表
                       </Button>
                       <Button
-                        disabled={readOnly || savingShots || !shotsDirty}
+                        disabled={
+                          readOnly ||
+                          savingShots ||
+                          (!shotsDirty &&
+                            !storyboardReview &&
+                            shotIssues.length === 0)
+                        }
                         onClick={() => void saveShotEdits()}
                         variant="outline"
                       >
-                        {savingShots ? "保存中…" : "保存为自定义"}
+                        {savingShots
+                          ? "保存中…"
+                          : storyboardReview
+                            ? "保存分镜"
+                            : "保存为自定义"}
                       </Button>
                     </span>
                   </div>
@@ -3261,10 +3384,15 @@ export function ReplicaPage() {
                       {shotSaveError}
                     </p>
                   ) : null}
-                  <details className="creation-shot-details">
+                  <SourceReviewNotice review={sourceReview} />
+                  <details
+                    className="creation-shot-details"
+                    open={shotIssues.length > 0 || undefined}
+                  >
                     <summary>展开编辑完整分镜</summary>
                     <ShotCardEditor
                       shots={displayShots}
+                      issues={shotIssues}
                       readOnly={readOnly || savingShots}
                       onChange={(index, shot) => updateShot(index, shot)}
                     />

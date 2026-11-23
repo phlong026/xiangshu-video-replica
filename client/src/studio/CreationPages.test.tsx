@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { sampleFactsShot } from "../test/shotFacts";
 import { replicaInputKey } from "./PromptEditor";
 import { createState } from "./state";
 import type { StudioAsset, StudioContextValue } from "./types";
@@ -4595,6 +4596,90 @@ describe("视频复刻（模块①）", () => {
     return value;
   }
 
+  it("恢复分镜问题，保存拒绝显示新问题，修正保存后清除提醒", async () => {
+    const value = replicaStudio();
+    value.state.storyboardReviewProjectId = "project-1";
+    mockAnalysisSuccess({ existingShotCards: true });
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-conflict",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 8,
+        shots: [shot],
+        consistency_issues: [
+          {
+            code: "MOTION_CONFLICT",
+            shot_id: "s1",
+            message: "人物运动状态与动作矛盾",
+          },
+        ],
+      },
+    });
+    replicaApi.saveShotCards.mockRejectedValueOnce(
+      Object.assign(new Error("请修正分镜后保存"), {
+        consistencyIssues: [
+          {
+            code: "CAMERA_CONFLICT",
+            shot_id: "s1",
+            message: "运镜方式仍有冲突",
+          },
+        ],
+      }),
+    );
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    expect(
+      await screen.findByText(/s1：人物运动状态与动作矛盾/),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("s1 动作"), {
+      target: { value: "人物走向门口" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存分镜" }));
+    expect(await screen.findByText(/s1：运镜方式仍有冲突/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存分镜" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/分镜待确认/)).not.toBeInTheDocument(),
+    );
+    expect(value.notify).toHaveBeenCalledWith(
+      "分镜已保存，自动复刻将在检查通过后继续。",
+    );
+  });
+
+  it("全片台词待确认时无需改字也可保存核对后的分镜", async () => {
+    const value = replicaStudio();
+    value.state.storyboardReviewProjectId = "project-1";
+    mockAnalysisSuccess();
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-review",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 8,
+        shots: [shot],
+        consistency_issues: [
+          {
+            code: "SPOKEN_SCRIPT_CONFLICT",
+            shot_id: "",
+            message: "请核对分段台词与全片文案",
+          },
+        ],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText("请核对分段台词与全片文案");
+    const save = screen.getByRole("button", { name: "保存分镜" });
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(replicaApi.saveShotCards).toHaveBeenCalledWith("av-1", [shot]),
+    );
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "分镜已保存，自动复刻将在检查通过后继续。",
+      ),
+    );
+  });
+
   function mockAnalysisSuccess(options: { existingShotCards?: boolean } = {}) {
     replicaApi.startVideoAnalysis.mockResolvedValue({
       id: "task-1",
@@ -4632,6 +4717,393 @@ describe("视频复刻（模块①）", () => {
       },
     });
   }
+
+  it("保存后显示服务端按事实重新派生的分镜，后续复制也使用已保存结果", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccess();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    replicaApi.saveShotCards.mockResolvedValue({
+      id: "scv-normalized",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 8,
+        shots: [{ ...shot, action: "已按事实同步的行走动作" }],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText(/已拆解/);
+    fireEvent.change(screen.getByLabelText("s1 动作"), {
+      target: { value: "待保存的动作描述" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存为自定义" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("s1 动作")).toHaveValue(
+        "已按事实同步的行走动作",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "复制分镜表" }));
+    await waitFor(() =>
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        expect.stringContaining("已按事实同步的行走动作"),
+      ),
+    );
+  });
+
+  it("恢复校对通过的新事实后，人工修改使展示和复制中的旧校对失效，保存保留主体事实", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccess();
+    const original = sampleFactsShot();
+    const savedShot = sampleFactsShot();
+    savedShot.facts.actions[0].gait = "RUNNING";
+    savedShot.facts.evidence[0].status = "STALE";
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-facts",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 4,
+        shots: [original],
+        source_review: { status: "PASSED", attempted: true, issues: [] },
+      },
+    });
+    replicaApi.saveShotCards.mockResolvedValue({
+      id: "scv-facts-edited",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 4,
+        shots: [savedShot],
+        source_review: {
+          status: "INCOMPLETE",
+          attempted: false,
+          issues: [
+            {
+              code: "SOURCE_REVIEW_STALE",
+              shot_id: "s1",
+              message: "人工修改的动作尚待核对",
+            },
+          ],
+        },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText("原片校对已通过");
+    fireEvent.change(screen.getByLabelText("s1 p1 步态"), {
+      target: { value: "RUNNING" },
+    });
+    expect(
+      screen.getByRole("status", { name: "原片校对状态" }),
+    ).toHaveTextContent("分镜已修改");
+    fireEvent.click(screen.getByRole("button", { name: "复制分镜表" }));
+    await waitFor(() =>
+      expect(navigator.clipboard.writeText).toHaveBeenCalled(),
+    );
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0][0];
+    expect(copied).toContain('"code":"SOURCE_REVIEW_STALE"');
+    expect(copied).not.toContain('"status":"PASSED"');
+    fireEvent.click(screen.getByRole("button", { name: "保存为自定义" }));
+    await waitFor(() =>
+      expect(replicaApi.saveShotCards).toHaveBeenCalledWith("av-1", [
+        expect.objectContaining({ facts: savedShot.facts }),
+      ]),
+    );
+    expect(
+      await screen.findByText("s1：人工修改的动作尚待核对"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("s1 p1 步态")).toHaveValue("RUNNING");
+    expect(original.facts.evidence[0].status).toBe("CURRENT");
+  });
+
+  it("损坏初稿可修正当前段结构并提交保存，无需重新拆解", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccess();
+    const valid = sampleFactsShot();
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-broken-facts",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 4,
+        shots: [{ ...valid, facts: { broken: "保留初稿" } }],
+        consistency_issues: [
+          {
+            code: "FACTS_SCHEMA_INVALID",
+            shot_id: "s1",
+            message: "结构化记录需修正",
+          },
+        ],
+      },
+    });
+    replicaApi.saveShotCards.mockResolvedValue({
+      id: "scv-fixed-facts",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 4,
+        shots: [valid],
+        consistency_issues: [],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText("修正结构化记录");
+    fireEvent.click(screen.getByText("修正结构化记录"));
+    fireEvent.change(screen.getByLabelText("s1 结构化记录修正"), {
+      target: { value: JSON.stringify(valid.facts) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "采用修正记录" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存为自定义" }));
+    await waitFor(() =>
+      expect(replicaApi.saveShotCards).toHaveBeenCalledWith("av-1", [
+        expect.objectContaining({
+          facts: expect.objectContaining({
+            schema_version: "storyboard.facts.v1",
+            evidence: expect.arrayContaining([
+              expect.objectContaining({ status: "STALE" }),
+            ]),
+          }),
+        }),
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText("s1：结构化记录需修正"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("s1 p1 位移")).toHaveValue("MOVING");
+    expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
+  });
+
+  it("核对并保存路人动作时主要主体始终不变", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccess();
+    const original = sampleFactsShot();
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-two-subjects",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 4,
+        shots: [original],
+      },
+    });
+    const saved = sampleFactsShot();
+    saved.facts.actions.push({
+      subject_id: "p2",
+      translation: "UNKNOWN",
+      gait: "UNKNOWN",
+      turning: "UNKNOWN",
+      gesture: "GESTURING",
+      direction: "unknown",
+      path: "",
+      hand_detail: "",
+    });
+    replicaApi.saveShotCards.mockResolvedValue({
+      id: "scv-bystander-edited",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 4,
+        shots: [saved],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByLabelText("s1 核对主体");
+    fireEvent.change(screen.getByLabelText("s1 核对主体"), {
+      target: { value: "p2" },
+    });
+    expect(screen.getByRole("button", { name: "保存为自定义" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("s1 p2 局部手势"), {
+      target: { value: "GESTURING" },
+    });
+    expect(screen.getByLabelText("s1 主要主体")).toHaveValue("p1");
+    fireEvent.click(screen.getByRole("button", { name: "保存为自定义" }));
+    await waitFor(() =>
+      expect(replicaApi.saveShotCards).toHaveBeenCalledWith("av-1", [
+        expect.objectContaining({
+          facts: expect.objectContaining({
+            primary_subject_id: "p1",
+            actions: saved.facts.actions,
+          }),
+        }),
+      ]),
+    );
+    expect(screen.getByLabelText("s1 主要主体")).toHaveValue("p1");
+  });
+
+  it.each(["分镜修正后的台词", ""])(
+    "恢复项目以最新分镜原文为准，包括显式空串：%j",
+    async (original) => {
+      const value = replicaStudio();
+      mockAnalysisSuccess();
+      replicaApi.getLatestProjectShotCards.mockResolvedValue({
+        id: "scv-reviewed",
+        payload: {
+          source_analysis_version_id: "av-1",
+          duration_seconds: 8,
+          original_script: original,
+          shots: [{ ...shot, spoken_text: original }],
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ReplicaPage />);
+
+      await waitFor(() =>
+        expect(value.patchDraft).toHaveBeenCalledWith(
+          expect.objectContaining({
+            script: expect.objectContaining({ original, text: original }),
+          }),
+        ),
+      );
+    },
+  );
+
+  it("历史恢复不把旧来源镜头卡混入最新分析的分镜与原文", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccess();
+    const latestShot = {
+      ...shot,
+      shot_id: "new-s1",
+      action: "最新分析中的动作",
+      spoken_text: "最新原文",
+    };
+    replicaApi.getLatestProjectAnalysis.mockResolvedValue({
+      id: "av-new",
+      payload: {
+        analysis: {
+          summary: "最新分析",
+          duration_seconds: 8,
+          original_script: "最新原文",
+          visual_style: "最新风格",
+          shots: [latestShot],
+          consistency_issues: [
+            { code: "NEW_ISSUE", shot_id: "new-s1", message: "请核对新分镜" },
+          ],
+        },
+      },
+    });
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-old",
+      payload: {
+        source_analysis_version_id: "av-old",
+        duration_seconds: 8,
+        original_script: "旧卡原文",
+        visual_style: "旧卡风格",
+        shots: [shot],
+        consistency_issues: [
+          { code: "OLD_ISSUE", shot_id: "s1", message: "旧卡问题" },
+        ],
+      },
+    });
+    const writeText = vi.fn(async (_text: string) => {});
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    expect(await screen.findByLabelText("new-s1 动作")).toHaveValue(
+      "最新分析中的动作",
+    );
+    expect(screen.getByText(/请核对新分镜/)).toBeInTheDocument();
+    expect(screen.queryByText(/旧卡问题/)).toBeNull();
+    expect(screen.queryByText("已保存为自定义 ✓")).toBeNull();
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        script: expect.objectContaining({
+          original: "最新原文",
+          text: "最新原文",
+        }),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "复制分镜表" }));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("最新风格"));
+    expect(writeText.mock.calls[0]?.[0]).not.toContain("旧卡风格");
+    fireEvent.click(screen.getByRole("button", { name: "保存为自定义" }));
+    await waitFor(() =>
+      expect(replicaApi.saveShotCards).toHaveBeenCalledWith("av-new", [
+        latestShot,
+      ]),
+    );
+  });
+
+  it("拆解完成返回旧来源镜头卡时不写入任何旧卡内容", async () => {
+    const value = replicaStudio();
+    value.data.projects = [];
+    mockAnalysisSuccess();
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-old",
+      payload: {
+        source_analysis_version_id: "av-old",
+        duration_seconds: 8,
+        original_script: "旧卡原文",
+        shots: [{ ...shot, action: "旧卡动作" }],
+        consistency_issues: [{ code: "OLD_ISSUE", message: "旧卡问题" }],
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "启动 AI 拆解" }));
+    expect(await screen.findByText(/分镜尚未就绪/)).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("旧卡动作")).toBeNull();
+    expect(screen.queryByText(/旧卡问题/)).toBeNull();
+    expect(value.patchDraft).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        script: expect.objectContaining({ original: "旧卡原文" }),
+      }),
+    );
+    expect(value.notify).not.toHaveBeenCalledWith(
+      "拆解完成。请确认文案和置换首帧，再合成最终提示词。",
+    );
+  });
+
+  it.each(["保存时修正的台词", ""])(
+    "保存分镜后同步未改写口播，空串不回退旧分析：%j",
+    async (original) => {
+      const value = replicaStudio();
+      value.state.draft.script = {
+        ...value.state.draft.script,
+        original: "之前的原文",
+        text: "之前的原文",
+        confirmed: false,
+      };
+      mockAnalysisSuccess();
+      replicaApi.saveShotCards.mockResolvedValue({
+        id: "scv-reviewed",
+        payload: {
+          source_analysis_version_id: "av-1",
+          duration_seconds: 8,
+          original_script: original,
+          shots: [{ ...shot, spoken_text: original }],
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ReplicaPage />);
+      fireEvent.change(await screen.findByLabelText("s1 原口播"), {
+        target: { value: original },
+      });
+      vi.mocked(value.patchDraft).mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "保存为自定义" }));
+
+      await waitFor(() =>
+        expect(value.patchDraft).toHaveBeenCalledWith(
+          expect.objectContaining({
+            script: expect.objectContaining({
+              original,
+              text: original,
+              confirmed: false,
+            }),
+            scriptEdited: false,
+          }),
+        ),
+      );
+    },
+  );
 
   async function prepareFinalReplica() {
     replicaApi.createScriptVersion.mockResolvedValue({ id: "script-final" });

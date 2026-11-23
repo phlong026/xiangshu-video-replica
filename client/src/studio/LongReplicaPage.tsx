@@ -19,10 +19,19 @@ import {
   getReplicaPromptVersionById,
   readReplicaPromptShots,
   readReplicaPromptSpokenScript,
+  readShotConsistencyIssues,
+  readSourceReview,
   startReplicaPromptTask,
   waitForReplicaPromptTask,
 } from "../api";
 import { isInsufficientCredits } from "../insufficientCredits";
+import {
+  formatShotCardsForClipboard,
+  formatShotMotion,
+} from "../ShotCardEditor";
+import { ShotFactEvidence } from "../ShotFactsEditor";
+import { SourceReviewNotice } from "../SourceReviewNotice";
+import { formatShotFacts, readShotFacts, shotFactsView } from "../shotFacts";
 import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { readVideoDuration, uploadWorkbenchSourceVideo } from "./live";
@@ -69,10 +78,14 @@ function formatSeconds(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return "--:--";
   }
-  const total = Math.round(value);
+  const milliseconds = Math.round(value * 1000);
+  const total = Math.floor(milliseconds / 1000);
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  const fraction = String(milliseconds % 1000)
+    .padStart(3, "0")
+    .replace(/0+$/, "");
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${fraction ? `.${fraction}` : ""}`;
 }
 
 function CopyBlock({
@@ -635,12 +648,37 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
           result.payload.spoken_script,
         ),
         shots: readReplicaPromptShots(result.payload.shots),
+        source_review: readSourceReview(result.payload.source_review),
         replica_prompt: String(result.payload.replica_prompt ?? ""),
-        warnings: Array.isArray(result.payload.warnings)
-          ? result.payload.warnings
-          : [],
+        warnings: [
+          ...readShotConsistencyIssues(result.payload.warnings),
+          ...readShotConsistencyIssues(result.payload.consistency_issues),
+        ].filter(
+          (issue, index, issues) =>
+            issues.findIndex(
+              (item) =>
+                item.code === issue.code &&
+                item.shot_id === issue.shot_id &&
+                item.message === issue.message,
+            ) === index,
+        ),
       }
     : null;
+
+  const copyShotTable = async () => {
+    if (!payload?.shots?.length) return;
+    try {
+      await navigator.clipboard.writeText(
+        formatShotCardsForClipboard(payload.shots, {
+          ...payload.summary,
+          source_review: payload.source_review,
+        }),
+      );
+      notify("分镜表已复制，包含结构化事实；导入后仍需核对转换结果。");
+    } catch {
+      notify("复制失败，请检查剪贴板权限后重试。");
+    }
+  };
 
   return (
     <section className="creation-page creation-long-replica">
@@ -746,11 +784,17 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                 拆解历史
               </Button>
             </header>
+            <SourceReviewNotice review={payload.source_review} />
             {payload.warnings?.length ? (
               <Panel className="long-replica-warnings">
                 <ul role="status">
                   {payload.warnings.map((warning) => (
-                    <li key={warning.code}>{warning.message}</li>
+                    <li
+                      key={`${warning.code}:${warning.shot_id ?? ""}:${warning.message}`}
+                    >
+                      {warning.shot_id ? `${warning.shot_id}：` : ""}
+                      {warning.message}
+                    </li>
                   ))}
                 </ul>
               </Panel>
@@ -759,6 +803,12 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
               <section className="long-replica-block">
                 <div className="long-replica-block__head">
                   <h3>分镜表（{payload.shots.length} 段）</h3>
+                  <Button
+                    variant="outline"
+                    onClick={() => void copyShotTable()}
+                  >
+                    复制分镜表
+                  </Button>
                 </div>
                 <div className="long-replica-shots">
                   <table>
@@ -770,28 +820,69 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                         <th>运镜</th>
                         <th>主体</th>
                         <th>动作与画面变化</th>
+                        <th>运动</th>
+                        <th>分段</th>
                         <th>场景</th>
                         <th>口播</th>
                         <th>衔接</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {payload.shots.map((shot, index) => (
-                        <tr key={shot.shot_id ?? `shot-${index}`}>
-                          <td>{shot.shot_id ?? index + 1}</td>
-                          <td className="long-replica-shots__time">
-                            {formatSeconds(shot.start_time)}-
-                            {formatSeconds(shot.end_time)}
-                          </td>
-                          <td>{shot.shot_type || "—"}</td>
-                          <td>{shot.camera_motion || "—"}</td>
-                          <td>{shot.subject || "—"}</td>
-                          <td>{shot.action || "—"}</td>
-                          <td>{shot.scene || "—"}</td>
-                          <td>{shot.spoken_text || "—"}</td>
-                          <td>{shot.transition || "—"}</td>
-                        </tr>
-                      ))}
+                      {payload.shots.map((sourceShot, index) => {
+                        const shot = shotFactsView(sourceShot);
+                        const facts = readShotFacts(shot.facts);
+                        return (
+                          <tr key={shot.shot_id ?? `shot-${index}`}>
+                            <td>{shot.shot_id ?? index + 1}</td>
+                            <td className="long-replica-shots__time">
+                              {formatSeconds(shot.start_time)}-
+                              {formatSeconds(shot.end_time)}
+                            </td>
+                            <td>{shot.shot_type || "—"}</td>
+                            <td>{shot.camera_motion || "—"}</td>
+                            <td>{shot.subject || "—"}</td>
+                            <td>{shot.action || "—"}</td>
+                            <td>
+                              {facts ? (
+                                <>
+                                  {formatShotFacts(facts)}
+                                  <ShotFactEvidence facts={facts} />
+                                </>
+                              ) : shot.facts != null ? (
+                                "结构化事实待确认"
+                              ) : (
+                                formatShotMotion(shot.motion) || "未标注"
+                              )}
+                            </td>
+                            <td>
+                              {[
+                                shot.segment_kind === "ACTION_BEAT"
+                                  ? "连续动作段"
+                                  : shot.segment_kind === "SHOT_CUT"
+                                    ? "切镜"
+                                    : "",
+                                shot.boundary_reason,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ") || "—"}
+                            </td>
+                            <td>
+                              {[
+                                shot.scene,
+                                shot.scene_dressing,
+                                shot.scene_lighting,
+                                shot.wardrobe_pose_detail,
+                                shot.ambient_sound,
+                                shot.music_style_hint,
+                              ]
+                                .filter(Boolean)
+                                .join("；") || "—"}
+                            </td>
+                            <td>{shot.spoken_text || "—"}</td>
+                            <td>{shot.transition || "—"}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

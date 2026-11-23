@@ -231,6 +231,11 @@ def effective_elapsed_seconds(row: BusinessRow, *, now: datetime) -> float:
         if isinstance(suspended_at, str):
             suspended_at = datetime.fromisoformat(suspended_at)
         elapsed -= (now - suspended_at).total_seconds()
+    detail = row["stage_detail"] if "stage_detail" in row.keys() else None
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    if isinstance(detail, dict):
+        elapsed -= float(detail.get("storyboardReviewWaitSeconds", 0))
     return float(elapsed)
 
 
@@ -653,6 +658,16 @@ def check_deadlines(conn: BusinessConnection, row: BusinessRow, *, now: datetime
     # 已确认（GENERATING 起）、等待确认、观察态均不在该期限下——晚确认两天
     # 后 GENERATING 不得立即判超时（m2-r1#4）。
     if row["status"] not in (PROGRESS_STATUSES - {STATUS_GENERATING}):
+        return False
+    detail = row["stage_detail"] if "stage_detail" in row.keys() else None
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    if (
+        row["status"] == STATUS_ANALYZING
+        and isinstance(detail, dict)
+        and detail.get("storyboardReview")
+    ):
+        # 拆解已经交付，等待用户确认不算机器执行超时，也不重新调用拆解服务。
         return False
     return effective_elapsed_seconds(row, now=now) > EXECUTION_DEADLINE_SECONDS
 

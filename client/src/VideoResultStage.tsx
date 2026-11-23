@@ -43,6 +43,49 @@ const REGENERATION_REASONS = [
   "其他原因",
 ] as const;
 
+const REPLICA_REVIEW_REASONS: Record<string, string> = {
+  REPLICA_ACTION_MISMATCH: "动作与分镜不一致",
+  REPLICA_CAMERA_MISMATCH: "运镜与分镜不一致",
+  REPLICA_TIMING_MISMATCH: "时间与分镜不一致",
+  REPLICA_SPEECH_MISMATCH: "台词与确认文案不一致",
+  REPLICA_REVIEW_UNAVAILABLE: "自动核对暂不可用，请人工检查",
+  REPLICA_REVIEW_INCOMPLETE: "自动核对未完成，请人工检查",
+};
+
+function ReplicaReviewNotice({ task }: { task: GenerationTask }) {
+  if (task.quality_status === "REPLICA_REVIEW_PASSED") {
+    return <p className="video-stage-provider-note">复刻核对通过</p>;
+  }
+  if (task.quality_status !== "REPLICA_REVIEW_REQUIRED") return null;
+  const messages = [
+    ...new Set(
+      (task.quality_issue_codes ?? []).map((issue) => {
+        const [code, shotId] = issue.split(":");
+        const reason = REPLICA_REVIEW_REASONS[code];
+        return reason
+          ? `${shotId ? `${shotId}：` : ""}${reason}`
+          : "部分内容需要人工复核";
+      }),
+    ),
+  ];
+  return (
+    <section
+      className="video-stage-review-note"
+      role="status"
+      aria-label="成片复核结果"
+    >
+      <strong>成片需复核</strong>
+      <ul>
+        {(messages.length ? messages : ["请对照分镜检查成片。"]).map(
+          (message) => (
+            <li key={message}>{message}</li>
+          ),
+        )}
+      </ul>
+    </section>
+  );
+}
+
 type VideoResultStageProps = {
   activeResultAction: string;
   activeTaskAction: string;
@@ -287,6 +330,8 @@ export function VideoResultStage({
           onOpenDownloadFolder?.(activeTask, downloadId)
         }
       />
+
+      {hasPreviewSource ? <ReplicaReviewNotice task={activeTask} /> : null}
 
       <div className="video-stage-result-grid">
         <div className="video-stage-player">

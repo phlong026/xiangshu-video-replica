@@ -20,6 +20,7 @@ from app.analysis import (
     APILIO_REPLICA_PROMPT_MODEL,
     NETWORK_FAILURE_PHASE,
     SHOT_CARD_KIND,
+    SOURCE_REVIEW_TIMEOUT_SECONDS,
     AnalysisProviderFailed,
     AnalysisResult,
     ApilioChatTransport,
@@ -75,6 +76,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
+from app.storyboard_consistency import StoryboardConsistencyError
 from app.task_lease import recover_analysis_interrupted
 
 router = APIRouter(prefix="/api", tags=["analysis"])
@@ -86,7 +88,7 @@ MAX_ANALYSIS_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERAN
 ANALYSIS_TASK_LEASE_MINUTES = 10
 # 拆解任务调用预算（方案 T4/T6）：租约 10 分钟 − 预处理与落库缓冲。预算在
 # 发起每个 provider 请求前校验，重试、换道、token 回退都被同一截止线约束；
-# 满额超时连烧两次后剩余预算已不足以再发起任何完整调用，任务转为失败。
+# 初稿/格式修复须给独立源片复核保留时间和一次请求机会。
 ANALYSIS_CALL_BUDGET_SECONDS = ANALYSIS_TASK_LEASE_MINUTES * 60 - 90
 
 
@@ -96,7 +98,10 @@ def analysis_call_budget() -> VideoCallBudget:
     截止线在工厂构造时定格为绝对单调时钟（租约预算 − 缓冲）：构造到实际
     调用之间的预处理耗时（ffprobe/场景检测/签名）被自然计入预算。
     """
-    return VideoCallBudget(attempt_deadline=time.monotonic() + ANALYSIS_CALL_BUDGET_SECONDS)
+    return VideoCallBudget(
+        attempt_deadline=time.monotonic() + ANALYSIS_CALL_BUDGET_SECONDS,
+        source_review_timeout_seconds=SOURCE_REVIEW_TIMEOUT_SECONDS,
+    )
 
 
 def get_video_analysis_provider(
@@ -692,12 +697,29 @@ def update_analysis_shots(
                 status_code=422,
                 detail={"code": "SHOT_CARD_INVALID", "message": str(exc)},
             ) from exc
+        except StoryboardConsistencyError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "STORYBOARD_CONSISTENCY_REQUIRED",
+                    "message": str(exc),
+                    "issues": exc.issues,
+                },
+            ) from exc
 
         shot_card = create_shot_card_version(
             conn,
             analysis_version=row,
             created_by_user_id=actor.id,
             shots=shots,
+            manually_reviewed=True,
+        )
+        # 用户已完成确认，不必等待最长五分钟的子任务轮询退避；仍由 worker 重算门禁。
+        conn.execute(
+            "UPDATE replica_pipeline_tasks SET next_poll_at = now() "
+            "WHERE project_id = %s AND status = 'ANALYZING' "
+            "AND stage_detail #>> '{storyboardReview,analysisVersionId}' = %s",
+            (str(row["project_id"]), analysis_id),
         )
         write_audit(
             conn,
@@ -1600,13 +1622,27 @@ def external_version_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(ref, dict):
         return payload
     raw = ref.get("raw")
-    if not isinstance(raw, dict) or not isinstance(raw.get("provider"), str):
+    if not isinstance(raw, dict):
         return payload
+    external_raw = dict(raw)
+    if isinstance(raw.get("provider"), str):
+        external_raw["provider"] = "analysis_gateway"
+    # 标准源片复核保留限长观察和白名单引用；嵌套引用沿用对外中性化约定。
+    for stage in ("initial", "source_review"):
+        observation = raw.get(stage)
+        if not isinstance(observation, dict):
+            continue
+        observation_ref = observation.get("ref")
+        if isinstance(observation_ref, dict) and isinstance(observation_ref.get("provider"), str):
+            external_raw[stage] = {
+                **observation,
+                "ref": {**observation_ref, "provider": "analysis_gateway"},
+            }
     return {
         **payload,
         "provider_response_ref": {
             **ref,
-            "raw": {**raw, "provider": "analysis_gateway"},
+            "raw": external_raw,
         },
     }
 

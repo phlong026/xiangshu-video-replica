@@ -448,19 +448,35 @@ export async function loadProjectDraft(
     project.reference_asset_id ?? project.script_source_asset_id ?? undefined;
   draft.script.title = project.name;
 
-  const [analysisResult, scriptResult] = await Promise.allSettled([
+  const [analysisResult, scriptResult, shotResult] = await Promise.allSettled([
     project.analysis_status === "READY"
       ? getLatestProjectAnalysis(project.id)
       : Promise.resolve(undefined),
     getLatestScriptVersion(project.id),
+    project.analysis_status === "READY"
+      ? getLatestProjectShotCards(project.id)
+      : Promise.resolve(null),
   ]);
   const errors: string[] = [];
   let original = "";
+  const analysisVersion =
+    analysisResult.status === "fulfilled" ? analysisResult.value : undefined;
 
   if (analysisResult.status === "rejected") {
     errors.push(`读取项目拆解结果失败：${errorText(analysisResult.reason)}`);
   } else if (analysisResult.value) {
     original = readAnalysisPayload(analysisResult.value)?.original_script ?? "";
+  }
+  if (shotResult.status === "rejected") {
+    errors.push(`读取项目分镜原文失败：${errorText(shotResult.reason)}`);
+  } else if (
+    typeof shotResult.value?.payload?.original_script === "string" &&
+    (!analysisVersion ||
+      shotResult.value.payload.source_analysis_version_id ===
+        analysisVersion.id)
+  ) {
+    // 人工确认过的分段台词优先于旧分析；空串表示当前分镜没有口播。
+    original = shotResult.value.payload.original_script;
   }
 
   draft.script.original = original;

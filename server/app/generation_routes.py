@@ -511,18 +511,26 @@ def compile_h3_preview(
             end_time = float(shot.get("end_time", 0))
             if end_time > source_duration_seconds:
                 source_duration_seconds = end_time
+        if not math.isfinite(source_duration_seconds) or source_duration_seconds <= 0:
+            raise HTTPException(
+                422,
+                detail={"code": "SHOT_CARD_TIMELINE_INVALID", "message": "请先核对分镜时间。"},
+            )
 
         # 调用核心编译函数
         prompt_text = compile_prompt_text(
             script_payload=dict(script_payload),
             shot_payload=dict(shot_payload),
             source_duration_seconds=source_duration_seconds,
-            duration_seconds=15,  # 默认 15 秒
+            duration_seconds=max(4, min(30, math.ceil(source_duration_seconds))),
             resolution="768P",  # 默认分辨率
         )
 
         return CompileH3PreviewResult(h3_prompt_text=prompt_text)
 
+    except HTTPException:
+        # 分镜冲突是可定位的业务提示，不能被改写成泛化的服务错误。
+        raise
     except Exception as e:
         logging.error(f"Failed to compile H3 preview: {e}")
         raise HTTPException(status_code=500, detail=f"编译 H3 提示词失败：{str(e)}")

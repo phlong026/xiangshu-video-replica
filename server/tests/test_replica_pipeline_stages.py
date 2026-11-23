@@ -583,6 +583,72 @@ def test_analysis_success_advances_to_script(
     assert detail.get("shotCardVersionId") == "shot-1"
 
 
+def test_analysis_conflict_keeps_results_and_uses_corrected_latest_card(
+    biz: BusinessConnection, _stub_domains: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slot = "motion-review"
+    pipeline_id = _seed_pipeline(biz, status=rp.STATUS_ANALYZING, slot=slot)
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET analysis_task_id='review-analysis' WHERE id=%s",
+        (pipeline_id,),
+    )
+    analysis_id = "motion-review-analysis"
+    shot = {
+        "shot_id": "s1",
+        "start_time": 0,
+        "end_time": 8,
+        "person_count": 1,
+        "action": "人物从院子走向门口",
+        "spoken_text": "核对后的文案",
+        "motion": {"subject_motion_state": "STATIC", "subject_direction": "none"},
+    }
+    biz.execute(
+        "INSERT INTO versions(id,project_id,kind,version_number,payload_json) "
+        "VALUES(%s,%s,'analysis',1,%s)",
+        (analysis_id, f"p-{slot}", json.dumps({"analysis": {"original_script": "旧文案"}})),
+    )
+    payload = {
+        "source_analysis_version_id": analysis_id,
+        "duration_seconds": 8,
+        "original_script": "核对后的文案",
+        "shots": [shot],
+    }
+    biz.execute(
+        "INSERT INTO versions(id,project_id,kind,version_number,payload_json) "
+        "VALUES('review-card-1',%s,'shot_card',1,%s)",
+        (f"p-{slot}", json.dumps(payload)),
+    )
+    _stub_domains["sub_status"] = {
+        ("analysis_tasks", "review-analysis"): ("SUCCEEDED", {"result_version_id": analysis_id})
+    }
+    monkeypatch.setattr(stages, "_version_payload", real_version_payload)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "waiting"
+    row = biz.execute("SELECT * FROM replica_pipeline_tasks WHERE id=%s", (pipeline_id,)).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_ANALYZING
+    assert row["stage_detail"]["storyboardReview"]["issues"][0]["shot_id"] == "s1"
+    assert "first_frame_enqueue_kwargs" not in _stub_domains
+    assert "analysis_enqueue_kwargs" not in _stub_domains
+    assert row["suspended_at"] is None
+
+    # 保存新卡后，只向前推进；已有拆解和任务编号不会被清空或重复提交。
+    shot["motion"] = {"subject_motion_state": "WALKING", "subject_direction": "away_from_camera"}
+    biz.execute(
+        "INSERT INTO versions(id,project_id,kind,version_number,payload_json) "
+        "VALUES('review-card-2',%s,'shot_card',2,%s)",
+        (f"p-{slot}", json.dumps(payload)),
+    )
+    _release_for_next_round(biz, pipeline_id)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    row = biz.execute("SELECT * FROM replica_pipeline_tasks WHERE id=%s", (pipeline_id,)).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_SCRIPT_VERSIONING
+    assert row["analysis_task_id"] == "review-analysis"
+    assert row["stage_detail"]["shotCardVersionId"] == "review-card-2"
+    assert "storyboardReview" not in row["stage_detail"]
+    _release_for_next_round(biz, pipeline_id)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    assert _stub_domains["script_request"].text == "核对后的文案"
+
+
 def test_resume_consumes_analysis_completed_during_suspension(
     biz: BusinessConnection, _stub_domains: dict[str, Any]
 ) -> None:
