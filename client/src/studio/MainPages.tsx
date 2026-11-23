@@ -1861,6 +1861,16 @@ export function TaskDetailPage() {
             : "以任务返回结果为准",
     ],
   ];
+  const creationPage =
+    task.backendKind === "oral_task" || task.type === "数字人口播"
+      ? "oral"
+      : task.type === "人物置换"
+        ? "replacement"
+        : task.type === "视频生成"
+          ? (task.draftSnapshot?.referenceIds.length ?? 0) > 0
+            ? "reference"
+            : "video"
+          : "replica";
   const recreate = (
     page: "copy" | "oral" | "replica" | "video" | "reference" | "replacement",
     picker?: "reference" | "avatar" | "image" | "first-frame",
@@ -1895,7 +1905,14 @@ export function TaskDetailPage() {
       if (!current()) return;
       const id = archived.result_asset_id;
       if (!id) throw new Error("成片仍在保存中，请稍后再试。");
-      const preview = await createGenerationResultPreviewUrl(id);
+      // 归档和预览签名是两个独立结果：签名失败不能抹掉已成功保存的资产。
+      let preview: string | undefined;
+      try {
+        preview = await createGenerationResultPreviewUrl(id);
+      } catch {
+        if (current())
+          notify("成片已保存，但预览链接获取失败；可以直接发布或重试预览。");
+      }
       if (!current()) return;
       const asset: StudioAsset = {
         ...result,
@@ -1915,7 +1932,11 @@ export function TaskDetailPage() {
           item.id === task.id ? { ...item, resultId: id } : item,
         ),
       }));
-      setPreviewLoad({ key: context, status: "ready", asset });
+      setPreviewLoad({
+        key: context,
+        status: preview ? "ready" : "error",
+        asset,
+      });
     } catch (cause) {
       if (!current()) return;
       if (isResultUrlExpired(cause)) {
@@ -2157,24 +2178,20 @@ export function TaskDetailPage() {
                   recreate("oral", "avatar");
                 else if (task.type === "人物置换")
                   recreate("replacement", "image");
-                else if (task.type === "视频生成")
+                else if (task.type === "视频生成") {
+                  const hasReferences =
+                    (task.draftSnapshot?.referenceIds.length ?? 0) > 0;
                   recreate(
-                    (task.draftSnapshot?.referenceIds.length ?? 0) > 0
-                      ? "reference"
-                      : "video",
-                    "reference",
+                    hasReferences ? "reference" : "video",
+                    hasReferences ? "reference" : "first-frame",
                   );
-                else recreate("replica", "first-frame");
+                } else recreate("replica", "first-frame");
               }}
             >
               <Icon name="image" />
               更换素材
             </Button>
-            <Button
-              onClick={() =>
-                recreate(task.type === "数字人口播" ? "oral" : "replica")
-              }
-            >
+            <Button onClick={() => recreate(creationPage)}>
               <Icon name="refresh" />
               新建草稿
             </Button>

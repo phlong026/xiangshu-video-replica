@@ -5865,6 +5865,51 @@ describe("全自动复刻入口（M8 v1）", () => {
     ).toBeInTheDocument();
   });
 
+  it("培训素材超过1000条时继续读取全部分页并能检索末尾记录", async () => {
+    useStudio.mockReturnValue(studio());
+    // 仅替换本用例的 11 次分页请求；消费完后恢复原有模拟数据，
+    // 防止后续预览、下载、搜索测试被千条素材夹具污染。
+    for (let currentPage = 1; currentPage <= 11; currentPage += 1) {
+      const rows = currentPage <= 10 ? 100 : 1;
+      listTrainingMaterials.mockResolvedValueOnce({
+        items: Array.from({ length: rows }, (_, index) => ({
+          id: `tm-${currentPage}-${index}`,
+          title:
+            currentPage === 11
+              ? "最后一条教材"
+              : `培训素材-${currentPage}-${index}`,
+          description: "",
+          kind: "doc",
+          kind_label: "文档",
+          content_type: "application/pdf",
+          file_suffix: ".pdf",
+          size_bytes: 1024,
+          tags: ["资料"],
+          created_at: "2026-11-01T01:00:00Z",
+        })),
+        tag_facet: ["资料"],
+        page: currentPage,
+        page_size: 100,
+        total: 1001,
+      });
+    }
+    render(<MaterialsPage />);
+    await waitFor(() =>
+      expect(listTrainingMaterials).toHaveBeenCalledTimes(11),
+    );
+    expect(listTrainingMaterials).toHaveBeenNthCalledWith(
+      11,
+      expect.objectContaining({ page: 11, pageSize: 100 }),
+    );
+    expect(await screen.findByText("共 1001 个素材")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索素材" }), {
+      target: { value: "最后一条教材" },
+    });
+    expect(await screen.findByText("最后一条教材")).toBeInTheDocument();
+    expect(screen.getByText("共 1 个素材")).toBeInTheDocument();
+  });
+
   it("培训 Office 文档默认不请求外部预览或签发，需显式下载", async () => {
     useStudio.mockReturnValue(studio());
     listTrainingMaterials.mockResolvedValueOnce({
