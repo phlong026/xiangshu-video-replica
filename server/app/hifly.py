@@ -186,8 +186,8 @@ class HiflyHttpTransport:
 
     ``timeout_seconds`` is the per-request deadline override: ``None`` keeps
     the transport's configured default (the JSON API budget). The client only
-    sets it for the binary lanes (material PUT / result GET), whose payloads
-    are orders of magnitude larger than the JSON envelope calls.
+    sets it for the binary lanes (material PUT / result GET) and synchronous
+    cover generation, which can outlast ordinary JSON envelope calls.
     """
 
     def request(
@@ -359,6 +359,7 @@ class HiflyClient:
         *,
         payload: Mapping[str, Any] | None = None,
         query: Mapping[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         if query:
@@ -375,7 +376,12 @@ class HiflyClient:
         if body is not None:
             headers["Content-Type"] = "application/json"
         try:
-            content = self.transport.request(method, url, headers=headers, body=body)
+            if timeout_seconds is None:
+                content = self.transport.request(method, url, headers=headers, body=body)
+            else:
+                content = self.transport.request(
+                    method, url, headers=headers, body=body, timeout_seconds=timeout_seconds
+                )
         except HiflyError:
             raise
         except Exception as exc:  # noqa: BLE001 - third-party transports may raise anything
@@ -719,7 +725,10 @@ class HiflyClient:
         }
         if avatar:
             payload["avatar"] = avatar
-        return self._request("POST", "/api/v2/hifly/project/covers", payload=payload)
+        # 同步成图实测需 60–90 秒，单独放宽这条请求，不改变其他接口的默认超时。
+        return self._request(
+            "POST", "/api/v2/hifly/project/covers", payload=payload, timeout_seconds=180.0
+        )
 
     # -- 二进制传输 ---------------------------------------------------------
 

@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 from app import publish_delivery
 from app.publish_credentials import PublishCredentials
 from app.publishers.base import PublisherUnavailableError, PublishResult
+from app.publishers.vendor.weixinshipinhao_publisher import channels_publisher
 
 _STATE = {
     "cookies": [{"name": "sessionid", "value": "s", "domain": ".douyin.com"}],
@@ -201,6 +203,89 @@ def test_materialized_media_rejects_empty_objects() -> None:
         ),
     ):
         pass
+
+
+@pytest.mark.parametrize("custom_cover", [True, False], ids=["selected-cover", "default-cover"])
+def test_channels_publish_preserves_selected_cover_after_clip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, custom_cover: bool
+) -> None:
+    network = Mock(side_effect=AssertionError("回归测试不允许访问发布网络"))
+    monkeypatch.setattr(channels_publisher.requests.Session, "request", network)
+    # 上游默认抽帧写在模块目录，测试将该路径隔离到临时目录。
+    monkeypatch.setattr(channels_publisher, "__file__", str(tmp_path / "publisher.py"))
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"test-video")
+    cover = tmp_path / "selected-cover.jpg"
+    cover.write_bytes(b"selected-cover")
+    extract_cover = Mock(
+        side_effect=lambda _video, output, **_kwargs: Path(output).write_bytes(b"default-cover")
+    )
+    monkeypatch.setattr(channels_publisher, "extract_cover_jpeg", extract_cover)
+    monkeypatch.setattr(channels_publisher, "parse_mp4_meta", Mock(return_value=(1920, 1080, 30.0)))
+    publisher = channels_publisher.ChannelsPublisher(cookie="test-cookie")
+    publisher.finder_id = "test-finder"
+    monkeypatch.setattr(publisher, "auth_data", Mock(return_value={}))
+    monkeypatch.setattr(publisher, "helper_upload_params", Mock(return_value={}))
+    monkeypatch.setattr(publisher, "get_trace_key", Mock(return_value="test-trace"))
+    uploaded_cover = "https://example.test/uploaded-cover.jpg"
+    upload_file = Mock(
+        side_effect=[
+            {
+                "url": "https://example.test/uploaded-video.mp4",
+                "fileSize": 1024,
+                "md5sum": "upload-task-uuid",
+            },
+            {"url": uploaded_cover},
+        ]
+    )
+    monkeypatch.setattr(publisher, "upload_file", upload_file)
+    monkeypatch.setattr(publisher, "clip_video", Mock(return_value="test-clip"))
+    clip = {
+        "url": "https://example.test/clipped-video.mp4",
+        "thumbUrl": "https://example.test/clip-thumb.jpg",
+        "coverUrl": "https://example.test/clip-cover.jpg",
+        "md5": "clipped-media-md5",
+        "width": 1280,
+        "height": 720,
+        "duration": 29.0,
+        "fileSize": 768,
+    }
+    monkeypatch.setattr(publisher, "wait_clip_result", Mock(return_value=clip))
+    post_create = Mock(return_value={"data": {"objectId": "test-post"}})
+    monkeypatch.setattr(publisher, "post_create", post_create)
+    resolve_link = Mock(
+        return_value={
+            "exportId": "test-post",
+            "objectNonce": "test-nonce",
+            "shortUrl": "https://example.test/post",
+            "feedUrl": "https://example.test/feed",
+        }
+    )
+    monkeypatch.setattr(publisher, "resolve_publish_link", resolve_link)
+
+    result = publisher.publish(
+        str(video), "发布文案", cover_path=str(cover) if custom_cover else None
+    )
+
+    post_create.assert_called_once()
+    submitted = post_create.call_args.kwargs
+    assert submitted["thumb_url"] == (uploaded_cover if custom_cover else clip["thumbUrl"])
+    assert submitted["cover_url"] == (uploaded_cover if custom_cover else clip["coverUrl"])
+    assert submitted["video_url"] == clip["url"]
+    assert (submitted["width"], submitted["height"]) == (clip["width"], clip["height"])
+    assert submitted["duration"] == clip["duration"]
+    assert submitted["file_size"] == clip["fileSize"]
+    assert submitted["md5sum"] == "upload-task-uuid"
+    resolve_link.assert_called_once()
+    assert resolve_link.call_args.kwargs["media_md5"] == clip["md5"]
+    assert result["exportId"] == "test-post"
+    assert upload_file.call_count == 2
+    if custom_cover:
+        assert upload_file.call_args.args[0] == str(cover)
+        extract_cover.assert_not_called()
+    else:
+        extract_cover.assert_called_once()
+    network.assert_not_called()
 
 
 @pytest.mark.parametrize(

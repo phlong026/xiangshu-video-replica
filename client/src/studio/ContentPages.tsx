@@ -3047,6 +3047,18 @@ export function MaterialsPage() {
 
 const PUBLISH_PLATFORM_LABELS = ["抖音", "视频号", "小红书", "快手"] as const;
 const KUAISHOU_TAG_LIMIT = 3;
+const COVER_TITLE_LIMIT = 500;
+
+type GeneratedCoverPreview = {
+  contextKey: string;
+  draftId: string;
+  videoName: string;
+  templateId: string;
+  templateTitle: string;
+  title: string;
+  imageBase64: string;
+  appliedAssetId?: string;
+};
 
 function formCoverId(
   drafts: StudioPublishDraft[] | undefined,
@@ -3070,6 +3082,16 @@ export function parsePublishDrafts(value: unknown): StudioPublishDraft[] {
       !Array.isArray(item.tags) ||
       item.tags.some((tag: unknown) => typeof tag !== "string") ||
       (item.coverId !== undefined && typeof item.coverId !== "string") ||
+      (item.coverTitleOverride !== undefined &&
+        typeof item.coverTitleOverride !== "string") ||
+      (item.coverTemplateId !== undefined &&
+        typeof item.coverTemplateId !== "string") ||
+      (item.appliedCoverGeneration !== undefined &&
+        (!item.appliedCoverGeneration ||
+          typeof item.appliedCoverGeneration !== "object" ||
+          typeof item.appliedCoverGeneration.assetId !== "string" ||
+          typeof item.appliedCoverGeneration.templateId !== "string" ||
+          typeof item.appliedCoverGeneration.title !== "string")) ||
       (item.scheduledAt !== undefined && typeof item.scheduledAt !== "string")
     )
       throw new Error("云端发布草稿内容不完整，请联系支持。");
@@ -3082,6 +3104,21 @@ export function parsePublishDrafts(value: unknown): StudioPublishDraft[] {
       title: item.title,
       description: item.description,
       tags: item.tags,
+      ...(item.coverTitleOverride !== undefined
+        ? { coverTitleOverride: item.coverTitleOverride }
+        : {}),
+      ...(item.coverTemplateId !== undefined
+        ? { coverTemplateId: item.coverTemplateId }
+        : {}),
+      ...(item.appliedCoverGeneration
+        ? {
+            appliedCoverGeneration: {
+              assetId: item.appliedCoverGeneration.assetId,
+              templateId: item.appliedCoverGeneration.templateId,
+              title: item.appliedCoverGeneration.title,
+            },
+          }
+        : {}),
       ...(item.scheduledAt ? { scheduledAt: item.scheduledAt } : {}),
     };
   });
@@ -3153,7 +3190,7 @@ export function PublishPage() {
   } = useStudio();
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
-  // 模板封面（飞影，用户拍板 2026-11-15）：模板列表懒加载 + 文案自动填充。
+  // 模板图来自接口；生成候选只驻留本页，确认后才转存并应用。
   const [coverSource, setCoverSource] = useState<"frames" | "templates">(
     "frames",
   );
@@ -3162,10 +3199,9 @@ export function PublishPage() {
   >([]);
   const [coverStylesLoading, setCoverStylesLoading] = useState(false);
   const [coverStylesError, setCoverStylesError] = useState("");
-  const [selectedTemplate, setSelectedTemplate] = useState("");
-  const [coverContent, setCoverContent] = useState("");
   const [generatingCover, setGeneratingCover] = useState(false);
-  const [generatedCoverUrl, setGeneratedCoverUrl] = useState("");
+  const [generatedCover, setGeneratedCover] =
+    useState<GeneratedCoverPreview | null>(null);
   const completedResultIds = new Set(
     data.tasks
       .filter((task) => taskHasDeliverable(task) && task.resultId)
@@ -3191,7 +3227,38 @@ export function PublishPage() {
   }>({ requested: [], available: [] });
   const operation = useRef(0);
   const mutationPending = useRef(false);
+  const coverOperation = useRef(0);
+  const coverOwnsMutation = useRef(false);
+  const coverUploadAbort = useRef<AbortController | null>(null);
   const coverInput = useRef<HTMLInputElement>(null);
+  const coverContextKey = JSON.stringify([
+    user.id,
+    user.role,
+    review,
+    state.selectedAssetId,
+    reload,
+  ]);
+  const coverContextRef = useRef<string | null>(coverContextKey);
+  // 渲染时立即隔离旧请求，不能等到 effect 才发现已切换用户或成片。
+  coverContextRef.current = coverContextKey;
+  useEffect(() => {
+    coverContextRef.current = coverContextKey;
+    setGeneratedCover(null);
+    setGeneratingCover(false);
+    setCoverStylesLoading(false);
+    setCoverStylesError("");
+    if (coverOwnsMutation.current) {
+      coverOwnsMutation.current = false;
+      mutationPending.current = false;
+      setActionBusy(false);
+    }
+    return () => {
+      coverOperation.current += 1;
+      coverContextRef.current = null;
+      coverUploadAbort.current?.abort();
+      coverUploadAbort.current = null;
+    };
+  }, [coverContextKey]);
   useEffect(() => {
     void reload;
     void user.id;
@@ -3341,6 +3408,47 @@ export function PublishPage() {
   );
   const [tagInput, setTagInput] = useState("");
   const [saveNotice, setSaveNotice] = useState(false);
+  const selectedTemplate = form.coverTemplateId ?? "";
+  const coverTitle = form.coverTitleOverride ?? form.title;
+  const effectiveCoverTitle = coverTitle.trim();
+  const coverTitleError = !effectiveCoverTitle
+    ? "请填写封面标题。"
+    : effectiveCoverTitle.length > COVER_TITLE_LIMIT
+      ? "封面标题不能超过 500 字。"
+      : "";
+  const coverInputsRef = useRef({
+    draftId: form.id,
+    title: effectiveCoverTitle,
+    templateId: selectedTemplate,
+  });
+  coverInputsRef.current = {
+    draftId: form.id,
+    title: effectiveCoverTitle,
+    templateId: selectedTemplate,
+  };
+  const coverPreview =
+    generatedCover?.contextKey === coverContextKey &&
+    generatedCover.draftId === form.id
+      ? generatedCover
+      : null;
+  const previewStale = Boolean(
+    coverPreview &&
+      (coverPreview.title !== effectiveCoverTitle ||
+        coverPreview.templateId !== selectedTemplate),
+  );
+  const appliedCoverStale = Boolean(
+    form.appliedCoverGeneration &&
+      form.coverId === form.appliedCoverGeneration.assetId &&
+      (form.appliedCoverGeneration.title !== effectiveCoverTitle ||
+        form.appliedCoverGeneration.templateId !== selectedTemplate),
+  );
+  const coverEditingBlocked =
+    review ||
+    user.role === "auditor" ||
+    !selectedAsset ||
+    form.assetId !== selectedAsset.id ||
+    cloudRevision === null ||
+    actionBusy;
   const draftCount = visibleDrafts.length;
   const kuaishou = form.platform === "快手";
   const isScheduled = !kuaishou && scheduleMode === "later";
@@ -3368,6 +3476,8 @@ export function PublishPage() {
     !platformDeliverable ||
     review ||
     actionBusy ||
+    generatingCover ||
+    appliedCoverStale ||
     cloudRevision === null ||
     user.role === "auditor" ||
     (kuaishou && (!form.title.trim() || form.tags.length > tagLimit));
@@ -3405,7 +3515,12 @@ export function PublishPage() {
   };
 
   const savePublishDraft = async () => {
-    if (!selectedAsset || mutationPending.current || cloudRevision === null)
+    if (
+      !selectedAsset ||
+      mutationPending.current ||
+      cloudRevision === null ||
+      user.role === "auditor"
+    )
       return;
     const scheduledAt = isScheduled
       ? (isoFromLocalDateTimeInput(scheduleInput) ?? undefined)
@@ -3522,25 +3637,110 @@ export function PublishPage() {
     });
   }
 
-  async function uploadCover(file: File) {
+  async function generateCover() {
+    if (
+      coverEditingBlocked ||
+      mutationPending.current ||
+      coverTitleError ||
+      !selectedTemplate ||
+      !selectedAsset
+    )
+      return;
+    const current = ++coverOperation.current;
+    const contextKey = coverContextKey;
+    const snapshot = {
+      contextKey,
+      draftId: form.id,
+      videoName: selectedAsset.name,
+      templateId: selectedTemplate,
+      templateTitle:
+        coverStyles.find((style) => style.id === selectedTemplate)?.title ??
+        selectedTemplate,
+      title: effectiveCoverTitle,
+    };
+    const isCurrent = () =>
+      coverOperation.current === current &&
+      coverContextRef.current === contextKey;
+    mutationPending.current = true;
+    coverOwnsMutation.current = true;
+    setGeneratingCover(true);
+    setActionError("");
+    try {
+      const generated = await generateCoverFromTemplate({
+        canvasPreset: "9:16",
+        content: snapshot.title,
+        template: snapshot.templateId,
+      });
+      if (!isCurrent()) return;
+      if (!generated.imageBase64)
+        throw new Error("未收到封面图片，请重新生成。");
+      setGeneratedCover({ ...snapshot, imageBase64: generated.imageBase64 });
+    } catch (cause) {
+      if (isCurrent())
+        setActionError(
+          cause instanceof Error ? cause.message : "生成封面失败，请稍后重试。",
+        );
+    } finally {
+      if (isCurrent()) {
+        mutationPending.current = false;
+        coverOwnsMutation.current = false;
+        setGeneratingCover(false);
+      }
+    }
+  }
+
+  async function applyGeneratedCover() {
+    if (!coverPreview || previewStale || coverEditingBlocked) return;
+    try {
+      const bytes = Uint8Array.from(atob(coverPreview.imageBase64), (char) =>
+        char.charCodeAt(0),
+      );
+      await uploadCover(
+        new File([bytes], `封面-${Date.now()}.jpg`, { type: "image/jpeg" }),
+        coverPreview,
+      );
+    } catch {
+      setActionError("封面图片读取失败，请重新生成。");
+    }
+  }
+
+  async function uploadCover(file: File, generated?: GeneratedCoverPreview) {
+    if (coverEditingBlocked || mutationPending.current) return;
     if (!file.type.startsWith("image/") || file.size > 20 * 1024 * 1024) {
       setActionError("封面请选择 20 MB 以内的图片。");
       return;
     }
-    if (mutationPending.current) return;
+    const current = ++coverOperation.current;
+    const contextKey = coverContextKey;
+    const isCurrent = () =>
+      coverOperation.current === current &&
+      coverContextRef.current === contextKey;
+    const matchesGeneratedInputs = () =>
+      !generated ||
+      (generated.contextKey === contextKey &&
+        generated.draftId === coverInputsRef.current.draftId &&
+        generated.title === coverInputsRef.current.title &&
+        generated.templateId === coverInputsRef.current.templateId);
+    if (!matchesGeneratedInputs()) return;
+    const controller = new AbortController();
+    coverUploadAbort.current = controller;
     mutationPending.current = true;
+    coverOwnsMutation.current = true;
     setActionBusy(true);
     setActionError("");
-    const current = operation.current;
     try {
       const intent = await createMaterialUploadIntent(file, {
         title: file.name,
         group: "发布封面",
       });
+      if (!isCurrent()) return;
       const asset = studioAssetFromMaterial(
-        await putMaterial(intent, file, () => {}),
+        await putMaterial(intent, file, () => {}, controller.signal),
       );
-      if (current !== operation.current) return;
+      if (!isCurrent()) return;
+      asset.url = (await getAssetDownloadUrl(asset.assetId ?? asset.id)).url;
+      if (!isCurrent() || !matchesGeneratedInputs()) return;
+      if (!asset.url) throw new Error("读取封面预览失败，请重试。");
       updateData((previous) => ({
         ...previous,
         assets: [
@@ -3548,13 +3748,33 @@ export function PublishPage() {
           asset,
         ],
       }));
-      updateForm({ coverId: asset.id });
+      updateForm({
+        coverId: asset.id,
+        appliedCoverGeneration: generated
+          ? {
+              assetId: asset.id,
+              templateId: generated.templateId,
+              title: generated.title,
+            }
+          : undefined,
+      });
+      if (generated)
+        setGeneratedCover((preview) =>
+          preview === generated
+            ? { ...preview, appliedAssetId: asset.id }
+            : preview,
+        );
+      notifyRef.current("封面已应用，可继续发布。");
     } catch (cause) {
-      if (current === operation.current)
+      if (isCurrent())
         setActionError(cause instanceof Error ? cause.message : "上传封面失败");
     } finally {
-      mutationPending.current = false;
-      if (current === operation.current) setActionBusy(false);
+      if (isCurrent()) {
+        mutationPending.current = false;
+        coverOwnsMutation.current = false;
+        coverUploadAbort.current = null;
+        setActionBusy(false);
+      }
     }
   }
   async function perform(action: () => Promise<void>) {
@@ -3780,9 +4000,7 @@ export function PublishPage() {
             </section>
             <section className="content-publish-cover">
               <h3>封面选择</h3>
-              <Hint>
-                从你的成片中抽取的候选帧；也可以上传自定义图片或用飞影模板生成。
-              </Hint>
+              <Hint>使用成片预览图、上传图片，或选择模板生成封面。</Hint>
               <div
                 aria-label="封面来源"
                 className="content-cover-source"
@@ -3803,22 +4021,28 @@ export function PublishPage() {
                   onClick={() => {
                     setCoverSource("templates");
                     if (coverStyles.length === 0 && !coverStylesLoading) {
+                      const contextKey = coverContextKey;
                       setCoverStylesLoading(true);
                       setCoverStylesError("");
                       void fetchCoverStyles()
                         .then((items) => {
+                          if (coverContextRef.current !== contextKey) return;
                           setCoverStyles(items);
                           if (items.length === 0)
                             setCoverStylesError("暂无可用模板。");
                         })
                         .catch((cause: unknown) => {
+                          if (coverContextRef.current !== contextKey) return;
                           setCoverStylesError(
                             cause instanceof Error
                               ? cause.message
                               : "读取封面模板失败",
                           );
                         })
-                        .finally(() => setCoverStylesLoading(false));
+                        .finally(() => {
+                          if (coverContextRef.current === contextKey)
+                            setCoverStylesLoading(false);
+                        });
                     }
                   }}
                 >
@@ -3841,7 +4065,10 @@ export function PublishPage() {
                           selectedTemplate === style.id ? "is-selected" : ""
                         }
                         key={style.id}
-                        onClick={() => setSelectedTemplate(style.id)}
+                        disabled={coverEditingBlocked}
+                        onClick={() =>
+                          updateForm({ coverTemplateId: style.id })
+                        }
                         type="button"
                       >
                         <img alt={style.title} loading="lazy" src={style.url} />
@@ -3849,86 +4076,97 @@ export function PublishPage() {
                       </button>
                     ))}
                   </div>
-                  {selectedTemplate ? (
-                    <div className="content-cover-generate">
+                  <div className="content-cover-generate">
+                    <Field label="封面标题">
                       <textarea
-                        aria-label="封面文案"
-                        maxLength={500}
+                        aria-label="封面标题"
+                        disabled={coverEditingBlocked}
                         onChange={(event) =>
-                          setCoverContent(event.target.value)
+                          updateForm({ coverTitleOverride: event.target.value })
                         }
-                        placeholder="封面文案（留空则用草稿标题生成）"
                         rows={2}
-                        value={coverContent}
+                        value={coverTitle}
                       />
-                      <Button
-                        disabled={generatingCover}
-                        variant="primary"
-                        onClick={() => {
-                          const content =
-                            coverContent.trim() ||
-                            (form.title ? form.title : "") ||
-                            "乡村自建房 · 建房指南";
-                          if (!selectedTemplate) return;
-                          setGeneratingCover(true);
-                          void (async () => {
-                            try {
-                              const generated = await generateCoverFromTemplate(
-                                {
-                                  canvasPreset: "9:16",
-                                  content,
-                                  template: selectedTemplate,
-                                },
-                              );
-                              const response = await fetch(
-                                `data:image/${
-                                  generated.coverId ? "jpeg" : "jpeg"
-                                };base64,${generated.imageBase64}`,
-                              );
-                              const blob = await response.blob();
-                              const file = new File(
-                                [blob],
-                                `封面-${Date.now()}.jpg`,
-                                { type: "image/jpeg" },
-                              );
-                              setGeneratedCoverUrl(
-                                `data:image/jpeg;base64,${generated.imageBase64}`,
-                              );
-                              await uploadCover(file);
-                              notify("封面已生成并应用。");
-                            } catch (cause) {
-                              notify(
-                                cause instanceof Error
-                                  ? cause.message
-                                  : "生成封面失败，请稍后重试。",
-                              );
-                            } finally {
-                              setGeneratingCover(false);
-                            }
-                          })();
-                        }}
-                      >
-                        {generatingCover ? "生成中…约需 1 分钟" : "生成封面"}
-                      </Button>
-                      {generatingCover ? (
-                        <Hint>生成需要约 1 分钟，请勿关闭页面。</Hint>
-                      ) : null}
-                      {generatedCoverUrl && !generatingCover ? (
+                    </Field>
+                    <Button
+                      disabled={
+                        coverEditingBlocked ||
+                        form.coverTitleOverride === undefined
+                      }
+                      onClick={() =>
+                        updateForm({ coverTitleOverride: undefined })
+                      }
+                    >
+                      使用发布标题
+                    </Button>
+                    <Hint>
+                      {form.coverTitleOverride === undefined
+                        ? "跟随发布标题；可单独修改封面标题。"
+                        : "封面标题独立保存，不修改发布标题。"}
+                    </Hint>
+                    {coverTitleError ? (
+                      <p className="admin-hint">{coverTitleError}</p>
+                    ) : null}
+                    <Button
+                      disabled={
+                        coverEditingBlocked ||
+                        generatingCover ||
+                        !selectedTemplate ||
+                        Boolean(coverTitleError)
+                      }
+                      variant="primary"
+                      onClick={() => void generateCover()}
+                    >
+                      {generatingCover ? "生成中…约需 1 分钟" : "生成封面"}
+                    </Button>
+                    {generatingCover ? (
+                      <Hint>正在生成封面，完成后确认使用。</Hint>
+                    ) : null}
+                    {coverPreview && !generatingCover ? (
+                      <div>
                         <img
                           alt="生成的封面预览"
                           className="content-cover-generated"
-                          src={generatedCoverUrl}
+                          src={`data:image/jpeg;base64,${coverPreview.imageBase64}`}
                         />
-                      ) : null}
-                    </div>
-                  ) : null}
+                        <p>封面标题：{coverPreview.title}</p>
+                        <p>模板：{coverPreview.templateTitle}</p>
+                        <p>对应成片：{coverPreview.videoName}</p>
+                        {previewStale ? (
+                          <p role="status">
+                            封面标题或模板已变化，请重新生成。
+                          </p>
+                        ) : null}
+                        <Button
+                          disabled={
+                            coverEditingBlocked ||
+                            previewStale ||
+                            coverPreview.appliedAssetId === selectedCover?.id
+                          }
+                          variant="primary"
+                          onClick={() => void applyGeneratedCover()}
+                        >
+                          {coverPreview.appliedAssetId === selectedCover?.id
+                            ? "已使用此封面"
+                            : "使用此封面"}
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
+              ) : null}
+              {appliedCoverStale ? (
+                <p role="alert">
+                  当前封面的标题或模板已变化，请重新生成并使用封面，或选择成片预览图、上传图片后再发布。
+                </p>
               ) : null}
               {coverCandidates.length ? (
                 <div className="content-cover-options">
                   {coverCandidates.map((asset, index) => (
                     <button
-                      disabled={actionBusy || cloudRevision === null}
+                      disabled={
+                        actionBusy || generatingCover || cloudRevision === null
+                      }
                       aria-label={`选择封面 ${asset.name}`}
                       className={
                         selectedCover?.id === asset.id ? "is-selected" : ""
@@ -3964,7 +4202,7 @@ export function PublishPage() {
                 }}
               />
               <Button
-                disabled={review || actionBusy || user.role === "auditor"}
+                disabled={coverEditingBlocked || generatingCover}
                 variant="outline"
                 onClick={() => coverInput.current?.click()}
               >
@@ -4199,6 +4437,7 @@ export function PublishPage() {
               disabled={
                 !selectedAsset ||
                 actionBusy ||
+                generatingCover ||
                 cloudRevision === null ||
                 user.role === "auditor"
               }
@@ -4212,6 +4451,7 @@ export function PublishPage() {
                 !savedDraftForAsset ||
                 cloudRevision === null ||
                 actionBusy ||
+                generatingCover ||
                 user.role === "auditor"
               }
               onClick={() => void removeCurrentDraft()}
