@@ -2157,14 +2157,14 @@ export function TaskDetailPage() {
                   recreate("oral", "avatar");
                 else if (task.type === "人物置换")
                   recreate("replacement", "image");
-                else if (task.type === "视频生成")
+                else if (task.type === "视频生成") {
+                  const hasReferences =
+                    (task.draftSnapshot?.referenceIds.length ?? 0) > 0;
                   recreate(
-                    (task.draftSnapshot?.referenceIds.length ?? 0) > 0
-                      ? "reference"
-                      : "video",
-                    "reference",
+                    hasReferences ? "reference" : "video",
+                    hasReferences ? "reference" : "first-frame",
                   );
-                else recreate("replica", "first-frame");
+                } else recreate("replica", "first-frame");
               }}
             >
               <Icon name="image" />
