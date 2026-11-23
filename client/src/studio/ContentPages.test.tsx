@@ -5839,11 +5839,11 @@ describe("全自动复刻入口（M8 v1）", () => {
 
   it("培训素材超过1000条时继续读取全部分页并能检索末尾记录", async () => {
     useStudio.mockReturnValue(studio());
-    listTrainingMaterials.mockImplementation(async (...args: unknown[]) => {
-      const options = args[0] as { page?: number } | undefined;
-      const currentPage = options?.page ?? 1;
+    // 仅替换本用例的 11 次分页请求；消费完后恢复原有模拟数据，
+    // 防止后续预览、下载、搜索测试被千条素材夹具污染。
+    for (let currentPage = 1; currentPage <= 11; currentPage += 1) {
       const rows = currentPage <= 10 ? 100 : 1;
-      return {
+      listTrainingMaterials.mockResolvedValueOnce({
         items: Array.from({ length: rows }, (_, index) => ({
           id: `tm-${currentPage}-${index}`,
           title:
@@ -5863,11 +5863,15 @@ describe("全自动复刻入口（M8 v1）", () => {
         page: currentPage,
         page_size: 100,
         total: 1001,
-      };
-    });
+      });
+    }
     render(<MaterialsPage />);
     await waitFor(() =>
       expect(listTrainingMaterials).toHaveBeenCalledTimes(11),
+    );
+    expect(listTrainingMaterials).toHaveBeenNthCalledWith(
+      11,
+      expect.objectContaining({ page: 11, pageSize: 100 }),
     );
     expect(await screen.findByText("共 1001 个素材")).toBeInTheDocument();
 
