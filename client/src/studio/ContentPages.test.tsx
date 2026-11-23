@@ -5869,7 +5869,7 @@ describe("全自动复刻入口（M8 v1）", () => {
     await waitFor(() =>
       expect(listTrainingMaterials).toHaveBeenCalledTimes(11),
     );
-    expect(screen.getByText("共 1001 个素材")).toBeInTheDocument();
+    expect(await screen.findByText("共 1001 个素材")).toBeInTheDocument();
 
     fireEvent.change(
       screen.getByRole("searchbox", { name: "搜索素材" }),
