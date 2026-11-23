@@ -648,15 +648,21 @@ def mark_suspended(conn: BusinessConnection, pipeline_id: str) -> None:
     )
 
 
-def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> None:
-    """总开关重开：累计挂起时长、清挂起起点、重设轮询时间（方案 §3.2.3）.
+def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> bool:
+    """持父行锁恢复轮询与确定未发送的子任务；返回是否发生恢复。
 
-    挂起产物的版本链恢复在 M6 的受保护恢复事务中执行（r3#5/r5#6）；此处
-    负责行级挂起属性的清算，并把本管线被 fencing 拦下的任务重新开放领取
-    （Codex r-P1：hold 打的 REPLICA_PIPELINE_SUSPENDED 标记会被领取谓词
-    排除——不清掉，开关恢复后任务永远不可领取）。
+    fencing 可能先 hold 子任务，父编排尚未来得及挂起，总开关就已重开。
+    因此子任务恢复不依赖 suspended_at；累计时长仍只清算一次。
+    未知提交只恢复父编排的观察，不重新开放付费任务；DRAINING 则开放领取
+    以便 worker 按既有取消路径释放预占，不会签发发送意图。
     """
-    conn.execute(
+    row = conn.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s FOR UPDATE",
+        (pipeline_id,),
+    ).fetchone()
+    if row is None or str(row["status"]) not in POLL_STATUSES:
+        return False
+    resumed = conn.execute(
         """
         UPDATE replica_pipeline_tasks SET
             suspended_seconds_total = suspended_seconds_total +
@@ -668,37 +674,53 @@ def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> None:
         WHERE id = %s AND suspended_at IS NOT NULL
         """,
         (pipeline_id,),
-    )
-    conn.execute(
+    ).rowcount
+    status = str(row["status"])
+    detail = row["stage_detail"] if isinstance(row["stage_detail"], dict) else {}
+    if status != STATUS_DRAINING and (
+        status not in SUBMIT_PERMIT_STATUSES
+        or detail.get("uncertain") is True
+        or detail.get("revokedReason")
+        or _pipeline_generation_uncertain(conn, pipeline_id)
+    ):
+        return resumed > 0
+    released = conn.execute(
         """
         UPDATE first_frame_tasks SET error_code = NULL,
             error_message_redacted = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+        WHERE status = 'PENDING' AND error_code = 'REPLICA_PIPELINE_SUSPENDED'
           AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
                       WHERE p.first_frame_task_id = first_frame_tasks.id AND p.id = %s)
         """,
         (pipeline_id,),
-    )
-    conn.execute(
+    ).rowcount
+    released += conn.execute(
         """
         UPDATE analysis_tasks SET error_code = NULL,
             error_message_redacted = NULL, updated_at = %s
-        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+        WHERE status = 'PENDING' AND error_code = 'REPLICA_PIPELINE_SUSPENDED'
           AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
                       WHERE p.analysis_task_id = analysis_tasks.id AND p.id = %s)
         """,
         (datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"), pipeline_id),
-    )
-    conn.execute(
+    ).rowcount
+    released += conn.execute(
         """
         UPDATE generation_tasks SET error_code = NULL,
             error_message_redacted = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+        WHERE status = 'PENDING' AND error_code = 'REPLICA_PIPELINE_SUSPENDED'
           AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
                       WHERE p.batch_id = generation_tasks.batch_id AND p.id = %s)
         """,
         (pipeline_id,),
-    )
+    ).rowcount
+    if released and not resumed:
+        conn.execute(
+            "UPDATE replica_pipeline_tasks SET next_poll_at = now(), updated_at = now() "
+            "WHERE id = %s",
+            (pipeline_id,),
+        )
+    return resumed > 0 or released > 0
 
 
 def pipeline_enabled(conn: BusinessConnection) -> bool:

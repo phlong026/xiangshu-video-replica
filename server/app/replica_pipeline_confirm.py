@@ -342,32 +342,43 @@ def expire_pipelines(conn: BusinessConnection, *, limit: int = 50) -> int:
 
 
 def resume_suspended_pipelines(conn: BusinessConnection, *, limit: int = 50) -> int:
-    """总开关重开后的恢复扫描（评审 B-r1#2）：挂起行里清屏障、累计时长、重轮询.
+    """worker 重开扫描：同一事务恢复父轮询与三个子任务域的领取资格。
 
-    与 expire_pipelines 同为独立扫描（不进轮询白名单——挂起行按设计不被领取）。
-    调用方：worker 定时任务在开关开启时调用；恢复后行重新可领、断点续跑
-    （挂起产物纳回版本链依赖子任务域既有恢复语义，M6b 迭代登记）。
+    同时扫描仅子任务被 hold 的关开窗口，以及未知提交完成对账后留下的
+    hold。先锁父行、跳过竞争者，再复用单条恢复，避免两条路径语义分叉。
     """
-    resumed = conn.execute(
+    if limit <= 0:
+        return 0
+    candidates = conn.execute(
         """
-        UPDATE replica_pipeline_tasks SET
-            suspended_seconds_total = suspended_seconds_total +
-                CASE WHEN suspended_at IS NULL THEN 0
-                     ELSE FLOOR(EXTRACT(EPOCH FROM (now() - suspended_at)))::int END,
-            suspended_at = NULL,
-            next_poll_at = now(),
-            updated_at = now()
-        WHERE id IN (
-            SELECT id FROM replica_pipeline_tasks
-            WHERE suspended_at IS NOT NULL
-            ORDER BY suspended_at LIMIT %s
-            FOR UPDATE SKIP LOCKED
+        SELECT p.id FROM replica_pipeline_tasks p
+        WHERE p.status = ANY(%s) AND (
+            p.suspended_at IS NOT NULL OR (
+                (p.status = %s OR (
+                    p.status = ANY(%s)
+                    AND (p.stage_detail -> 'uncertain') IS DISTINCT FROM 'true'::jsonb
+                    AND COALESCE(p.stage_detail ->> 'revokedReason', '') = ''
+                    AND NOT EXISTS (
+                        SELECT 1 FROM generation_tasks t WHERE t.batch_id = p.batch_id
+                        AND (t.status IN ('SUBMISSION_UNCERTAIN', 'NEEDS_ATTENTION')
+                             OR t.error_code = 'LEASE_EXPIRED_NEEDS_ATTENTION')
+                    )
+                )) AND (
+                    EXISTS (SELECT 1 FROM analysis_tasks t WHERE t.id = p.analysis_task_id
+                        AND t.status = 'PENDING' AND t.error_code = 'REPLICA_PIPELINE_SUSPENDED')
+                    OR EXISTS (SELECT 1 FROM first_frame_tasks t WHERE t.id = p.first_frame_task_id
+                        AND t.status = 'PENDING' AND t.error_code = 'REPLICA_PIPELINE_SUSPENDED')
+                    OR EXISTS (SELECT 1 FROM generation_tasks t WHERE t.batch_id = p.batch_id
+                        AND t.status = 'PENDING' AND t.error_code = 'REPLICA_PIPELINE_SUSPENDED')
+                )
+            )
         )
-        RETURNING id
+        ORDER BY p.suspended_at NULLS LAST, p.id LIMIT %s
+        FOR UPDATE OF p SKIP LOCKED
         """,
-        (limit,),
+        (sorted(rp.POLL_STATUSES), rp.STATUS_DRAINING, sorted(rp.SUBMIT_PERMIT_STATUSES), limit),
     ).fetchall()
-    return len(resumed)
+    return sum(rp.resume_from_suspension(conn, str(row["id"])) for row in candidates)
 
 
 def confirm_quote_payload(row: BusinessRow) -> dict[str, object]:

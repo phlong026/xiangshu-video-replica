@@ -4144,3 +4144,295 @@ def test_generation_pipeline_fence_cancels_when_draining(pg_state: str) -> None:
     # 公平队列槽已归还：认领 +1、取消 -1，回到 0。
     assert _cursor_count(pg_state, "u1") == 0
     assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0
+
+
+def _seed_resume_pipeline(dsn: str, domain: str) -> str:
+    table, column, status = {
+        "analysis": ("analysis_tasks", "analysis_task_id", "ANALYZING"),
+        "first_frame": ("first_frame_tasks", "first_frame_task_id", "FIRST_FRAMING"),
+        "generation": ("generation_tasks", "batch_id", "GENERATING"),
+    }[domain]
+    reference = "resume-child"
+    if domain == "analysis":
+        _exec(
+            dsn,
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, created_by_user_id) VALUES ('resume-asset', 'proj-1', "
+            "'reference_video', 'fake://uploads/ref.mp4', %s, 9, 'video/mp4', 'u1')",
+            ("b" * 64,),
+        )
+        _exec(
+            dsn,
+            "INSERT INTO analysis_tasks (id, project_id, asset_id, created_by_user_id, "
+            "duration_seconds, status) VALUES "
+            "('resume-child', 'proj-1', 'resume-asset', 'u1', 4, 'PENDING')",
+        )
+    elif domain == "first_frame":
+        _seed_image_task(dsn, table=table, task_id=reference)
+    else:
+        _seed_generation_task(dsn, task_id=reference, user_id="u1")
+        reference = "batch-resume-child"
+    _exec(
+        dsn,
+        "INSERT INTO replica_pipeline_tasks (id, owner_user_id, project_id, platform, "
+        "video_id, request_hash, status, stage, idempotency_key, next_poll_at, "
+        f"{column}) VALUES ('pipeline-resume', 'u1', 'proj-1', 'douyin', 'v1', 'hash', "
+        "%s, %s, 'resume-key', now() + interval '1 hour', %s)",
+        (status, domain, reference),
+    )
+    return table
+
+
+def _claim_resume_child(domain: str) -> str | None:
+    from app.analysis_routes import acquire_analysis_task
+
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        if domain == "generation":
+            task = acquire_generation_task_lease(conn, worker_id="resume-claim")
+            return str(task["id"]) if task is not None else None
+        lease = (
+            acquire_analysis_task(conn, worker_id="resume-claim")
+            if domain == "analysis"
+            else acquire_first_frame_task(conn, worker_id="resume-claim")
+        )
+        return lease.id if lease is not None else None
+
+
+def _sweep_resume(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    from app import generation_worker as worker
+
+    monkeypatch.setattr(worker, "_last_replica_pipeline_sweep_at", 0.0)
+    return worker.sweep_replica_pipelines(
+        storage=FakeStorageAdapter(provider="cos", bucket="bucket")
+    )
+
+
+@pytest.mark.parametrize(
+    ("domain", "fair_queue"),
+    [("analysis", True), ("first_frame", True), ("generation", True), ("generation", False)],
+)
+@pytest.mark.parametrize("parent_suspended", [True, False])
+def test_worker_switch_resume_releases_held_children(
+    pg_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    domain: str,
+    fair_queue: bool,
+    parent_suspended: bool,
+) -> None:
+    """实际 worker 关开流程须恢复三域领取；父挂起滞后的窗口也不能丢任务。"""
+    from app import generation_worker as worker
+    from app import replica_pipeline as rp
+
+    _seed_base(pg_state, fair_queue=fair_queue)
+    table = _seed_resume_pipeline(pg_state, domain)
+    assert _run_worker("resume-switch-off") == 1
+    assert _one(pg_state, f"SELECT error_code FROM {table}") == "REPLICA_PIPELINE_SUSPENDED"
+    assert _claim_resume_child(domain) is None
+    assert _sweep_resume(monkeypatch)["resumed"] == 0
+    if parent_suspended:
+        _exec(
+            pg_state,
+            "UPDATE replica_pipeline_tasks SET suspended_at = now() - interval '5 minutes', "
+            "suspended_seconds_total = 20 WHERE id = 'pipeline-resume'",
+        )
+    _exec(pg_state, "UPDATE runtime_settings SET replica_pipeline_enabled = true")
+    # 仅隔离后续阶段业务；恢复必须由 worker 入口真正调用的维护扫描完成。
+    monkeypatch.setattr(
+        worker, "_drive_replica_pipeline", lambda conn, lease: rp.set_next_poll(conn, lease)
+    )
+    monkeypatch.setattr(worker, "_last_replica_pipeline_sweep_at", 0.0)
+    assert _run_worker("resume-switch-on") == 1
+    child = _rows(pg_state, f"SELECT status, error_code, attempt FROM {table}")[0]
+    assert child == {"status": "PENDING", "error_code": None, "attempt": 1}
+    parent = _rows(
+        pg_state, "SELECT suspended_at, suspended_seconds_total FROM replica_pipeline_tasks"
+    )[0]
+    assert parent["suspended_at"] is None
+    if parent_suspended:
+        assert 320 <= parent["suspended_seconds_total"] < 325
+    else:
+        assert parent["suspended_seconds_total"] == 0
+    assert _sweep_resume(monkeypatch)["resumed"] == 0
+    assert (
+        _rows(pg_state, "SELECT suspended_at, suspended_seconds_total FROM replica_pipeline_tasks")[
+            0
+        ]
+        == parent
+    )
+    assert _claim_resume_child(domain) == "resume-child"
+    assert _claim_resume_child(domain) is None
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0
+
+
+@pytest.mark.parametrize(
+    "status", ["DELIVERED", "DELIVERED_PARTIAL", "FAILED", "CANCELLED", "EXPIRED"]
+)
+def test_worker_resume_does_not_reopen_terminal_pipeline(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    from app import replica_pipeline as rp
+
+    _seed_base(pg_state)
+    _seed_resume_pipeline(pg_state, "generation")
+    _exec(pg_state, "UPDATE runtime_settings SET replica_pipeline_enabled = true")
+    _exec(
+        pg_state,
+        "UPDATE generation_tasks SET error_code = 'REPLICA_PIPELINE_SUSPENDED'",
+    )
+    _exec(
+        pg_state,
+        "UPDATE replica_pipeline_tasks SET status = %s, suspended_at = now()",
+        (status,),
+    )
+    assert _sweep_resume(monkeypatch)["resumed"] == 0
+    with pg_transaction() as raw:
+        assert (
+            rp.resume_from_suspension(BusinessConnection.postgres(raw), "pipeline-resume") is False
+        )
+    assert _one(pg_state, "SELECT status FROM replica_pipeline_tasks") == status
+    assert _one(pg_state, "SELECT suspended_at FROM replica_pipeline_tasks") is not None
+    assert _claim_resume_child("generation") is None
+
+
+@pytest.mark.parametrize(
+    ("domain", "status"),
+    [
+        ("analysis", "FAILED"),
+        ("analysis", "SUCCEEDED"),
+        ("first_frame", "FAILED"),
+        ("first_frame", "SUCCEEDED"),
+        ("first_frame", "SUBMISSION_UNCERTAIN"),
+        ("generation", "CANCELLED"),
+        ("generation", "SUBMISSION_UNCERTAIN"),
+    ],
+)
+def test_worker_resume_preserves_nonpending_children(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch, domain: str, status: str
+) -> None:
+    _seed_base(pg_state)
+    table = _seed_resume_pipeline(pg_state, domain)
+    _exec(pg_state, "UPDATE runtime_settings SET replica_pipeline_enabled = true")
+    _exec(pg_state, "UPDATE replica_pipeline_tasks SET suspended_at = now()")
+    _exec(
+        pg_state,
+        f"UPDATE {table} SET status = %s, error_code = 'REPLICA_PIPELINE_SUSPENDED'",
+        (status,),
+    )
+    assert _sweep_resume(monkeypatch)["resumed"] == 1
+    row = _rows(pg_state, f"SELECT status, error_code, attempt FROM {table}")[0]
+    assert row == {"status": status, "error_code": "REPLICA_PIPELINE_SUSPENDED", "attempt": 0}
+    assert _claim_resume_child(domain) is None
+
+
+@pytest.mark.parametrize("parent_flag", [True, False])
+def test_worker_resume_observes_uncertainty_before_releasing_pending_siblings(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch, parent_flag: bool
+) -> None:
+    from app import replica_pipeline as rp
+    from app.replica_pipeline_stages import drive_pipeline_once
+
+    _seed_base(pg_state)
+    _seed_resume_pipeline(pg_state, "generation")
+    _exec(pg_state, "UPDATE runtime_settings SET replica_pipeline_enabled = true")
+    _exec(pg_state, "UPDATE generation_tasks SET error_code = 'REPLICA_PIPELINE_SUSPENDED'")
+    _exec(
+        pg_state,
+        "INSERT INTO generation_tasks (id, batch_id, generation_mode, provider, model, "
+        "status, archive_status, quality_status, prompt_version_id, prompt_snapshot_json) "
+        "SELECT 'uncertain-sibling', batch_id, generation_mode, provider, model, "
+        "'SUBMISSION_UNCERTAIN', archive_status, quality_status, prompt_version_id, "
+        "prompt_snapshot_json FROM generation_tasks WHERE id = 'resume-child'",
+    )
+    _exec(
+        pg_state,
+        "UPDATE replica_pipeline_tasks SET suspended_at = now(), stage_detail = %s::jsonb",
+        (json.dumps({"uncertain": parent_flag}),),
+    )
+    assert _sweep_resume(monkeypatch)["resumed"] == 1
+    assert _one(pg_state, "SELECT suspended_at FROM replica_pipeline_tasks") is None
+    assert _claim_resume_child("generation") is None
+    # 父标志可能滞后；真实子任务仍未知时，重复扫描也不能解除 sibling 的 hold。
+    assert _sweep_resume(monkeypatch)["resumed"] == 0
+    _exec(pg_state, "UPDATE generation_tasks SET status = 'FAILED' WHERE id = 'uncertain-sibling'")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        lease = rp.acquire_replica_pipeline(conn, worker_id="observe-reconciled")
+        assert lease is not None
+        assert drive_pipeline_once(conn, lease) == "waiting"
+    assert _sweep_resume(monkeypatch)["resumed"] == 1
+    assert _claim_resume_child("generation") == "resume-child"
+    assert _task_status(pg_state, "generation_tasks", "uncertain-sibling") == "FAILED"
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0
+
+
+@pytest.mark.parametrize("domain", ["analysis", "first_frame", "generation"])
+def test_worker_resume_draining_cancels_held_children_without_submission(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch, domain: str
+) -> None:
+    from app import generation_worker as worker
+
+    _seed_base(pg_state)
+    table = _seed_resume_pipeline(pg_state, domain)
+    _exec(pg_state, "UPDATE runtime_settings SET replica_pipeline_enabled = true")
+    _exec(pg_state, f"UPDATE {table} SET error_code = 'REPLICA_PIPELINE_SUSPENDED'")
+    _exec(
+        pg_state,
+        "UPDATE replica_pipeline_tasks SET status = 'DRAINING', suspended_at = now(), "
+        'stage_detail = \'{"uncertain":true,"revokedReason":"user_cancelled"}\'',
+    )
+    monkeypatch.setattr(worker, "_last_replica_pipeline_sweep_at", 0.0)
+    assert _run_worker("resume-drain", max_tasks=2) == 2
+    row = _rows(pg_state, f"SELECT status, error_code FROM {table}")[0]
+    assert row == {
+        "status": "CANCELLED" if domain == "generation" else "FAILED",
+        "error_code": "REPLICA_PIPELINE_DRAIN_CANCELLED",
+    }
+    assert _one(pg_state, "SELECT COUNT(*) FROM replica_pipeline_submit_intents") == 0
+    assert _cursor_count(pg_state, "u1") in (0, -1)
+
+
+def test_resume_scan_limit_skips_locked_rows_and_accounts_time_once(pg_state: str) -> None:
+    from app import replica_pipeline as rp
+    from app.replica_pipeline_confirm import resume_suspended_pipelines
+
+    _seed_base(pg_state)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        for number in range(1, 4):
+            rp.enqueue_replica_pipeline(
+                conn,
+                owner_user_id=f"u{number}",
+                platform="douyin",
+                video_id="v1",
+                character_version_id="cv1",
+                idempotency_key=f"resume-page-{number}",
+                request_hash="hash",
+                pipeline_id=f"resume-page-{number}",
+            )
+        conn.execute(
+            "UPDATE replica_pipeline_tasks SET suspended_at = now() - interval '10 minutes', "
+            "suspended_seconds_total = 20"
+        )
+        assert resume_suspended_pipelines(conn, limit=0) == 0
+    # 三个独立事务同时持锁：每次限领一条，后到扫描跳过前一个扫描未提交的行。
+    with psycopg.connect(pg_state) as locked, psycopg.connect(pg_state) as second:
+        locked.execute("SELECT id FROM replica_pipeline_tasks WHERE id='resume-page-1' FOR UPDATE")
+        assert resume_suspended_pipelines(BusinessConnection.postgres(second), limit=1) == 1
+        with psycopg.connect(pg_state) as third:
+            third.execute("SET LOCAL lock_timeout = '2s'")
+            assert resume_suspended_pipelines(BusinessConnection.postgres(third), limit=1) == 1
+            resumed_ids = third.execute(
+                "SELECT id FROM replica_pipeline_tasks WHERE suspended_at IS NULL ORDER BY id"
+            ).fetchall()
+            assert [row["id"] for row in resumed_ids] == ["resume-page-3"]
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert resume_suspended_pipelines(conn, limit=1) == 1
+        assert resume_suspended_pipelines(conn, limit=1) == 0
+    totals = _rows(
+        pg_state, "SELECT suspended_at, suspended_seconds_total FROM replica_pipeline_tasks"
+    )
+    assert len(totals) == 3
+    assert all(row["suspended_at"] is None for row in totals)
+    assert all(620 <= row["suspended_seconds_total"] < 625 for row in totals)
