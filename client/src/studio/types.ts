@@ -184,6 +184,10 @@ export type StudioViralTiming = {
   /** 该平台响应抵达客户端的时间（毫秒）；分别记录，避免聚合等待延后排期。 */
   receivedAt: number;
 };
+export type ReplicaSource = Pick<
+  StudioVideo,
+  "id" | "title" | "durationMs" | "platformKey" | "nativeId"
+>;
 export type StudioTask = {
   draftSnapshot?: StudioDraft;
   id: string;
@@ -290,6 +294,8 @@ export type StudioDraft = {
   sourceId?: string;
   /** 上传来源视频的资产 id：提取文案（script-from-audio）管线输入。 */
   sourceAssetId?: string;
+  /** 来源时长随草稿保存，离开工作台后仍能按同一来源继续复刻。 */
+  sourceDurationSeconds?: number;
   analysisTaskId?: string;
   analysisTaskStatus?: string;
   projectId?: string;

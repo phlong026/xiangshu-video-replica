@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -233,6 +234,19 @@ def effective_elapsed_seconds(row: BusinessRow, *, now: datetime) -> float:
     return float(elapsed)
 
 
+def require_output_duration(duration_ms: int | float | None) -> int:
+    """先校验真实时长，再向上取整；preserve 编译不能静默截短小数秒。"""
+    if duration_ms is None or not math.isfinite(duration_ms) or duration_ms < 4_000:
+        raise ReplicaPipelineError(
+            422, "SOURCE_TOO_SHORT_FOR_GENERATION", "全自动复刻需要至少 4 秒且时长已知的视频。"
+        )
+    if duration_ms > 30_000:
+        raise ReplicaPipelineError(
+            422, "SOURCE_TOO_LONG_FOR_GENERATION", "该视频超过 30 秒，请使用长视频拆解。"
+        )
+    return math.ceil(duration_ms / 1000)
+
+
 def enqueue_replica_pipeline(
     conn: BusinessConnection,
     *,
@@ -243,6 +257,8 @@ def enqueue_replica_pipeline(
     idempotency_key: str,
     request_hash: str,
     pipeline_id: str | None = None,
+    existing_project_id: str | None = None,
+    source_asset_id: str | None = None,
 ) -> dict[str, object]:
     """发起全自动复刻：幂等受理 + 项目同事务创建（project_id NOT NULL 落库）.
 
@@ -253,8 +269,23 @@ def enqueue_replica_pipeline(
     replay_or_none = _replay_if_exists(conn, scoped_key, request_hash)
     if replay_or_none is not None:
         return replay_or_none
+    if platform == "upload":
+        if not existing_project_id or not source_asset_id or video_id != source_asset_id:
+            raise ReplicaPipelineError(422, "REPLICA_SOURCE_INVALID", "上传来源不完整。")
+    elif existing_project_id is not None or source_asset_id is not None:
+        raise ReplicaPipelineError(422, "REPLICA_SOURCE_INVALID", "来源类型与项目不匹配。")
     new_id = pipeline_id or f"rplc-{uuid.uuid4().hex[:16]}"
-    project_id = f"proj-{uuid.uuid4().hex[:16]}"
+    project_id = existing_project_id or f"proj-{uuid.uuid4().hex[:16]}"
+    detail: dict[str, object] = {"strategy": "fixed_v1"}
+    if existing_project_id is not None:
+        # 上传来源复用原项目；与项目删除持相同的行锁，避免受理后来源被并发删除。
+        project = conn.execute(
+            "SELECT id FROM projects WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+            (existing_project_id, owner_user_id),
+        ).fetchone()
+        if project is None:
+            raise ReplicaPipelineError(404, "PROJECT_NOT_FOUND", "项目不存在或不可用。")
+        detail["sourceAssetId"] = source_asset_id
     fingerprint = f"{platform}:{video_id}:{character_version_id}:{request_hash}"
     # 并发同键（m2-r2#1）：PG 下 conn.rollback() 是 no-op（commit 权威在外层
     # fenced 事务），冲突后事务仍 aborted、重读会抛 25P02——project 与任务两
@@ -262,10 +293,11 @@ def enqueue_replica_pipeline(
     # project）后外层事务保持可用，再重读赢家给出重放或异参拒绝。
     conn.execute("SAVEPOINT replica_enqueue")
     try:
-        conn.execute(
-            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
-            (project_id, owner_user_id, "全自动复刻"),
-        )
+        if existing_project_id is None:
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                (project_id, owner_user_id, "全自动复刻"),
+            )
         conn.execute(
             """
             INSERT INTO replica_pipeline_tasks (
@@ -286,7 +318,7 @@ def enqueue_replica_pipeline(
                 character_version_id,
                 fingerprint,
                 scoped_key,
-                json.dumps({"strategy": "fixed_v1"}),
+                json.dumps(detail),
             ),
         )
     except IntegrityConstraintError as exc:
@@ -634,15 +666,21 @@ def mark_suspended(conn: BusinessConnection, pipeline_id: str) -> None:
     )
 
 
-def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> None:
-    """总开关重开：累计挂起时长、清挂起起点、重设轮询时间（方案 §3.2.3）.
+def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> bool:
+    """持父行锁恢复轮询与确定未发送的子任务；返回是否发生恢复。
 
-    挂起产物的版本链恢复在 M6 的受保护恢复事务中执行（r3#5/r5#6）；此处
-    负责行级挂起属性的清算，并把本管线被 fencing 拦下的任务重新开放领取
-    （Codex r-P1：hold 打的 REPLICA_PIPELINE_SUSPENDED 标记会被领取谓词
-    排除——不清掉，开关恢复后任务永远不可领取）。
+    fencing 可能先 hold 子任务，父编排尚未来得及挂起，总开关就已重开。
+    因此子任务恢复不依赖 suspended_at；累计时长仍只清算一次。
+    未知提交只恢复父编排的观察，不重新开放付费任务；DRAINING 则开放领取
+    以便 worker 按既有取消路径释放预占，不会签发发送意图。
     """
-    conn.execute(
+    row = conn.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s FOR UPDATE",
+        (pipeline_id,),
+    ).fetchone()
+    if row is None or str(row["status"]) not in POLL_STATUSES:
+        return False
+    resumed = conn.execute(
         """
         UPDATE replica_pipeline_tasks SET
             suspended_seconds_total = suspended_seconds_total +
@@ -654,37 +692,53 @@ def resume_from_suspension(conn: BusinessConnection, pipeline_id: str) -> None:
         WHERE id = %s AND suspended_at IS NOT NULL
         """,
         (pipeline_id,),
-    )
-    conn.execute(
+    ).rowcount
+    status = str(row["status"])
+    detail = row["stage_detail"] if isinstance(row["stage_detail"], dict) else {}
+    if status != STATUS_DRAINING and (
+        status not in SUBMIT_PERMIT_STATUSES
+        or detail.get("uncertain") is True
+        or detail.get("revokedReason")
+        or _pipeline_generation_uncertain(conn, pipeline_id)
+    ):
+        return resumed > 0
+    released = conn.execute(
         """
         UPDATE first_frame_tasks SET error_code = NULL,
             error_message_redacted = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+        WHERE status = 'PENDING' AND error_code = 'REPLICA_PIPELINE_SUSPENDED'
           AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
                       WHERE p.first_frame_task_id = first_frame_tasks.id AND p.id = %s)
         """,
         (pipeline_id,),
-    )
-    conn.execute(
+    ).rowcount
+    released += conn.execute(
         """
         UPDATE analysis_tasks SET error_code = NULL,
             error_message_redacted = NULL, updated_at = %s
-        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+        WHERE status = 'PENDING' AND error_code = 'REPLICA_PIPELINE_SUSPENDED'
           AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
                       WHERE p.analysis_task_id = analysis_tasks.id AND p.id = %s)
         """,
         (datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"), pipeline_id),
-    )
-    conn.execute(
+    ).rowcount
+    released += conn.execute(
         """
         UPDATE generation_tasks SET error_code = NULL,
             error_message_redacted = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE error_code = 'REPLICA_PIPELINE_SUSPENDED'
+        WHERE status = 'PENDING' AND error_code = 'REPLICA_PIPELINE_SUSPENDED'
           AND EXISTS (SELECT 1 FROM replica_pipeline_tasks p
                       WHERE p.batch_id = generation_tasks.batch_id AND p.id = %s)
         """,
         (pipeline_id,),
-    )
+    ).rowcount
+    if released and not resumed:
+        conn.execute(
+            "UPDATE replica_pipeline_tasks SET next_poll_at = now(), updated_at = now() "
+            "WHERE id = %s",
+            (pipeline_id,),
+        )
+    return resumed > 0 or released > 0
 
 
 def pipeline_enabled(conn: BusinessConnection) -> bool:

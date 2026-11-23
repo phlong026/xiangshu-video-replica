@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 from typing import Literal
 
 from fastapi import APIRouter
@@ -46,6 +48,14 @@ class ReplicaPipelineConfirmRequest(BaseModel):
     quote_token: str = Field(min_length=1, max_length=8192)
     max_credits: int = Field(ge=1, le=2_147_483_647)
     fingerprint: str = Field(min_length=8, max_length=128)
+
+
+class UploadedReplicaPipelineRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    source_asset_id: str = Field(min_length=1, max_length=200)
+    character_version_id: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    preprocess_acknowledged: bool
 
 
 class ReplicaPipelineRegenerateRequest(BaseModel):
@@ -85,21 +95,6 @@ def initiate_replica_pipeline(
             rp.require_pipeline_enabled(conn)
         except rp.ReplicaPipelineError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code, "message": exc.message})
-        # 自动生成只支持 4–15 秒输出（批次请求硬约束）：超长源片在此拒绝，
-        # 避免先收费拆解/首帧、再在 COMPOSING 必然失败（评审 M8-r2#2）。
-        video_row = conn.execute(
-            "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
-            (request.platform, request.video_id),
-        ).fetchone()
-        if video_row is not None and video_row["duration_ms"] is not None:
-            if int(video_row["duration_ms"]) > 15_000:
-                raise HTTPException(
-                    422,
-                    detail={
-                        "code": "SOURCE_TOO_LONG_FOR_GENERATION",
-                        "message": "该视频超过 15 秒，暂不支持全自动生成，请转手动复刻。",
-                    },
-                )
         request_hash = hashlib.sha256(
             f"{request.platform}|{request.video_id}|{request.character_version_id}".encode()
         ).hexdigest()
@@ -115,6 +110,28 @@ def initiate_replica_pipeline(
             )
         except rp.ReplicaPipelineError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code, "message": exc.message})
+        if result["replay"] is False:
+            # 新任务与项目仍未提交。先核对源片和长档价目，失败时整笔回滚，
+            # 避免启动收费拆解/首帧；同键重放不受当前目录或价目修改影响。
+            video_row = conn.execute(
+                "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
+                (request.platform, request.video_id),
+            ).fetchone()
+            duration_ms = None if video_row is None else video_row["duration_ms"]
+            try:
+                duration = rp.require_output_duration(
+                    int(duration_ms) if duration_ms is not None else None
+                )
+            except rp.ReplicaPipelineError as exc:
+                raise HTTPException(
+                    exc.status_code, detail={"code": exc.code, "message": exc.message}
+                ) from exc
+            if duration > 15:
+                from app.generation import generation_price_quote
+
+                generation_price_quote(
+                    conn, resolution="768P", duration_seconds=duration, quantity=1, user_id=actor.id
+                )
         # 人物可用性校验（评审 B-r3#1：复用既有人物域判定，而非自造 SQL）：
         # enqueue 已在**同一事务**建好项目，用项目上下文跑权威校验——
         # 发布快照/参考图/授权凭据不满足时抛 HTTPException，事务整体回滚
@@ -140,6 +157,94 @@ def initiate_replica_pipeline(
                     "message": "所选人物不存在或不可用。",
                 },
             )
+        return result
+
+
+@router.post("/replica-pipelines/upload", status_code=202)
+def initiate_uploaded_replica_pipeline(
+    request: UploadedReplicaPipelineRequest, db: BusinessDbDep
+) -> dict[str, object]:
+    """已上传来源直接接自动编排；不新建项目、不再次下载或上传原片。"""
+    from fastapi import HTTPException
+
+    from app.analysis_routes import CreateAnalysisRequest, validate_analysis_enqueue
+    from app.generation import generation_price_quote
+    from app.project_character_selection import list_available_project_character_versions
+
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="replica_pipeline.initiate",
+            entity_type="project",
+            entity_id=request.project_id,
+        )
+        if not request.preprocess_acknowledged:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "REPLICA_PREPROCESS_NOT_ACKNOWLEDGED",
+                    "message": "请先确认预处理费用说明。",
+                },
+            )
+        request_hash = hashlib.sha256(
+            f"upload|{request.project_id}|{request.source_asset_id}|"
+            f"{request.character_version_id}".encode()
+        ).hexdigest()
+        try:
+            result = rp.enqueue_replica_pipeline(
+                conn,
+                owner_user_id=actor.id,
+                platform="upload",
+                video_id=request.source_asset_id,
+                character_version_id=request.character_version_id,
+                idempotency_key=request.idempotency_key,
+                request_hash=request_hash,
+                existing_project_id=request.project_id,
+                source_asset_id=request.source_asset_id,
+            )
+            if result["replay"] is False:
+                rp.require_pipeline_enabled(conn)
+                # 复用分析域的归属、视频类型和完成上传校验；时长只信服务端实测值。
+                _asset, measured_duration = validate_analysis_enqueue(
+                    conn,
+                    actor=actor,
+                    project_id=request.project_id,
+                    request=CreateAnalysisRequest(asset_id=request.source_asset_id),
+                )
+                if not math.isfinite(measured_duration):
+                    raise rp.ReplicaPipelineError(
+                        422, "ANALYSIS_DURATION_UNAVAILABLE", "视频时长不可用，请重新上传。"
+                    )
+                duration = rp.require_output_duration(measured_duration * 1000)
+                if duration > 15:
+                    generation_price_quote(
+                        conn,
+                        resolution="768P",
+                        duration_seconds=duration,
+                        quantity=1,
+                        user_id=actor.id,
+                    )
+                if not list_available_project_character_versions(
+                    conn,
+                    actor=actor,
+                    project_id=request.project_id,
+                    character_version_id=request.character_version_id,
+                ):
+                    raise HTTPException(
+                        422,
+                        detail={
+                            "code": "REPLICA_CHARACTER_NOT_FOUND",
+                            "message": "所选人物不存在或不可用。",
+                        },
+                    )
+                conn.execute(
+                    "UPDATE replica_pipeline_tasks SET stage_detail = stage_detail || %s::jsonb "
+                    "WHERE id = %s",
+                    (json.dumps({"sourceDurationMs": measured_duration * 1000}), result["id"]),
+                )
+        except rp.ReplicaPipelineError as exc:
+            raise HTTPException(exc.status_code, detail={"code": exc.code, "message": exc.message})
         return result
 
 
@@ -269,7 +374,7 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
 
 @router.get("/replica-pipelines/active")
 def find_active_replica_pipeline(
-    platform: Literal["douyin", "xiaohongshu", "wechat_channels"],
+    platform: Literal["douyin", "xiaohongshu", "wechat_channels", "upload"],
     video_id: str,
     conn: ReadDatabase,
     actor: ShortAuthUser,

@@ -7,13 +7,13 @@
 - 首帧子步骤机：源帧抽取→开场帧选定→候选→质检首位自动确认（AUTO_PIPELINE）；
 - 编译冲突不自动代答：转失败出口。
 
-域原语（导入/拆解/源帧/首帧/编译）全部桩化——本套件测的是**编排驱动逻辑**，
-域内行为由各域自己的套件覆盖。真库只承载 pipeline 状态机（advance 的条件
-UPDATE 与转换表校验是 M2 已验证的真实 SQL）。
+大部分用例桩化域原语以测编排驱动逻辑；小数秒回归用真实编译、报价、
+建批次和预占验证跨域时长一致，外部媒体与供应商入口不执行。
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -29,6 +29,9 @@ from pg_test_kit import (
 from app import replica_pipeline as rp
 from app import replica_pipeline_stages as stages
 from app.db_portable import BusinessConnection
+from app.replica_pipeline_confirm import freeze_confirm_quote as real_freeze_confirm_quote
+from app.replica_pipeline_stages import _version_payload as real_version_payload
+from app.replica_pipeline_stages import _video_duration_ms as real_video_duration_ms
 
 DATABASE = "rplc_pipeline_stages_test"
 
@@ -165,13 +168,20 @@ def _stub_domains(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return status, row
 
     def fake_version_payload(conn: object, version_id: str) -> dict[str, object] | None:
-        return registry.get("version_payload", {}).get(version_id)
+        payloads = registry.get("version_payload", {})
+        if version_id in payloads:
+            return payloads[version_id]
+        if version_id == "shot-1":
+            return {"duration_seconds": registry.get("duration_ms", 8000) / 1000}
+        return None
 
     def fake_character_binding(conn: object, **kwargs: Any) -> Any:
         return registry.get("reference_selection")
 
     def fake_freeze_quote(conn: object, **kwargs: Any) -> dict[str, object]:
-        return {"fingerprint": "fp-1", "quantity": 1, "durationSeconds": 8}
+        if "quote_error" in registry:
+            raise registry["quote_error"]
+        return {"fingerprint": "fp-1", "quantity": 1, "durationSeconds": kwargs["duration_seconds"]}
 
     def fake_choose_character(conn: object, **kwargs: Any) -> dict[str, object]:
         registry["choose_character_kwargs"] = kwargs
@@ -242,6 +252,227 @@ def test_enqueued_enqueues_import_and_advances(
     # 操作键派生幂等键（pipeline:{id}:import:{retry_no}）。
     kwargs = _stub_domains["import_enqueue_kwargs"]
     assert kwargs["idempotency_key"] == f"pipeline:{pipeline_id}:import:0"
+
+
+def _seed_uploaded_pipeline(
+    biz: BusinessConnection,
+    *,
+    slot: str,
+    status: str,
+    seconds: float = 8.123456,
+    credits: int = 100,
+) -> tuple[str, str]:
+    asset_id = f"upload-source-{slot}"
+    pipeline_id = _seed_pipeline(
+        biz,
+        status=status,
+        slot=slot,
+        stage_detail={"sourceAssetId": asset_id, "sourceDurationMs": seconds * 1000},
+    )
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET platform = 'upload', video_id = %s WHERE id = %s",
+        (asset_id, pipeline_id),
+    )
+    biz.execute(
+        "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+        "content_type, metadata_json, created_by_user_id) VALUES "
+        "(%s, %s, 'reference_video', %s, 'test-hash', 100, 'video/mp4', %s, %s) "
+        "ON CONFLICT (id) DO UPDATE SET sha256 = 'test-hash', size_bytes = 100, "
+        "metadata_json = EXCLUDED.metadata_json",
+        (
+            asset_id,
+            f"p-{slot}",
+            f"local://test/{asset_id}.mp4",
+            json.dumps({"duration_seconds": seconds, "upload_status": "COMPLETE"}),
+            f"u-{slot}",
+        ),
+    )
+    biz.execute(
+        "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_rounding) "
+        "VALUES ('analysis', true, 2, 'ceil') ON CONFLICT (service) "
+        "DO UPDATE SET enabled = true, unit_credits = 2"
+    )
+    biz.execute(
+        "INSERT INTO wallets (user_id, available_credits, reserved_credits) VALUES (%s, %s, 0) "
+        "ON CONFLICT (user_id) DO UPDATE SET available_credits = EXCLUDED.available_credits, "
+        "reserved_credits = 0",
+        (f"u-{slot}", credits),
+    )
+    return pipeline_id, asset_id
+
+
+def test_uploaded_worker_skips_import_and_recovers_completed_analysis_without_recharging(
+    biz: BusinessConnection, _stub_domains: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.analysis import enqueue_analysis_task
+
+    slot = "upload-resume"
+    pipeline_id, asset_id = _seed_uploaded_pipeline(biz, slot=slot, status=rp.STATUS_ENQUEUED)
+    monkeypatch.setattr(stages, "enqueue_analysis_task", enqueue_analysis_task)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    row = biz.execute(
+        "SELECT status, import_task_id FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert (
+        row is not None and row["status"] == rp.STATUS_IMPORTING and row["import_task_id"] is None
+    )
+    assert "import_enqueue_kwargs" not in _stub_domains
+
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    task = biz.execute(
+        "SELECT * FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+    ).fetchone()
+    assert task is not None and task["asset_id"] == asset_id
+    assert float(task["duration_seconds"]) == 8.123456
+    assert task["request_id"] == f"pipeline:{pipeline_id}:analyze:0"
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM viral_import_tasks WHERE project_id = %s", (f"p-{slot}",)
+        ).fetchone()[0]
+        == 0
+    )
+
+    # 子任务已经成功而父引用丢失：恢复原收据，不重新创建付费分析。
+    biz.execute("UPDATE analysis_tasks SET status = 'SUCCEEDED' WHERE id = %s", (task["id"],))
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET analysis_task_id = NULL WHERE id = %s", (pipeline_id,)
+    )
+    biz.execute("UPDATE assets SET metadata_json = '{}' WHERE id = %s", (asset_id,))
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "waiting"
+    row = biz.execute(
+        "SELECT analysis_task_id, stage_detail FROM replica_pipeline_tasks WHERE id = %s",
+        (pipeline_id,),
+    ).fetchone()
+    assert row is not None and row["analysis_task_id"] == task["id"]
+    assert row["stage_detail"]["sourceAssetId"] == asset_id
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM billing_operations WHERE user_id = %s AND service = 'analysis'",
+            (f"u-{slot}",),
+        ).fetchone()[0]
+        == 1
+    )
+    wallet = biz.execute(
+        "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s", (f"u-{slot}",)
+    ).fetchone()
+    assert (
+        wallet is not None and wallet["available_credits"] == 98 and wallet["reserved_credits"] == 2
+    )
+
+
+@pytest.mark.parametrize("status", [rp.STATUS_IMPORTING, rp.STATUS_ANALYZING])
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("missing", "ASSET_NOT_FOUND"),
+        ("pending", "REFERENCE_VIDEO_NOT_READY"),
+        ("unknown", "ANALYSIS_DURATION_UNAVAILABLE"),
+        ("short", "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ("long", "SOURCE_TOO_LONG_FOR_GENERATION"),
+        ("long-tier-disabled", "LONG_DURATION_TIER_DISABLED"),
+    ],
+)
+def test_uploaded_worker_rechecks_source_before_first_analysis_and_retry(
+    biz: BusinessConnection,
+    _stub_domains: dict[str, Any],
+    status: str,
+    case: str,
+    code: str,
+) -> None:
+    slot = f"upload-check-{status}-{case}"
+    pipeline_id, asset_id = _seed_uploaded_pipeline(biz, slot=slot, status=status)
+    if case == "missing":
+        biz.execute("DELETE FROM assets WHERE id = %s", (asset_id,))
+    elif case == "pending":
+        biz.execute("UPDATE assets SET sha256 = '', size_bytes = 0 WHERE id = %s", (asset_id,))
+    else:
+        duration = {"short": 3.9995, "long": 30.001, "long-tier-disabled": 15.001}.get(case)
+        biz.execute(
+            "UPDATE assets SET metadata_json = %s WHERE id = %s",
+            (json.dumps({} if duration is None else {"duration_seconds": duration}), asset_id),
+        )
+        if case == "long-tier-disabled":
+            biz.execute(
+                "UPDATE billing_tariffs SET enabled = false WHERE service = 'video_768p_long'"
+            )
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "failed"
+    row = biz.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_FAILED
+    assert row["stage_detail"]["failureCode"] == code
+    assert "analysis_enqueue_kwargs" not in _stub_domains
+
+
+def test_uploaded_analysis_credit_rejection_rolls_back_unfunded_child(
+    biz: BusinessConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.analysis import enqueue_analysis_task
+
+    slot = "upload-no-credit"
+    pipeline_id, _asset_id = _seed_uploaded_pipeline(
+        biz, slot=slot, status=rp.STATUS_IMPORTING, credits=0
+    )
+    monkeypatch.setattr(stages, "enqueue_analysis_task", enqueue_analysis_task)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "failed"
+    row = biz.execute(
+        "SELECT status, stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_FAILED
+    assert row["stage_detail"]["failureCode"] == "INSUFFICIENT_CREDITS"
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        biz.execute(
+            "SELECT count(*) FROM billing_operations WHERE user_id = %s", (f"u-{slot}",)
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_uploaded_analysis_explicit_retry_uses_next_operation_key(
+    biz: BusinessConnection, _stub_domains: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.analysis import enqueue_analysis_task
+
+    slot = "upload-retry"
+    pipeline_id, asset_id = _seed_uploaded_pipeline(biz, slot=slot, status=rp.STATUS_IMPORTING)
+    monkeypatch.setattr(stages, "enqueue_analysis_task", enqueue_analysis_task)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    task = biz.execute(
+        "SELECT * FROM analysis_tasks WHERE project_id = %s", (f"p-{slot}",)
+    ).fetchone()
+    assert task is not None
+    biz.execute("UPDATE analysis_tasks SET status = 'FAILED' WHERE id = %s", (task["id"],))
+    _stub_domains["sub_status"] = {
+        ("analysis_tasks", str(task["id"])): (
+            "FAILED",
+            {"error_code": "ANALYSIS_TIMEOUT", "error_message_redacted": "超时", "retryable": 1},
+        )
+    }
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "retrying"
+    _release_for_next_round(biz, pipeline_id)
+    assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "waiting"
+    tasks = biz.execute(
+        "SELECT asset_id, request_id FROM analysis_tasks WHERE project_id = %s "
+        "ORDER BY created_at, id",
+        (f"p-{slot}",),
+    ).fetchall()
+    assert len(tasks) == 2 and all(task["asset_id"] == asset_id for task in tasks)
+    assert {task["request_id"] for task in tasks} == {
+        f"pipeline:{pipeline_id}:analyze:0",
+        f"pipeline:{pipeline_id}:analyze:1",
+    }
 
 
 def test_import_running_waits(biz: BusinessConnection, _stub_domains: dict[str, Any]) -> None:
@@ -609,9 +840,11 @@ def test_first_framing_without_quality_takes_first_candidate(
     assert first_frame.get("qualityAvailable") is False
 
 
+@pytest.mark.parametrize("seconds", [4, 8, 15, 16, 30])
 def test_compose_advances_to_await_confirm(
-    biz: BusinessConnection, _stub_domains: dict[str, Any]
+    biz: BusinessConnection, _stub_domains: dict[str, Any], seconds: int
 ) -> None:
+    _stub_domains["duration_ms"] = seconds * 1000
     biz.execute("DELETE FROM replica_pipeline_tasks")
     pipeline_id = _seed_pipeline(
         biz,
@@ -627,20 +860,306 @@ def test_compose_advances_to_await_confirm(
     assert stages.run_pipeline_stage(biz, lease).kind == "advanced"
     request = _stub_domains["compile_request"]
     assert request.resolution == "768P" and request.timeline_policy == "preserve"
-    assert request.output_duration_seconds == 8
+    assert request.output_duration_seconds == seconds
     row = biz.execute(
-        "SELECT status, prompt_version_id FROM replica_pipeline_tasks WHERE id = %s",
+        "SELECT status, prompt_version_id, quote_snapshot "
+        "FROM replica_pipeline_tasks WHERE id = %s",
         (pipeline_id,),
     ).fetchone()
     assert row is not None
     assert row["status"] == rp.STATUS_AWAIT_CONFIRM and row["prompt_version_id"] == "pv-1"
+    assert row["quote_snapshot"]["durationSeconds"] == seconds
 
 
+@pytest.mark.parametrize(
+    ("source_seconds", "output_seconds", "uploaded"),
+    [
+        (4.0, 4, False),
+        (15.0, 15, False),
+        (15.001, 16, False),
+        (16.1, 17, False),
+        (16.5, 17, False),
+        (29.4, 30, False),
+        (30.0, 30, False),
+        pytest.param(16.1, 17, True, id="upload-metadata-missing"),
+    ],
+)
+def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
+    biz: BusinessConnection,
+    _stub_domains: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    source_seconds: float,
+    output_seconds: int,
+    uploaded: bool,
+) -> None:
+    """真编译器不得触发压缩确认；报价、任务与预占共同使用向上取整后的秒数。"""
+    from cryptography.fernet import Fernet
+
+    from app import generation
+    from app import replica_pipeline_confirm as confirm
+    from app.analysis import (
+        FakeGemini,
+        analyze_video,
+        create_analysis_version,
+        create_shot_card_version,
+        insert_version,
+    )
+    from app.auth import CurrentUser
+
+    slot = f"real-{source_seconds}" + ("-upload" if uploaded else "")
+    project_id, user_id = f"p-{slot}", f"u-{slot}"
+    source_id, frame_id = f"source-{slot}", f"frame-{slot}"
+    pipeline_id = _seed_pipeline(
+        biz,
+        status=rp.STATUS_FIRST_FRAMING if uploaded else rp.STATUS_COMPOSING,
+        slot=slot,
+    )
+    actor = CurrentUser(id=user_id, username=user_id, display_name="测试", role="customer")
+    for asset_id, kind, content_type in (
+        (source_id, "reference_video", "video/mp4"),
+        (frame_id, "first_frame", "image/png"),
+    ):
+        biz.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, created_by_user_id) VALUES (%s, %s, %s, %s, 'test-hash', 10, %s, %s)",
+            (asset_id, project_id, kind, f"local://test/{asset_id}", content_type, user_id),
+        )
+    biz.execute(
+        "UPDATE assets SET metadata_json = %s WHERE id = %s",
+        (json.dumps({"duration_seconds": source_seconds}), source_id),
+    )
+    analysis_result = analyze_video(
+        video_uri="fake", video_duration_seconds=source_seconds, provider=FakeGemini()
+    )
+    analysis = create_analysis_version(
+        biz,
+        project_id=project_id,
+        asset_id=source_id,
+        asset_uri="fake",
+        created_by_user_id=user_id,
+        result=analysis_result,
+    )
+    shots = create_shot_card_version(
+        biz,
+        analysis_version=analysis,
+        created_by_user_id=user_id,
+        shots=analysis_result.analysis.shots,
+    )
+    if uploaded:
+        # 分析和分镜已落库后，上游资产元数据缺失也不能改写冻结时间轴。
+        biz.execute("UPDATE assets SET metadata_json = '{}' WHERE id = %s", (source_id,))
+        biz.execute(
+            "UPDATE replica_pipeline_tasks SET platform = 'upload', video_id = %s WHERE id = %s",
+            (source_id, pipeline_id),
+        )
+        monkeypatch.setattr(stages, "_video_duration_ms", real_video_duration_ms)
+
+    def version(kind: str, payload: dict[str, Any]) -> Any:
+        return insert_version(
+            biz,
+            project_id=project_id,
+            asset_id=frame_id,
+            kind=kind,
+            created_by_user_id=user_id,
+            payload=payload,
+        )
+
+    source = version("source_frame_selection", {"timestamp_seconds": 0})
+    candidates = version(
+        "first_frame_candidates",
+        {
+            "source_frame_selection_version_id": source["id"],
+            "review_mode": "HUMAN_CONFIRMATION",
+            "candidates": [{"asset_id": frame_id}],
+        },
+    )
+    version(
+        "first_frame_selection",
+        {
+            "first_frame_candidates_version_id": candidates["id"],
+            "first_frame_asset_id": frame_id,
+            "review_mode": "HUMAN_CONFIRMATION",
+            "reviewed_by_user_id": user_id,
+        },
+    )
+    script = generation.create_script_version(
+        biz,
+        project_id=project_id,
+        actor=actor,
+        request=generation.ScriptRequest(
+            source="custom", text="今天带你看庭院", shot_card_version_id=str(shots["id"])
+        ),
+    )
+    biz.execute(
+        "UPDATE replica_pipeline_tasks SET stage_detail = %s WHERE id = %s",
+        (
+            json.dumps(
+                {
+                    "shotCardVersionId": shots["id"],
+                    "scriptVersionId": script["id"],
+                    "firstFrame": {
+                        "substage": "candidates",
+                        "sourceFrameSelectionVersionId": source["id"],
+                    }
+                    if uploaded
+                    else {"firstFrameAssetId": frame_id},
+                }
+            ),
+            pipeline_id,
+        ),
+    )
+    monkeypatch.setattr(stages, "_version_payload", real_version_payload)
+    # 目录时长即使被刷新为 8 秒，也不能覆盖本次拆解的不可变媒体时间轴。
+    _stub_domains["duration_ms"] = 8000
+    monkeypatch.setattr(stages, "compile_prompt_version", generation.compile_prompt_version)
+    monkeypatch.setattr(confirm, "freeze_confirm_quote", real_freeze_confirm_quote)
+    cipher = Fernet(Fernet.generate_key())
+    monkeypatch.setattr("app.quote_contracts._cipher", lambda: cipher)
+    for service in ("video_768p", "video_768p_long"):
+        biz.execute(
+            "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_rounding) "
+            "VALUES (%s, true, 2, 'ceil') ON CONFLICT (service) DO UPDATE "
+            "SET enabled = true, unit_credits = 2",
+            (service,),
+        )
+    biz.execute(
+        "INSERT INTO wallets (user_id, available_credits, reserved_credits) VALUES (%s, 1000, 0)",
+        (user_id,),
+    )
+    if uploaded:
+        assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "waiting"
+        assert "first_frame_enqueue_kwargs" in _stub_domains
+        _stub_domains["sub_status"] = {
+            ("first_frame_tasks", "ff-1"): ("SUCCEEDED", {"result_version_id": candidates["id"]})
+        }
+        _release_for_next_round(biz, pipeline_id)
+        assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
+    lease = _acquire(biz, slot=slot)
+    assert stages.drive_pipeline_once(biz, lease) == "advanced"
+    row = biz.execute(
+        "SELECT * FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
+    ).fetchone()
+    assert row is not None and row["status"] == rp.STATUS_AWAIT_CONFIRM
+    assert row["locked_by"] is None and row["locked_until"] is None
+    prompt = biz.execute(
+        "SELECT payload_json FROM versions WHERE id = %s", (row["prompt_version_id"],)
+    ).fetchone()
+    assert prompt is not None
+    payload = json.loads(str(prompt["payload_json"]))
+    assert payload["source_duration_seconds"] == source_seconds
+    assert payload["output_duration_seconds"] == output_seconds
+    assert payload["timeline_policy"] == "preserve" and payload["timeline_scale_factor"] >= 1
+    snapshot = row["quote_snapshot"]
+    assert snapshot["durationSeconds"] == output_seconds
+    assert snapshot["maxCredits"] == output_seconds * 2
+
+    # 仅绕过外部存储/凭据预检；不运行 worker，真实建批次、报价校验和账务预占照常执行。
+    monkeypatch.setattr(generation, "metaso_h3_provider_from_settings", lambda conn: object())
+    monkeypatch.setattr(generation, "require_cos_first_frame_storage", lambda *args, **kwargs: None)
+    quote = generation.generation_price_quote(
+        biz, resolution="768P", duration_seconds=output_seconds, quantity=1, user_id=user_id
+    )
+    submitted = confirm.confirm_pipeline(
+        biz,
+        pipeline_id=pipeline_id,
+        owner_user_id=user_id,
+        quote_token=quote.quote_token,
+        max_credits=quote.max_credits,
+        expected_fingerprint=snapshot["fingerprint"],
+    )
+    tasks = biz.execute(
+        "SELECT billed_seconds, prompt_snapshot_json FROM generation_tasks WHERE batch_id = %s",
+        (submitted["batchId"],),
+    ).fetchall()
+    assert len(tasks) == 1 and tasks[0]["billed_seconds"] == output_seconds
+    assert (
+        json.loads(str(tasks[0]["prompt_snapshot_json"]))["output_duration_seconds"]
+        == output_seconds
+    )
+    wallet = biz.execute(
+        "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s", (user_id,)
+    ).fetchone()
+    assert wallet is not None
+    assert wallet["available_credits"] == 1000 - output_seconds * 2
+    assert wallet["reserved_credits"] == output_seconds * 2
+
+
+@pytest.mark.parametrize(
+    ("payload", "failure_code"),
+    [
+        (None, "SHOT_CARD_TIMELINE_INVALID"),
+        ({}, "SHOT_CARD_TIMELINE_INVALID"),
+        ({"duration_seconds": 3.999}, "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ({"duration_seconds": 30.001}, "SOURCE_TOO_LONG_FOR_GENERATION"),
+        ({"duration_seconds": float("inf")}, "SOURCE_TOO_SHORT_FOR_GENERATION"),
+    ],
+)
+def test_actual_timeline_rejected_before_compile_and_quote(
+    biz: BusinessConnection,
+    _stub_domains: dict[str, Any],
+    payload: dict[str, object] | None,
+    failure_code: str,
+) -> None:
+    _seed_pipeline(
+        biz,
+        status=rp.STATUS_COMPOSING,
+        slot="timeline-invalid",
+        stage_detail={
+            "shotCardVersionId": "shot-1",
+            "scriptVersionId": "scr-1",
+            "firstFrame": {"firstFrameAssetId": "ff-asset"},
+        },
+    )
+    _stub_domains["version_payload"] = {"shot-1": payload}
+    result = stages.run_pipeline_stage(biz, _acquire(biz, slot="timeline-invalid"))
+    assert result.kind == "failed" and result.failure_code == failure_code
+    assert "compile_request" not in _stub_domains
+
+
+@pytest.mark.parametrize(
+    ("payload", "failure_code"),
+    [
+        ({}, "SHOT_CARD_TIMELINE_INVALID"),
+        ({"duration_seconds": 3.999}, "SOURCE_TOO_SHORT_FOR_GENERATION"),
+        ({"duration_seconds": 30.001}, "SOURCE_TOO_LONG_FOR_GENERATION"),
+        ({"shots": [{"end_time": 15.001}]}, "LONG_DURATION_TIER_DISABLED"),
+    ],
+)
+def test_actual_timeline_and_long_tier_checked_before_paid_first_frame(
+    biz: BusinessConnection,
+    _stub_domains: dict[str, Any],
+    payload: dict[str, object],
+    failure_code: str,
+) -> None:
+    _seed_pipeline(
+        biz,
+        status=rp.STATUS_FIRST_FRAMING,
+        slot="duration-preflight",
+        stage_detail={
+            "shotCardVersionId": "shot-1",
+            "firstFrame": {"substage": "candidates", "sourceFrameSelectionVersionId": "sfs-1"},
+        },
+    )
+    _stub_domains["version_payload"] = {"shot-1": payload}
+    biz.execute("UPDATE billing_tariffs SET enabled = false WHERE service = 'video_768p_long'")
+    result = stages.run_pipeline_stage(biz, _acquire(biz, slot="duration-preflight"))
+    assert result.kind == "failed" and result.failure_code == failure_code
+    assert "first_frame_enqueue_kwargs" not in _stub_domains
+
+
+@pytest.mark.parametrize(
+    ("error_key", "code"),
+    [
+        ("compile_error", "TIMELINE_CONFIRMATION_REQUIRED"),
+        ("quote_error", "LONG_DURATION_TIER_DISABLED"),
+    ],
+)
 def test_compose_conflict_fails_with_domain_code(
-    biz: BusinessConnection, _stub_domains: dict[str, Any]
+    biz: BusinessConnection, _stub_domains: dict[str, Any], error_key: str, code: str
 ) -> None:
     from fastapi import HTTPException
 
+    _stub_domains["duration_ms"] = 30_000
     biz.execute("DELETE FROM replica_pipeline_tasks")
     _seed_pipeline(
         biz,
@@ -652,13 +1171,11 @@ def test_compose_conflict_fails_with_domain_code(
             "firstFrame": {"firstFrameAssetId": "ff-asset"},
         },
     )
-    _stub_domains["compile_error"] = HTTPException(
-        409, detail={"code": "TIMELINE_CONFIRMATION_REQUIRED", "message": "x"}
-    )
+    _stub_domains[error_key] = HTTPException(422, detail={"code": code, "message": "x"})
     lease = _acquire(biz, slot="cmpf")
     result = stages.run_pipeline_stage(biz, lease)
     assert result.kind == "failed"
-    assert result.failure_code == "TIMELINE_CONFIRMATION_REQUIRED"
+    assert result.failure_code == code
 
 
 def test_needs_review_without_batch_fails_loudly(biz: BusinessConnection) -> None:

@@ -9,7 +9,7 @@ import {
 import { StrictMode, useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "../api";
-import { getLongReplicaSession } from "./longReplicaSession";
+import { saveReplicaPreference } from "./AdaptiveReplicaSetup";
 import { createState, patchStudioDraft } from "./state";
 import type {
   StudioAsset,
@@ -22,6 +22,7 @@ import type {
 type WorkbenchUploadResult = {
   projectId: string;
   assetId: string;
+  durationSeconds?: number;
   project?: Project;
   asset?: StudioAsset;
 };
@@ -55,8 +56,30 @@ const {
   removePublishAccount,
   requestPublishAccountVerify,
   extractLocalVideoAudio,
+  findActiveReplicaPipeline,
+  initiateUploadedReplicaPipeline,
+  listReplicaPipelineCharacters,
+  fetchReplicaPipeline,
 } = vi.hoisted(() => ({
   useStudio: vi.fn<() => StudioContextValue>(),
+  findActiveReplicaPipeline: vi.fn(async () => ({ pipelineId: null })),
+  initiateUploadedReplicaPipeline: vi.fn(async () => ({
+    id: "pipeline-upload",
+    projectId: "proj-1",
+    status: "ENQUEUED",
+    replay: false,
+  })),
+  listReplicaPipelineCharacters: vi.fn(async () => ({
+    characters: [
+      { characterVersionId: "cv-upload", name: "默认人物", versionNumber: 1 },
+    ],
+  })),
+  fetchReplicaPipeline: vi.fn(async () => ({
+    id: "pipeline-upload",
+    projectId: "proj-1",
+    status: "ANALYZING",
+    stage: "analyze",
+  })),
   loadTaskPreview: vi.fn(),
   loadViralVideos: vi.fn<typeof import("./live").loadViralVideos>(async () => ({
     videos: [],
@@ -134,6 +157,10 @@ vi.mock("./viralCache", () => ({
 }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  findActiveReplicaPipeline,
+  initiateUploadedReplicaPipeline,
+  listReplicaPipelineCharacters,
+  fetchReplicaPipeline,
   createViralImportTask,
   resolveViralLink,
   getViralImportTask,
@@ -1399,6 +1426,8 @@ describe("V1.4 工作台上传与创作入口", () => {
   beforeEach(() => {
     useStudio.mockReset();
     uploadWorkbenchSourceVideo.mockReset();
+    initiateUploadedReplicaPipeline.mockClear();
+    findActiveReplicaPipeline.mockClear();
     // 默认时长在复刻上限以内：上传预检不触发本地抽轨，走整片上传。
     readVideoDuration.mockReset();
     readVideoDuration.mockResolvedValue(10);
@@ -1411,11 +1440,20 @@ describe("V1.4 工作台上传与创作入口", () => {
   function workbench(
     overrides: Partial<StudioContextValue> = {},
   ): StudioContextValue {
-    return studio(undefined, {
+    const value = studio(undefined, {
       state: { ...createState("workbench") },
       data: data([]),
       ...overrides,
     });
+    if (!overrides.patchDraft) {
+      vi.mocked(value.patchDraft).mockImplementation((patch) => {
+        value.state = {
+          ...value.state,
+          draft: patchStudioDraft(value.state.draft, patch),
+        };
+      });
+    }
+    return value;
   }
 
   function changeFile(name: string) {
@@ -1447,82 +1485,42 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
 
-  it(">15s 来源点开始复刻：补传整片（replica_prompt 用途）并跳长视频拆解页签", async () => {
-    const value = workbench({
-      user: { id: "account-long" } as StudioContextValue["user"],
-    });
-    useStudio.mockReturnValue(value);
-    readVideoDuration.mockResolvedValue(60);
-    extractLocalVideoAudio.mockImplementation(
-      async () => new File(["audio"], "乡墅案例.m4a", { type: "audio/mp4" }),
-    );
-    uploadWorkbenchSourceVideo
-      .mockResolvedValueOnce({
+  it.each([30.001, 60, 200])(
+    "%s 秒上传来源直接进入数字人口播，不重复上传或创建项目",
+    async (duration) => {
+      const value = workbench({
+        user: {
+          id: `account-upload-${duration}`,
+        } as StudioContextValue["user"],
+      });
+      useStudio.mockReturnValue(value);
+      readVideoDuration.mockResolvedValue(duration);
+      extractLocalVideoAudio.mockResolvedValue(
+        new File(["audio"], "来源.m4a", { type: "audio/mp4" }),
+      );
+      uploadWorkbenchSourceVideo.mockResolvedValue({
         projectId: "project-audio",
         assetId: "asset-audio",
-      })
-      .mockResolvedValueOnce({
-        projectId: "project-long",
-        assetId: "asset-long",
       });
-    render(<WorkbenchPage />);
-
-    changeFile("乡墅案例.mp4");
-    await waitFor(() =>
+      const view = render(<WorkbenchPage />);
+      changeFile("来源.mp4");
+      expect(
+        await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+      ).toBeEnabled();
       expect(value.patchDraft).toHaveBeenCalledWith(
-        expect.objectContaining({ projectId: "project-audio" }),
-      ),
-    );
-    uploadWorkbenchSourceVideo.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
-
-    // 第二次上传的是原片整片（非抽出的音轨），用途为长视频拆解素材。
-    await waitFor(() =>
-      expect(uploadWorkbenchSourceVideo).toHaveBeenCalledOnce(),
-    );
-    expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[0]?.name).toBe(
-      "乡墅案例.mp4",
-    );
-    expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[3]).toBe(
-      "replica_prompt",
-    );
-    await waitFor(() =>
-      expect(value.navigate).toHaveBeenCalledWith("long-replica"),
-    );
-    expect(getLongReplicaSession(value.user.id).run).toEqual({
-      projectId: "project-long",
-      assetId: "asset-long",
-      taskId: "",
-    });
-  });
-
-  it(">180s 来源点开始复刻：本地拦截并提示，不补传也不跳转", async () => {
-    const value = workbench();
-    useStudio.mockReturnValue(value);
-    readVideoDuration.mockResolvedValue(200);
-    extractLocalVideoAudio.mockImplementation(
-      async () => new File(["audio"], "乡墅案例.m4a", { type: "audio/mp4" }),
-    );
-    uploadWorkbenchSourceVideo.mockResolvedValue({
-      projectId: "project-audio",
-      assetId: "asset-audio",
-    });
-    render(<WorkbenchPage />);
-
-    changeFile("乡墅案例.mp4");
-    await waitFor(() =>
-      expect(value.patchDraft).toHaveBeenCalledWith(
-        expect.objectContaining({ projectId: "project-audio" }),
-      ),
-    );
-    uploadWorkbenchSourceVideo.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
-    expect(value.notify).toHaveBeenCalledWith(
-      "长视频拆解仅支持 4–180 秒的视频，请裁剪后再试。",
-    );
-    expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
-    expect(value.navigate).not.toHaveBeenCalledWith("long-replica");
-  });
+        expect.objectContaining({
+          projectId: "project-audio",
+          sourceAssetId: "asset-audio",
+          sourceDurationSeconds: duration,
+        }),
+        { persistNow: true },
+      );
+      expect(uploadWorkbenchSourceVideo).toHaveBeenCalledOnce();
+      expect(initiateUploadedReplicaPipeline).not.toHaveBeenCalled();
+      expect(value.navigate).not.toHaveBeenCalled();
+      view.unmount();
+    },
+  );
 
   it("超过 15 秒的视频先本地抽音轨，再以音频文件提取文案", async () => {
     const value = workbench();
@@ -1550,6 +1548,7 @@ describe("V1.4 工作台上传与创作入口", () => {
     await waitFor(() =>
       expect(value.patchDraft).toHaveBeenCalledWith(
         expect.objectContaining({ projectId: "project-audio" }),
+        { persistNow: true },
       ),
     );
   });
@@ -1601,11 +1600,15 @@ describe("V1.4 工作台上传与创作入口", () => {
       },
     });
     await waitFor(() =>
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "proj-1",
-        sourceId: "asset-1",
-        sourceAssetId: "asset-1",
-      }),
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        {
+          projectId: "proj-1",
+          sourceId: "asset-1",
+          sourceAssetId: "asset-1",
+          sourceDurationSeconds: 10,
+        },
+        { persistNow: true },
+      ),
     );
     expect(value.updateData).toHaveBeenCalledOnce();
     const update = vi.mocked(value.updateData).mock.calls[0][0];
@@ -1684,11 +1687,15 @@ describe("V1.4 工作台上传与创作入口", () => {
 
     second.resolve({ projectId: "project-b", assetId: "asset-b" });
     await waitFor(() =>
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "project-b",
-        sourceId: "asset-b",
-        sourceAssetId: "asset-b",
-      }),
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        {
+          projectId: "project-b",
+          sourceId: "asset-b",
+          sourceAssetId: "asset-b",
+          sourceDurationSeconds: 10,
+        },
+        { persistNow: true },
+      ),
     );
     await Promise.resolve();
     expect(value.patchDraft).toHaveBeenCalledTimes(1);
@@ -1696,26 +1703,167 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(screen.queryByText(/迟到失败/)).toBeNull();
   });
 
-  it("上传完成后开始复刻直接进分镜工作区，不再打开项目面板", async () => {
+  it.each([4, 16.1, 30])(
+    "%s 秒上传完成后复用项目和素材启动自动复刻，保留费用确认",
+    async (duration) => {
+      const value = workbench({
+        user: { id: `account-short-${duration}` } as StudioContextValue["user"],
+      });
+      useStudio.mockReturnValue(value);
+      saveReplicaPreference(value.user.id, "guide-v1", "1");
+      saveReplicaPreference(value.user.id, "short-character", "cv-upload");
+      readVideoDuration.mockResolvedValue(duration);
+      uploadWorkbenchSourceVideo.mockResolvedValue({
+        projectId: "proj-1",
+        assetId: "asset-1",
+        durationSeconds: duration,
+      });
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const view = render(<WorkbenchPage />);
+      changeFile("来源.mp4");
+      const entry = await screen.findByRole("button", { name: "全自动复刻" });
+      await waitFor(() => expect(entry).toBeEnabled());
+      expect(initiateUploadedReplicaPipeline).not.toHaveBeenCalled();
+      fireEvent.click(entry);
+      await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+      expect(initiateUploadedReplicaPipeline).not.toHaveBeenCalled();
+      confirm.mockReturnValue(true);
+      fireEvent.click(entry);
+      await waitFor(() =>
+        expect(initiateUploadedReplicaPipeline).toHaveBeenCalledOnce(),
+      );
+      expect(initiateUploadedReplicaPipeline).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "proj-1",
+          sourceAssetId: "asset-1",
+          characterVersionId: "cv-upload",
+        }),
+      );
+      expect(findActiveReplicaPipeline).toHaveBeenCalledWith(
+        "upload",
+        "asset-1",
+      );
+      expect(uploadWorkbenchSourceVideo).toHaveBeenCalledOnce();
+      expect(value.openLive).not.toHaveBeenCalled();
+      expect(value.navigate).not.toHaveBeenCalled();
+      view.unmount();
+      confirm.mockRestore();
+    },
+  );
+
+  it("重新进入工作台后按草稿保存的来源时长继续口播，不依赖原文件引用", () => {
+    const state = createState("workbench");
+    state.draft = {
+      ...state.draft,
+      projectId: "restored-project",
+      sourceId: "restored-asset",
+      sourceAssetId: "restored-asset",
+      sourceDurationSeconds: 60,
+    };
+    const value = workbench({ state });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+    expect(
+      screen.getByRole("button", { name: "一键复刻 · 数字人口播" }),
+    ).toBeEnabled();
+    expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+    expect(initiateUploadedReplicaPipeline).not.toHaveBeenCalled();
+  });
+
+  it("浏览器读不出时长时使用服务端上传回执的实测时长分流", async () => {
+    useStudio.mockReturnValue(workbench());
+    readVideoDuration.mockRejectedValue(new Error("无法解码"));
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "p-measured",
+      assetId: "a-measured",
+      durationSeconds: 42,
+    });
+    render(<WorkbenchPage />);
+    changeFile("来源.mov");
+    expect(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    ).toBeEnabled();
+    expect(initiateUploadedReplicaPipeline).not.toHaveBeenCalled();
+  });
+
+  it("原片以服务端实测时长分流，抽音轨时保留原视频时长", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    readVideoDuration.mockResolvedValue(30);
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "server-project",
+      assetId: "server-asset",
+      durationSeconds: 30.001,
+    });
+    const view = render(<WorkbenchPage />);
+    changeFile("来源.mp4");
+    expect(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    ).toBeEnabled();
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceDurationSeconds: 30.001 }),
+      { persistNow: true },
+    );
+    view.unmount();
+
+    const audioValue = workbench();
+    useStudio.mockReturnValue(audioValue);
+    readVideoDuration.mockResolvedValue(30.001);
+    extractLocalVideoAudio.mockResolvedValue(
+      new File(["audio"], "来源.m4a", { type: "audio/mp4" }),
+    );
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "audio-project",
+      assetId: "audio-asset",
+      durationSeconds: 30,
+    });
+    render(<WorkbenchPage />);
+    changeFile("来源.mp4");
+    expect(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    ).toBeEnabled();
+    expect(audioValue.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceDurationSeconds: 30.001 }),
+      { persistNow: true },
+    );
+  });
+
+  it("同页换来源和放弃草稿后，不再使用上次上传的项目", async () => {
     const value = workbench();
     useStudio.mockReturnValue(value);
     uploadWorkbenchSourceVideo.mockResolvedValue({
-      projectId: "proj-1",
-      assetId: "asset-1",
+      projectId: "project-a",
+      assetId: "asset-a",
+      durationSeconds: 30,
     });
-    render(<WorkbenchPage />);
-
-    changeFile("乡墅案例.mp4");
-    await waitFor(() =>
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "proj-1",
-        sourceId: "asset-1",
-        sourceAssetId: "asset-1",
-      }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
-    expect(value.navigate).toHaveBeenCalledWith("replica");
-    expect(value.openLive).not.toHaveBeenCalled();
+    const view = render(<WorkbenchPage />);
+    changeFile("来源A.mp4");
+    expect(
+      await screen.findByRole("button", { name: "全自动复刻" }),
+    ).toBeInTheDocument();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...createState("workbench").draft,
+        projectId: "project-b",
+        sourceId: "asset-b",
+        sourceAssetId: "asset-b",
+        sourceDurationSeconds: 60,
+      },
+    };
+    view.rerender(<WorkbenchPage />);
+    expect(
+      screen.getByRole("button", { name: "一键复刻 · 数字人口播" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+    expect(screen.queryByText("已上传：来源A.mp4")).toBeNull();
+    value.state = createState("workbench");
+    view.rerender(<WorkbenchPage />);
+    expect(
+      screen.queryByRole("button", { name: "一键复刻 · 数字人口播" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "开始复刻" })).toBeEnabled();
+    expect(initiateUploadedReplicaPipeline).not.toHaveBeenCalled();
   });
 
   it("上传后的提取文案走 script-from-audio 管线，不再打开旧项目面板", async () => {
@@ -1729,11 +1877,15 @@ describe("V1.4 工作台上传与创作入口", () => {
 
     changeFile("乡墅案例.mp4");
     await waitFor(() =>
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "proj-1",
-        sourceId: "asset-1",
-        sourceAssetId: "asset-1",
-      }),
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        {
+          projectId: "proj-1",
+          sourceId: "asset-1",
+          sourceAssetId: "asset-1",
+          sourceDurationSeconds: 10,
+        },
+        { persistNow: true },
+      ),
     );
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
     expect(value.extractScriptFromUpload).toHaveBeenCalledTimes(1);

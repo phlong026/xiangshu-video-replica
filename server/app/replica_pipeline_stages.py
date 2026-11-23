@@ -32,6 +32,7 @@ from app.generation import (
     ScriptRequest,
     compile_prompt_version,
     create_script_version,
+    shot_timeline_duration,
 )
 from app.image_tasks import enqueue_first_frame_task
 from app.project_character_selection import choose_project_character_version
@@ -122,6 +123,23 @@ def _version_payload(conn: BusinessConnection, version_id: str) -> dict[str, obj
     return cast(dict[str, object], payload) if isinstance(payload, dict) else {}
 
 
+def _shot_output_duration(conn: BusinessConnection, detail: dict[str, object]) -> int:
+    """和编译器使用同一分镜时间轴，避免目录估算时长覆盖实际媒体时长。"""
+    from fastapi import HTTPException
+
+    version_id = detail.get("shotCardVersionId")
+    payload = _version_payload(conn, version_id) if isinstance(version_id, str) else None
+    if payload is None:
+        raise rp.ReplicaPipelineError(422, "SHOT_CARD_TIMELINE_INVALID", "缺少有效分镜时长。")
+    try:
+        duration_seconds = shot_timeline_duration(payload)
+    except HTTPException as exc:
+        raise rp.ReplicaPipelineError(
+            422, "SHOT_CARD_TIMELINE_INVALID", "缺少有效分镜时长。"
+        ) from exc
+    return rp.require_output_duration(duration_seconds * 1000)
+
+
 def _sub_task_status(
     conn: BusinessConnection, table: str, task_id: str
 ) -> tuple[str, BusinessRow] | None:
@@ -179,6 +197,16 @@ def _stage_enqueue_import(
     conn: BusinessConnection, lease: rp.ReplicaPipelineLease, row: BusinessRow
 ) -> StageResult:
     """ENQUEUED → 入队 purpose=replica 导入（挂既有 project）→ IMPORTING."""
+    if lease.platform == "upload":
+        # 上传受理已验证原项目和素材，保留相同状态机但跳过平台下载。
+        rp.advance_status(
+            conn,
+            lease,
+            decision=rp.AdvanceDecision(
+                kind="completed", next_status=rp.STATUS_IMPORTING, next_stage=rp.STAGE_IMPORT
+            ),
+        )
+        return ADVANCED
     actor = _pipeline_actor(conn, lease.owner_user_id)
     key = rp.stage_operation_key(lease.id, rp.STAGE_IMPORT, lease.stage_retry_no)
     request = ViralImportRequest.model_validate(
@@ -221,6 +249,8 @@ def _stage_poll_import(
     conn: BusinessConnection, lease: rp.ReplicaPipelineLease, row: BusinessRow
 ) -> StageResult:
     """IMPORTING：等待导入完成 → 入队拆解 → ANALYZING."""
+    if lease.platform == "upload":
+        return _enqueue_source_analysis(conn, lease, row, lease.video_id)
     import_task_id = row["import_task_id"]
     if not import_task_id:
         # 引用未回填（崩溃窗口/重试清引用后）：同状态重新入队，不迁移
@@ -241,22 +271,91 @@ def _stage_poll_import(
     asset_id = task["source_asset_id"]
     if not asset_id:
         return _failed("IMPORT_NO_ASSET", "导入结果缺少素材。")
+    return _enqueue_source_analysis(conn, lease, row, str(asset_id))
+
+
+def _enqueue_source_analysis(
+    conn: BusinessConnection,
+    lease: rp.ReplicaPipelineLease,
+    row: BusinessRow,
+    asset_id: str,
+    *,
+    advance: bool = True,
+) -> StageResult:
+    from fastapi import HTTPException
+
+    if lease.platform == "upload" and asset_id != lease.video_id:
+        return _failed("REPLICA_SOURCE_INVALID", "上传来源与受理记录不一致。")
     detail = _stage_detail(row)
     detail["sourceAssetId"] = str(asset_id)
-    _save_stage_detail(conn, lease.id, detail)
-    # 立即入队拆解（同一操作键幂等），迁移到 ANALYZING。
-    duration_ms = _video_duration_ms(conn, lease.platform, lease.video_id)
-    if duration_ms <= 0:
-        return _failed("ANALYZE_NO_DURATION", "素材时长未知，无法拆解。")
     analyze_key = rp.stage_operation_key(lease.id, rp.STAGE_ANALYZE, lease.stage_retry_no)
-    analysis_task, _created = enqueue_analysis_task(
-        conn,
-        project_id=lease.project_id,
-        asset_id=str(asset_id),
-        created_by_user_id=lease.owner_user_id,
-        duration_seconds=duration_ms / 1000,
-        request_id=analyze_key,
-    )
+    # 分析域只去重在途任务；父引用丢失时还必须找回已完成的同轮收据，
+    # 否则恢复会再次付费。显式业务重试会递增 retry_no，不会复用失败收据。
+    analysis_task = conn.execute(
+        "SELECT * FROM analysis_tasks WHERE project_id = %s AND asset_id = %s "
+        "AND created_by_user_id = %s AND request_id = %s ORDER BY created_at DESC LIMIT 1",
+        (lease.project_id, asset_id, lease.owner_user_id, analyze_key),
+    ).fetchone()
+    if analysis_task is None:
+        # 分析域先插子任务再做资金准入；确定性拒绝必须连同子任务回滚，
+        # 不能留下没有计费收据的 PENDING 任务供分析 worker 继续执行。
+        conn.execute("SAVEPOINT replica_analysis_enqueue")
+        try:
+            if lease.platform == "upload":
+                from app.analysis_routes import CreateAnalysisRequest, validate_analysis_enqueue
+                from app.generation import generation_price_quote
+
+                # 等待和重试期间素材可能变化；只在新付费分析前复查。
+                _asset, duration_seconds = validate_analysis_enqueue(
+                    conn,
+                    actor=_pipeline_actor(conn, lease.owner_user_id),
+                    project_id=lease.project_id,
+                    request=CreateAnalysisRequest(asset_id=asset_id),
+                )
+                output_duration = rp.require_output_duration(duration_seconds * 1000)
+                if output_duration > 15:
+                    generation_price_quote(
+                        conn,
+                        resolution="768P",
+                        duration_seconds=output_duration,
+                        quantity=1,
+                        user_id=lease.owner_user_id,
+                    )
+                detail["sourceDurationMs"] = duration_seconds * 1000
+            else:
+                duration_ms = _video_duration_ms(conn, lease.platform, lease.video_id)
+                if duration_ms <= 0:
+                    raise rp.ReplicaPipelineError(
+                        422, "ANALYZE_NO_DURATION", "素材时长未知，无法拆解。"
+                    )
+                duration_seconds = duration_ms / 1000
+            analysis_task, _created = enqueue_analysis_task(
+                conn,
+                project_id=lease.project_id,
+                asset_id=asset_id,
+                created_by_user_id=lease.owner_user_id,
+                duration_seconds=duration_seconds,
+                request_id=analyze_key,
+            )
+        except rp.ReplicaPipelineError as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT replica_analysis_enqueue")
+            conn.execute("RELEASE SAVEPOINT replica_analysis_enqueue")
+            return _failed(exc.code, exc.message)
+        except HTTPException as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT replica_analysis_enqueue")
+            conn.execute("RELEASE SAVEPOINT replica_analysis_enqueue")
+            code = "ANALYSIS_PRECHECK_FAILED"
+            if isinstance(exc.detail, dict) and isinstance(exc.detail.get("code"), str):
+                code = exc.detail["code"]
+            return _failed(code, "素材或生成档位当前不可用，请检查后重试。")
+        conn.execute("RELEASE SAVEPOINT replica_analysis_enqueue")
+    _save_stage_detail(conn, lease.id, detail)
+    if not advance:
+        conn.execute(
+            "UPDATE replica_pipeline_tasks SET analysis_task_id = %s WHERE id = %s",
+            (str(analysis_task["id"]), lease.id),
+        )
+        return WAITING
     rp.advance_status(
         conn,
         lease,
@@ -488,6 +587,19 @@ def _first_frame_candidates(
         from fastapi import HTTPException
 
         try:
+            # 拆解会用实际媒体时长校正目录估算；新付费首帧前复查，
+            # 已有在途候选只观察，不因价目变化重复提交或丢弃产物。
+            duration_seconds = _shot_output_duration(conn, detail)
+            if duration_seconds > 15:
+                from app.generation import generation_price_quote
+
+                generation_price_quote(
+                    conn,
+                    resolution="768P",
+                    duration_seconds=duration_seconds,
+                    quantity=1,
+                    user_id=lease.owner_user_id,
+                )
             character_version_id, reference_selection_id = _resolve_character_binding(
                 conn, lease, selection_id, actor=actor
             )
@@ -496,13 +608,15 @@ def _first_frame_candidates(
             # driver（评审 A-r2#7：穿透就不会 settle_failure，「转手动」不落库）。
             return _failed(exc.code, exc.message, retryable=False)
         except HTTPException as exc:
-            # 参考选择过期等域异常同样是确定性失败（评审 A-r3）：不能穿透
-            # driver，否则失败状态不落库。
+            # 档位不可用或参考选择过期等域异常不能穿透 driver，
+            # 否则失败状态不落库。
             detail_code = exc.detail
             code = "REPLICA_PIPELINE_CHARACTER_STALE"
-            message = "人物参考图选择已过期，请转手动处理。"
+            message = "生成前置检查未通过，请转手动处理。"
             if isinstance(detail_code, dict) and isinstance(detail_code.get("code"), str):
                 code = detail_code["code"]
+            if code == "LONG_DURATION_TIER_DISABLED":
+                message = "当前未开放 16–30 秒生成，请转手动处理。"
             return _failed(code, message, retryable=False)
         key = rp.stage_operation_key(
             lease.id, f"{rp.STAGE_FIRST_FRAME}:candidates", lease.stage_retry_no
@@ -690,17 +804,10 @@ def _stage_compose(
         script_version_id = str(row["script_version_id"] or "")
     if not isinstance(shot_card_version_id, str) or not isinstance(first_frame_asset_id, str):
         return _failed("COMPOSE_INPUT_MISSING", "编译输入缺失。")
-    duration_ms = _video_duration_ms(conn, lease.platform, lease.video_id)
-    duration_seconds = round(duration_ms / 1000) if duration_ms > 0 else 0
-    if duration_seconds > 15:
-        # 批次请求限 4–15 秒（GenerationBatchRequest）：>15 秒源片在 v1 不支持
-        # 自动生成——显式失败转手动，不静默 clamp（否则编译 30s、报价 15s、
-        # 建批次 PROMPT_PARAMETERS_MISMATCH，评审 A-r1#11）。
-        return _failed(
-            "SOURCE_TOO_LONG_FOR_GENERATION",
-            "源片超过 15 秒，暂不支持自动生成；请转手动分段处理。",
-        )
-    duration_seconds = max(4, duration_seconds)
+    try:
+        duration_seconds = _shot_output_duration(conn, detail)
+    except rp.ReplicaPipelineError as exc:
+        return _failed(exc.code, exc.message)
     actor = _pipeline_actor(conn, lease.owner_user_id)
     request = PromptCompileRequest(
         script_version_id=script_version_id,
@@ -729,7 +836,17 @@ def _stage_compose(
     from app.replica_pipeline_confirm import freeze_confirm_quote
 
     row_after = _load_row(conn, lease)
-    snapshot = freeze_confirm_quote(conn, row=row_after, owner_user_id=lease.owner_user_id)
+    try:
+        snapshot = freeze_confirm_quote(
+            conn,
+            row=row_after,
+            owner_user_id=lease.owner_user_id,
+            duration_seconds=duration_seconds,
+        )
+    except HTTPException as exc:
+        if isinstance(exc.detail, dict) and exc.detail.get("code") == "LONG_DURATION_TIER_DISABLED":
+            return _failed("LONG_DURATION_TIER_DISABLED", "当前未开放 16–30 秒生成，请转手动处理。")
+        raise
     conn.execute(
         "UPDATE replica_pipeline_tasks SET quote_snapshot = %s, "
         "awaiting_since = now() WHERE id = %s",
@@ -789,23 +906,7 @@ def _enqueue_analysis_again(
     asset_id = detail.get("sourceAssetId")
     if not isinstance(asset_id, str) or not asset_id:
         return _failed("ANALYZE_NO_ASSET", "缺少导入素材，无法重新拆解。")
-    duration_ms = _video_duration_ms(conn, lease.platform, lease.video_id)
-    if duration_ms <= 0:
-        return _failed("ANALYZE_NO_DURATION", "素材时长未知。")
-    analyze_key = rp.stage_operation_key(lease.id, rp.STAGE_ANALYZE, lease.stage_retry_no)
-    analysis_task, _created = enqueue_analysis_task(
-        conn,
-        project_id=lease.project_id,
-        asset_id=asset_id,
-        created_by_user_id=lease.owner_user_id,
-        duration_seconds=duration_ms / 1000,
-        request_id=analyze_key,
-    )
-    conn.execute(
-        "UPDATE replica_pipeline_tasks SET analysis_task_id = %s WHERE id = %s",
-        (str(analysis_task["id"]), lease.id),
-    )
-    return WAITING
+    return _enqueue_source_analysis(conn, lease, row, asset_id, advance=False)
 
 
 def drive_pipeline_once(conn: BusinessConnection, lease: rp.ReplicaPipelineLease) -> str:

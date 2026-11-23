@@ -15,6 +15,7 @@ import {
   type ViralImportTask,
 } from "../api";
 import { VideoPreview } from "../VideoPreview";
+import { AdaptiveReplicaControl } from "./ContentPages";
 import { useStudio } from "./context";
 import { LocalPublishAccountsPanel as PublishAccountsPanel } from "./LocalPublishAccountsPanel";
 import {
@@ -31,10 +32,10 @@ import {
   studioVideoFromViral,
   uploadWorkbenchSourceVideo,
 } from "./live";
-import { handOffLongReplicaSource } from "./longReplicaSession";
 import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
 import type {
+  ReplicaSource,
   StudioAsset,
   StudioData,
   StudioPage,
@@ -384,18 +385,48 @@ export function WorkbenchPage() {
     error: string;
     projectId: string | null;
     completed: boolean;
+    assetId?: string;
+    durationSeconds?: number;
   } | null>(null);
   const upload =
-    uploadState?.accountContextKey === accountContextKey ? uploadState : null;
+    uploadState?.accountContextKey === accountContextKey &&
+    (!uploadState.completed ||
+      (uploadState.assetId === state.draft.sourceAssetId &&
+        uploadState.projectId === state.draft.projectId))
+      ? uploadState
+      : null;
+  const uploadedProjectId = state.draft.projectId;
+  const uploadedAssetId = state.draft.sourceAssetId;
+  const uploadedDuration = state.draft.sourceDurationSeconds;
+  const uploadedSource =
+    !review &&
+    user.role !== "auditor" &&
+    !sourceLink.trim() &&
+    (!upload || upload.completed) &&
+    uploadedProjectId &&
+    uploadedAssetId &&
+    typeof uploadedDuration === "number" &&
+    Number.isFinite(uploadedDuration) &&
+    uploadedDuration >= 4
+      ? { projectId: uploadedProjectId, assetId: uploadedAssetId }
+      : undefined;
+  const uploadedVideo: ReplicaSource | undefined = uploadedSource
+    ? {
+        id: `upload:${uploadedSource.assetId}`,
+        title:
+          upload?.name ??
+          data.assets.find((asset) => asset.id === uploadedSource.assetId)
+            ?.name ??
+          "上传视频",
+        durationMs: Math.ceil((uploadedDuration ?? 0) * 1000),
+      }
+    : undefined;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadOperationRef = useRef(0);
   const linkOperationRef = useRef(0);
   const viralOperationRef = useRef(0);
   const viralIdempotencyKeysRef = useRef(new Map<string, string>());
   const uploadAbortRef = useRef<AbortController | null>(null);
-  // >15s 原片登记：上传时只抽音轨供提取文案，原片留在本机；「开始复刻」
-  // 时按 replica_prompt 用途补传整片并跳长视频拆解页签。仅当前挂载有效。
-  const longOriginalRef = useRef<{ file: File; duration: number } | null>(null);
   const [linkStateValue, setLinkState] = useState<{
     accountContextKey: string;
     status: "idle" | "loading" | "error";
@@ -565,102 +596,6 @@ export function WorkbenchPage() {
   const pendingViralSource = !state.draft.projectId
     ? data.videos.find((video) => video.id === state.draft.sourceId)
     : undefined;
-  // 长视频拆解入口：>15s 原片按 replica_prompt 用途补传整片（进度走同一个
-  // 上传状态位），成功后交接给长视频拆解页签自动建任务。本地先卡 180 秒/600MB，
-  // 与服务端长视频门禁同口径，避免整片白传。
-  const beginLongAnalysis = async (original: {
-    file: File;
-    duration: number;
-  }) => {
-    if (original.duration > 180.1) {
-      notify("长视频拆解仅支持 4–180 秒的视频，请裁剪后再试。");
-      return;
-    }
-    if (original.file.size > 600 * 1024 * 1024) {
-      notify("长视频不能超过 600 MB，请压缩后再上传。");
-      return;
-    }
-    const operation = ++uploadOperationRef.current;
-    const requestAccount = accountId;
-    uploadAbortRef.current?.abort();
-    const abortController = new AbortController();
-    uploadAbortRef.current = abortController;
-    setUpload({
-      accountContextKey,
-      name: original.file.name,
-      progress: 0,
-      error: "",
-      projectId: null,
-      completed: false,
-    });
-    notify("正在上传长视频原片…");
-    let notifiedStep = -1;
-    try {
-      const uploaded = await uploadWorkbenchSourceVideo(
-        original.file,
-        (percent) => {
-          if (
-            operation !== uploadOperationRef.current ||
-            requestAccount !== activeAccountRef.current
-          )
-            return;
-          setUpload((current) =>
-            current?.accountContextKey === accountContextKey
-              ? { ...current, progress: percent }
-              : current,
-          );
-          const step = Math.min(
-            100,
-            Math.max(0, Math.floor(percent / 10) * 10),
-          );
-          if (step <= notifiedStep) return;
-          notifiedStep = step;
-          notify(`长视频上传中 ${step}%`);
-        },
-        abortController.signal,
-        "replica_prompt",
-      );
-      if (
-        operation !== uploadOperationRef.current ||
-        requestAccount !== activeAccountRef.current
-      )
-        return;
-      setUpload((current) =>
-        current?.accountContextKey === accountContextKey
-          ? {
-              ...current,
-              progress: 100,
-              projectId: uploaded.projectId,
-              completed: true,
-            }
-          : current,
-      );
-      longOriginalRef.current = null;
-      handOffLongReplicaSource(accountId, {
-        projectId: uploaded.projectId,
-        assetId: uploaded.assetId,
-      });
-      notify("长视频已上传，开始拆解，预计 5–15 分钟。");
-      navigate("long-replica");
-    } catch (error) {
-      if (
-        operation !== uploadOperationRef.current ||
-        requestAccount !== activeAccountRef.current
-      )
-        return;
-      setUpload((current) =>
-        current?.accountContextKey === accountContextKey
-          ? {
-              ...current,
-              error:
-                error instanceof Error && error.message.trim()
-                  ? error.message.trim()
-                  : "上传失败，请重试。",
-            }
-          : current,
-      );
-    }
-  };
   const begin = async (mode: "copy" | "replica", overrideLink?: string) => {
     if (requireLogin) {
       requireLogin();
@@ -754,13 +689,6 @@ export function WorkbenchPage() {
       // 上传完成的来源已经写进当前草稿：复刻直接进分镜工作区；
       // 文案提取走 script-from-audio 异步管线（抽音轨→转写→回填草稿）。
       if (mode === "replica") {
-        // >15s 原片登记在案时走长视频拆解：补传整片后跳长视频页签自动开跑；
-        // ≤15s 或无登记保持原 <15s 复刻流程。
-        const original = longOriginalRef.current;
-        if (original) {
-          await beginLongAnalysis(original);
-          return;
-        }
         navigate("replica");
         return;
       }
@@ -791,14 +719,11 @@ export function WorkbenchPage() {
       projectId: null,
       completed: false,
     });
-    // 首页上传尚未选择复刻或文案提取；只存素材，后续动作入口再推进。
-    // 超过 30 秒的视频默认只抽音轨上传供提取文案（原片不出本机）；原片与
-    // 实测时长登记进 longOriginalRef——用户点「开始复刻」时按 replica_prompt
-    // 用途补传整片并跳长视频拆解页签（4–30 秒源片留在复刻页签直接拆解）。
-    // 读不出时长、非桌面端或抽轨失败时回退整片上传（服务端 script 门禁无上限）。
+    // 上传只保存素材，不触发收费处理。时长随草稿交接：短片进入自动复刻，
+    // 长片复用已上传音轨生成口播，不再补传原片或另外创建项目。
     const pickUploadFile = async (): Promise<{
       file: File;
-      longDuration?: number;
+      durationSeconds?: number;
     }> => {
       let duration: number | undefined;
       try {
@@ -806,12 +731,13 @@ export function WorkbenchPage() {
       } catch {
         duration = undefined;
       }
-      if (duration === undefined || duration <= 30.1) return { file };
+      if (duration === undefined || duration <= 30)
+        return { file, durationSeconds: duration };
       notify("正在提取视频音轨…");
       try {
         return {
           file: await extractLocalVideoAudio(file),
-          longDuration: duration,
+          durationSeconds: duration,
         };
       } catch (error) {
         notify(
@@ -819,22 +745,21 @@ export function WorkbenchPage() {
             ? `${error.message}（将改为直接上传视频）`
             : "本地音轨提取失败，将改为直接上传视频。",
         );
-        return { file, longDuration: duration };
+        return { file, durationSeconds: duration };
       }
     };
-    longOriginalRef.current = null;
-    // >15s 时长在第一个 then 里测得，登记动作在第二个 then（拿到 assetId 后）；
-    // 变量提升到 handler 作用域，两个 then 共享。
-    let longDuration: number | undefined;
+    let sourceDurationSeconds: number | undefined;
+    let audioOnlyUpload = false;
     void pickUploadFile()
-      .then(({ file: uploadFile, longDuration: pickedDuration }) => {
+      .then(({ file: uploadFile, durationSeconds: pickedDuration }) => {
         if (
           operation !== uploadOperationRef.current ||
           requestAccount !== activeAccountRef.current
         ) {
           return null;
         }
-        longDuration = pickedDuration;
+        sourceDurationSeconds = pickedDuration;
+        audioOnlyUpload = uploadFile !== file;
         return uploadWorkbenchSourceVideo(
           uploadFile,
           (progress) => {
@@ -861,23 +786,35 @@ export function WorkbenchPage() {
         )
           return;
         const { projectId, assetId } = uploaded;
-        if (longDuration !== undefined) {
-          longOriginalRef.current = { file, duration: longDuration };
-        }
+        // 原片以服务端实测为准；仅抽音轨时保留原视频时长，避免音轨裁切改变分流。
+        const durationSeconds = audioOnlyUpload
+          ? (sourceDurationSeconds ?? uploaded.durationSeconds)
+          : (uploaded.durationSeconds ?? sourceDurationSeconds);
         setUpload((current) =>
           current?.accountContextKey === accountContextKey
-            ? { ...current, progress: 100, projectId, completed: true }
+            ? {
+                ...current,
+                progress: 100,
+                projectId,
+                assetId,
+                durationSeconds,
+                completed: true,
+              }
             : current,
         );
-        patchDraft({
-          projectId,
-          sourceId: assetId,
-          sourceAssetId: assetId,
-          analysisTaskId: uploaded.analysisTaskId,
-          analysisTaskStatus: uploaded.analysisTaskStatus,
-          firstFrameId: undefined,
-          firstFrameSelectionVersionId: undefined,
-        });
+        patchDraft(
+          {
+            projectId,
+            sourceId: assetId,
+            sourceAssetId: assetId,
+            sourceDurationSeconds: durationSeconds,
+            analysisTaskId: uploaded.analysisTaskId,
+            analysisTaskStatus: uploaded.analysisTaskStatus,
+            firstFrameId: undefined,
+            firstFrameSelectionVersionId: undefined,
+          },
+          { persistNow: true },
+        );
         if (uploaded.project || uploaded.asset) {
           updateData((current) => ({
             ...current,
@@ -1004,21 +941,38 @@ export function WorkbenchPage() {
               }}
             />
             <Button
-              disabled={linkState.status === "loading"}
+              disabled={
+                linkState.status === "loading" ||
+                Boolean(upload && !upload.completed)
+              }
               onClick={() => void begin("copy")}
             >
               <Icon name="pen" />
               提取文案
             </Button>
-            <Button
-              disabled={linkState.status === "loading"}
-              variant="primary"
-              onClick={() => void begin("replica")}
-            >
-              <Icon name="play" />
-              {linkState.status === "loading" ? "正在解析链接…" : "开始复刻"}
-            </Button>
+            {!uploadedSource && (
+              <Button
+                disabled={
+                  linkState.status === "loading" ||
+                  Boolean(upload && !upload.completed)
+                }
+                variant="primary"
+                onClick={() => void begin("replica")}
+              >
+                <Icon name="play" />
+                {linkState.status === "loading" ? "正在解析链接…" : "开始复刻"}
+              </Button>
+            )}
           </div>
+          {uploadedSource && uploadedVideo && (
+            <div className="studio-upload-replica">
+              <AdaptiveReplicaControl
+                key={`${accountContextKey}:${uploadedVideo.id}`}
+                video={uploadedVideo}
+                uploadedSource={uploadedSource}
+              />
+            </div>
+          )}
           {upload && (
             <p className="studio-upload-status" role="status">
               {upload.error

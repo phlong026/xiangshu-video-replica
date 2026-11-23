@@ -1059,6 +1059,14 @@ html:has(.studio-shell) {
   font-size: var(--font-label);
   margin: 9px 0 0;
 }
+.studio-upload-replica {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
 .studio-start .studio-start-helper {
   color: #999c93;
   font-size: var(--font-body);

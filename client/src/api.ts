@@ -10125,6 +10125,34 @@ export function findActiveReplicaPipeline(
   );
 }
 
+export function initiateUploadedReplicaPipeline(input: {
+  projectId: string;
+  sourceAssetId: string;
+  characterVersionId: string;
+  idempotencyKey: string;
+}): Promise<{
+  id: string;
+  projectId: string;
+  status: string;
+  replay: boolean;
+}> {
+  return requestApiJson(
+    "/api/viral/replica-pipelines/upload",
+    "全自动复刻发起失败",
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": input.idempotencyKey },
+      body: JSON.stringify({
+        project_id: input.projectId,
+        source_asset_id: input.sourceAssetId,
+        character_version_id: input.characterVersionId,
+        idempotency_key: input.idempotencyKey,
+        preprocess_acknowledged: true,
+      }),
+    },
+  );
+}
+
 export function fetchReplicaPipeline(
   pipelineId: string,
 ): Promise<ReplicaPipelineStatus> {

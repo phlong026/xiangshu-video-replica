@@ -1093,6 +1093,7 @@ export async function uploadWorkbenchSourceVideo(
 ): Promise<{
   projectId: string;
   assetId: string;
+  durationSeconds?: number;
   project?: Project;
   asset?: StudioAsset;
   analysisTaskId?: string;
@@ -1112,16 +1113,27 @@ export async function uploadWorkbenchSourceVideo(
     let analysisTaskStatus: string | undefined =
       intent.analysis_task_status ?? undefined;
     let assetId = intent.asset_id;
+    let durationSeconds: number | undefined;
     if (intent.upload_required !== false) {
       await uploadReferenceVideo(intent, file, onProgress, signal);
       signal?.throwIfAborted();
       const completed = await completeVideoUpload(intent.asset_id);
       signal?.throwIfAborted();
       assetId = completed.asset_id;
+      durationSeconds = completed.metadata?.duration_seconds;
       analysisTaskId = completed.analysis_task_id ?? undefined;
       analysisTaskStatus = completed.analysis_task_status ?? undefined;
+    } else {
+      // 去重素材已完成上传，免费读取元数据即可；重复 complete 会重复处理引用。
+      const resolved = await resolveMaterials([`asset:${assetId}`]).catch(
+        () => undefined,
+      );
+      signal?.throwIfAborted();
+      durationSeconds =
+        resolved?.items.find((item) => item.asset_id === assetId)
+          ?.duration_seconds ?? undefined;
     }
-    // 桌面端对 >15 秒视频只上传抽出的音轨：它只能用于提取文案，服务端也不把它算作
+    // 桌面端可能只上传抽出的音轨：它只能用于提取文案，服务端也不把它算作
     // 复刻参考视频。本地状态与服务端口径保持一致，否则刷新后项目「来源」凭空消失。
     const audioOnly = /\.(m4a|mp3|wav|aac)$/i.test(file.name);
     const uploadedProject: Project = audioOnly
@@ -1140,6 +1152,7 @@ export async function uploadWorkbenchSourceVideo(
     return {
       projectId: project.id,
       assetId,
+      durationSeconds,
       project: uploadedProject,
       asset: audioOnly
         ? {

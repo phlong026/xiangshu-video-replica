@@ -24,6 +24,12 @@ import type {
 
 const {
   useStudio,
+  createOralTask,
+  createScriptFromAudioTask,
+  getLatestScriptFromAudioTask,
+  getOralPrice,
+  listOralAvatars,
+  listOralVoices,
   fetchViralVideoMedia,
   fetchViralVideoStatistics,
   fetchViralVideo,
@@ -76,6 +82,12 @@ const {
   deletePublishRecord,
 } = vi.hoisted(() => ({
   useStudio: vi.fn(),
+  createOralTask: vi.fn(),
+  createScriptFromAudioTask: vi.fn(),
+  getLatestScriptFromAudioTask: vi.fn(),
+  getOralPrice: vi.fn(),
+  listOralAvatars: vi.fn(),
+  listOralVoices: vi.fn(),
   fetchViralVideoMedia: vi.fn(),
   fetchViralVideoStatistics: vi.fn(),
   fetchViralVideo: vi.fn(),
@@ -187,6 +199,14 @@ const {
 }));
 vi.mock("./context", () => ({ useStudio }));
 vi.mock("../api", () => ({
+  createOralTask,
+  createScriptFromAudioTask,
+  getLatestScriptFromAudioTask,
+  getOralPrice,
+  listOralAvatars,
+  listOralVoices,
+  customerVisibleErrorMessage: (cause: unknown, fallback: string) =>
+    cause instanceof Error ? cause.message : fallback,
   fetchViralVideoMedia,
   fetchViralVideoStatistics,
   fetchViralVideo,
@@ -330,6 +350,7 @@ class IntersectionObserverStub {
 }
 vi.stubGlobal("IntersectionObserver", IntersectionObserverStub);
 
+import { saveReplicaPreference } from "./AdaptiveReplicaSetup";
 import {
   MaterialsPage,
   PublishPage,
@@ -340,6 +361,7 @@ import {
   visiblePageButtons,
 } from "./ContentPages";
 import { readAudioDuration } from "./live";
+import { OralReplicaControl } from "./OralReplicaControl";
 import { navigateStudioState } from "./state";
 
 describe("素材分页窗口化", () => {
@@ -355,6 +377,15 @@ describe("素材分页窗口化", () => {
     expect(visiblePageButtons(13, 13)).toEqual([1, "…", 12, 13]);
   });
 });
+
+function finishAdaptiveGuide() {
+  const guide = within(
+    screen.getByRole("dialog", { name: "一键复刻使用教程" }),
+  );
+  fireEvent.click(guide.getByRole("button", { name: "下一步" }));
+  fireEvent.click(guide.getByRole("button", { name: "下一步" }));
+  fireEvent.click(guide.getByRole("button", { name: "知道了" }));
+}
 
 function studio(
   overrides: Partial<StudioContextValue> = {},
@@ -3763,6 +3794,7 @@ describe("V1.4 内容与运营页面", () => {
       );
       const value = studio({
         review: false,
+        user: { ...base.user, id: `fresh-detail-${intent}` },
         data: {
           ...base.data,
           videos: [{ ...base.data.videos[0], durationMs: 10_000 }],
@@ -3802,14 +3834,21 @@ describe("V1.4 内容与运营页面", () => {
           ),
         );
       });
-      await waitFor(() =>
-        expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
-          "douyin",
-          "native-dy-1",
-          intent === "viralExtractIntent" ? "copy" : "replica",
-          expect.any(String),
-        ),
-      );
+      if (intent === "viralReplicateIntent") {
+        expect(
+          await screen.findByRole("dialog", { name: "一键复刻使用教程" }),
+        ).toBeInTheDocument();
+        expect(createViralImportTask).not.toHaveBeenCalled();
+      } else {
+        await waitFor(() =>
+          expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
+            "douyin",
+            "native-dy-1",
+            "copy",
+            expect.any(String),
+          ),
+        );
+      }
       expect(value.patchState).toHaveBeenCalledWith({ [intent]: false });
     },
   );
@@ -3887,6 +3926,7 @@ describe("V1.4 内容与运营页面", () => {
       };
       let current = studio({
         review: false,
+        user: { ...base.user, id: `switch-detail-${intent}` },
         data: { ...base.data, videos: [base.data.videos[0], second] },
         state: {
           ...base.state,
@@ -3938,14 +3978,21 @@ describe("V1.4 内容与运营页面", () => {
         }),
       };
       view.rerender(<ViralDetailPage />);
-      await waitFor(() =>
-        expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
-          "douyin",
-          "native-dy-2",
-          intent === "viralExtractIntent" ? "copy" : "replica",
-          expect.any(String),
-        ),
-      );
+      if (intent === "viralReplicateIntent") {
+        expect(
+          await screen.findByRole("dialog", { name: "一键复刻使用教程" }),
+        ).toBeInTheDocument();
+        expect(createViralImportTask).not.toHaveBeenCalled();
+      } else {
+        await waitFor(() =>
+          expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
+            "douyin",
+            "native-dy-2",
+            "copy",
+            expect.any(String),
+          ),
+        );
+      }
     },
   );
 
@@ -4949,6 +4996,480 @@ describe("V1.4 内容与运营页面", () => {
   });
 });
 
+function oralReplicaFixture(accountId: string) {
+  const base = studio();
+  const value = studio({
+    review: false,
+    user: { ...base.user, id: accountId },
+    data: {
+      ...base.data,
+      people: [
+        {
+          id: "person-1",
+          name: "本人",
+          role: "",
+          version: 1,
+          scope: "",
+          audience: "",
+          expression: "",
+          sceneLookCount: 0,
+          photoIds: [],
+          avatars: [
+            {
+              id: "a-1",
+              name: "默认分身",
+              imageId: "asset-1",
+              ready: true,
+              origin: "视频制作",
+              duration: "00:15",
+            },
+          ],
+          voices: [
+            { id: "v-1", name: "默认声音", confirmed: true, status: "READY" },
+          ],
+        },
+      ],
+    },
+  });
+  saveReplicaPreference(
+    accountId,
+    "oral-defaults",
+    JSON.stringify(["person-1", "a-1", "v-1"]),
+  );
+  useStudio.mockReturnValue(value);
+  listOralAvatars.mockResolvedValue([
+    { id: "a-1", status: "READY", source_kind: "VIDEO" },
+  ]);
+  listOralVoices.mockResolvedValue([
+    { id: "v-1", status: "READY", confirmed: 1, demo_asset_id: "demo" },
+  ]);
+  createViralImportTask.mockResolvedValue({
+    status: "SUCCEEDED",
+    projectId: "p-oral",
+    sourceAssetId: "asset-oral",
+  });
+  getLatestScriptFromAudioTask.mockResolvedValue({
+    id: "asr-existing",
+    status: "SUCCEEDED",
+    source_asset_id: "asset-oral",
+    result: { text: "原转写文案" },
+  });
+  getOralPrice.mockResolvedValue({
+    quote_token: "quote-1",
+    quote_expires_at: Math.floor(Date.now() / 1000) + 120,
+    max_credits: 18,
+    estimated_credits: 18,
+  });
+  // 本地上传没有平台原生 ID；两个上传素材也必须分别恢复。
+  const video: StudioVideo = {
+    ...base.data.videos[0],
+    id: "upload:oral-a",
+    platformKey: undefined,
+    nativeId: undefined,
+    durationMs: 45_000,
+  };
+  return { value, video };
+}
+
+function OralReplicaHarness({ video }: { video: StudioVideo }) {
+  const [requested, setRequested] = useState(true);
+  return (
+    <OralReplicaControl
+      video={video}
+      requested={requested}
+      onRequest={() => setRequested(true)}
+      onHandled={() => setRequested(false)}
+      importVideo={createViralImportTask}
+    />
+  );
+}
+
+async function prepareOralReplica() {
+  fireEvent.click(
+    await screen.findByRole("button", { name: "确认并提取口播" }),
+  );
+  const submit = await screen.findByRole("button", { name: "确认并生成口播" });
+  await waitFor(() => expect(submit).toBeEnabled());
+  return submit;
+}
+
+describe("数字人口播请求恢复", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    createOralTask.mockReset();
+    getOralPrice.mockReset();
+    getLatestScriptFromAudioTask.mockReset();
+  });
+
+  it("离页后晚到的成功回执仍保存任务号，重开只恢复原任务", async () => {
+    const { video, value } = oralReplicaFixture("oral-late-receipt");
+    let resolveSubmission!: (value: { id: string; status: string }) => void;
+    createOralTask.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSubmission = resolve;
+        }),
+    );
+    const view = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(await prepareOralReplica());
+    expect(createOralTask).toHaveBeenCalledOnce();
+    view.unmount();
+    await act(async () => {
+      resolveSubmission({ id: "oral-late-accepted", status: "QUEUED" });
+    });
+    expect(value.navigate).not.toHaveBeenCalled();
+    render(<OralReplicaHarness video={video} />);
+    const receipt = await screen.findByRole("dialog", {
+      name: "口播任务已受理",
+    });
+    expect(receipt).toHaveTextContent("oral-late-accepted");
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    expect(createOralTask).toHaveBeenCalledOnce();
+    fireEvent.click(within(receipt).getByRole("button", { name: "查看任务" }));
+    expect(value.navigate).toHaveBeenCalledWith("tasks");
+  });
+
+  it("刷新后保留未知受理请求，重新报价仍使用原文案、素材和幂等键", async () => {
+    const { video } = oralReplicaFixture("oral-frozen-refresh");
+    createOralTask
+      .mockRejectedValueOnce(new Error("网络断开"))
+      .mockResolvedValue({ id: "oral-resumed", status: "QUEUED" });
+    const view = render(<OralReplicaHarness video={video} />);
+    await prepareOralReplica();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "用户确认过的最终文案" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "获取口播报价" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认并生成口播" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("网络断开");
+    const firstRequest = createOralTask.mock.calls[0]?.[0];
+    view.unmount();
+    getOralPrice.mockResolvedValue({
+      quote_token: "quote-2",
+      quote_expires_at: Math.floor(Date.now() / 1000) + 120,
+      max_credits: 21,
+      estimated_credits: 21,
+    });
+    render(
+      <OralReplicaHarness video={{ ...video, title: "后来变化的标题" }} />,
+    );
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "用户确认过的最终文案",
+    );
+    expect(screen.getByLabelText("口播文案")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "更换默认分身和声音" }),
+    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "确认并生成口播" })).toBeNull();
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "获取口播报价" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "继续核对原口播任务" }),
+    );
+    await screen.findByRole("dialog", { name: "口播任务已受理" });
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    expect(createOralTask.mock.calls[1]?.[0]).toEqual({
+      ...firstRequest,
+      quoteToken: "quote-2",
+      maxCredits: 21,
+    });
+    expect(JSON.stringify(window.localStorage)).not.toContain("quote-1");
+    expect(JSON.stringify(window.localStorage)).not.toContain("quote-2");
+  });
+
+  it("重开后已同键重试时，旧页面晚到的明确拒绝不能清掉正在恢复的请求", async () => {
+    const { video } = oralReplicaFixture("oral-late-rejection-overlap");
+    let rejectOriginal!: (reason: unknown) => void;
+    let resolveRetry!: (value: { id: string; status: string }) => void;
+    createOralTask
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectOriginal = reject;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRetry = resolve;
+          }),
+      );
+    const original = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(await prepareOralReplica());
+    original.unmount();
+    const retry = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "获取口播报价" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "继续核对原口播任务" }),
+    );
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    expect(createOralTask.mock.calls[1]?.[0].idempotencyKey).toBe(
+      createOralTask.mock.calls[0]?.[0].idempotencyKey,
+    );
+    await act(async () => {
+      rejectOriginal(
+        Object.assign(new Error("原报价过期"), { code: "QUOTE_EXPIRED" }),
+      );
+    });
+    retry.unmount();
+    await act(async () => {
+      resolveRetry({ id: "oral-overlap-accepted", status: "QUEUED" });
+    });
+    render(<OralReplicaHarness video={video} />);
+    expect(
+      await screen.findByRole("dialog", { name: "口播任务已受理" }),
+    ).toHaveTextContent("oral-overlap-accepted");
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("待核对请求按账号与 video.id 隔离，不串到另一个上传视频", async () => {
+    const { video, value } = oralReplicaFixture("oral-isolation-a");
+    createOralTask.mockRejectedValue(new Error("网络断开"));
+    const view = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(await prepareOralReplica());
+    await screen.findByRole("alert");
+    view.unmount();
+    const otherVideo = render(
+      <OralReplicaHarness video={{ ...video, id: "upload:oral-b" }} />,
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "用数字人口播复刻" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("口播文案")).toBeNull();
+    otherVideo.unmount();
+    oralReplicaFixture("oral-isolation-b");
+    const otherAccount = render(<OralReplicaHarness video={video} />);
+    expect(
+      await screen.findByRole("dialog", { name: "用数字人口播复刻" }),
+    ).toBeInTheDocument();
+    otherAccount.unmount();
+    useStudio.mockReturnValue(value);
+    render(<OralReplicaHarness video={video} />);
+    expect(await screen.findByLabelText("口播文案")).toBeDisabled();
+    expect(createOralTask).toHaveBeenCalledOnce();
+  });
+
+  it("首次明确拒绝后允许修正文案，未知结果后的拒绝仍保留原请求", async () => {
+    const { video } = oralReplicaFixture("oral-rejected-vs-uncertain");
+    createOralTask
+      .mockRejectedValueOnce(
+        Object.assign(new Error("文案不符合要求"), {
+          code: "ORAL_REQUEST_INVALID",
+        }),
+      )
+      .mockRejectedValueOnce(new Error("网络断开"))
+      .mockRejectedValueOnce(
+        Object.assign(new Error("暂时无法核对"), {
+          code: "ORAL_REQUEST_INVALID",
+        }),
+      );
+    render(<OralReplicaHarness video={video} />);
+    fireEvent.click(await prepareOralReplica());
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "文案不符合要求",
+    );
+    expect(screen.getByLabelText("口播文案")).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "确认并生成口播" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("网络断开"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "继续核对原口播任务" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("暂时无法核对"),
+    );
+    expect(screen.getByLabelText("口播文案")).toBeDisabled();
+    expect(createOralTask.mock.calls[0]?.[0].idempotencyKey).not.toBe(
+      createOralTask.mock.calls[1]?.[0].idempotencyKey,
+    );
+    expect(createOralTask.mock.calls[1]?.[0].idempotencyKey).toBe(
+      createOralTask.mock.calls[2]?.[0].idempotencyKey,
+    );
+  });
+
+  it("无法持久保存恢复信息时阻止付费提交，内存回退不能绕过检查", async () => {
+    const { video } = oralReplicaFixture("oral-storage-unavailable");
+    render(<OralReplicaHarness video={video} />);
+    const submit = await prepareOralReplica();
+    const storage = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("Storage unavailable", "QuotaExceededError");
+      });
+    try {
+      fireEvent.click(submit);
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "无法保存任务恢复信息",
+      );
+      fireEvent.click(submit);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "获取口播报价" }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", { name: "继续核对原口播任务" }),
+      );
+      await screen.findByRole("alert");
+      expect(createOralTask).not.toHaveBeenCalled();
+    } finally {
+      storage.mockRestore();
+    }
+  });
+});
+
+describe("数字人口播编辑草稿", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    createOralTask.mockReset();
+    getOralPrice.mockReset();
+    getLatestScriptFromAudioTask.mockReset();
+  });
+
+  it("改稿关闭后直接恢复编辑稿，刷新也不会被原转写覆盖", async () => {
+    const { video } = oralReplicaFixture("oral-edited-draft");
+    const view = render(<OralReplicaHarness video={video} />);
+    await prepareOralReplica();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "  我改写的第一段\n保留换行和空格  " },
+    });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "一键复刻 · 数字人口播" }),
+    );
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "  我改写的第一段\n保留换行和空格  ",
+    );
+    expect(screen.getByLabelText("口播文案")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "获取口播报价" })).toBeEnabled();
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+    view.unmount();
+    render(<OralReplicaHarness video={video} />);
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "  我改写的第一段\n保留换行和空格  ",
+    );
+    expect(screen.queryByRole("button", { name: "确认并生成口播" })).toBeNull();
+    expect(getOralPrice).toHaveBeenCalledOnce();
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    expect(createOralTask).not.toHaveBeenCalled();
+    expect(JSON.stringify(window.localStorage)).not.toContain("quote-1");
+  });
+
+  it("主动清空的草稿也会保存，并与其他账号、上传视频隔离", async () => {
+    const { video, value } = oralReplicaFixture("oral-empty-draft-a");
+    const view = render(<OralReplicaHarness video={video} />);
+    await prepareOralReplica();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "" },
+    });
+    view.unmount();
+    const otherVideo = render(
+      <OralReplicaHarness video={{ ...video, id: "upload:different-draft" }} />,
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "用数字人口播复刻" }),
+    ).toBeInTheDocument();
+    otherVideo.unmount();
+    oralReplicaFixture("oral-empty-draft-b");
+    const otherAccount = render(<OralReplicaHarness video={video} />);
+    expect(
+      await screen.findByRole("dialog", { name: "用数字人口播复刻" }),
+    ).toBeInTheDocument();
+    otherAccount.unmount();
+    useStudio.mockReturnValue(value);
+    render(<OralReplicaHarness video={video} />);
+    expect(await screen.findByLabelText("口播文案")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "获取口播报价" })).toBeDisabled();
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+  });
+
+  it("编辑后更换默认素材仍保留文案，不再提取原视频", async () => {
+    const { video, value } = oralReplicaFixture("oral-draft-change-assets");
+    value.data.people[0].voices.push({
+      id: "v-2",
+      name: "第二个声音",
+      confirmed: true,
+      status: "READY",
+    });
+    createOralTask.mockResolvedValue({
+      id: "oral-new-voice",
+      status: "QUEUED",
+    });
+    const view = render(<OralReplicaHarness video={video} />);
+    await prepareOralReplica();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "更换声音时保留我编辑的文案" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "更换素材" }));
+    fireEvent.change(screen.getByLabelText("口播声音"), {
+      target: { value: "v-2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存默认素材并继续" }));
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "更换声音时保留我编辑的文案",
+    );
+    view.unmount();
+    render(<OralReplicaHarness video={video} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "获取口播报价" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认并生成口播" }),
+    );
+    await screen.findByRole("dialog", { name: "口播任务已受理" });
+    expect(createOralTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        voiceId: "v-2",
+        scriptText: "更换声音时保留我编辑的文案",
+      }),
+    );
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+  });
+
+  it("受理后须显式新建版本；新版本草稿刷新后保留并使用新请求键", async () => {
+    const { video } = oralReplicaFixture("oral-explicit-new-version");
+    createOralTask.mockResolvedValue({
+      id: "oral-first-version",
+      status: "QUEUED",
+    });
+    const view = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(await prepareOralReplica());
+    const receipt = await screen.findByRole("dialog", {
+      name: "口播任务已受理",
+    });
+    const previousKey = createOralTask.mock.calls[0]?.[0].idempotencyKey;
+    fireEvent.click(
+      within(receipt).getByRole("button", { name: "新建一个口播版本" }),
+    );
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "第二版的文案" },
+    });
+    view.unmount();
+    render(<OralReplicaHarness video={video} />);
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "第二版的文案",
+    );
+    expect(screen.getByLabelText("口播文案")).toBeEnabled();
+    expect(createOralTask).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "获取口播报价" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认并生成口播" }),
+    );
+    await screen.findByRole("dialog", { name: "口播任务已受理" });
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    expect(createOralTask.mock.calls[1]?.[0].idempotencyKey).not.toBe(
+      previousKey,
+    );
+    expect(createOralTask.mock.calls[1]?.[0].scriptText).toBe("第二版的文案");
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+  });
+});
+
 describe("全自动复刻入口（M8 v1）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -4956,13 +5477,18 @@ describe("全自动复刻入口（M8 v1）", () => {
     fetchReplicaPipeline.mockReset();
   });
 
-  it.each(["庭院案例", "管理员上传"])(
-    "%s 详情保留任务恢复与复刻入口",
-    async (category) => {
+  it.each([
+    ["庭院案例", 4_000],
+    ["管理员上传", 30_000],
+    ["管理员上传", 30_001],
+  ] as const)(
+    "%s %i 毫秒详情保留任务恢复与复刻入口",
+    async (category, durationMs) => {
       const nativeId = "replica-native-1";
       const base = studio();
       const value = studio({
         review: false,
+        user: { ...base.user, id: `ai-${durationMs}` },
         state: { ...base.state, selectedVideoId: `douyin-${nativeId}` },
         data: {
           ...base.data,
@@ -4974,8 +5500,8 @@ describe("全自动复刻入口（M8 v1）", () => {
               platform: "抖音",
               category,
               poster: "",
-              duration: "00:08",
-              durationMs: 8_000,
+              duration: `00:${String(durationMs / 1000).padStart(2, "0")}`,
+              durationMs,
               likes: 123,
               comments: 4,
               shares: 5,
@@ -4997,7 +5523,7 @@ describe("全自动复刻入口（M8 v1）", () => {
           authorAvatar: null,
           verified: false,
           coverUrl: null,
-          durationMs: 8_000,
+          durationMs,
           likes: 123,
           comments: 4,
           shares: 5,
@@ -5027,12 +5553,35 @@ describe("全自动复刻入口（M8 v1）", () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
       useStudio.mockReturnValue(value);
       const view = render(<ViralDetailPage />);
+      if (durationMs > 30_000) {
+        expect(
+          await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+        ).toBeEnabled();
+        expect(
+          screen.queryByRole("button", { name: "全自动复刻" }),
+        ).not.toBeInTheDocument();
+        expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+        confirmSpy.mockRestore();
+        view.unmount();
+        return;
+      }
       const entry = await screen.findByRole("button", { name: "全自动复刻" });
       await waitFor(() => expect(entry).toBeEnabled());
       expect(
         screen.queryByRole("button", { name: "刷新资源（按次计费）" }),
       ).not.toBeInTheDocument();
       fireEvent.click(entry);
+      expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+      finishAdaptiveGuide();
+      const setup = await screen.findByRole("dialog", {
+        name: "设置 AI 视频默认人物",
+      });
+      fireEvent.change(within(setup).getByLabelText("人物版本"), {
+        target: { value: "cv-1" },
+      });
+      fireEvent.click(
+        within(setup).getByRole("button", { name: "保存默认人物并继续" }),
+      );
       expect(confirmSpy).toHaveBeenCalledOnce();
       confirmSpy.mockRestore();
       await waitFor(() =>
@@ -5097,6 +5646,197 @@ describe("全自动复刻入口（M8 v1）", () => {
       failedRecovery.unmount();
     },
   );
+  it("30.001 秒自动转写、复用默认素材，改稿后重新报价，只有确认才生成", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: "oral-adaptive-test" },
+      state: {
+        ...base.state,
+        selectedVideoId: "dy-1",
+        viralReplicateIntent: true,
+      },
+      data: {
+        ...base.data,
+        people: [
+          {
+            id: "person-1",
+            name: "本人",
+            role: "",
+            version: 1,
+            scope: "",
+            audience: "",
+            expression: "",
+            sceneLookCount: 0,
+            photoIds: [],
+            avatars: [
+              {
+                id: "a-1",
+                name: "默认分身",
+                imageId: "asset-1",
+                ready: true,
+                origin: "视频制作",
+                duration: "00:15",
+              },
+            ],
+            voices: [
+              { id: "v-1", name: "默认声音", confirmed: true, status: "READY" },
+              { id: "v-2", name: "未确认声音", confirmed: false },
+            ],
+          },
+        ],
+      },
+    });
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(viralItem(1, { durationMs: 30_001 })),
+    );
+    listOralAvatars.mockResolvedValue([
+      { id: "a-1", status: "READY", source_kind: "VIDEO" },
+    ]);
+    listOralVoices.mockResolvedValue([
+      { id: "v-1", status: "READY", confirmed: 1, demo_asset_id: "demo" },
+    ]);
+    createViralImportTask.mockResolvedValue({
+      status: "SUCCEEDED",
+      canTranscribe: true,
+      projectId: "p-oral",
+      sourceAssetId: "asset-oral",
+    });
+    const transcript = {
+      id: "asr-1",
+      status: "SUCCEEDED",
+      source_asset_id: "asset-oral",
+      result: { text: "已转写的内容" },
+    };
+    getLatestScriptFromAudioTask
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(transcript);
+    createScriptFromAudioTask.mockResolvedValue(transcript);
+    const quoteFixture = "fixture-quote";
+    getOralPrice.mockResolvedValue({
+      quote_token: quoteFixture,
+      quote_expires_at: Math.floor(Date.now() / 1000) + 120,
+      max_credits: 18,
+      estimated_credits: 18,
+    });
+    createOralTask
+      .mockRejectedValueOnce(new Error("网络断开"))
+      .mockResolvedValue({ id: "oral-1", status: "PENDING" });
+    useStudio.mockReturnValue(value);
+    const view = render(<ViralDetailPage />);
+    await screen.findByRole("dialog", { name: "一键复刻使用教程" });
+    finishAdaptiveGuide();
+    const setup = await screen.findByRole("dialog", {
+      name: "设置数字人口播默认素材",
+    });
+    fireEvent.change(within(setup).getByLabelText("人物"), {
+      target: { value: "person-1" },
+    });
+    expect(within(setup).queryByText("未确认声音")).not.toBeInTheDocument();
+    fireEvent.change(within(setup).getByLabelText("视频分身"), {
+      target: { value: "a-1" },
+    });
+    fireEvent.change(within(setup).getByLabelText("口播声音"), {
+      target: { value: "v-1" },
+    });
+    fireEvent.click(
+      within(setup).getByRole("button", { name: "保存默认素材并继续" }),
+    );
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认并提取口播" }));
+    const generate = await screen.findByRole("button", {
+      name: "确认并生成口播",
+    });
+    expect(createViralImportTask).toHaveBeenCalledWith(
+      "douyin",
+      "native-dy-1",
+      "copy",
+      expect.any(String),
+    );
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+    expect(createOralTask).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "改好的文案" },
+    });
+    expect(generate).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "获取口播报价" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认并生成口播" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("网络断开");
+    expect(value.navigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "继续核对原口播任务" }));
+    await waitFor(() => expect(value.navigate).toHaveBeenCalledWith("tasks"));
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    expect(createOralTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        identityId: "person-1",
+        avatarId: "a-1",
+        voiceId: "v-1",
+        scriptText: "改好的文案",
+        quoteToken: "fixture-quote",
+        maxCredits: 18,
+        idempotencyKey: expect.any(String),
+      }),
+    );
+    expect(createOralTask.mock.calls[1]?.[0].idempotencyKey).toEqual(
+      createOralTask.mock.calls[0]?.[0].idempotencyKey,
+    );
+    view.unmount();
+    render(<ViralDetailPage />);
+    const receipt = await screen.findByRole("dialog", {
+      name: "口播任务已受理",
+    });
+    expect(receipt).toHaveTextContent("oral-1");
+    expect(
+      screen.queryByRole("dialog", { name: "一键复刻使用教程" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("dialog", { name: "设置数字人口播默认素材" }),
+    ).toBeNull();
+    expect(createScriptFromAudioTask).toHaveBeenCalledOnce();
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("首次关闭教程后不再自动弹出，仍允许手动查看", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: "adaptive-guide-dismiss" },
+      state: { ...base.state, selectedVideoId: "dy-1" },
+    });
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(viralItem(1, { durationMs: 30_001 })),
+    );
+    useStudio.mockReturnValue(value);
+    const view = render(<ViralDetailPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
+    );
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    view.unmount();
+    render(<ViralDetailPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "设置数字人口播默认素材" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "一键复刻使用教程" }),
+    ).toBeNull();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "使用教程" }));
+    expect(
+      screen.getByRole("dialog", { name: "一键复刻使用教程" }),
+    ).toBeInTheDocument();
+  });
+
   it("培训下载重新签发地址并保留工作台页面", async () => {
     useStudio.mockReturnValue(studio());
     trainingMaterialDownloadUrl

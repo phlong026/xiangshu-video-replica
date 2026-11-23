@@ -370,6 +370,8 @@ export function patchStudioDraft(
   if (sourceChanged) {
     if (!Object.hasOwn(patch, "projectId")) next.projectId = undefined;
     if (!Object.hasOwn(patch, "sourceAssetId")) next.sourceAssetId = undefined;
+    if (!Object.hasOwn(patch, "sourceDurationSeconds"))
+      next.sourceDurationSeconds = undefined;
     if (!Object.hasOwn(patch, "originalImageId"))
       next.originalImageId = undefined;
     if (!Object.hasOwn(patch, "tailFrameId")) next.tailFrameId = undefined;

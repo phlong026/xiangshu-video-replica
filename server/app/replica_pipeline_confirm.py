@@ -71,12 +71,11 @@ def freeze_confirm_quote(
     *,
     row: BusinessRow,
     owner_user_id: str,
+    duration_seconds: int,
 ) -> dict[str, object]:
     """进入 AWAIT_CONFIRM 前冻结授权基准（金额上限/档位/名额/指纹/报价凭证）.
 
-    固定策略（方案 §3.4）：768P、单任务、时长=源片时长（4–15 秒为可成交口径，
-    超出 15 秒的源片在 COMPOSING 已按失败出口转手动——批次请求限 4–15 秒，
-    30 秒复刻走既有两段方案，不由本管道自动代答）。
+    使用本次实际编译的时长，不因素材库元数据刷新而生成另一份报价。
     """
     from app.generation import generation_price_quote
 
@@ -94,7 +93,6 @@ def freeze_confirm_quote(
         and isinstance(first_frame_asset_id, str)
     ):
         raise _confirm_error("CONFIRM_INPUT_INCOMPLETE", "确认点输入不完整。")
-    duration_seconds = _output_duration_seconds(conn, row)
     quote = generation_price_quote(
         conn,
         resolution="768P",
@@ -124,20 +122,6 @@ def freeze_confirm_quote(
         "frozenAt": datetime.now(UTC).isoformat(),
     }
     return snapshot
-
-
-def _output_duration_seconds(conn: BusinessConnection, row: BusinessRow) -> int:
-    """输出时长=源片时长（4–15 秒）。>15 秒源片不自动生成（见模块注释）."""
-    duration_ms = conn.execute(
-        "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
-        (str(row["platform"]), str(row["video_id"])),
-    ).fetchone()
-    source_seconds = (
-        0
-        if duration_ms is None or duration_ms["duration_ms"] is None
-        else round(int(duration_ms["duration_ms"]) / 1000)
-    )
-    return max(4, min(15, source_seconds or 4))
 
 
 def confirm_pipeline(
@@ -358,32 +342,43 @@ def expire_pipelines(conn: BusinessConnection, *, limit: int = 50) -> int:
 
 
 def resume_suspended_pipelines(conn: BusinessConnection, *, limit: int = 50) -> int:
-    """总开关重开后的恢复扫描（评审 B-r1#2）：挂起行里清屏障、累计时长、重轮询.
+    """worker 重开扫描：同一事务恢复父轮询与三个子任务域的领取资格。
 
-    与 expire_pipelines 同为独立扫描（不进轮询白名单——挂起行按设计不被领取）。
-    调用方：worker 定时任务在开关开启时调用；恢复后行重新可领、断点续跑
-    （挂起产物纳回版本链依赖子任务域既有恢复语义，M6b 迭代登记）。
+    同时扫描仅子任务被 hold 的关开窗口，以及未知提交完成对账后留下的
+    hold。先锁父行、跳过竞争者，再复用单条恢复，避免两条路径语义分叉。
     """
-    resumed = conn.execute(
+    if limit <= 0:
+        return 0
+    candidates = conn.execute(
         """
-        UPDATE replica_pipeline_tasks SET
-            suspended_seconds_total = suspended_seconds_total +
-                CASE WHEN suspended_at IS NULL THEN 0
-                     ELSE FLOOR(EXTRACT(EPOCH FROM (now() - suspended_at)))::int END,
-            suspended_at = NULL,
-            next_poll_at = now(),
-            updated_at = now()
-        WHERE id IN (
-            SELECT id FROM replica_pipeline_tasks
-            WHERE suspended_at IS NOT NULL
-            ORDER BY suspended_at LIMIT %s
-            FOR UPDATE SKIP LOCKED
+        SELECT p.id FROM replica_pipeline_tasks p
+        WHERE p.status = ANY(%s) AND (
+            p.suspended_at IS NOT NULL OR (
+                (p.status = %s OR (
+                    p.status = ANY(%s)
+                    AND (p.stage_detail -> 'uncertain') IS DISTINCT FROM 'true'::jsonb
+                    AND COALESCE(p.stage_detail ->> 'revokedReason', '') = ''
+                    AND NOT EXISTS (
+                        SELECT 1 FROM generation_tasks t WHERE t.batch_id = p.batch_id
+                        AND (t.status IN ('SUBMISSION_UNCERTAIN', 'NEEDS_ATTENTION')
+                             OR t.error_code = 'LEASE_EXPIRED_NEEDS_ATTENTION')
+                    )
+                )) AND (
+                    EXISTS (SELECT 1 FROM analysis_tasks t WHERE t.id = p.analysis_task_id
+                        AND t.status = 'PENDING' AND t.error_code = 'REPLICA_PIPELINE_SUSPENDED')
+                    OR EXISTS (SELECT 1 FROM first_frame_tasks t WHERE t.id = p.first_frame_task_id
+                        AND t.status = 'PENDING' AND t.error_code = 'REPLICA_PIPELINE_SUSPENDED')
+                    OR EXISTS (SELECT 1 FROM generation_tasks t WHERE t.batch_id = p.batch_id
+                        AND t.status = 'PENDING' AND t.error_code = 'REPLICA_PIPELINE_SUSPENDED')
+                )
+            )
         )
-        RETURNING id
+        ORDER BY p.suspended_at NULLS LAST, p.id LIMIT %s
+        FOR UPDATE OF p SKIP LOCKED
         """,
-        (limit,),
+        (sorted(rp.POLL_STATUSES), rp.STATUS_DRAINING, sorted(rp.SUBMIT_PERMIT_STATUSES), limit),
     ).fetchall()
-    return len(resumed)
+    return sum(rp.resume_from_suspension(conn, str(row["id"])) for row in candidates)
 
 
 def confirm_quote_payload(row: BusinessRow) -> dict[str, object]:
