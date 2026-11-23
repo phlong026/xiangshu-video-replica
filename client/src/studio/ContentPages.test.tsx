@@ -5183,6 +5183,53 @@ describe("数字人口播请求恢复", () => {
     );
   });
 
+  it("重开后已同键重试时，旧页面晚到的明确拒绝不能清掉正在恢复的请求", async () => {
+    const { video } = oralReplicaFixture("oral-late-rejection-overlap");
+    let rejectOriginal!: (reason: unknown) => void;
+    let resolveRetry!: (value: { id: string; status: string }) => void;
+    createOralTask
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectOriginal = reject;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRetry = resolve;
+          }),
+      );
+    const original = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(await prepareOralReplica());
+    original.unmount();
+    const retry = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "获取口播报价" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "继续核对原口播任务" }),
+    );
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    expect(createOralTask.mock.calls[1]?.[0].idempotencyKey).toBe(
+      createOralTask.mock.calls[0]?.[0].idempotencyKey,
+    );
+    await act(async () => {
+      rejectOriginal(
+        Object.assign(new Error("原报价过期"), { code: "QUOTE_EXPIRED" }),
+      );
+    });
+    retry.unmount();
+    await act(async () => {
+      resolveRetry({ id: "oral-overlap-accepted", status: "QUEUED" });
+    });
+    render(<OralReplicaHarness video={video} />);
+    expect(
+      await screen.findByRole("dialog", { name: "口播任务已受理" }),
+    ).toHaveTextContent("oral-overlap-accepted");
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+  });
+
   it("待核对请求按账号与 video.id 隔离，不串到另一个上传视频", async () => {
     const { video, value } = oralReplicaFixture("oral-isolation-a");
     createOralTask.mockRejectedValue(new Error("网络断开"));

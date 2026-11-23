@@ -36,6 +36,7 @@ type OralRequestSnapshot = OralDefaults & {
 type OralAttempt = {
   request: OralRequestSnapshot;
   idempotencyKey: string;
+  retried: boolean;
   receipt?: { id: string; status: string };
 };
 const EMPTY: OralDefaults = { identityId: "", avatarId: "", voiceId: "" };
@@ -101,6 +102,7 @@ function readAttempt(
         scriptText: request.scriptText,
       },
       idempotencyKey: attempt.idempotencyKey,
+      retried: attempt.retried === true,
       ...(typeof attempt.receipt?.id === "string" &&
       typeof attempt.receipt.status === "string"
         ? {
@@ -402,15 +404,18 @@ export function OralReplicaControl({
         setQuote(null);
         throw new Error("口播报价已失效或默认素材不可用，请重新核对。");
       }
-      const submitted: OralAttempt = saved ?? {
-        request: {
-          ...choice,
-          title,
-          mode: "TTS",
-          scriptText: script.trim(),
-        },
-        idempotencyKey: crypto.randomUUID(),
-      };
+      const submitted: OralAttempt = saved
+        ? { ...saved, retried: true }
+        : {
+            request: {
+              ...choice,
+              title,
+              mode: "TTS",
+              scriptText: script.trim(),
+            },
+            idempotencyKey: crypto.randomUUID(),
+            retried: false,
+          };
       if (!saveAttempt(user.id, video, submitted)) {
         throw new Error("无法保存任务恢复信息，请检查浏览器本地存储后重试。");
       }
@@ -424,11 +429,12 @@ export function OralReplicaControl({
           maxCredits: quote.max_credits,
         });
       } catch (cause) {
-        // 首次请求的明确拒绝允许修正；已有不确定请求仍冻结，不能重造另一个任务。
+        // 同键重试一旦开始，旧页面晚到的拒绝也不能解冻仍在核对的请求。
         const current = readAttempt(user.id, video);
         if (
           !saved &&
           current?.idempotencyKey === submitted.idempotencyKey &&
+          !current.retried &&
           !current.receipt &&
           cause &&
           typeof cause === "object" &&
