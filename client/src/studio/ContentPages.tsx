@@ -37,6 +37,7 @@ import {
   type ReplicaPipelineCharacter,
   type ReplicaPipelineQuote,
   type ReplicaPipelineStatus,
+  readShotConsistencyIssues,
   removeViralFavorite,
   resolveMaterials,
   saveStudioDraft,
@@ -71,6 +72,7 @@ import {
   KUAISHOU_VERIFICATION_MESSAGE,
   PublishRecordsPanel,
 } from "./PublishRecordsPanel";
+import { createDraft } from "./state";
 import { taskHasDeliverable } from "./taskResults";
 import type {
   ReplicaSource,
@@ -492,7 +494,7 @@ function ReplicaPipelineControl({
   onRequest: () => void;
   onHandled: () => void;
 }) {
-  const { notify, user } = useStudio();
+  const { notify, user, state, navigate, refresh } = useStudio();
   const sourcePlatform = uploadedSource ? "upload" : video.platformKey;
   const sourceId = uploadedSource?.assetId ?? video.nativeId;
   const [pipelineId, setPipelineId] = useState<string | null>(null);
@@ -798,14 +800,58 @@ function ReplicaPipelineControl({
       </>
     );
   }
-  const label = status
-    ? (REPLICA_STAGE_LABELS[status.status] ?? status.status)
-    : "启动中…";
+  const reviewDetail = status?.stageDetail?.storyboardReview;
+  const storyboardIssues = readShotConsistencyIssues(
+    reviewDetail && typeof reviewDetail === "object" && "issues" in reviewDetail
+      ? reviewDetail.issues
+      : undefined,
+  );
+  const waitingForStoryboard =
+    status?.status === "ANALYZING" && storyboardIssues.length > 0;
+  const label = waitingForStoryboard
+    ? `拆解已完成，${storyboardIssues.length} 处待确认`
+    : status
+      ? (REPLICA_STAGE_LABELS[status.status] ?? status.status)
+      : "启动中…";
   const quoteStale = quoteAgeMs > 300_000;
   const fees = status?.feeSummary;
   return (
     <div className="replica-pipeline-panel">
       <p role="status">全自动复刻：{label}</p>
+      {waitingForStoryboard && status ? (
+        <div className="replica-pipeline-review">
+          <ul>
+            {storyboardIssues.map((issue) => (
+              <li key={`${issue.code}:${issue.shot_id ?? ""}:${issue.message}`}>
+                {issue.shot_id ? `${issue.shot_id}：` : ""}
+                {issue.message}
+              </li>
+            ))}
+          </ul>
+          <Button
+            variant="primary"
+            disabled={busy}
+            onClick={() => {
+              refresh();
+              navigate("replica", {
+                storyboardReviewProjectId: status.projectId,
+                draft:
+                  state.draft.projectId === status.projectId
+                    ? state.draft
+                    : {
+                        ...createDraft(),
+                        projectId: status.projectId,
+                        sourceId: uploadedSource?.assetId ?? video.id,
+                        sourceAssetId: uploadedSource?.assetId,
+                      },
+              });
+            }}
+          >
+            确认分镜后继续
+          </Button>
+          <p className="admin-hint">修正并保存后会自动继续，无需重新拆解。</p>
+        </div>
+      ) : null}
       {status?.status === "AWAIT_CONFIRM" ? (
         <div className="replica-pipeline-review">
           {status.promptText ? (

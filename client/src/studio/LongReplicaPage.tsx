@@ -19,10 +19,12 @@ import {
   getReplicaPromptVersionById,
   readReplicaPromptShots,
   readReplicaPromptSpokenScript,
+  readShotConsistencyIssues,
   startReplicaPromptTask,
   waitForReplicaPromptTask,
 } from "../api";
 import { isInsufficientCredits } from "../insufficientCredits";
+import { formatShotMotion } from "../ShotCardEditor";
 import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { readVideoDuration, uploadWorkbenchSourceVideo } from "./live";
@@ -69,10 +71,14 @@ function formatSeconds(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return "--:--";
   }
-  const total = Math.round(value);
+  const milliseconds = Math.round(value * 1000);
+  const total = Math.floor(milliseconds / 1000);
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  const fraction = String(milliseconds % 1000)
+    .padStart(3, "0")
+    .replace(/0+$/, "");
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${fraction ? `.${fraction}` : ""}`;
 }
 
 function CopyBlock({
@@ -636,9 +642,18 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
         ),
         shots: readReplicaPromptShots(result.payload.shots),
         replica_prompt: String(result.payload.replica_prompt ?? ""),
-        warnings: Array.isArray(result.payload.warnings)
-          ? result.payload.warnings
-          : [],
+        warnings: [
+          ...readShotConsistencyIssues(result.payload.warnings),
+          ...readShotConsistencyIssues(result.payload.consistency_issues),
+        ].filter(
+          (issue, index, issues) =>
+            issues.findIndex(
+              (item) =>
+                item.code === issue.code &&
+                item.shot_id === issue.shot_id &&
+                item.message === issue.message,
+            ) === index,
+        ),
       }
     : null;
 
@@ -750,7 +765,12 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
               <Panel className="long-replica-warnings">
                 <ul role="status">
                   {payload.warnings.map((warning) => (
-                    <li key={warning.code}>{warning.message}</li>
+                    <li
+                      key={`${warning.code}:${warning.shot_id ?? ""}:${warning.message}`}
+                    >
+                      {warning.shot_id ? `${warning.shot_id}：` : ""}
+                      {warning.message}
+                    </li>
                   ))}
                 </ul>
               </Panel>
@@ -770,6 +790,8 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                         <th>运镜</th>
                         <th>主体</th>
                         <th>动作与画面变化</th>
+                        <th>运动</th>
+                        <th>分段</th>
                         <th>场景</th>
                         <th>口播</th>
                         <th>衔接</th>
@@ -787,7 +809,31 @@ function LongReplicaAccountPage({ accountId }: { accountId: string }) {
                           <td>{shot.camera_motion || "—"}</td>
                           <td>{shot.subject || "—"}</td>
                           <td>{shot.action || "—"}</td>
-                          <td>{shot.scene || "—"}</td>
+                          <td>{formatShotMotion(shot.motion) || "未标注"}</td>
+                          <td>
+                            {[
+                              shot.segment_kind === "ACTION_BEAT"
+                                ? "连续动作段"
+                                : shot.segment_kind === "SHOT_CUT"
+                                  ? "切镜"
+                                  : "",
+                              shot.boundary_reason,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || "—"}
+                          </td>
+                          <td>
+                            {[
+                              shot.scene,
+                              shot.scene_dressing,
+                              shot.scene_lighting,
+                              shot.wardrobe_pose_detail,
+                              shot.ambient_sound,
+                              shot.music_style_hint,
+                            ]
+                              .filter(Boolean)
+                              .join("；") || "—"}
+                          </td>
                           <td>{shot.spoken_text || "—"}</td>
                           <td>{shot.transition || "—"}</td>
                         </tr>

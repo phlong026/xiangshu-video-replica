@@ -112,6 +112,44 @@ function renderStage(
 }
 
 describe("VideoResultStage", () => {
+  it.each([
+    ["REPLICA_ACTION_MISMATCH:s1", "s1：动作与分镜不一致"],
+    ["REPLICA_CAMERA_MISMATCH:s1", "s1：运镜与分镜不一致"],
+    ["REPLICA_TIMING_MISMATCH:s1", "s1：时间与分镜不一致"],
+    ["REPLICA_SPEECH_MISMATCH", "台词与确认文案不一致"],
+    ["REPLICA_REVIEW_UNAVAILABLE", "自动核对暂不可用，请人工检查"],
+    ["REPLICA_REVIEW_INCOMPLETE", "自动核对未完成，请人工检查"],
+  ])("复刻核对 %s 提醒人工检查但保留成片操作", (code, message) => {
+    const result = task({
+      quality_status: "REPLICA_REVIEW_REQUIRED",
+      quality_issue_codes: [code],
+      available_actions: ["REGENERATE"],
+    });
+    const props = renderStage({
+      batch: batch({ quantity: 1, tasks: [result] }),
+      previewUrls: { "task-ok": "https://preview.example/result.mp4" },
+    });
+    expect(screen.getByText("成片需复核")).toBeInTheDocument();
+    expect(screen.getByText(message)).toBeInTheDocument();
+    expect(screen.getByLabelText("结果预览 task-ok")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下载 MP4" }));
+    expect(props.onDownload).toHaveBeenCalledWith(result);
+    expect(screen.getByRole("button", { name: "再次生成" })).toBeEnabled();
+    expect(props.onRegenerate).not.toHaveBeenCalled();
+  });
+
+  it("通过复刻核对只显示核对结果，不承诺逐帧一致", () => {
+    renderStage({
+      batch: batch({
+        quantity: 1,
+        tasks: [task({ quality_status: "REPLICA_REVIEW_PASSED" })],
+      }),
+    });
+    expect(screen.getByText("复刻核对通过")).toBeInTheDocument();
+    expect(screen.queryByText("成片需复核")).not.toBeInTheDocument();
+  });
+
   it("displays legacy UTC completion timestamps in Beijing time", () => {
     renderStage();
     expect(screen.getAllByText("2026/8/16 18:00:06").length).toBeGreaterThan(0);

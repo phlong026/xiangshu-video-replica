@@ -1106,6 +1106,38 @@ describe("真实 Studio 只读适配器", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it.each(["最新分镜确认的原文", ""])(
+    "项目草稿优先最新分镜原文，包括显式空串：%j",
+    async (original) => {
+      api.getLatestProjectShotCards.mockResolvedValue({
+        id: "reviewed-card",
+        payload: {
+          source_analysis_version_id: "analysis-1",
+          original_script: original,
+        },
+      });
+      const result = await loadProjectDraft(project);
+      expect(result.draft.script.original).toBe(original);
+      expect(result.draft.script.text).toBe("已经保存的二创终稿。");
+      expect(result.errors).toEqual([]);
+    },
+  );
+
+  it.each(["旧卡原文", ""])(
+    "旧来源镜头卡原文不覆盖新分析：%j",
+    async (original) => {
+      api.getLatestProjectShotCards.mockResolvedValue({
+        id: "old-card",
+        payload: {
+          source_analysis_version_id: "analysis-old",
+          original_script: original,
+        },
+      });
+      const result = await loadProjectDraft(project);
+      expect(result.draft.script.original).toBe("分析得到的原始口播。");
+    },
+  );
+
   it("没有保存版本时只把分析原文带入未确认的本地草稿", async () => {
     api.getLatestScriptVersion.mockResolvedValue({
       stale: false,

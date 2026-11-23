@@ -1,4 +1,4 @@
-import type { ShotCard, ShotMotion } from "./api";
+import type { ShotCard, ShotConsistencyIssue, ShotMotion } from "./api";
 
 const SUBJECT_MOTION_STATE_OPTIONS: Array<{
   value: ShotMotion["subject_motion_state"];
@@ -8,9 +8,10 @@ const SUBJECT_MOTION_STATE_OPTIONS: Array<{
   { value: "WALKING", label: "行走" },
   { value: "RUNNING", label: "跑动" },
   { value: "TURNING", label: "转身" },
-  { value: "GESTURING_ONLY", label: "仅手势" },
+  { value: "GESTURING_ONLY", label: "手势" },
   { value: "OBJECT_MOTION", label: "物体运动" },
   { value: "NO_PERSON", label: "无人物" },
+  { value: "UNKNOWN", label: "待确认" },
 ];
 
 const SUBJECT_DIRECTION_OPTIONS: Array<{
@@ -24,6 +25,7 @@ const SUBJECT_DIRECTION_OPTIONS: Array<{
   { value: "lateral", label: "横向移动" },
   { value: "in_place", label: "原地" },
   { value: "none", label: "无" },
+  { value: "unknown", label: "待确认" },
 ];
 
 const MOTION_CAMERA_OPTIONS: Array<{
@@ -37,15 +39,21 @@ const MOTION_CAMERA_OPTIONS: Array<{
   { value: "PAN", label: "横摇" },
   { value: "TILT", label: "纵摇" },
   { value: "FOLLOW", label: "跟随主体" },
+  { value: "ORBIT", label: "环绕" },
+  { value: "CRANE_UP", label: "升高" },
+  { value: "CRANE_DOWN", label: "降低" },
+  { value: "ZOOM_IN", label: "变焦拉近" },
+  { value: "ZOOM_OUT", label: "变焦拉远" },
+  { value: "UNKNOWN", label: "待确认" },
 ];
 
 const DEFAULT_SHOT_MOTION: ShotMotion = {
-  subject_motion_state: "STATIC",
-  subject_direction: "none",
-  subject_displacement: "无位移",
-  hand_action: "未描述",
-  camera_motion: "STATIC",
-  relative_motion: "未描述",
+  subject_motion_state: "UNKNOWN",
+  subject_direction: "unknown",
+  subject_displacement: "待确认",
+  hand_action: "待确认",
+  camera_motion: "UNKNOWN",
+  relative_motion: "待确认",
 };
 
 const SHOT_TEXT_FIELDS = [
@@ -73,6 +81,14 @@ const CLIPBOARD_HEADERS = [
   "场景",
   "原口播",
   "转场",
+  "分段类型",
+  "分段原因",
+  "人数",
+  "场景陈设",
+  "光线",
+  "服装与姿态",
+  "环境音",
+  "配乐风格",
 ];
 
 function clipboardCell(value: unknown): string {
@@ -85,13 +101,23 @@ function optionLabel<T extends string>(
   options: Array<{ value: T; label: string }>,
   value: T,
 ): string {
-  return options.find((option) => option.value === value)?.label ?? value;
+  return options.find((option) => option.value === value)?.label ?? "待确认";
 }
 
-function motionClipboardText(motion: ShotMotion | null | undefined): string {
+export function formatShotMotion(
+  motion: ShotMotion | null | undefined,
+): string {
   if (!motion) return "";
   return [
-    `人物：${optionLabel(SUBJECT_MOTION_STATE_OPTIONS, motion.subject_motion_state)}`,
+    `人物：${motion.subject_motion_state
+      .split("+")
+      .map((state) =>
+        optionLabel(
+          SUBJECT_MOTION_STATE_OPTIONS,
+          state as ShotMotion["subject_motion_state"],
+        ),
+      )
+      .join("＋")}`,
     `方向：${optionLabel(SUBJECT_DIRECTION_OPTIONS, motion.subject_direction)}`,
     `位移：${motion.subject_displacement}`,
     `手部：${motion.hand_action}`,
@@ -116,7 +142,10 @@ export function missingMotionShotIds(shots: ShotCard[]): string[] {
 }
 
 /** 制表符格式可直接粘贴到 Excel、飞书表格和常见文档表格。 */
-export function formatShotCardsForClipboard(shots: ShotCard[]): string {
+export function formatShotCardsForClipboard(
+  shots: ShotCard[],
+  context: Record<string, unknown> = {},
+): string {
   const rows = shots.map((shot) => [
     shot.shot_id,
     shot.start_time,
@@ -126,14 +155,48 @@ export function formatShotCardsForClipboard(shots: ShotCard[]): string {
     shot.camera_motion,
     shot.subject,
     shot.action,
-    motionClipboardText(shot.motion),
+    formatShotMotion(shot.motion),
     shot.scene,
     shot.spoken_text,
     shot.transition,
+    shot.segment_kind,
+    shot.boundary_reason,
+    shot.person_count,
+    shot.scene_dressing,
+    shot.scene_lighting,
+    shot.wardrobe_pose_detail,
+    shot.ambient_sound,
+    shot.music_style_hint,
   ]);
-  return [CLIPBOARD_HEADERS, ...rows]
+  const table = [CLIPBOARD_HEADERS, ...rows]
     .map((row) => row.map(clipboardCell).join("\t"))
     .join("\n");
+  const source =
+    context.analysis &&
+    typeof context.analysis === "object" &&
+    !Array.isArray(context.analysis)
+      ? (context.analysis as Record<string, unknown>)
+      : context;
+  const metadata = [
+    ["theme", "主题"],
+    ["visual_style", "视觉风格"],
+    ["pace", "节奏"],
+    ["camera_language", "镜头语言"],
+    ["color_tone", "色调"],
+    ["duration_seconds", "全片时长(秒)"],
+    ["aspect_ratio", "画幅"],
+    ["resolution", "源片分辨率"],
+    ["fps", "源片帧率"],
+  ].flatMap(([key, label]) => {
+    const value = source[key];
+    return (typeof value === "string" && value.trim()) ||
+      (typeof value === "number" && Number.isFinite(value))
+      ? [`${label}\t${clipboardCell(value)}`]
+      : [];
+  });
+  return metadata.length
+    ? `${table}\n\n全片信息\n${metadata.join("\n")}`
+    : table;
 }
 
 export type ShotTableImportResult =
@@ -159,7 +222,7 @@ export function promptTextFromShotTableClipboard(
     return { ok: false, error: "分镜表中没有可导入的镜头数据。" };
   }
   const promptText = [
-    "以下内容是拆解后的分镜表。请保留镜头顺序、时间、主体动作、原口播和转场，并转换为当前视频模式要求的 H3 提示词格式：",
+    "以下内容是拆解后的分镜表。请保留镜头顺序、精确时间、人物与镜头运动、场景光线、服饰姿态、原口播和声音信息，并转换为当前视频模式要求的 H3 提示词格式。SHOT_CUT 表示真实切镜；ACTION_BEAT 表示同一镜头内的连续动作阶段，不得改成切镜。缺失字段保持未确认，不得补成静止或固定机位：",
     normalized,
   ].join("\n\n");
   if (Array.from(promptText).length > 7000) {
@@ -175,10 +238,12 @@ export function ShotCardEditor({
   shots,
   readOnly = false,
   onChange,
+  issues = [],
 }: {
   shots: ShotCard[];
   readOnly?: boolean;
   onChange: (index: number, shot: ShotCard) => void;
+  issues?: ShotConsistencyIssue[];
 }) {
   const update = (
     index: number,
@@ -210,10 +275,27 @@ export function ShotCardEditor({
 
   return (
     <div className="shot-table-wrap">
+      {issues.length ? (
+        <div
+          className="shot-table-review"
+          role="status"
+          aria-label="分镜待确认事项"
+        >
+          <strong>分镜待确认 · {issues.length} 项</strong>
+          <ul>
+            {issues.map((issue) => (
+              <li key={`${issue.code}:${issue.shot_id ?? ""}:${issue.message}`}>
+                {issue.shot_id ? `${issue.shot_id}：` : ""}
+                {issue.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       {missingMotionIds.length ? (
         <p className="shot-table__motion-missing" role="status">
           {missingMotionIds.join("、")}{" "}
-          缺运动信息（旧版拆解），成片可能偏静止；建议重新拆解，或直接在「运动」列补标注。
+          尚未识别运动信息，建议核对，或在「运动」列补充。
         </p>
       ) : null}
       <table className="shot-table">
@@ -248,14 +330,37 @@ export function ShotCardEditor({
                   readOnly={readOnly}
                   value={shot.shot_id}
                 />
-                {shot.segment_kind ? (
-                  <span
-                    className="shot-segment-kind"
-                    title={shot.boundary_reason ?? undefined}
-                  >
-                    {shot.segment_kind === "ACTION_BEAT" ? "动作段" : "切镜"}
-                  </span>
-                ) : null}
+                <select
+                  aria-label={`${shot.shot_id} 分段类型`}
+                  className="shot-table-select"
+                  disabled={readOnly}
+                  value={shot.segment_kind ?? ""}
+                  onChange={(event) =>
+                    onChange(index, {
+                      ...shot,
+                      segment_kind:
+                        (event.target.value as ShotCard["segment_kind"]) ||
+                        null,
+                    })
+                  }
+                >
+                  <MotionOptions
+                    options={[
+                      { value: "", label: "未标注分段" },
+                      { value: "ACTION_BEAT", label: "连续动作段" },
+                      { value: "SHOT_CUT", label: "真实切镜" },
+                    ]}
+                    values={[shot.segment_kind ?? ""]}
+                  />
+                </select>
+                <ShotCellInput
+                  ariaLabel={`${shot.shot_id} 分段原因`}
+                  onChange={(value) =>
+                    onChange(index, { ...shot, boundary_reason: value || null })
+                  }
+                  readOnly={readOnly}
+                  value={shot.boundary_reason ?? ""}
+                />
               </td>
               <td className="shot-table__time">
                 <ShotCellInput
@@ -289,6 +394,27 @@ export function ShotCardEditor({
                       readOnly={readOnly}
                       value={shot[key]}
                     />
+                    {key === "subject" ? (
+                      <input
+                        aria-label={`${shot.shot_id} 人数`}
+                        className="shot-table-input"
+                        type="number"
+                        min={0}
+                        step={1}
+                        placeholder="人数待确认"
+                        readOnly={readOnly}
+                        value={shot.person_count ?? ""}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          const count = value === "" ? null : Number(value);
+                          if (
+                            count === null ||
+                            (Number.isInteger(count) && count >= 0)
+                          )
+                            onChange(index, { ...shot, person_count: count });
+                        }}
+                      />
+                    ) : null}
                   </td>,
                   ...(key === "action"
                     ? [
@@ -376,25 +502,53 @@ function ShotMotionCell({
       </select>
     );
   }
+  const states = motion.subject_motion_state
+    .split("+")
+    .map((state) => state.trim());
   return (
     <div className="shot-motion-cell">
       <select
         aria-label={`${ariaPrefix} 人物运动`}
         className="shot-table-select"
         disabled={readOnly}
-        onChange={(event) =>
+        multiple
+        size={4}
+        title="可多选；按住 Ctrl 或 Command 添加伴随动作"
+        onChange={(event) => {
+          const selected = Array.from(
+            event.target.selectedOptions,
+            (option) => option.value,
+          );
+          const added = selected.filter((state) => !states.includes(state));
+          const exclusive = new Set([
+            "STATIC",
+            "NO_PERSON",
+            "UNKNOWN",
+            "OBJECT_MOTION",
+          ]);
+          const single = added.find((state) => exclusive.has(state));
+          const locomotion = added.find(
+            (state) => state === "WALKING" || state === "RUNNING",
+          );
+          const next = single
+            ? [single]
+            : added.length
+              ? selected.filter(
+                  (state) =>
+                    !exclusive.has(state) &&
+                    (!locomotion ||
+                      !["WALKING", "RUNNING"].includes(state) ||
+                      state === locomotion),
+                )
+              : selected;
           onChange({
-            subject_motion_state: event.target
-              .value as ShotMotion["subject_motion_state"],
-          })
-        }
-        value={motion.subject_motion_state}
+            subject_motion_state: (next.join("+") ||
+              "UNKNOWN") as ShotMotion["subject_motion_state"],
+          });
+        }}
+        value={states}
       >
-        {SUBJECT_MOTION_STATE_OPTIONS.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
+        <MotionOptions options={SUBJECT_MOTION_STATE_OPTIONS} values={states} />
       </select>
       <select
         aria-label={`${ariaPrefix} 位移方向`}
@@ -408,11 +562,10 @@ function ShotMotionCell({
         }
         value={motion.subject_direction}
       >
-        {SUBJECT_DIRECTION_OPTIONS.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
+        <MotionOptions
+          options={SUBJECT_DIRECTION_OPTIONS}
+          values={[motion.subject_direction]}
+        />
       </select>
       <select
         aria-label={`${ariaPrefix} 运镜方式`}
@@ -425,11 +578,10 @@ function ShotMotionCell({
         }
         value={motion.camera_motion}
       >
-        {MOTION_CAMERA_OPTIONS.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
+        <MotionOptions
+          options={MOTION_CAMERA_OPTIONS}
+          values={[motion.camera_motion]}
+        />
       </select>
       <ShotCellInput
         ariaLabel={`${ariaPrefix} 位移幅度`}
@@ -450,5 +602,32 @@ function ShotMotionCell({
         value={motion.relative_motion}
       />
     </div>
+  );
+}
+
+function MotionOptions({
+  options,
+  values,
+}: {
+  options: Array<{ value: string; label: string }>;
+  values: string[];
+}) {
+  // 历史或未来枚举必须保留可见占位，不能让 select 默默选中第一项。
+  const unknown = [...new Set(values)].filter(
+    (value) => !options.some((option) => option.value === value),
+  );
+  return (
+    <>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+      {unknown.map((value) => (
+        <option key={value} value={value}>
+          待确认（未识别）
+        </option>
+      ))}
+    </>
   );
 }

@@ -91,6 +91,7 @@ import {
   readFirstFrameCandidates,
   readReplicaPromptShots,
   readReplicaPromptSpokenScript,
+  readShotConsistencyIssues,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
@@ -104,6 +105,7 @@ import {
   rewriteProjectScript,
   SESSION_EXPIRED_EVENT,
   saveGenerationPrompt,
+  saveShotCards,
   selectCharacterReferences,
   setCustomerSessionToken,
   setInternalAccessToken,
@@ -214,6 +216,75 @@ describe("长视频轮询的账号生命周期", () => {
       waitForReplicaPromptTask("compat-task"),
     ]);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("分镜一致性与扩展信息", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("长视频保留结构化运动、动作边界与环境信息", () => {
+    const shot = {
+      shot_id: "s1",
+      start_time: 0.125,
+      end_time: 1.375,
+      subject: "讲解者",
+      action: "走向门口",
+      segment_kind: "ACTION_BEAT",
+      boundary_reason: "同镜头内开始走动",
+      scene_lighting: "左侧柔光",
+      ambient_sound: "鸟鸣",
+      motion: {
+        subject_motion_state: "WALKING+GESTURING_ONLY",
+        subject_direction: "unknown",
+        subject_displacement: "走向门口",
+        hand_action: "抬手",
+        camera_motion: "ORBIT",
+        relative_motion: "摄影机环绕人物",
+      },
+    };
+    expect(readReplicaPromptShots([shot])).toEqual([shot]);
+  });
+
+  it("一致性问题只保留安全的字符串字段", () => {
+    const issue = {
+      code: "MOTION_CONFLICT",
+      shot_id: "s1",
+      message: "人物运动状态与动作矛盾",
+    };
+    expect(
+      readShotConsistencyIssues([
+        issue,
+        null,
+        { code: "BAD", message: {} },
+        { code: "BAD", message: "", shot_id: "s2" },
+      ]),
+    ).toEqual([issue]);
+  });
+
+  it("保存被拒绝时保留具体分镜问题供编辑器展示", async () => {
+    const issue = {
+      code: "MOTION_CONFLICT",
+      shot_id: "s1",
+      message: "人物运动状态与动作矛盾",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: {
+            code: "SHOT_CARD_INCONSISTENT",
+            message: "请修正分镜后保存",
+            issues: [issue],
+          },
+        }),
+      }),
+    );
+    await expect(saveShotCards("analysis-1", [])).rejects.toMatchObject({
+      code: "SHOT_CARD_INCONSISTENT",
+      consistencyIssues: [issue],
+    });
   });
 });
 

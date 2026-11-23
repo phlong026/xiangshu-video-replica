@@ -493,7 +493,8 @@ export type ShotMotion = {
     | "right"
     | "lateral"
     | "in_place"
-    | "none";
+    | "none"
+    | "unknown";
   subject_displacement: string;
   hand_action: string;
   camera_motion:
@@ -503,7 +504,13 @@ export type ShotMotion = {
     | "HANDHELD_TRACKING"
     | "PAN"
     | "TILT"
-    | "FOLLOW";
+    | "FOLLOW"
+    | "ORBIT"
+    | "CRANE_UP"
+    | "CRANE_DOWN"
+    | "ZOOM_IN"
+    | "ZOOM_OUT"
+    | "UNKNOWN";
   relative_motion: string;
 };
 
@@ -518,6 +525,11 @@ export type ShotCard = {
   person_count?: number | null;
   action: string;
   scene: string;
+  scene_dressing?: string;
+  scene_lighting?: string;
+  wardrobe_pose_detail?: string;
+  ambient_sound?: string;
+  music_style_hint?: string;
   spoken_text: string;
   transition: string;
   motion?: ShotMotion | null;
@@ -525,17 +537,41 @@ export type ShotCard = {
   boundary_reason?: string | null;
 };
 
+export type ShotConsistencyIssue = {
+  code: string;
+  shot_id?: string | null;
+  message: string;
+};
+
+/** 保留历史结果，但不把坏字段渲染成 [object Object] 或虚构的分镜编号。 */
+export function readShotConsistencyIssues(
+  value: unknown,
+): ShotConsistencyIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is ShotConsistencyIssue =>
+      isRecord(item) &&
+      typeof item.code === "string" &&
+      typeof item.message === "string" &&
+      Boolean(item.message.trim()) &&
+      (item.shot_id == null || typeof item.shot_id === "string"),
+  );
+}
+
 export type AnalysisPayload = {
   summary: string;
   duration_seconds: number;
   original_script: string;
   shots: ShotCard[];
+  consistency_issues?: ShotConsistencyIssue[];
 };
 
 export type ShotCardPayload = {
   source_analysis_version_id: string;
   duration_seconds: number;
+  original_script?: string;
   shots: ShotCard[];
+  consistency_issues?: ShotConsistencyIssue[];
 };
 
 export type ProjectMainCharacter = Omit<
@@ -3704,6 +3740,7 @@ export function readReplicaPromptSpokenScript(
 export type ReplicaPromptWarning = {
   code: string;
   message: string;
+  shot_id?: string | null;
 };
 
 export type ReplicaPromptResult = {
@@ -3721,6 +3758,7 @@ export type ReplicaPromptResult = {
   shots?: ReplicaPromptShot[];
   /** 服务端软警告（画幅/时长要素缺失、超长）；禁词是硬拒绝，不会出现在这里。 */
   warnings?: ReplicaPromptWarning[];
+  consistency_issues?: ShotConsistencyIssue[];
 };
 
 const REPLICA_SHOT_TEXT_FIELDS = [
@@ -3731,8 +3769,14 @@ const REPLICA_SHOT_TEXT_FIELDS = [
   "subject",
   "action",
   "scene",
+  "scene_dressing",
+  "scene_lighting",
+  "wardrobe_pose_detail",
+  "ambient_sound",
+  "music_style_hint",
   "spoken_text",
   "transition",
+  "boundary_reason",
 ] as const;
 
 export type ReplicaPromptShot = Partial<
@@ -3740,7 +3784,11 @@ export type ReplicaPromptShot = Partial<
     ShotCard,
     (typeof REPLICA_SHOT_TEXT_FIELDS)[number] | "start_time" | "end_time"
   >
-> & { person_count?: number };
+> & {
+  person_count?: number;
+  motion?: ShotMotion;
+  segment_kind?: ShotCard["segment_kind"];
+};
 
 /** 历史版本也可能有旧的脏字段，只保留可展示的镜头，不补造缺失内容。 */
 export function readReplicaPromptShots(value: unknown): ReplicaPromptShot[] {
@@ -3765,8 +3813,17 @@ export function readReplicaPromptShots(value: unknown): ReplicaPromptShot[] {
     if (typeof count === "number" && Number.isInteger(count) && count >= 0) {
       shot.person_count = count;
     }
+    if (isShotMotion(source.motion)) shot.motion = source.motion;
+    if (
+      source.segment_kind === "SHOT_CUT" ||
+      source.segment_kind === "ACTION_BEAT"
+    )
+      shot.segment_kind = source.segment_kind;
     const hasDescription = REPLICA_SHOT_TEXT_FIELDS.some(
-      (field) => field !== "shot_id" && Boolean(shot[field]?.trim()),
+      (field) =>
+        field !== "shot_id" &&
+        field !== "boundary_reason" &&
+        Boolean(shot[field]?.trim()),
     );
     const start = shot.start_time;
     const end = shot.end_time;
@@ -6138,6 +6195,7 @@ export function readAnalysisPayload(
             .filter(Boolean)
             .join(""),
     shots: analysis.shots,
+    consistency_issues: readShotConsistencyIssues(analysis.consistency_issues),
   };
 }
 
@@ -6199,7 +6257,12 @@ export function readShotCardPayload(
   return {
     source_analysis_version_id: payload.source_analysis_version_id,
     duration_seconds: payload.duration_seconds,
+    original_script:
+      typeof payload.original_script === "string"
+        ? payload.original_script
+        : undefined,
     shots: payload.shots,
+    consistency_issues: readShotConsistencyIssues(payload.consistency_issues),
   };
 }
 
@@ -6587,6 +6650,7 @@ async function requestApiJson<T>(
     error.code = details.code;
     error.retryable = details.retryable;
     error.staleReasons = details.staleReasons;
+    error.consistencyIssues = details.consistencyIssues;
     error.requestId = response.headers?.get?.("X-Request-Id") ?? undefined;
     throw error;
   }
@@ -6860,6 +6924,7 @@ type RequestError = Error & {
   /** 失败任务编号（P1-4）：失败卡片上给用户的「任务编号」。 */
   taskId?: string;
   staleReasons?: string[];
+  consistencyIssues?: ShotConsistencyIssue[];
 };
 
 const BRANDED_SERVICE_ERRORS: ReadonlyArray<{
@@ -7042,6 +7107,7 @@ async function responseErrorDetails(
   code?: string;
   retryable?: boolean;
   staleReasons?: string[];
+  consistencyIssues?: ShotConsistencyIssue[];
 }> {
   try {
     const payload: unknown = await response.json();
@@ -7139,6 +7205,9 @@ async function responseErrorDetails(
         code,
         retryable,
         staleReasons,
+        consistencyIssues: readShotConsistencyIssues(
+          payload.detail.issues ?? payload.detail.consistency_issues,
+        ),
       };
     }
   } catch {

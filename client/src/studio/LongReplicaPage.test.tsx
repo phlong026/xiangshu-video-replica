@@ -476,6 +476,50 @@ describe("LongReplicaPage 拆解链路", () => {
     expect(screen.getByText("全片摘要")).toBeTruthy();
   });
 
+  it("完整显示运动、动作段边界、小数时间和待确认问题", async () => {
+    setupContext();
+    getLatestReplicaPromptTask.mockResolvedValue(null);
+    getLongReplicaSession("u-1").result = {
+      ...resultPayload(),
+      payload: {
+        ...RESULT_PAYLOAD,
+        shots: [
+          {
+            ...RESULT_PAYLOAD.shots[0],
+            start_time: 0.125,
+            end_time: 1.375,
+            segment_kind: "ACTION_BEAT",
+            boundary_reason: "同镜头内开始走动",
+            scene_lighting: "左侧柔光",
+            motion: {
+              subject_motion_state: "WALKING+GESTURING_ONLY",
+              subject_direction: "lateral",
+              subject_displacement: "走向门口",
+              hand_action: "抬手",
+              camera_motion: "ORBIT",
+              relative_motion: "摄影机环绕人物",
+            },
+          },
+        ],
+        consistency_issues: [
+          {
+            code: "MOTION_CONFLICT",
+            shot_id: "s1",
+            message: "人物运动状态与动作矛盾",
+          },
+        ],
+      },
+    };
+    render(<LongReplicaPage />);
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("00:00.125-00:01.375")).toBeInTheDocument();
+    expect(within(table).getByText(/人物：行走＋手势/)).toBeInTheDocument();
+    expect(within(table).getByText(/镜头：环绕/)).toBeInTheDocument();
+    expect(within(table).getByText(/同镜头内开始走动/)).toBeInTheDocument();
+    expect(within(table).getByText(/左侧柔光/)).toBeInTheDocument();
+    expect(screen.getByText(/s1：人物运动状态与动作矛盾/)).toBeInTheDocument();
+  });
+
   it("拆解历史弹窗列出历史并可载入历史版本", async () => {
     setupContext();
     getLatestReplicaPromptTask.mockResolvedValue(null);
