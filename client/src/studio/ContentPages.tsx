@@ -2627,7 +2627,6 @@ export function MaterialsPage() {
   // 全量素材元数据（当前标签筛选维度）：素材库是运营上传的小体量只读列表，
   // 全量在手才能做类型计数、站内搜索与纯前端分页，不必为计数加服务端 facet。
   const [library, setLibrary] = useState<TrainingMaterialPublicItem[]>([]);
-  const [truncated, setTruncated] = useState(false);
   const loadRevision = useRef(0);
   const [tagFacet, setTagFacet] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2649,8 +2648,7 @@ export function MaterialsPage() {
     try {
       setLoading(true);
       setError("");
-      // 服务端 pageSize 上限 100：循环翻页拿全量（上限 10 页 = 1000 条，
-      // 培训素材实际量远低于此；触顶时按已取得的条目呈现）。
+      // 后端分页大小为 100；读取当前筛选条件下的全部页，避免尾部素材在搜索中消失。
       const first = await listTrainingMaterials({
         tags: tagFilter.length ? tagFilter : undefined,
         page: 1,
@@ -2658,7 +2656,7 @@ export function MaterialsPage() {
       });
       if (!current()) return;
       const collected = [...first.items];
-      const pages = Math.min(Math.ceil(first.total / 100), 10);
+      const pages = Math.ceil(first.total / 100);
       for (let next = 2; next <= pages; next += 1) {
         const part = await listTrainingMaterials({
           tags: tagFilter.length ? tagFilter : undefined,
@@ -2669,7 +2667,6 @@ export function MaterialsPage() {
         collected.push(...part.items);
       }
       setLibrary(collected);
-      setTruncated(first.total > collected.length);
       setTagFacet(first.tag_facet);
     } catch (cause) {
       if (current())
@@ -2833,9 +2830,7 @@ export function MaterialsPage() {
           value={search}
         />
         {!loading ? (
-          <span className="content-material-total">
-            {truncated ? "前 1000 条中匹配" : "共"} {total} 个素材
-          </span>
+          <span className="content-material-total">共 {total} 个素材</span>
         ) : null}
       </div>
       {tagFacet.length > 0 ? (

@@ -332,6 +332,44 @@ describe("V1.4 任务详情真实成片预览", () => {
     });
   });
 
+  it("成片归档成功但预览签名失败仍可发布，允许单独重试预览", async () => {
+    const value = studio();
+    useStudio.mockReturnValue(value);
+    loadTaskPreview.mockResolvedValue({
+      id: "direct-2",
+      name: "待保存成片",
+      kind: "video",
+      url: "/signed/direct",
+      source: "任务中心",
+      group: "任务结果",
+      delivery: "direct",
+      generationTaskId: "generation-2",
+      saved: false,
+    });
+    archiveGenerationTask.mockResolvedValueOnce({
+      result_asset_id: "archived-2",
+    });
+    createGenerationResultPreviewUrl.mockRejectedValueOnce(
+      new Error("预览签发失败"),
+    );
+    render(<TaskDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "保存成片" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "去发布管理" })).toBeEnabled(),
+    );
+    expect(value.notify).toHaveBeenCalledWith(
+      "成片已保存，但预览链接获取失败；可以直接发布或重试预览。",
+    );
+    expect(
+      screen.getByRole("button", { name: "重试预览" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "去发布管理" }));
+    expect(value.navigate).toHaveBeenCalledWith("publishing", {
+      selectedAssetId: "archived-2",
+    });
+  });
+
   it("换素材回到原任务的创作类型并打开创作选择器", () => {
     const value = studio(taskA.id, {
       data: data([
@@ -361,6 +399,88 @@ describe("V1.4 任务详情真实成片预览", () => {
       }),
     );
     expect(value.openPicker).toHaveBeenCalledWith("reference");
+  });
+
+  it("图生视频更换素材选择首帧，不将新图片误加入参考生视频素材", () => {
+    const value = studio(taskA.id, {
+      data: data([
+        {
+          ...taskA,
+          type: "视频生成",
+          draftSnapshot: {
+            ...createState("video").draft,
+            firstFrameId: "original-first-frame",
+            referenceIds: [],
+          },
+        },
+      ]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "更换素材" }));
+
+    expect(value.navigate).toHaveBeenCalledWith(
+      "video",
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          firstFrameId: "original-first-frame",
+          referenceIds: [],
+        }),
+        returnTo: "task-detail",
+      }),
+    );
+    expect(value.openPicker).toHaveBeenCalledWith("first-frame");
+    expect(value.openPicker).not.toHaveBeenCalledWith("reference");
+  });
+
+  it("视频生成任务新建草稿回到视频创作而非视频拆解", () => {
+    const value = studio(taskA.id, {
+      data: data([
+        {
+          ...taskA,
+          type: "视频生成",
+          draftSnapshot: {
+            ...createState("video").draft,
+            firstFrameId: "frame-original",
+            referenceIds: [],
+          },
+        },
+      ]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "新建草稿" }));
+    expect(value.navigate).toHaveBeenCalledWith(
+      "video",
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          firstFrameId: "frame-original",
+        }),
+      }),
+    );
+  });
+
+  it("人物置换任务新建草稿继续进入人物置换模块", () => {
+    const value = studio(taskA.id, {
+      data: data([
+        {
+          ...taskA,
+          type: "人物置换",
+          draftSnapshot: createState("replacement").draft,
+        },
+      ]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "新建草稿" }));
+    expect(value.navigate).toHaveBeenCalledWith(
+      "replacement",
+      expect.objectContaining({ returnTo: "task-detail" }),
+    );
   });
 
   it("首屏外任务按 URL 中的类型和后端 ID 读取，失败可受控重试", async () => {
