@@ -61,6 +61,9 @@ export function CustomerRechargeDialog({
   const [packages, setPackages] = useState<CustomerRechargePackage[]>([]);
   const [packageError, setPackageError] = useState("");
   const [amountYuan, setAmountYuan] = useState("");
+  const [selectedPackageId, setSelectedPackageId] = useState<string | null>(
+    null,
+  );
   // 订单与码只能作为同一个视图替换，避免异步响应跨订单拼接。
   const [payment, setPayment] = useState<{
     order: CreatedRechargeOrder;
@@ -107,6 +110,7 @@ export function CustomerRechargeDialog({
         setPayment(null);
         setWallet(null);
         setPackages([]);
+        setSelectedPackageId(null);
         setPaymentState("choosing");
         setError("登录账号已变化，请关闭后重新打开充值窗口。");
         return false;
@@ -123,7 +127,13 @@ export function CustomerRechargeDialog({
       return;
     }
     setWallet(null);
-    setAmountYuan(suggestedAmountYuan ? String(suggestedAmountYuan) : "");
+    // 套餐金额可能不是自定义步长的整数倍，不能同时预填到自定义充值。
+    setAmountYuan(
+      !suggestedPackageId && suggestedAmountYuan
+        ? String(suggestedAmountYuan)
+        : "",
+    );
+    setSelectedPackageId(null);
     setPayment(null);
     setPaymentState("choosing");
     setIsQrLoaded(false);
@@ -153,6 +163,17 @@ export function CustomerRechargeDialog({
         }
         if (packageResult.status === "fulfilled") {
           setPackages(packageResult.value);
+          if (suggestedPackageId || !suggestedAmountYuan) {
+            const availablePackages = packageResult.value.filter(
+              (pkg) =>
+                walletResult.status === "fulfilled" &&
+                !packageBelowMinimum(pkg, walletResult.value),
+            );
+            const initialPackage =
+              availablePackages.find((pkg) => pkg.id === suggestedPackageId) ??
+              availablePackages[0];
+            setSelectedPackageId(initialPackage?.id ?? null);
+          }
         } else {
           setPackageError("充值套餐暂不可用，可使用自定义金额充值。");
         }
@@ -167,7 +188,13 @@ export function CustomerRechargeDialog({
       generation.current += 1;
       busy.current = false;
     };
-  }, [isOpen, suggestedAmountYuan, loadCredential, stillCurrent]);
+  }, [
+    isOpen,
+    suggestedAmountYuan,
+    suggestedPackageId,
+    loadCredential,
+    stillCurrent,
+  ]);
 
   useEffect(() => {
     if (!isOpen || paymentState !== "waiting" || payment === null) {
@@ -314,7 +341,8 @@ export function CustomerRechargeDialog({
     if (
       amountFen === null ||
       amountFen < wallet.min_recharge_fen ||
-      amountFen % wallet.recharge_step_fen !== 0
+      amountFen % wallet.recharge_step_fen !== 0 ||
+      amountFen > 2_147_483_647
     ) {
       setError(
         `充值金额须为${formatFen(wallet.min_recharge_fen)}起，并按${formatFen(wallet.recharge_step_fen)}递增。`,
@@ -361,9 +389,21 @@ export function CustomerRechargeDialog({
     }
   }
 
-  function submitCustom(event: FormEvent<HTMLFormElement>) {
+  function confirmSelection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void createCustomPayment(amountYuan);
+    if (!wallet) return;
+    const selectedPackage = packages.find(
+      (pkg) => pkg.id === selectedPackageId,
+    );
+    if (selectedPackage) {
+      if (packageBelowMinimum(selectedPackage, wallet)) return;
+      void createOrder({
+        amountFen: selectedPackage.amount_fen,
+        packageId: selectedPackage.id,
+      });
+    } else {
+      void createCustomPayment(amountYuan);
+    }
   }
 
   if (!isOpen) {
@@ -373,6 +413,23 @@ export function CustomerRechargeDialog({
   // 输入串只解析一次：套餐命中提示与到账预估都必须用精确分值，
   // Number 路线的浮点尘埃会让 "99.98" 永远匹配不到 9998 分的套餐。
   const customAmountFen = yuanInputToFen(amountYuan);
+  const selectedPackage = packages.find((pkg) => pkg.id === selectedPackageId);
+  const isCustomSelected = selectedPackage === undefined;
+  const validCustomAmount =
+    wallet !== null &&
+    customAmountFen !== null &&
+    customAmountFen >= wallet.min_recharge_fen &&
+    customAmountFen % wallet.recharge_step_fen === 0 &&
+    customAmountFen <= 2_147_483_647;
+  const selectedAmountFen =
+    selectedPackage?.amount_fen ?? (validCustomAmount ? customAmountFen : null);
+  const selectedCredits =
+    selectedPackage?.credits ??
+    (validCustomAmount && wallet && customAmountFen !== null
+      ? wallet.points_per_yuan
+        ? Math.floor((customAmountFen * wallet.points_per_yuan) / 100)
+        : Math.floor(customAmountFen / wallet.internal_unit_price_fen)
+      : null);
 
   return (
     <div className="recharge-dialog">
@@ -383,10 +440,7 @@ export function CustomerRechargeDialog({
         role="dialog"
       >
         <header className="recharge-dialog__header">
-          <div>
-            <p className="eyebrow">余额充值</p>
-            <h2 id="recharge-dialog-title">扫码充值</h2>
-          </div>
+          <h2 id="recharge-dialog-title">余额充值</h2>
           <button
             aria-label="关闭充值窗口"
             className="secondary-button"
@@ -447,112 +501,141 @@ export function CustomerRechargeDialog({
             </div>
           </div>
         ) : (
-          <div className="recharge-dialog__chooser">
-            <p>
+          <form
+            className="recharge-dialog__chooser"
+            noValidate
+            onSubmit={confirmSelection}
+          >
+            <p className="recharge-dialog__balance">
               {wallet
-                ? `当前可用 ${wallet.available_credits} 积分，${wallet.points_per_yuan ? `1 元 = ${wallet.points_per_yuan} 积分` : `兑换单价 ${formatFen(wallet.internal_unit_price_fen)}/积分`}。`
+                ? `当前可用 ${wallet.available_credits.toLocaleString("zh-CN")} 积分 · ${wallet.points_per_yuan ? `1 元 = ${wallet.points_per_yuan} 积分` : `兑换单价 ${formatFen(wallet.internal_unit_price_fen)}/积分`}`
                 : "正在读取充值信息…"}
             </p>
             {packages.length ? (
-              <div className="recharge-dialog__packages">
-                {packages.map((pkg) => {
-                  const benefit = packageBenefitLabel(pkg);
-                  const bonus = packageBonusCredits(wallet, pkg);
-                  // 低于生效起充额的档位后端必 422：钱包快照就绪后置灰并说明原因。
-                  const belowMinimum = packageBelowMinimum(pkg, wallet);
-                  const suggested = pkg.id === suggestedPackageId;
-                  return (
-                    <button
-                      className={
-                        belowMinimum
-                          ? "recharge-package-card recharge-package-card--locked"
-                          : suggested
-                            ? "recharge-package-card recharge-package-card--suggested"
-                            : "recharge-package-card"
-                      }
-                      disabled={paymentState === "creating" || belowMinimum}
-                      key={pkg.id}
-                      onClick={() =>
-                        void createOrder({
-                          amountFen: pkg.amount_fen,
-                          packageId: pkg.id,
-                        })
-                      }
-                      type="button"
-                    >
-                      <span className="recharge-package-card__head">
-                        <span className="recharge-package-card__tier">
-                          {pkg.name}
+              <>
+                <h3 className="recharge-dialog__section-title">选择套餐</h3>
+                <div className="recharge-dialog__packages">
+                  {packages.map((pkg) => {
+                    const benefit = packageBenefitLabel(pkg);
+                    const bonus = packageBonusCredits(wallet, pkg);
+                    // 低于生效起充额的档位后端必 422：钱包快照就绪后置灰并说明原因。
+                    const belowMinimum = packageBelowMinimum(pkg, wallet);
+                    const selected = pkg.id === selectedPackageId;
+                    return (
+                      <button
+                        aria-pressed={selected}
+                        className={
+                          belowMinimum
+                            ? "recharge-package-card recharge-package-card--locked"
+                            : selected
+                              ? "recharge-package-card recharge-package-card--suggested"
+                              : "recharge-package-card"
+                        }
+                        disabled={
+                          !wallet || paymentState === "creating" || belowMinimum
+                        }
+                        key={pkg.id}
+                        onClick={() => {
+                          setSelectedPackageId(pkg.id);
+                          setError("");
+                        }}
+                        type="button"
+                      >
+                        <span className="recharge-package-card__head">
+                          <span className="recharge-package-card__tier">
+                            {pkg.name}
+                          </span>
+                          {selected ? (
+                            <span className="recharge-package-card__badge">
+                              已选套餐
+                            </span>
+                          ) : null}
                         </span>
-                        {suggested ? (
-                          <span className="recharge-package-card__badge">
-                            已选套餐
+                        <span className="recharge-package-card__price">
+                          {formatFen(pkg.amount_fen)}
+                        </span>
+                        <span className="recharge-package-card__credits">
+                          到账 {pkg.credits.toLocaleString("zh-CN")} 积分
+                        </span>
+                        {bonus !== null ? (
+                          <span className="recharge-package-card__bonus">
+                            含赠送 {bonus} 积分
                           </span>
                         ) : null}
-                      </span>
-                      <span className="recharge-package-card__price">
-                        {formatFen(pkg.amount_fen)}
-                      </span>
-                      <span className="recharge-package-card__credits">
-                        到账 {pkg.credits} 积分
-                      </span>
-                      {bonus !== null ? (
-                        <span className="recharge-package-card__bonus">
-                          含赠送 {bonus} 积分
-                        </span>
-                      ) : null}
-                      {benefit ? (
-                        <span
-                          className="recharge-package-card__benefit"
-                          title={benefit}
-                        >
-                          {benefit}
-                        </span>
-                      ) : null}
-                      {belowMinimum && wallet ? (
-                        <span className="recharge-package-card__note">
-                          低于起充金额 {formatFen(wallet.min_recharge_fen)}
-                          ，暂不可购
-                        </span>
-                      ) : null}
-                    </button>
-                  );
-                })}
-              </div>
+                        {benefit ? (
+                          <span
+                            className="recharge-package-card__benefit"
+                            title={benefit}
+                          >
+                            {benefit}
+                          </span>
+                        ) : null}
+                        {belowMinimum && wallet ? (
+                          <span className="recharge-package-card__note">
+                            低于起充金额{" "}
+                            {formatFen(
+                              wallet.package_min_recharge_fen ??
+                                wallet.min_recharge_fen,
+                            )}
+                            ，暂不可购
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
             ) : packageError ? (
               <p role="status">{packageError}</p>
             ) : null}
-            <form onSubmit={submitCustom}>
-              <label>
-                自定义金额（元）
+            <div
+              className={`recharge-dialog__custom${isCustomSelected ? " is-selected" : ""}`}
+            >
+              <label className="recharge-dialog__custom-choice">
                 <input
+                  checked={isCustomSelected}
+                  disabled={!wallet || paymentState === "creating"}
+                  name="recharge-method"
+                  onChange={() => {
+                    setSelectedPackageId(null);
+                    setError("");
+                  }}
+                  type="radio"
+                />
+                自定义充值
+              </label>
+              <label className="recharge-dialog__amount">
+                <span className="recharge-dialog__amount-label">
+                  自定义金额（元）
+                </span>
+                <input
+                  aria-describedby="recharge-custom-hint"
+                  disabled={!wallet || paymentState === "creating"}
                   inputMode="numeric"
                   min={wallet ? wallet.min_recharge_fen / 100 : undefined}
-                  onChange={(event) => setAmountYuan(event.target.value)}
-                  placeholder={
-                    wallet ? `不低于 ${formatFen(wallet.min_recharge_fen)}` : ""
-                  }
+                  onChange={(event) => {
+                    setAmountYuan(event.target.value);
+                    setSelectedPackageId(null);
+                    setError("");
+                  }}
+                  placeholder="请输入充值金额"
                   step={wallet ? wallet.recharge_step_fen / 100 : undefined}
                   type="number"
                   value={amountYuan}
                 />
               </label>
-              <button
-                disabled={!wallet || paymentState === "creating"}
-                type="submit"
-              >
-                {paymentState === "creating"
-                  ? "正在生成二维码…"
-                  : "生成支付二维码"}
-              </button>
-            </form>
-            {wallet ? (
-              <p className="recharge-dialog__custom-hint" role="note">
-                自定义充值金额不低于 {formatFen(wallet.min_recharge_fen)}
-                ，并按 {formatFen(wallet.recharge_step_fen)} 递增。
-              </p>
-            ) : null}
-            {wallet &&
+              {wallet ? (
+                <p
+                  className="recharge-dialog__custom-hint"
+                  id="recharge-custom-hint"
+                >
+                  最低 {formatFen(wallet.min_recharge_fen)}，按{" "}
+                  {formatFen(wallet.recharge_step_fen)} 递增
+                </p>
+              ) : null}
+            </div>
+            {isCustomSelected &&
+            wallet &&
             customAmountFen !== null &&
             matchingPackagesForAmount(packages, customAmountFen).length ? (
               <p role="status">
@@ -560,17 +643,46 @@ export function CustomerRechargeDialog({
                 自定义金额按基础汇率到账。
               </p>
             ) : null}
-            {wallet && customAmountFen !== null && (
-              <p role="status">
-                预计到账{" "}
-                {wallet.points_per_yuan
-                  ? Math.floor((customAmountFen * wallet.points_per_yuan) / 100)
-                  : Math.floor(
-                      customAmountFen / wallet.internal_unit_price_fen,
-                    )}{" "}
-                积分，以创建订单时的兑换规则为准。
-              </p>
-            )}
+            <div className="recharge-dialog__checkout">
+              <div
+                className="recharge-dialog__checkout-details"
+                aria-live="polite"
+              >
+                <span>
+                  {selectedPackage
+                    ? `已选${selectedPackage.name}`
+                    : "自定义充值"}
+                </span>
+                <div>
+                  <strong>
+                    应付{" "}
+                    {selectedAmountFen !== null
+                      ? formatFen(selectedAmountFen)
+                      : "—"}
+                  </strong>
+                  {selectedCredits !== null ? (
+                    <p>
+                      预计到账 {selectedCredits.toLocaleString("zh-CN")} 积分
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              <div className="recharge-dialog__checkout-actions">
+                <button
+                  className="secondary-button"
+                  onClick={closeDialog}
+                  type="button"
+                >
+                  取消
+                </button>
+                <button
+                  disabled={!wallet || paymentState === "creating"}
+                  type="submit"
+                >
+                  {paymentState === "creating" ? "正在生成二维码…" : "确认充值"}
+                </button>
+              </div>
+            </div>
             {order && !paymentCode ? (
               <button
                 className="secondary-button"
@@ -581,7 +693,7 @@ export function CustomerRechargeDialog({
                 重新获取上一订单二维码
               </button>
             ) : null}
-          </div>
+          </form>
         )}
 
         {error && paymentCode ? (

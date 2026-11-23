@@ -18,10 +18,10 @@ test("customer wallet creates a recharge order under the customer session", asyn
         contentType: "application/json",
         json: {
           order_no: orderNo,
-          amount_fen: 10_000,
-          // 必须与 seed_codes.py 的 e2e-package-100 套餐一致（100 元 = 1000 积分）：
+          amount_fen: 50_000,
+          // 必须与 seed_codes.py 的 e2e-package-500 套餐一致（500 元 = 5000 积分）：
           // 客户端 assertPaymentMatches 逐字段核对，不一致就拒绝渲染二维码。
-          credits: 1_000,
+          credits: 5_000,
           qr_image_url:
             "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
           payment_url: "https://payment.invalid/e2e",
@@ -37,9 +37,10 @@ test("customer wallet creates a recharge order under the customer session", asyn
   const balance = page.locator(".uc-balance strong");
   const creditsBefore = await balance.textContent();
   await page.getByRole("button", { name: "充值积分", exact: true }).click();
-  const rechargeDialog = page.getByRole("dialog", { name: "扫码充值" });
+  const rechargeDialog = page.getByRole("dialog", { name: "余额充值" });
   await expect(rechargeDialog).toBeVisible();
-  await rechargeDialog.getByRole("button", { name: /^100 元/ }).click();
+  await rechargeDialog.getByRole("button", { name: /^500 元/ }).click();
+  await rechargeDialog.getByRole("button", { name: "确认充值" }).click();
   await expect(
     rechargeDialog.getByRole("img", { name: "充值支付二维码" }),
   ).toBeVisible();

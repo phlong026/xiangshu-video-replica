@@ -15,6 +15,7 @@ Verification level: AUTOMATED_VERIFIED → Ready for STAGING_VERIFIED
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 import time
 from collections.abc import Iterator
@@ -49,6 +50,112 @@ FUTURE_EXPIRY = "2099-01-01T00:00:00+00:00"
 
 def _b64key(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+@pytest.mark.parametrize(
+    ("amount_fen", "allowed"),
+    [
+        (10_000, False),
+        (49_000, False),
+        (50_000, True),
+        (50_010, False),
+        (55_000, False),
+        (60_000, True),
+    ],
+)
+def test_customer_recharge_defaults_enforce_500_yuan_and_100_yuan_steps(
+    amount_fen: int, allowed: bool
+) -> None:
+    from fastapi import HTTPException
+
+    from app.recharge_routes import validate_recharge_amount
+    from app.settings import DEFAULT_BILLING_SETTINGS
+
+    billing = {**DEFAULT_BILLING_SETTINGS, "points_per_yuan": 10}
+    if allowed:
+        validate_recharge_amount(amount_fen, billing)
+    else:
+        with pytest.raises(HTTPException) as rejected:
+            validate_recharge_amount(amount_fen, billing)
+        assert rejected.value.status_code == 422
+
+
+@pytest.mark.parametrize("points_per_yuan", [None, 10])
+@pytest.mark.parametrize(
+    ("amount_fen", "allowed"),
+    [(50_000, True), (50_010, False), (55_000, False), (60_000, True)],
+)
+def test_customer_unit_price_does_not_lower_custom_recharge_steps(
+    amount_fen: int, allowed: bool, points_per_yuan: int | None
+) -> None:
+    from fastapi import HTTPException
+
+    from app.recharge_routes import validate_recharge_amount
+    from app.settings import apply_customer_unit_price, custom_recharge_billing_settings
+
+    billing = apply_customer_unit_price(
+        {
+            "charged_unit_price_fen": 1000,
+            "min_recharge_fen": 50_000,
+            "recharge_step_fen": 10_000,
+        },
+        unit_price_fen=500,
+    )
+    if points_per_yuan is not None:
+        billing["points_per_yuan"] = points_per_yuan
+    billing = custom_recharge_billing_settings(billing)
+    assert billing["min_recharge_fen"] == 50_000
+    assert billing["recharge_step_fen"] == 10_000
+    if allowed:
+        validate_recharge_amount(amount_fen, billing)
+    else:
+        with pytest.raises(HTTPException) as rejected:
+            validate_recharge_amount(amount_fen, billing)
+        assert rejected.value.status_code == 422
+
+
+def test_legacy_customer_price_divisibility_does_not_apply_to_credit_exchange() -> None:
+    from fastapi import HTTPException
+
+    from app.recharge_routes import validate_recharge_amount
+    from app.settings import apply_customer_unit_price, custom_recharge_billing_settings
+
+    billing = apply_customer_unit_price(
+        {
+            "charged_unit_price_fen": 1000,
+            "min_recharge_fen": 50_000,
+            "recharge_step_fen": 10_000,
+        },
+        unit_price_fen=700,
+    )
+    legacy = custom_recharge_billing_settings(billing)
+    assert legacy["min_recharge_fen"] == 70_000
+    assert legacy["recharge_step_fen"] == 70_000
+    # 旧钱包仍须精确兑换整数积分；启用新汇率后不再按旧单价整除。
+    with pytest.raises(HTTPException):
+        validate_recharge_amount(50_000, legacy)
+    validate_recharge_amount(70_000, legacy)
+    modern = custom_recharge_billing_settings({**billing, "points_per_yuan": 10})
+    assert modern["min_recharge_fen"] == 50_000
+    assert modern["recharge_step_fen"] == 10_000
+    validate_recharge_amount(50_000, modern)
+
+
+def test_legacy_recharge_rules_reject_unrepresentable_postgres_amounts() -> None:
+    from fastapi import HTTPException
+
+    from app.settings import custom_recharge_billing_settings
+
+    with pytest.raises(HTTPException) as rejected:
+        custom_recharge_billing_settings(
+            {
+                "charged_unit_price_fen": 2_147_483_647,
+                "min_recharge_fen": 50_000,
+                "recharge_step_fen": 10_000,
+            }
+        )
+    assert rejected.value.status_code == 503
+    assert rejected.value.detail["code"] == "RECHARGE_CONFIGURATION_INVALID"
 
 
 def _pg_dsn() -> str:
@@ -112,6 +219,14 @@ def clean_state(recharge_pg_dsn: str) -> Iterator[str]:
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"
         )
+        # 历史支付链路用例显式使用原计价，避免依赖今后的运营默认值。
+        # 新充值规则专项会覆盖为 500/100；每例清空汇率，防止新旧模型互相污染。
+        conn.execute(
+            "INSERT INTO runtime_settings (id, min_recharge_fen, recharge_step_fen) "
+            "VALUES (1, 10000, 1000) ON CONFLICT (id) DO UPDATE "
+            "SET min_recharge_fen=10000, recharge_step_fen=1000"
+        )
+        conn.execute("UPDATE customer_credit_pricing SET version=0, config_json=NULL WHERE id=1")
     yield recharge_pg_dsn
     close_pg_pool()
 
@@ -250,6 +365,130 @@ def recharge_config_fixture(monkeypatch: pytest.MonkeyPatch, clean_state: str) -
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("amount_fen", "expected_status"),
+    [(49_000, 422), (50_000, 201), (50_010, 422), (55_000, 422), (60_000, 201)],
+)
+def test_customer_recharge_500_yuan_policy_matches_wallet_and_order(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+    amount_fen: int,
+    expected_status: int,
+) -> None:
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(conn, code_id="policy-code", batch_id="policy-batch", plaintext=code)
+    activation = _activate_customer(client, code, "policy-device", "unused")
+    with psycopg.connect(clean_state) as conn:
+        conn.execute(
+            "UPDATE runtime_settings SET internal_base_unit_price_fen=300, "
+            "min_recharge_fen=50000, recharge_step_fen=10000 WHERE id=1"
+        )
+        conn.execute(
+            "UPDATE customer_credit_pricing SET version=1, config_json=%s WHERE id=1",
+            (json.dumps({"points_per_yuan": 10}),),
+        )
+        conn.execute(
+            "INSERT INTO customer_unit_prices (user_id, unit_price_fen, updated_by_user_id) "
+            "VALUES (%s, 700, 'admin_u')",
+            (activation["user_id"],),
+        )
+    wallet = client.get(
+        "/api/customer/wallet",
+        headers={"Authorization": f"Bearer {activation['session_token']}"},
+    )
+    assert wallet.status_code == 200, wallet.text
+    assert wallet.json()["min_recharge_fen"] == 50_000
+    assert wallet.json()["recharge_step_fen"] == 10_000
+    assert wallet.json()["package_min_recharge_fen"] == 50_000
+    assert wallet.json()["points_per_yuan"] == 10
+    response = client.post(
+        "/api/customer/recharge-orders",
+        headers=_recharge_headers(activation["session_token"]),
+        json={"amount_fen": amount_fen},
+    )
+    assert response.status_code == expected_status, response.text
+    if expected_status == 201:
+        assert response.json()["credits"] == amount_fen // 10
+        with psycopg.connect(clean_state) as conn:
+            snapshot = conn.execute(
+                "SELECT min_recharge_fen_snapshot, recharge_step_fen_snapshot, credits "
+                "FROM recharge_orders WHERE merchant_order_no=%s",
+                (response.json()["order_no"],),
+            ).fetchone()
+        assert snapshot == (50_000, 10_000, amount_fen // 10)
+    else:
+        assert response.json()["detail"]["code"] == "INVALID_RECHARGE_AMOUNT"
+        assert _customer_recharge_count(clean_state) == 0
+
+
+@pytest.mark.parametrize(
+    ("unit_price_fen", "amount_fen", "expected_status"),
+    [
+        (700, 50_000, 422),
+        (700, 60_000, 422),
+        (700, 70_000, 201),
+        (700, 140_000, 201),
+        (None, 50_000, 422),
+        (None, 60_000, 201),
+        (None, 90_000, 201),
+    ],
+)
+def test_legacy_recharge_wallet_advertises_only_payable_amounts(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+    unit_price_fen: int | None,
+    amount_fen: int,
+    expected_status: int,
+) -> None:
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(conn, code_id="legacy-policy", batch_id="legacy-batch", plaintext=code)
+    activation = _activate_customer(client, code, "legacy-policy-device", "unused")
+    with psycopg.connect(clean_state) as conn:
+        conn.execute(
+            "UPDATE runtime_settings SET internal_base_unit_price_fen=300, "
+            "min_recharge_fen=50000, recharge_step_fen=10000 WHERE id=1"
+        )
+        if unit_price_fen is not None:
+            conn.execute(
+                "INSERT INTO customer_unit_prices (user_id, unit_price_fen, updated_by_user_id) "
+                "VALUES (%s, %s, 'admin_u')",
+                (activation["user_id"], unit_price_fen),
+            )
+    minimum, step = (70_000, 70_000) if unit_price_fen is not None else (60_000, 30_000)
+    wallet = client.get(
+        "/api/customer/wallet",
+        headers={"Authorization": f"Bearer {activation['session_token']}"},
+    )
+    assert wallet.status_code == 200, wallet.text
+    assert wallet.json()["min_recharge_fen"] == minimum
+    assert wallet.json()["recharge_step_fen"] == step
+    assert wallet.json()["package_min_recharge_fen"] == 50_000
+    assert wallet.json()["points_per_yuan"] is None
+    response = client.post(
+        "/api/customer/recharge-orders",
+        headers=_recharge_headers(activation["session_token"]),
+        json={"amount_fen": amount_fen},
+    )
+    assert response.status_code == expected_status, response.text
+    if expected_status == 201:
+        credits = amount_fen // (unit_price_fen or 300)
+        assert response.json()["credits"] == credits
+        with psycopg.connect(clean_state) as conn:
+            snapshot = conn.execute(
+                "SELECT min_recharge_fen_snapshot, recharge_step_fen_snapshot, credits, "
+                "credit_pricing_snapshot_json FROM recharge_orders WHERE merchant_order_no=%s",
+                (response.json()["order_no"],),
+            ).fetchone()
+        assert snapshot == (minimum, step, credits, None)
+    else:
+        assert response.json()["detail"]["code"] == "INVALID_RECHARGE_AMOUNT"
+        assert _customer_recharge_count(clean_state) == 0
+
+
 def test_customer_session_cannot_use_internal_recharge_route(
     client: TestClient, clean_state: str, recharge_config_fixture
 ) -> None:
@@ -365,7 +604,7 @@ def test_customer_unit_price_override_controls_wallet_and_recharge_credits(
     assert wallet.status_code == 200, wallet.text
     assert wallet.json()["internal_unit_price_fen"] == 500
     assert wallet.json()["min_recharge_fen"] == 10000
-    assert wallet.json()["recharge_step_fen"] == 500
+    assert wallet.json()["recharge_step_fen"] == 1000
 
     response = client.post(
         "/api/customer/recharge-orders",
@@ -382,7 +621,7 @@ def test_customer_unit_price_override_controls_wallet_and_recharge_credits(
             "FROM recharge_orders WHERE merchant_order_no = %s",
             (response.json()["order_no"],),
         ).fetchone()
-    assert snapshot == (1000, 500, 10000, 500)
+    assert snapshot == (1000, 500, 10000, 1000)
 
 
 def test_customer_wallet_reads_and_order_list(

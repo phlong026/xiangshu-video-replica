@@ -73,7 +73,7 @@ async function openRechargeDialog() {
     target: { value: "zsj001" },
   });
   fireEvent.click(screen.getByRole("button", { name: "开始诊断" }));
-  return screen.findByRole("dialog", { name: "扫码充值" });
+  return screen.findByRole("dialog", { name: "余额充值" });
 }
 
 const reportFixture = {
@@ -391,6 +391,8 @@ describe("账号诊断页", () => {
   it("建单后保留真实支付窗口，等待付款确认后才关闭", async () => {
     await openRechargeDialog();
     fireEvent.click(await screen.findByRole("button", { name: /标准档/ }));
+    expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
 
     expect(
       await screen.findByRole("img", { name: "充值支付二维码" }),
@@ -398,7 +400,7 @@ describe("账号诊断页", () => {
     await waitFor(() => expect(mocks.getRechargeOrder).toHaveBeenCalled());
     expect(screen.getByText("正在等待支付结果")).toBeInTheDocument();
     expect(
-      screen.getByRole("dialog", { name: "扫码充值" }),
+      screen.getByRole("dialog", { name: "余额充值" }),
     ).toBeInTheDocument();
     expect(mocks.getAvailability).toHaveBeenCalledTimes(2);
     expect(mocks.notify).not.toHaveBeenCalledWith("充值到账，可以继续诊断了。");
@@ -409,7 +411,7 @@ describe("账号诊断页", () => {
     });
     await waitFor(
       () =>
-        expect(screen.queryByRole("dialog", { name: "扫码充值" })).toBeNull(),
+        expect(screen.queryByRole("dialog", { name: "余额充值" })).toBeNull(),
       { timeout: 3500 },
     );
     expect(mocks.notify).toHaveBeenCalledWith("充值到账，可以继续诊断了。");
@@ -421,10 +423,11 @@ describe("账号诊断页", () => {
     mocks.createPaymentCode.mockRejectedValueOnce(new Error("二维码暂不可用"));
     await openRechargeDialog();
     fireEvent.click(await screen.findByRole("button", { name: /标准档/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
 
     expect(await screen.findByText("二维码暂不可用")).toBeInTheDocument();
     expect(
-      screen.getByRole("dialog", { name: "扫码充值" }),
+      screen.getByRole("dialog", { name: "余额充值" }),
     ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "重新获取上一订单二维码" }),
@@ -446,10 +449,11 @@ describe("账号诊断页", () => {
   it("等待付款时仍允许用户主动关闭充值窗口", async () => {
     await openRechargeDialog();
     fireEvent.click(await screen.findByRole("button", { name: /标准档/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
     await screen.findByRole("img", { name: "充值支付二维码" });
     fireEvent.click(screen.getByRole("button", { name: "关闭充值窗口" }));
 
-    expect(screen.queryByRole("dialog", { name: "扫码充值" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "余额充值" })).toBeNull();
     expect(mocks.notify).not.toHaveBeenCalledWith("充值到账，可以继续诊断了。");
   });
 

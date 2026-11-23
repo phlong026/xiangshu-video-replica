@@ -1984,7 +1984,7 @@ def test_admin_can_set_read_and_reset_customer_unit_price(client: TestClient) ->
     assert update.json()["custom_unit_price_fen"] == 500
     assert update.json()["default_unit_price_fen"] == BASE_UNIT_PRICE_FEN
     assert update.json()["min_recharge_fen"] == MIN_RECHARGE_FEN
-    assert update.json()["recharge_step_fen"] == 500
+    assert update.json()["recharge_step_fen"] == RECHARGE_STEP_FEN
 
     stored = _fetch_one(
         "SELECT unit_price_fen, updated_by_user_id FROM customer_unit_prices WHERE user_id = %s",

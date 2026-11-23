@@ -118,7 +118,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 发布域三表平台 CHECK 的快手值，计数不变，digest 随约束定义重算。
 # 20261120T1000_account_diagnosis（账号诊断 P0）再追加两张表并种子价目行，
 # counts/表名集/digest 均按上方 HEAD_SCHEMA_COUNTS 注释重算。
-HEAD_REVISION = "20261122T1000_replica_prompt_mode"
+HEAD_REVISION = "20261124T1000_recharge_minimum_step"
 
 
 @pytest.mark.pg
@@ -751,7 +751,9 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 重算（实测计数与上方 HEAD_SCHEMA_COUNTS 完全一致）。
 # 2026-11-17 快手发布：隔离 PG 探针先验证上一 head 的冻结摘要，再追加本迁移
 # 重算；表名集与计数完全相同，仅三条平台 CHECK 的定义变化。
-HEAD_SCHEMA_DIGEST = "e765573ed3272db06ec2d5deb6cfa2d4286b61c9a227d4272af7311529052b0b"
+# 2026-11-24 充值最低额与步长列默认值调整后，在隔离 PG16 空库升级至 head 实测。
+# 表名及计数均保持一致，仅 column_default 进入摘要后产生变化。
+HEAD_SCHEMA_DIGEST = "d34673bd11c4ee5ce56bc6495b297337b1fec6332b7a6f0ec4bc76665e20bfaf"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

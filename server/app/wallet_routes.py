@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 
 from app.auth import ReadDatabase, ShortAuthUser
-from app.settings import DEFAULT_BILLING_SETTINGS
+from app.settings import DEFAULT_BILLING_SETTINGS, custom_recharge_billing_settings
 from app.sql_pagination import PAGE_CLAUSE
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
@@ -24,6 +24,7 @@ class WalletResponse(BaseModel):
     internal_unit_price_fen: int | None = None
     min_recharge_fen: int | None = None
     recharge_step_fen: int | None = None
+    package_min_recharge_fen: int | None = None
     points_per_yuan: int | None = None
     credit_price_version: int | None = None
 
@@ -263,11 +264,14 @@ def read_wallet(conn: ReadDatabase, actor: ShortAuthUser) -> WalletResponse:
         if billing_row is None
         else {
             "internal_base_unit_price_fen": int(billing_row["internal_base_unit_price_fen"]),
+            "charged_unit_price_fen": int(billing_row["internal_base_unit_price_fen"]),
             "min_recharge_fen": int(billing_row["min_recharge_fen"]),
             "recharge_step_fen": int(billing_row["recharge_step_fen"]),
         }
     )
     expose_internal_prices = actor.role != "customer"
+    if expose_internal_prices:
+        billing = custom_recharge_billing_settings(billing)
     return WalletResponse(
         available_credits=int(row["available_credits"]),
         reserved_credits=int(row["reserved_credits"]),

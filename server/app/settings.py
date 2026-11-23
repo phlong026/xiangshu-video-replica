@@ -5,6 +5,7 @@ import logging
 import os
 import uuid
 from collections.abc import Callable, Mapping
+from math import lcm
 from typing import Any, Literal, Protocol, cast
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from app import content_store
+from app.customer_pricing import read_pricing
 from app.db_portable import BusinessConnection
 from app.storage import (
     CloudStorageAdapter,
@@ -95,8 +97,8 @@ DEFAULT_BILLING_SETTINGS: dict[str, int] = {
     "internal_base_unit_price_fen": 1000,
     "charged_unit_price_fen": 1000,
     "oral_unit_price_fen": 1000,
-    "min_recharge_fen": 10000,
-    "recharge_step_fen": 1000,
+    "min_recharge_fen": 50000,
+    "recharge_step_fen": 10000,
 }
 
 
@@ -479,21 +481,23 @@ class SettingsRepository:
             "recharge_step_fen": int(row["recharge_step_fen"]),
         }
 
-    def read_customer_billing_settings(self, *, user_id: str) -> dict[str, int]:
-        """Return billing settings with an optional per-customer sale price.
-
-        Customized customers recharge in whole-video increments.  The global
-        minimum remains the lower bound and is rounded up to the next whole
-        video at that customer's price.
-        """
+    def read_customer_billing_settings(
+        self, *, user_id: str, for_custom_recharge: bool = True
+    ) -> dict[str, int]:
+        """钱包与建单共用兑换口径；固定套餐不应用旧单价的整除规则。"""
         billing = self.read_billing_settings()
         row = self.conn.execute(
             "SELECT unit_price_fen FROM customer_unit_prices WHERE user_id = %s",
             (user_id,),
         ).fetchone()
-        if row is None:
-            return billing
-        return apply_customer_unit_price(billing, unit_price_fen=int(row["unit_price_fen"]))
+        if row is not None:
+            billing = apply_customer_unit_price(billing, unit_price_fen=int(row["unit_price_fen"]))
+        version, credit_config = read_pricing(self.conn)
+        billing["credit_price_version"] = version
+        billing["package_min_recharge_fen"] = billing["min_recharge_fen"]
+        if credit_config is not None:
+            billing["points_per_yuan"] = credit_config.points_per_yuan
+        return custom_recharge_billing_settings(billing) if for_custom_recharge else billing
 
 
 def fernet_from_environment() -> Fernet:
@@ -612,8 +616,6 @@ def validate_billing_settings(
         raise ValueError("recharge_step_fen must be at least 1000")
     if min_recharge_fen % recharge_step_fen != 0:
         raise ValueError("min_recharge_fen must be divisible by recharge_step_fen")
-    if recharge_step_fen % internal_base_unit_price_fen != 0:
-        raise ValueError("recharge_step_fen must be divisible by internal_base_unit_price_fen")
 
 
 def apply_customer_unit_price(
@@ -621,19 +623,32 @@ def apply_customer_unit_price(
     *,
     unit_price_fen: int,
 ) -> dict[str, int]:
-    """Apply a positive per-customer sale price to a global billing snapshot."""
+    """保留全局充值规则，防止旧客户单价把自定义充值步长降回几元。"""
     if isinstance(unit_price_fen, bool) or not isinstance(unit_price_fen, int):
         raise ValueError("unit_price_fen must be an integer fen value")
     if unit_price_fen < 1 or unit_price_fen > 2_147_483_647:
         raise ValueError("unit_price_fen must be between 1 and 2147483647")
-    global_minimum = billing["min_recharge_fen"]
-    effective_minimum = ((global_minimum + unit_price_fen - 1) // unit_price_fen) * unit_price_fen
     return {
         **billing,
         "charged_unit_price_fen": unit_price_fen,
-        "min_recharge_fen": effective_minimum,
-        "recharge_step_fen": unit_price_fen,
     }
+
+
+def custom_recharge_billing_settings(billing: dict[str, int]) -> dict[str, int]:
+    """旧积分须精确兑换，向上对齐可充值金额；新汇率与旧单价解耦。"""
+    if "points_per_yuan" in billing:
+        return dict(billing)
+    step = lcm(billing["recharge_step_fen"], billing["charged_unit_price_fen"])
+    minimum = ((billing["min_recharge_fen"] + step - 1) // step) * step
+    if not 1 <= step <= 2_147_483_647 or not 1 <= minimum <= 2_147_483_647:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "RECHARGE_CONFIGURATION_INVALID",
+                "message": "充值规则超出允许范围，请联系管理员调整计价。",
+            },
+        )
+    return {**billing, "min_recharge_fen": minimum, "recharge_step_fen": step}
 
 
 def effective_customer_billing_settings(
@@ -666,11 +681,14 @@ def effective_customer_billing_settings(
     charged_unit_price_fen = billing["charged_unit_price_fen"]
     if amount_fen % charged_unit_price_fen != 0:
         raise ValueError("acceptance payment amount must be divisible by the configured unit price")
-    return {
+    overridden = {
         **billing,
         "min_recharge_fen": amount_fen,
         "recharge_step_fen": amount_fen,
     }
+    if "package_min_recharge_fen" in billing:
+        overridden["package_min_recharge_fen"] = amount_fen
+    return overridden
 
 
 def mask_config(config: dict[str, str]) -> dict[str, str]:

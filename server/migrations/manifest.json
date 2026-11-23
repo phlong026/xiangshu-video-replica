@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261122T1000_replica_prompt_mode"
+      "20261124T1000_recharge_minimum_step"
     ],
     "parents": {
       "001_core": null,
@@ -214,9 +214,10 @@
       "20261116T1000_recharge_orders_closed_at": "20261115T1000_display_settings",
       "20261117T1000_kuaishou_publish_platform": "20261116T1000_recharge_orders_closed_at",
       "20261120T1000_account_diagnosis": "20261117T1000_kuaishou_publish_platform",
-      "20261122T1000_replica_prompt_mode": "20261120T1000_account_diagnosis"
+      "20261122T1000_replica_prompt_mode": "20261120T1000_account_diagnosis",
+      "20261124T1000_recharge_minimum_step": "20261122T1000_replica_prompt_mode"
     },
-    "revision_count": 192
+    "revision_count": 193
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -998,6 +999,10 @@
     "20261122T1000_replica_prompt_mode": {
       "file": "versions/20261122T1000_replica_prompt_mode.py",
       "sha256": "0a458e8822f1fb3fc0943df01919933e52f1265f635b1190c7aff6f746e68a66"
+    },
+    "20261124T1000_recharge_minimum_step": {
+      "file": "versions/20261124T1000_recharge_minimum_step.py",
+      "sha256": "7bcd18b66b31e8285e4702420af6937ee945bcfe7b0f5ea60f8b7c1af7eac486"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

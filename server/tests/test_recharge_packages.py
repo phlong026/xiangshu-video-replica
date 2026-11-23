@@ -1143,6 +1143,82 @@ def test_customer_package_order_freezes_snapshot_and_rejects_conflicts(
         assert orders is not None and int(orders[0]) == 1
 
 
+@pytest.mark.parametrize(
+    ("name", "amount_fen", "credits"),
+    [("基础会员", 198_000, 20_000), ("白银会员", 298_000, 29_800), ("黄金会员", 398_000, 39_800)],
+)
+def test_existing_packages_are_exempt_from_100_yuan_custom_steps(
+    package_client, route_state, name: str, amount_fen: int, credits: int
+) -> None:
+    from types import SimpleNamespace
+
+    from app.payment_provider import DeploymentConfig, MerchantConfig, PaymentFormResult
+    from app.recharge_routes import get_zpay_provider
+
+    client = package_client
+    headers, user_id = account(client)
+    provider = SimpleNamespace(
+        name="zpay",
+        load_merchant_config=lambda conn: MerchantConfig("zpay", {}, ("alipay",)),
+        load_deployment_config=lambda: DeploymentConfig(
+            "https://example.test/notify", "https://example.test/return"
+        ),
+        create_payment_form=lambda **kwargs: PaymentFormResult(
+            "https://example.test/pay", "POST", {}
+        ),
+    )
+    client.app.dependency_overrides[get_zpay_provider] = lambda: provider
+    configured_name = f"{name}（后台配置原文）"
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE runtime_settings SET min_recharge_fen=50000, recharge_step_fen=10000 WHERE id=1"
+        )
+        # 旧单价导致自定义充值起步额高于套餐，仍不得影响套餐的独立金额/积分。
+        raw.execute(
+            "INSERT INTO customer_unit_prices (user_id, unit_price_fen, updated_by_user_id) "
+            "VALUES (%s, 4100, %s)",
+            (user_id, user_id),
+        )
+        package = create_package(
+            BusinessConnection.postgres(raw),
+            name=configured_name,
+            amount_fen=amount_fen,
+            credits=credits,
+            discount_rate=None,
+            actor_user_id=user_id,
+        )
+    wallet = client.get("/api/customer/wallet", headers=headers)
+    assert wallet.status_code == 200, wallet.text
+    assert wallet.json()["min_recharge_fen"] == 410_000
+    assert wallet.json()["recharge_step_fen"] == 410_000
+    assert wallet.json()["package_min_recharge_fen"] == 50_000
+    listing = client.get("/api/customer/recharge-packages", headers=headers)
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["items"][0]["name"] == configured_name
+    response = client.post(
+        "/api/customer/recharge-orders",
+        headers={**headers, "Idempotency-Key": str(uuid4())},
+        json={"amount_fen": amount_fen, "package_id": package.id},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["credits"] == credits
+    with psycopg.connect(route_state) as raw:
+        row = raw.execute(
+            "SELECT min_recharge_fen_snapshot, recharge_step_fen_snapshot, package_snapshot_json "
+            "FROM recharge_orders WHERE merchant_order_no=%s",
+            (response.json()["order_no"],),
+        ).fetchone()
+    assert row is not None and row[:2] == (50_000, 10_000)
+    assert json.loads(row[2])["name"] == configured_name
+    custom = client.post(
+        "/api/customer/recharge-orders",
+        headers={**headers, "Idempotency-Key": str(uuid4())},
+        json={"amount_fen": amount_fen},
+    )
+    assert custom.status_code == 422, custom.text
+    assert custom.json()["detail"]["code"] == "INVALID_RECHARGE_AMOUNT"
+
+
 def test_customer_package_order_below_effective_minimum_is_rejected(
     package_client, route_state
 ) -> None:

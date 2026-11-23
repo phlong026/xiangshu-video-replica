@@ -193,6 +193,19 @@ describe("yuanInputToFen", () => {
 });
 
 describe("packageBelowMinimum", () => {
+  test("套餐使用全局最低额，旧单价推高的自定义最低额不禁用固定套餐", () => {
+    const wallet = {
+      min_recharge_fen: 410000,
+      package_min_recharge_fen: 50000,
+    };
+    for (const amountFen of [198000, 298000, 398000]) {
+      expect(packageBelowMinimum({ amount_fen: amountFen }, wallet)).toBe(
+        false,
+      );
+    }
+    expect(packageBelowMinimum({ amount_fen: 49900 }, wallet)).toBe(true);
+  });
+
   test("flags packages under the effective minimum recharge amount", () => {
     expect(
       packageBelowMinimum({ amount_fen: 5000 }, { min_recharge_fen: 10000 }),

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -163,10 +169,98 @@ function renderDialog(
   );
 }
 
+function configuredRechargeFetchMock() {
+  const items = [
+    { id: "basic", name: "基础会员", amount_fen: 198000, credits: 20000 },
+    { id: "silver", name: "白银会员", amount_fen: 298000, credits: 29800 },
+    { id: "gold", name: "黄金会员", amount_fen: 398000, credits: 39800 },
+  ];
+  let order = { order_no: "configured-order", amount_fen: 0, credits: 0 };
+  return vi.fn((url: string, options?: RequestInit) => {
+    if (url.endsWith("/api/customer/wallet")) {
+      return jsonResponse({
+        ...walletPayload,
+        points_per_yuan: 10,
+        min_recharge_fen: 50000,
+        recharge_step_fen: 10000,
+      });
+    }
+    if (url.endsWith("/api/customer/recharge-packages")) {
+      return jsonResponse({
+        items: items.map((item) => ({
+          ...rechargePackagePayload.items[0],
+          ...item,
+        })),
+      });
+    }
+    if (
+      url.endsWith("/api/customer/recharge-orders") &&
+      options?.method === "POST"
+    ) {
+      const payload = JSON.parse(String(options.body));
+      const pkg = items.find((item) => item.id === payload.package_id);
+      order = {
+        ...order,
+        amount_fen: payload.amount_fen,
+        credits: pkg?.credits ?? payload.amount_fen / 10,
+      };
+      return jsonResponse({ ...order, status: "PENDING" }, 201);
+    }
+    if (url.endsWith("/payment-code")) {
+      return jsonResponse({
+        ...order,
+        qr_image_url: "https://payment.example/qr.png",
+        payment_url: "weixin://wxpay/bizpayurl?pr=configured-test",
+      });
+    }
+    if (url.endsWith("/api/customer/recharge-orders/configured-order")) {
+      return jsonResponse({ ...order, status: "PENDING" });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  });
+}
+
 describe("CustomerRechargeDialog", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("选择套餐只更新选择，确认充值后才创建带套餐编号的订单", async () => {
+    const fetchMock = paymentFlowFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    renderDialog();
+
+    const card = await screen.findByRole("button", { name: /标准档/ });
+    fireEvent.click(card);
+    expect(card).toHaveAttribute("aria-pressed", "true");
+    expect(
+      fetchMock.mock.calls.some(([, options]) => options?.method === "POST"),
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
+    await screen.findByRole("img", { name: "充值支付二维码" });
+    const createCall = fetchMock.mock.calls.find(
+      ([url, options]) =>
+        String(url).endsWith("/api/customer/recharge-orders") &&
+        options?.method === "POST",
+    );
+    expect(createCall?.[1]?.body).toBe(
+      JSON.stringify({ amount_fen: 10000, package_id: "pkg-basic" }),
+    );
+  });
+
+  it("键盘经过自定义输入框时保留已选套餐，实际输入才切换充值方式", async () => {
+    vi.stubGlobal("fetch", configuredRechargeFetchMock());
+    renderDialog();
+    const card = await screen.findByRole("button", { name: /基础会员/ });
+    fireEvent.click(card);
+    const input = screen.getByLabelText("自定义金额（元）");
+    fireEvent.focus(input);
+    expect(card).toHaveAttribute("aria-pressed", "true");
+    fireEvent.change(input, { target: { value: "600" } });
+    expect(card).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("radio", { name: "自定义充值" })).toBeChecked();
   });
 
   it.each([
@@ -181,8 +275,9 @@ describe("CustomerRechargeDialog", () => {
 
       renderDialog({ onOrderCreated });
 
-      // 档位来自管理端配置：点击套餐卡片按套餐下单（金额必须等于套餐金额）。
+      // 档位来自管理端配置，选中后统一确认，金额与套餐编号一起提交。
       fireEvent.click(await screen.findByRole("button", { name: /100元/ }));
+      fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
 
       const qr = await screen.findByRole("img", { name: "充值支付二维码" });
       expect(qr).toHaveAttribute("src", "https://payment.example/qr.png");
@@ -323,12 +418,13 @@ describe("CustomerRechargeDialog", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderDialog();
 
+    await screen.findByRole("button", { name: /标准档/ });
     fireEvent.change(screen.getByLabelText("自定义金额（元）"), {
       target: { value: "100" },
     });
     expect(await screen.findByText(/该金额有对应套餐/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "生成支付二维码" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(
@@ -370,16 +466,133 @@ describe("CustomerRechargeDialog", () => {
     expect(card).toHaveTextContent("已选套餐");
     expect(card).toHaveTextContent("视频生成 9折");
     expect(card).toHaveTextContent("含赠送 1801 积分");
-    expect(screen.getByLabelText("自定义金额（元）")).toHaveValue(1998);
-    // 起充额提示必须常驻可见：不能等用户提交了才报错（需求：标注不低于 100）。
-    expect(screen.getByText(/自定义充值金额不低于 100元/)).toBeInTheDocument();
+    // 套餐价不能污染自定义输入；两个入口适用不同的步长规则。
+    expect(screen.getByLabelText("自定义金额（元）")).toHaveValue(null);
+    expect(screen.getByText(/最低 100元/)).toBeInTheDocument();
     expect(screen.getByLabelText("自定义金额（元）")).toHaveAttribute(
       "min",
       "100",
     );
   });
 
-  it("套餐引导预填的非整元金额能精确下单，不被浮点尘埃误拒（上线审查 P1-4）", async () => {
+  it.each(["", "0", "499", "550", "500.01", "22000000"])(
+    "自定义金额 %s 不符合500元起100元步长时，不创建支付订单",
+    async (amount) => {
+      const fetchMock = configuredRechargeFetchMock();
+      vi.stubGlobal("fetch", fetchMock);
+      renderDialog();
+      await screen.findByRole("button", { name: /基础会员/ });
+
+      fireEvent.click(screen.getByRole("radio", { name: "自定义充值" }));
+      fireEvent.change(screen.getByLabelText("自定义金额（元）"), {
+        target: { value: amount },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "充值金额须为500元起，并按100元递增。",
+      );
+      expect(
+        fetchMock.mock.calls.some(([, options]) => options?.method === "POST"),
+      ).toBe(false);
+    },
+  );
+
+  it.each([500, 600])(
+    "自定义充值%s元显示基础汇率预估并提交不带套餐编号的精确金额",
+    async (amount) => {
+      const fetchMock = configuredRechargeFetchMock();
+      vi.stubGlobal("fetch", fetchMock);
+      renderDialog();
+      await screen.findByRole("button", { name: /基础会员/ });
+      const input = screen.getByLabelText("自定义金额（元）");
+      expect(input).toHaveAttribute("min", "500");
+      expect(input).toHaveAttribute("step", "100");
+      fireEvent.change(input, { target: { value: String(amount) } });
+      expect(screen.getByRole("radio", { name: "自定义充值" })).toBeChecked();
+      expect(
+        screen.getByText(
+          `预计到账 ${(amount * 10).toLocaleString("zh-CN")} 积分`,
+        ),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
+      await screen.findByRole("img", { name: "充值支付二维码" });
+      const createCall = fetchMock.mock.calls.find(
+        ([url, options]) =>
+          url.endsWith("/api/customer/recharge-orders") &&
+          options?.method === "POST",
+      );
+      expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+        amount_fen: amount * 100,
+      });
+    },
+  );
+
+  it.each([
+    ["基础会员", "basic", 198000],
+    ["白银会员", "silver", 298000],
+    ["黄金会员", "gold", 398000],
+  ] as const)(
+    "%s按后台原价提交，不受自定义100元步长限制",
+    async (name, id, amountFen) => {
+      const fetchMock = configuredRechargeFetchMock();
+      vi.stubGlobal("fetch", fetchMock);
+      renderDialog();
+      fireEvent.click(
+        await screen.findByRole("button", { name: new RegExp(name) }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
+      await screen.findByRole("img", { name: "充值支付二维码" });
+      const createCall = fetchMock.mock.calls.find(
+        ([url, options]) =>
+          url.endsWith("/api/customer/recharge-orders") &&
+          options?.method === "POST",
+      );
+      expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+        amount_fen: amountFen,
+        package_id: id,
+      });
+    },
+  );
+
+  it("保留后台自定义套餐名称和完整折扣范围文字", async () => {
+    const name = "运营配置的套餐名称与完整说明：用于持续创作和团队日常视频制作";
+    const fetchMock = configuredRechargeFetchMock();
+    vi.stubGlobal("fetch", (url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/customer/recharge-packages")) {
+        return jsonResponse({
+          items: [
+            {
+              ...discountPackagePayload.items[0],
+              name,
+              discount_interfaces: [
+                "video_generation",
+                "video_analysis",
+                "first_frame",
+                "character",
+                "script_rewrite",
+                "oral",
+                "asr",
+                "viral_extract",
+                "link_resolution",
+                "prompt_optimize",
+                "后台保留的自定义范围文字",
+              ],
+            },
+          ],
+        });
+      }
+      return fetchMock(url, options);
+    });
+    renderDialog();
+    const card = await screen.findByRole("button", { name: new RegExp(name) });
+    expect(within(card).getByText(name)).toBeInTheDocument();
+    expect(card).toHaveTextContent(
+      "视频生成、视频分析、首帧生成、人物形象、文案改写、数字人口播、语音转写、爆款提取、链接解析、提示词优化、后台保留的自定义范围文字 9折",
+    );
+  });
+
+  it("自定义预填的非整元金额按生效步长精确下单，不被浮点尘埃误拒", async () => {
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (String(url).endsWith("/api/customer/recharge-packages")) {
         return jsonResponse({
@@ -438,11 +651,13 @@ describe("CustomerRechargeDialog", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderDialog({
       suggestedAmountYuan: 99.98,
-      suggestedPackageId: "pkg-9998",
     });
 
     expect(await screen.findByLabelText("自定义金额（元）")).toHaveValue(99.98);
-    fireEvent.click(screen.getByRole("button", { name: "生成支付二维码" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认充值" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(
@@ -472,6 +687,7 @@ describe("CustomerRechargeDialog", () => {
     renderDialog();
 
     fireEvent.click(await screen.findByRole("button", { name: /100元/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
     await screen.findByRole("img", { name: "充值支付二维码" });
 
     // 此前这里只是不再 setTimeout，屏幕上「系统会继续查询」会一直留着，

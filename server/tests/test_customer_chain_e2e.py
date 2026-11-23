@@ -760,6 +760,7 @@ def test_customer_chain_second_device_conflict_switch_recharge(
     assert wallet_view.status_code == 200, wallet_view.text
     assert wallet_view.json()["min_recharge_fen"] == 500
     assert wallet_view.json()["recharge_step_fen"] == 500
+    assert wallet_view.json()["package_min_recharge_fen"] == 500
 
     # --- Recharge on the new session: order then signed ZPay callback ---
     order = client.post(

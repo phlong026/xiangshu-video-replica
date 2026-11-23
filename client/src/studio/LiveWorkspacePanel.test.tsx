@@ -403,11 +403,21 @@ describe("LiveWorkspacePanel 客户钱包入口 (CW-016)", () => {
       await screen.findByRole("button", { name: "购买套餐标准档" }),
     );
 
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("dialog", { name: "余额充值" });
+    expect(
+      await within(dialog).findByRole("button", { name: /标准档/ }),
+    ).toHaveAttribute("aria-pressed", "true");
     const submit = await within(dialog).findByRole("button", {
-      name: "生成支付二维码",
+      name: "确认充值",
     });
     await waitFor(() => expect(submit).toBeEnabled());
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, options]) =>
+          String(url).endsWith("/api/customer/recharge-orders") &&
+          options?.method === "POST",
+      ),
+    ).toBe(false);
     fireEvent.click(submit);
 
     // 订单创建成功并渲染客户支付二维码。
@@ -415,7 +425,7 @@ describe("LiveWorkspacePanel 客户钱包入口 (CW-016)", () => {
       await within(dialog).findByRole("img", { name: "充值支付二维码" }),
     ).toBeInTheDocument();
 
-    // method-path 记录：客户 lane POST 被调用（金额 20000 分），内部 lane 从不被调用。
+    // 确认后按套餐 ID 建单，保留套餐积分与折扣；内部 lane 从不被调用。
     const customerCreate = fetchMock.mock.calls.find(
       ([url, options]) =>
         String(url).endsWith("/api/customer/recharge-orders") &&
@@ -423,7 +433,7 @@ describe("LiveWorkspacePanel 客户钱包入口 (CW-016)", () => {
     );
     expect(customerCreate).toBeDefined();
     expect(customerCreate?.[1]?.body).toBe(
-      JSON.stringify({ amount_fen: 20000 }),
+      JSON.stringify({ amount_fen: 20000, package_id: "pkg-200" }),
     );
     expect(
       fetchMock.mock.calls.some(
