@@ -7,16 +7,13 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-SUBJECT_MOTION_STATES = (
-    "STATIC",
-    "WALKING",
-    "RUNNING",
-    "TURNING",
-    "GESTURING_ONLY",
-    "OBJECT_MOTION",
-    "NO_PERSON",
-    "UNKNOWN",
+from app.storyboard_facts import (
+    SUBJECT_MOTION_STATES as SUBJECT_MOTION_STATES,
 )
+from app.storyboard_facts import (
+    parse_subject_motion_states as parse_subject_motion_states,
+)
+from app.storyboard_facts import storyboard_facts_issues
 
 
 class StoryboardConsistencyError(ValueError):
@@ -26,19 +23,6 @@ class StoryboardConsistencyError(ValueError):
         self.issues = issues
         first = issues[0]
         super().__init__(f"分镜 {first['shot_id'] or '全片'} 待确认：{first['message']}")
-
-
-def parse_subject_motion_states(value: str) -> tuple[str, ...]:
-    """兼容现有并列手势写法；同一阶段不能同时断言静止、无人或未知。"""
-    parts = tuple(part.strip() for part in value.split("+"))
-    if not parts or any(part not in SUBJECT_MOTION_STATES for part in parts):
-        raise ValueError("人物运动状态包含未知取值")
-    if len(set(parts)) != len(parts):
-        raise ValueError("人物运动状态不能重复")
-    exclusive = {"STATIC", "NO_PERSON", "UNKNOWN", "OBJECT_MOTION"}
-    if (len(parts) > 1 and exclusive.intersection(parts)) or {"WALKING", "RUNNING"} <= set(parts):
-        raise ValueError("同一动作阶段的人物运动状态相互矛盾，请按真实阶段拆分")
-    return parts
 
 
 _UNCERTAIN_OR_QUOTED = re.compile(
@@ -80,13 +64,27 @@ def _observed_person_action(
             or re.search(r"多人|两人|两名|另一|其他|路人|分别|有人", action)
         ):
             return False
-    elif person_count != 1:
+    elif person_count != 1 and not (
+        isinstance(person_count, int) and not isinstance(person_count, bool) and person_count > 1
+    ):
         return False
+    clauses = _observed_clauses(action)
+    if isinstance(person_count, int) and person_count > 1:
+        # 多人旧数据没有主体 ID，只核对明确点名主讲人的子句；旁人的动作不借此归给他。
+        aliases = [name for name in ("主讲人", "讲解者", "主持人", "主要人物") if name in subject]
+        if len(subject.strip()) >= 4 and subject.strip() not in aliases:
+            aliases.append(subject.strip())
+        clauses = [
+            clause
+            for clause in clauses
+            if any(clause.strip().startswith(alias) for alias in aliases)
+            and not re.search(r"路人|配角|另一人|其他人", clause)
+        ]
     return any(
         pattern.search(clause) is not None
         and not re.match(r"\s*(?:镜头|摄影机|相机|摄像机|机位|画面)", clause)
         and not re.search(r"路人|另一人|其他人", clause)
-        for clause in _observed_clauses(action)
+        for clause in clauses
     )
 
 
@@ -164,7 +162,7 @@ def storyboard_consistency_issues(
     shots: Sequence[Mapping[str, Any]], original_script: str | None = None
 ) -> list[dict[str, str]]:
     """所有入口共享的门禁；旧数据缺 motion 时不伪造静止，也不破坏历史读取。"""
-    issues: list[dict[str, str]] = []
+    issues: list[dict[str, str]] = storyboard_facts_issues(shots)
     seen: set[str] = set()
 
     def add(code: str, shot_id: str, message: str) -> None:
@@ -175,6 +173,10 @@ def storyboard_consistency_issues(
         if shot_id and shot_id in seen:
             add("DUPLICATE_SHOT_ID", shot_id, "分镜编号重复，会导致台词或素材对应错误。")
         seen.add(shot_id)
+        if shot.get("facts") is not None:
+            # 新事实已按主体和时间校验；陈旧的兼容投影不能否决用户刚确认的事实。
+            # 不合法 facts 同样在上方形成硬问题，不能通过跳到旧字段消掉错误。
+            continue
         count = shot.get("person_count")
         subject = str(shot.get("subject") or "").strip()
         if isinstance(count, int) and not isinstance(count, bool):
@@ -199,7 +201,7 @@ def storyboard_consistency_issues(
         except ValueError as exc:
             add("MOTION_STATE_CONFLICT", shot_id, str(exc))
             states = set()
-        person_states = {"STATIC", "WALKING", "RUNNING", "TURNING", "GESTURING_ONLY"}
+        person_states = {"STATIC", "WALKING", "RUNNING", "MOVING", "TURNING", "GESTURING_ONLY"}
         if (count == 0 and states.intersection(person_states)) or (
             isinstance(count, int) and count > 0 and "NO_PERSON" in states
         ):
@@ -207,7 +209,7 @@ def storyboard_consistency_issues(
         action = str(shot.get("action") or "")
         if (
             states.intersection({"STATIC", "GESTURING_ONLY"})
-            and not states.intersection({"WALKING", "RUNNING", "TURNING"})
+            and not states.intersection({"WALKING", "RUNNING", "MOVING", "TURNING"})
             and any(
                 _observed_person_action(text, count, subject, _LOCOMOTION)
                 for text in (action, str(motion.get("subject_displacement") or ""))
@@ -230,7 +232,7 @@ def storyboard_consistency_issues(
         direction = motion.get("subject_direction")
         if (
             states.intersection({"STATIC", "GESTURING_ONLY", "NO_PERSON"})
-            and not states.intersection({"WALKING", "RUNNING", "TURNING"})
+            and not states.intersection({"WALKING", "RUNNING", "MOVING", "TURNING"})
             and direction in {"toward_camera", "away_from_camera", "left", "right", "lateral"}
         ):
             add(
@@ -239,7 +241,7 @@ def storyboard_consistency_issues(
                 "人物状态与人物位移方向不一致；摄影机运动应单独记录。",
             )
         if (
-            states.intersection({"WALKING", "RUNNING"})
+            states.intersection({"WALKING", "RUNNING", "MOVING"})
             and direction in {"none", "in_place"}
             and not re.search(
                 r"原地|踏步|跑步机|传送带", action + str(motion.get("subject_displacement") or "")
