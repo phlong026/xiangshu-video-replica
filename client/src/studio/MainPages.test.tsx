@@ -363,6 +363,40 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(value.openPicker).toHaveBeenCalledWith("reference");
   });
 
+  it("图生视频更换素材选择首帧，不将新图片误加入参考生视频素材", () => {
+    const value = studio(taskA.id, {
+      data: data([
+        {
+          ...taskA,
+          type: "视频生成",
+          draftSnapshot: {
+            ...createState("video").draft,
+            firstFrameId: "original-first-frame",
+            referenceIds: [],
+          },
+        },
+      ]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "更换素材" }));
+
+    expect(value.navigate).toHaveBeenCalledWith(
+      "video",
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          firstFrameId: "original-first-frame",
+          referenceIds: [],
+        }),
+        returnTo: "task-detail",
+      }),
+    );
+    expect(value.openPicker).toHaveBeenCalledWith("first-frame");
+    expect(value.openPicker).not.toHaveBeenCalledWith("reference");
+  });
+
   it("首屏外任务按 URL 中的类型和后端 ID 读取，失败可受控重试", async () => {
     const loaded = {
       ...taskA,
