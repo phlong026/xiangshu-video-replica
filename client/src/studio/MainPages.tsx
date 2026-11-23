@@ -2191,9 +2191,7 @@ export function TaskDetailPage() {
               <Icon name="image" />
               更换素材
             </Button>
-            <Button
-              onClick={() => recreate(creationPage)}
-            >
+            <Button onClick={() => recreate(creationPage)}>
               <Icon name="refresh" />
               新建草稿
             </Button>
