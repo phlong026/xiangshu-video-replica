@@ -14,6 +14,7 @@ import type {
   ReplicaPromptVersion,
 } from "../api";
 import { fetchReplicaPromptHistory } from "../api";
+import { sampleFactsShot } from "../test/shotFacts";
 import { clearAccountResidue } from "./draftResidue";
 import type { StudioContextValue } from "./types";
 
@@ -518,6 +519,43 @@ describe("LongReplicaPage 拆解链路", () => {
     expect(within(table).getByText(/同镜头内开始走动/)).toBeInTheDocument();
     expect(within(table).getByText(/左侧柔光/)).toBeInTheDocument();
     expect(screen.getByText(/s1：人物运动状态与动作矛盾/)).toBeInTheDocument();
+  });
+
+  it("长片以事实展示并复制主体与运动，复核未完成仍保留初稿", async () => {
+    const factsShot = sampleFactsShot();
+    getLongReplicaSession("u-1").result = {
+      ...resultPayload(),
+      payload: {
+        ...RESULT_PAYLOAD,
+        shots: [factsShot],
+        source_review: {
+          status: "INCOMPLETE",
+          attempted: true,
+          issues: [
+            {
+              code: "SOURCE_REVIEW_INCOMPLETE",
+              shot_id: "s1",
+              message: "门旁人物动作待确认",
+            },
+          ],
+        },
+      },
+    };
+    render(<LongReplicaPage />);
+    const table = screen.getByRole("table");
+    expect(within(table).queryByText("旧人物静止描述")).not.toBeInTheDocument();
+    expect(within(table).getAllByText(/步态：行走/).length).toBeGreaterThan(0);
+    expect(within(table).getByText("00:00.125-00:03.375")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "原片校对状态" }),
+    ).toHaveTextContent("s1：门旁人物动作待确认");
+    expect(screen.getByText("复刻提示词")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "复制分镜表" }));
+    await waitFor(() =>
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        expect.stringContaining(JSON.stringify(factsShot.facts)),
+      ),
+    );
   });
 
   it("拆解历史弹窗列出历史并可载入历史版本", async () => {

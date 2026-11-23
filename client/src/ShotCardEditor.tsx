@@ -1,4 +1,11 @@
 import type { ShotCard, ShotConsistencyIssue, ShotMotion } from "./api";
+import { RawShotFactsRepair, ShotFactsEditor } from "./ShotFactsEditor";
+import {
+  formatShotFacts,
+  invalidateShotEvidence,
+  readShotFacts,
+  shotFactsView,
+} from "./shotFacts";
 
 const SUBJECT_MOTION_STATE_OPTIONS: Array<{
   value: ShotMotion["subject_motion_state"];
@@ -6,6 +13,7 @@ const SUBJECT_MOTION_STATE_OPTIONS: Array<{
 }> = [
   { value: "STATIC", label: "静止" },
   { value: "WALKING", label: "行走" },
+  { value: "MOVING", label: "有位移，步态待确认" },
   { value: "RUNNING", label: "跑动" },
   { value: "TURNING", label: "转身" },
   { value: "GESTURING_ONLY", label: "手势" },
@@ -132,7 +140,7 @@ export function formatShotMotion(
 export function missingMotionShotIds(shots: ShotCard[]): string[] {
   return shots
     .map((shot, index) =>
-      shot.motion == null
+      shot.motion == null && shot.facts == null
         ? shot.shot_id?.trim()
           ? shot.shot_id
           : `第 ${index + 1} 镜`
@@ -143,32 +151,48 @@ export function missingMotionShotIds(shots: ShotCard[]): string[] {
 
 /** 制表符格式可直接粘贴到 Excel、飞书表格和常见文档表格。 */
 export function formatShotCardsForClipboard(
-  shots: ShotCard[],
+  shots: Partial<ShotCard>[],
   context: Record<string, unknown> = {},
 ): string {
-  const rows = shots.map((shot) => [
-    shot.shot_id,
-    shot.start_time,
-    shot.end_time,
-    shot.shot_type,
-    shot.composition,
-    shot.camera_motion,
-    shot.subject,
-    shot.action,
-    formatShotMotion(shot.motion),
-    shot.scene,
-    shot.spoken_text,
-    shot.transition,
-    shot.segment_kind,
-    shot.boundary_reason,
-    shot.person_count,
-    shot.scene_dressing,
-    shot.scene_lighting,
-    shot.wardrobe_pose_detail,
-    shot.ambient_sound,
-    shot.music_style_hint,
-  ]);
-  const table = [CLIPBOARD_HEADERS, ...rows]
+  const hasFacts = shots.some((shot) => shot.facts != null);
+  const rows = shots.map((sourceShot) => {
+    const shot = shotFactsView(sourceShot);
+    const facts = readShotFacts(shot.facts);
+    return [
+      shot.shot_id,
+      shot.start_time,
+      shot.end_time,
+      shot.shot_type,
+      shot.composition,
+      shot.camera_motion,
+      shot.subject,
+      shot.action,
+      facts
+        ? formatShotFacts(facts)
+        : shot.facts != null
+          ? "结构化事实待确认"
+          : formatShotMotion(shot.motion),
+      shot.scene,
+      shot.spoken_text,
+      shot.transition,
+      shot.segment_kind,
+      shot.boundary_reason,
+      shot.person_count,
+      shot.scene_dressing,
+      shot.scene_lighting,
+      shot.wardrobe_pose_detail,
+      shot.ambient_sound,
+      shot.music_style_hint,
+      ...(hasFacts
+        ? [shot.facts == null ? "" : JSON.stringify(shot.facts)]
+        : []),
+    ];
+  });
+  const headers = [
+    ...CLIPBOARD_HEADERS,
+    ...(hasFacts ? ["结构化事实(JSON)"] : []),
+  ];
+  const table = [headers, ...rows]
     .map((row) => row.map(clipboardCell).join("\t"))
     .join("\n");
   const source =
@@ -194,6 +218,12 @@ export function formatShotCardsForClipboard(
       ? [`${label}\t${clipboardCell(value)}`]
       : [];
   });
+  const sourceReview = Object.hasOwn(context, "source_review")
+    ? context.source_review
+    : source.source_review;
+  if (sourceReview && typeof sourceReview === "object") {
+    metadata.push(`原片校对(JSON)\t${JSON.stringify(sourceReview)}`);
+  }
   return metadata.length
     ? `${table}\n\n全片信息\n${metadata.join("\n")}`
     : table;
@@ -222,7 +252,7 @@ export function promptTextFromShotTableClipboard(
     return { ok: false, error: "分镜表中没有可导入的镜头数据。" };
   }
   const promptText = [
-    "以下内容是拆解后的分镜表。请保留镜头顺序、精确时间、人物与镜头运动、场景光线、服饰姿态、原口播和声音信息，并转换为当前视频模式要求的 H3 提示词格式。SHOT_CUT 表示真实切镜；ACTION_BEAT 表示同一镜头内的连续动作阶段，不得改成切镜。缺失字段保持未确认，不得补成静止或固定机位：",
+    "以下内容是拆解后的分镜表。请保留镜头顺序、精确时间、人物与镜头运动、场景光线、服饰姿态、原口播和声音信息，并转换为当前视频模式要求的 H3 提示词格式。SHOT_CUT 表示真实切镜；ACTION_BEAT 表示同一镜头内的连续动作阶段，不得改成切镜。若含结构化事实(JSON)，以其中的主体引用和独立运动维度为准，不得把一个主体的动作移给另一主体，STALE 依据不能当作当前确认。缺失字段保持未确认，不得补成静止或固定机位：",
     normalized,
   ].join("\n\n");
   if (Array.from(promptText).length > 7000) {
@@ -247,7 +277,7 @@ export function ShotCardEditor({
 }) {
   const update = (
     index: number,
-    key: Exclude<keyof ShotCard, "motion">,
+    key: Exclude<keyof ShotCard, "motion" | "facts">,
     value: string,
   ) => {
     const shot = shots[index];
@@ -256,7 +286,20 @@ export function ShotCardEditor({
       key === "start_time" || key === "end_time"
         ? toNonNegativeTime(value)
         : value;
-    onChange(index, { ...shot, [key]: nextValue } as ShotCard);
+    if (shot[key] === nextValue) return;
+    const facts = readShotFacts(shot.facts);
+    onChange(index, {
+      ...shot,
+      [key]: nextValue,
+      ...(facts
+        ? {
+            facts: invalidateShotEvidence(
+              facts,
+              key === "start_time" || key === "end_time" ? undefined : [key],
+            ),
+          }
+        : {}),
+    } as ShotCard);
   };
 
   const updateMotion = (index: number, patch: Partial<ShotMotion>) => {
@@ -321,67 +364,76 @@ export function ShotCardEditor({
           </tr>
         </thead>
         <tbody>
-          {shots.map((shot, index) => (
-            <tr key={shot.shot_id}>
-              <td className="shot-table__id">
-                <ShotCellInput
-                  ariaLabel={`${shot.shot_id} 镜头编号`}
-                  onChange={(value) => update(index, "shot_id", value)}
-                  readOnly={readOnly}
-                  value={shot.shot_id}
-                />
-                <select
-                  aria-label={`${shot.shot_id} 分段类型`}
-                  className="shot-table-select"
-                  disabled={readOnly}
-                  value={shot.segment_kind ?? ""}
-                  onChange={(event) =>
-                    onChange(index, {
-                      ...shot,
-                      segment_kind:
-                        (event.target.value as ShotCard["segment_kind"]) ||
-                        null,
-                    })
-                  }
-                >
-                  <MotionOptions
-                    options={[
-                      { value: "", label: "未标注分段" },
-                      { value: "ACTION_BEAT", label: "连续动作段" },
-                      { value: "SHOT_CUT", label: "真实切镜" },
-                    ]}
-                    values={[shot.segment_kind ?? ""]}
+          {shots.map((sourceShot, index) => {
+            const shot = shotFactsView(sourceShot);
+            const facts = readShotFacts(sourceShot.facts);
+            const hasFacts = sourceShot.facts != null;
+            return (
+              <tr key={shot.shot_id}>
+                <td className="shot-table__id">
+                  {hasFacts ? <small>动作阶段</small> : null}
+                  <ShotCellInput
+                    ariaLabel={`${shot.shot_id} ${hasFacts ? "动作阶段编号" : "镜头编号"}`}
+                    onChange={(value) => update(index, "shot_id", value)}
+                    readOnly={readOnly}
+                    value={shot.shot_id}
                   />
-                </select>
-                <ShotCellInput
-                  ariaLabel={`${shot.shot_id} 分段原因`}
-                  onChange={(value) =>
-                    onChange(index, { ...shot, boundary_reason: value || null })
-                  }
-                  readOnly={readOnly}
-                  value={shot.boundary_reason ?? ""}
-                />
-              </td>
-              <td className="shot-table__time">
-                <ShotCellInput
-                  ariaLabel={`${shot.shot_id} 开始时间`}
-                  onChange={(value) => update(index, "start_time", value)}
-                  readOnly={readOnly}
-                  type="number"
-                  value={String(shot.start_time)}
-                />
-              </td>
-              <td className="shot-table__time">
-                <ShotCellInput
-                  ariaLabel={`${shot.shot_id} 结束时间`}
-                  onChange={(value) => update(index, "end_time", value)}
-                  readOnly={readOnly}
-                  type="number"
-                  value={String(shot.end_time)}
-                />
-              </td>
-              {SHOT_TEXT_FIELDS.filter(({ key }) => key !== "shot_id").flatMap(
-                ({ key, label }) => [
+                  <select
+                    aria-label={`${shot.shot_id} 分段类型`}
+                    className="shot-table-select"
+                    disabled={readOnly || hasFacts}
+                    value={shot.segment_kind ?? ""}
+                    onChange={(event) =>
+                      onChange(index, {
+                        ...shot,
+                        segment_kind:
+                          (event.target.value as ShotCard["segment_kind"]) ||
+                          null,
+                      })
+                    }
+                  >
+                    <MotionOptions
+                      options={[
+                        { value: "", label: "未标注分段" },
+                        { value: "ACTION_BEAT", label: "连续动作段" },
+                        { value: "SHOT_CUT", label: "真实切镜" },
+                      ]}
+                      values={[shot.segment_kind ?? ""]}
+                    />
+                  </select>
+                  <ShotCellInput
+                    ariaLabel={`${shot.shot_id} 分段原因`}
+                    onChange={(value) =>
+                      onChange(index, {
+                        ...shot,
+                        boundary_reason: value || null,
+                      })
+                    }
+                    readOnly={readOnly || hasFacts}
+                    value={shot.boundary_reason ?? ""}
+                  />
+                </td>
+                <td className="shot-table__time">
+                  <ShotCellInput
+                    ariaLabel={`${shot.shot_id} 开始时间`}
+                    onChange={(value) => update(index, "start_time", value)}
+                    readOnly={readOnly}
+                    type="number"
+                    value={String(shot.start_time)}
+                  />
+                </td>
+                <td className="shot-table__time">
+                  <ShotCellInput
+                    ariaLabel={`${shot.shot_id} 结束时间`}
+                    onChange={(value) => update(index, "end_time", value)}
+                    readOnly={readOnly}
+                    type="number"
+                    value={String(shot.end_time)}
+                  />
+                </td>
+                {SHOT_TEXT_FIELDS.filter(
+                  ({ key }) => key !== "shot_id",
+                ).flatMap(({ key, label }) => [
                   <td
                     key={key}
                     className={
@@ -391,7 +443,16 @@ export function ShotCardEditor({
                     <ShotCellInput
                       ariaLabel={`${shot.shot_id} ${label}`}
                       onChange={(value) => update(index, key, value)}
-                      readOnly={readOnly}
+                      readOnly={
+                        readOnly ||
+                        (hasFacts &&
+                          [
+                            "action",
+                            "subject",
+                            "camera_motion",
+                            "transition",
+                          ].includes(key))
+                      }
                       value={shot[key]}
                     />
                     {key === "subject" ? (
@@ -403,6 +464,7 @@ export function ShotCardEditor({
                         step={1}
                         placeholder="人数待确认"
                         readOnly={readOnly}
+                        disabled={readOnly || hasFacts}
                         value={shot.person_count ?? ""}
                         onChange={(event) => {
                           const value = event.target.value;
@@ -419,19 +481,40 @@ export function ShotCardEditor({
                   ...(key === "action"
                     ? [
                         <td key="motion" className="shot-table__motion">
-                          <ShotMotionCell
-                            ariaPrefix={shot.shot_id}
-                            motion={shot.motion ?? null}
-                            onChange={(patch) => updateMotion(index, patch)}
-                            readOnly={readOnly}
-                          />
+                          {facts ? (
+                            <ShotFactsEditor
+                              ariaPrefix={shot.shot_id}
+                              facts={facts}
+                              readOnly={readOnly}
+                              onChange={(next) =>
+                                onChange(index, { ...sourceShot, facts: next })
+                              }
+                            />
+                          ) : hasFacts ? (
+                            <RawShotFactsRepair
+                              key={JSON.stringify(sourceShot.facts)}
+                              ariaPrefix={shot.shot_id}
+                              raw={sourceShot.facts}
+                              readOnly={readOnly}
+                              onChange={(next) =>
+                                onChange(index, { ...sourceShot, facts: next })
+                              }
+                            />
+                          ) : (
+                            <ShotMotionCell
+                              ariaPrefix={shot.shot_id}
+                              motion={shot.motion ?? null}
+                              onChange={(patch) => updateMotion(index, patch)}
+                              readOnly={readOnly}
+                            />
+                          )}
                         </td>,
                       ]
                     : []),
-                ],
-              )}
-            </tr>
-          ))}
+                ])}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -463,7 +546,7 @@ function ShotCellInput({
       disabled={readOnly}
       min={type === "number" ? 0 : undefined}
       onChange={(event) => onChange(event.target.value)}
-      step={type === "number" ? "0.1" : undefined}
+      step={type === "number" ? "any" : undefined}
       type={type}
       value={value}
     />
@@ -527,8 +610,8 @@ function ShotMotionCell({
             "OBJECT_MOTION",
           ]);
           const single = added.find((state) => exclusive.has(state));
-          const locomotion = added.find(
-            (state) => state === "WALKING" || state === "RUNNING",
+          const locomotion = added.find((state) =>
+            ["WALKING", "RUNNING", "MOVING"].includes(state),
           );
           const next = single
             ? [single]
@@ -537,7 +620,7 @@ function ShotMotionCell({
                   (state) =>
                     !exclusive.has(state) &&
                     (!locomotion ||
-                      !["WALKING", "RUNNING"].includes(state) ||
+                      !["WALKING", "RUNNING", "MOVING"].includes(state) ||
                       state === locomotion),
                 )
               : selected;

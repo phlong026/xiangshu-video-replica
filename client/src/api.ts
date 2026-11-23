@@ -479,6 +479,7 @@ export type ShotMotion = {
   subject_motion_state:
     | "STATIC"
     | "WALKING"
+    | "MOVING"
     | "RUNNING"
     | "TURNING"
     | "GESTURING_ONLY"
@@ -535,6 +536,8 @@ export type ShotCard = {
   motion?: ShotMotion | null;
   segment_kind?: "SHOT_CUT" | "ACTION_BEAT" | null;
   boundary_reason?: string | null;
+  /** 复核失败的已付费初稿可能保留坏 JSON，渲染前必须用 readShotFacts 校验。 */
+  facts?: unknown;
 };
 
 export type ShotConsistencyIssue = {
@@ -564,6 +567,7 @@ export type AnalysisPayload = {
   original_script: string;
   shots: ShotCard[];
   consistency_issues?: ShotConsistencyIssue[];
+  source_review?: SourceReview | null;
 };
 
 export type ShotCardPayload = {
@@ -572,7 +576,35 @@ export type ShotCardPayload = {
   original_script?: string;
   shots: ShotCard[];
   consistency_issues?: ShotConsistencyIssue[];
+  source_review?: SourceReview | null;
 };
+
+export type SourceReview = {
+  status: "PASSED" | "INCOMPLETE" | "UNAVAILABLE";
+  attempted: boolean;
+  issues: ShotConsistencyIssue[];
+};
+
+export function readSourceReview(value: unknown): SourceReview | null {
+  if (
+    !isRecord(value) ||
+    typeof value.status !== "string" ||
+    typeof value.attempted !== "boolean" ||
+    !Array.isArray(value.issues)
+  )
+    return null;
+  const issues = readShotConsistencyIssues(value.issues);
+  return {
+    status:
+      ["PASSED", "INCOMPLETE", "UNAVAILABLE"].includes(value.status) &&
+      issues.length === value.issues.length &&
+      !(value.status === "PASSED" && (!value.attempted || issues.length > 0))
+        ? (value.status as SourceReview["status"])
+        : "INCOMPLETE",
+    attempted: value.attempted,
+    issues,
+  };
+}
 
 export type ProjectMainCharacter = Omit<
   components["schemas"]["ProjectMainCharacterResponse"],
@@ -3759,6 +3791,7 @@ export type ReplicaPromptResult = {
   /** 服务端软警告（画幅/时长要素缺失、超长）；禁词是硬拒绝，不会出现在这里。 */
   warnings?: ReplicaPromptWarning[];
   consistency_issues?: ShotConsistencyIssue[];
+  source_review?: SourceReview | null;
 };
 
 const REPLICA_SHOT_TEXT_FIELDS = [
@@ -3785,9 +3818,10 @@ export type ReplicaPromptShot = Partial<
     (typeof REPLICA_SHOT_TEXT_FIELDS)[number] | "start_time" | "end_time"
   >
 > & {
-  person_count?: number;
-  motion?: ShotMotion;
+  person_count?: number | null;
+  motion?: ShotMotion | null;
   segment_kind?: ShotCard["segment_kind"];
+  facts?: unknown;
 };
 
 /** 历史版本也可能有旧的脏字段，只保留可展示的镜头，不补造缺失内容。 */
@@ -3813,7 +3847,11 @@ export function readReplicaPromptShots(value: unknown): ReplicaPromptShot[] {
     if (typeof count === "number" && Number.isInteger(count) && count >= 0) {
       shot.person_count = count;
     }
+    if (count === null) shot.person_count = null;
     if (isShotMotion(source.motion)) shot.motion = source.motion;
+    if (source.motion === null) shot.motion = null;
+    // 保留原始事实供编辑、复制和后续版本读取；解释与展示另外做结构校验。
+    if (source.facts !== undefined) shot.facts = source.facts;
     if (
       source.segment_kind === "SHOT_CUT" ||
       source.segment_kind === "ACTION_BEAT"
@@ -6196,6 +6234,7 @@ export function readAnalysisPayload(
             .join(""),
     shots: analysis.shots,
     consistency_issues: readShotConsistencyIssues(analysis.consistency_issues),
+    source_review: readSourceReview(analysis.source_review),
   };
 }
 
@@ -6263,6 +6302,7 @@ export function readShotCardPayload(
         : undefined,
     shots: payload.shots,
     consistency_issues: readShotConsistencyIssues(payload.consistency_issues),
+    source_review: readSourceReview(payload.source_review),
   };
 }
 

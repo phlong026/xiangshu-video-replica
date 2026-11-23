@@ -39,6 +39,7 @@ import {
   readFirstFrameSelectionPayload,
   readShotConsistencyIssues,
   readSourceFrameCandidates,
+  readSourceReview,
   rewriteProjectScript,
   type SavedPromptItem,
   type ScriptRewriteTask,
@@ -46,6 +47,7 @@ import {
   type ShotCard,
   type ShotCardPayload,
   type ShotConsistencyIssue,
+  type SourceReview,
   saveGenerationPrompt,
   saveShotCards,
   selectCharacterReferences,
@@ -63,6 +65,7 @@ import {
   ShotCardEditor,
 } from "../ShotCardEditor";
 import { SourceFrameSelection } from "../SourceFrameSelection";
+import { SourceReviewNotice } from "../SourceReviewNotice";
 import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { useCopyExtractionProgress } from "./copyExtractionProgress";
@@ -1779,6 +1782,7 @@ export function ReplicaPage() {
   );
   const [shots, setShots] = useState<ShotCard[]>([]);
   const [shotIssues, setShotIssues] = useState<ShotConsistencyIssue[]>([]);
+  const [sourceReview, setSourceReview] = useState<SourceReview | null>(null);
   const [shotTableContext, setShotTableContext] = useState<
     Record<string, unknown>
   >({});
@@ -2004,6 +2008,7 @@ export function ReplicaPage() {
     setAnalysisStatus(undefined);
     setShots([]);
     setShotIssues([]);
+    setSourceReview(null);
     setShotTableContext({});
     shotSaveOperationRef.current += 1;
     setSavingShots(false);
@@ -2187,6 +2192,11 @@ export function ReplicaPage() {
         const restoredPrompt = keepLocalPrompt ? promptTextRef.current : prompt;
 
         setShots(restoredShots);
+        setSourceReview(
+          readSourceReview(
+            shotPayload ? shotPayload.source_review : analysis?.source_review,
+          ),
+        );
         setShotIssues(
           readShotConsistencyIssues(
             shotPayload
@@ -2620,6 +2630,7 @@ export function ReplicaPage() {
             : "";
       const finalShots = shotPayload.shots ?? analysisShots;
       setShots(finalShots);
+      setSourceReview(readSourceReview(shotPayload.source_review));
       setShotIssues(readShotConsistencyIssues(shotPayload?.consistency_issues));
       setShotTableContext(
         shotVersion?.payload ?? analysisVersion?.payload ?? {},
@@ -2795,12 +2806,29 @@ export function ReplicaPage() {
 
   const updateShot = (index: number, patch: Partial<ShotCard>) => {
     if (readOnly || savingShots) return;
+    const current = shots[index];
+    if (
+      !current ||
+      JSON.stringify(current) === JSON.stringify({ ...current, ...patch })
+    )
+      return;
     setShots((current) =>
       current.map((shot, shotIndex) =>
         shotIndex === index ? { ...shot, ...patch } : shot,
       ),
     );
     setShotsDirty(true);
+    setSourceReview({
+      status: "INCOMPLETE",
+      attempted: false,
+      issues: [
+        {
+          code: "SOURCE_REVIEW_STALE",
+          shot_id: patch.shot_id ?? shots[index]?.shot_id,
+          message: "分镜已人工修改，原片校对结果需重新确认。",
+        },
+      ],
+    });
     setShotSaveError("");
     setFinalSnapshot(null);
     // TODO: H3 草稿功能的 UI 组件
@@ -2830,6 +2858,10 @@ export function ReplicaPage() {
       )
         return;
       setShotCardVersionId(saved.id);
+      // 保存端会按事实重新派生旧字段；页面和后续复制都使用同一份已保存结果。
+      if (Array.isArray(saved.payload?.shots))
+        setShots(saved.payload.shots as ShotCard[]);
+      setSourceReview(readSourceReview(saved.payload?.source_review));
       setShotIssues(
         readShotConsistencyIssues(saved.payload?.consistency_issues),
       );
@@ -2964,7 +2996,10 @@ export function ReplicaPage() {
     }
     try {
       await navigator.clipboard.writeText(
-        formatShotCardsForClipboard(displayShots, shotTableContext),
+        formatShotCardsForClipboard(displayShots, {
+          ...shotTableContext,
+          source_review: sourceReview,
+        }),
       );
       notify("分镜表已复制，可直接粘贴到 Excel 或在线表格。");
     } catch {
@@ -3349,6 +3384,7 @@ export function ReplicaPage() {
                       {shotSaveError}
                     </p>
                   ) : null}
+                  <SourceReviewNotice review={sourceReview} />
                   <details
                     className="creation-shot-details"
                     open={shotIssues.length > 0 || undefined}
