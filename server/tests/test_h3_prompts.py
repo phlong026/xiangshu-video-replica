@@ -77,7 +77,10 @@ def test_replacement_first_frame_neutralizes_source_presenter_identity() -> None
                     "composition": "女主持人位于画面中央，村民站在两侧",
                     "action": "女主持人拿着文件夹讲解，村民保持静止",
                     "ambient_sound": "女主持人的清晰女性声音",
-                    "motion": {"hand_action": "主持人单手做手势"},
+                    "motion": {
+                        "subject_motion_state": "GESTURING_ONLY",
+                        "hand_action": "主持人单手做手势",
+                    },
                 }
             ],
         },
@@ -192,11 +195,11 @@ def test_replaced_scene_prompt_uses_confirmed_first_frame_environment() -> None:
                     "scene_dressing": "源视频沙盘",
                     "scene_lighting": "源视频冷光",
                     "camera_motion": "缓慢推进",
-                    "action": "人物抬手指向源视频售楼部沙盘",
+                    "action": "人物抬手指向确认首帧中的沙盘",
                     "ambient_sound": "源售楼部广播",
                     "motion": {
                         "subject_motion_state": "WALKING",
-                        "relative_motion": "人物绕过源沙盘后靠近镜头",
+                        "relative_motion": "人物绕过确认首帧中的沙盘后靠近镜头",
                     },
                 }
             ]
@@ -215,8 +218,8 @@ def test_replaced_scene_prompt_uses_confirmed_first_frame_environment() -> None:
     assert "scene_lighting: 源视频冷光" not in text
     assert "中景" in text and "人物居中" in text and "缓慢推进" in text
     assert (
-        "动作与运动参考（受场景替换规则约束）：人物抬手指向源视频售楼部沙盘；"
-        "人物行走；人物绕过源沙盘后靠近镜头" in text
+        "动作与运动参考（受场景替换规则约束）：人物抬手指向确认首帧中的沙盘；"
+        "人物行走；人物绕过确认首帧中的沙盘后靠近镜头" in text
     )
     assert "动作：人物抬手指向源视频售楼部沙盘" not in text
     # motion 不再以 key: value 形式泄漏进正文。
@@ -315,6 +318,494 @@ def test_longer_target_automatically_scales_timeline_to_full_duration() -> None:
     assert "等比放慢" not in text
     assert "目标时长" not in text
     assert "pace: 快节奏" not in text
+
+
+def _motion_regression_shot(state: str = "WALKING+GESTURING_ONLY") -> dict:
+    return {
+        "shot_id": "courtyard-1",
+        "start_time": 0,
+        "end_time": 4,
+        "segment_kind": "ACTION_BEAT",
+        "shot_type": "全景",
+        "composition": "人物位于庭院中央",
+        "camera_motion": "固定机位",
+        "action": "人物从院子走向门口，边走边抬手讲解",
+        "scene": "庭院",
+        "transition": "视频开始",
+        "motion": {
+            "subject_motion_state": state,
+            "subject_direction": "away_from_camera",
+            "subject_displacement": "人物从院子中央走到门口",
+            "hand_action": "行走时抬手示意",
+            "camera_motion": "STATIC",
+            "relative_motion": "人物逐渐远离固定机位",
+        },
+    }
+
+
+@pytest.mark.parametrize("state", ["STATIC", "STATIC+WALKING"])
+@pytest.mark.parametrize("compiler", ["preview", "final"])
+def test_both_compilers_reject_stored_motion_contradictions(state: str, compiler: str) -> None:
+    """存量分镜也必须重算，不能信任旧结果中缺失或过期的校验标记。"""
+    from fastapi import HTTPException
+
+    from app.generation import compile_prompt_text
+    from app.h3_prompts import compile_replica_final_text
+
+    payload = {"shots": [_motion_regression_shot(state)], "consistency_issues": []}
+    with pytest.raises(HTTPException) as exc:
+        if compiler == "preview":
+            compile_prompt_text(
+                shot_payload=payload,
+                script_payload={"full_text": ""},
+                source_duration_seconds=4,
+                duration_seconds=4,
+                resolution="768P",
+            )
+        else:
+            compile_replica_final_text(
+                shot_payload=payload,
+                script_text="",
+                source_duration=4,
+                duration=4,
+                timeline_policy="preserve",
+                source_frame_time=0,
+            )
+    assert exc.value.status_code == 409
+    assert exc.value.detail["shot_id"] == "courtyard-1"
+    assert "courtyard-1" in exc.value.detail["message"]
+
+
+def test_preview_keeps_walking_and_gestures_without_fixed_stance() -> None:
+    from app.generation import compile_prompt_text
+
+    text = compile_prompt_text(
+        shot_payload={"shots": [_motion_regression_shot()]},
+        script_payload={"full_text": ""},
+        source_duration_seconds=4,
+        duration_seconds=4,
+        resolution="768P",
+    )
+    assert "人物持续行走" in text
+    assert "同时做手势" in text
+    assert "站位固定" not in text and "仅上半身" not in text
+
+
+def test_static_preview_does_not_instruct_every_person_to_move() -> None:
+    from app.generation import compile_prompt_text
+
+    shot = _motion_regression_shot("STATIC")
+    shot.update(action="人物静止站立", composition="人物居中")
+    shot["motion"].update(
+        subject_direction="in_place",
+        subject_displacement="无位移",
+        hand_action="无手势",
+        relative_motion="人物与摄影机相对位置稳定",
+    )
+    text = compile_prompt_text(
+        shot_payload={"shots": [shot]},
+        script_payload={"full_text": ""},
+        source_duration_seconds=4,
+        duration_seconds=4,
+        resolution="768P",
+    )
+    assert "保持站位" in text
+    assert "不得僵立原地" not in text
+
+
+def test_action_beat_times_remain_inside_one_continuous_camera_shot() -> None:
+    from app.h3_prompts import compile_replica_final_text
+
+    text = compile_replica_final_text(
+        shot_payload={
+            "shots": [
+                {
+                    "shot_id": "walk",
+                    "start_time": 0,
+                    "end_time": 2,
+                    "segment_kind": "ACTION_BEAT",
+                    "action": "人物走向门口",
+                },
+                {
+                    "shot_id": "stop",
+                    "start_time": 2,
+                    "end_time": 3,
+                    "segment_kind": "ACTION_BEAT",
+                    "action": "人物在门口停下",
+                },
+                {
+                    "shot_id": "detail",
+                    "start_time": 3,
+                    "end_time": 4,
+                    "segment_kind": "SHOT_CUT",
+                    "action": "门把手特写",
+                },
+            ]
+        },
+        script_text="",
+        duration=8,
+        source_duration=4,
+        timeline_policy="preserve",
+        source_frame_time=0,
+    )
+    assert "连续动作时间：00:00.000–00:04.000" in text
+    assert "连续动作时间：00:04.000–00:06.000" in text
+    assert "不新增切镜" in text
+    assert "[Shot 2] At 00:06.000" in text
+    assert text.count("[Shot ") == 3
+    assert not prompt_issues(text, mode="I2VA", duration=8, labels=["<Picture 1>"])
+
+
+def test_replaced_scene_rejects_unresolved_source_fixture_actions() -> None:
+    from fastapi import HTTPException
+
+    from app.h3_prompts import compile_replica_final_text
+
+    with pytest.raises(HTTPException) as exc:
+        compile_replica_final_text(
+            shot_payload={
+                "shots": [
+                    {
+                        "shot_id": "source-desk",
+                        "start_time": 0,
+                        "end_time": 4,
+                        "action": "人物走到源视频石桌旁并放下茶杯",
+                    }
+                ]
+            },
+            script_text="",
+            duration=4,
+            source_duration=4,
+            timeline_policy="preserve",
+            source_frame_time=0,
+            replace_scene=True,
+        )
+    assert exc.value.detail["code"] == "SCENE_ACTION_REVIEW_REQUIRED"
+    assert exc.value.detail["shot_id"] == "source-desk"
+
+
+def test_replaced_scene_accepts_explicitly_removed_source_fixture() -> None:
+    from app.h3_prompts import compile_replica_final_text
+
+    text = compile_replica_final_text(
+        shot_payload={
+            "shots": [
+                {
+                    "shot_id": "new-scene",
+                    "start_time": 0,
+                    "end_time": 4,
+                    "action": "人物沿确认首帧的道路前行，不使用原视频中的石桌",
+                }
+            ]
+        },
+        script_text="",
+        duration=4,
+        source_duration=4,
+        timeline_policy="preserve",
+        source_frame_time=0,
+        replace_scene=True,
+    )
+    assert "人物沿确认首帧的道路前行" in text
+
+
+@pytest.mark.parametrize(("source_duration", "target_duration"), [(30, 30), (4.25, 5)])
+def test_project_preview_defaults_to_the_full_source(
+    monkeypatch, source_duration, target_duration
+) -> None:
+    import json
+
+    from app import generation
+    from app.auth import CurrentUser
+
+    shot = _motion_regression_shot()
+    shot["end_time"] = source_duration
+    row = {
+        "id": "shots-30",
+        "payload_json": json.dumps({"duration_seconds": source_duration, "shots": [shot]}),
+    }
+    monkeypatch.setattr(generation, "require_project_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        generation,
+        "latest_version",
+        lambda *args, **kwargs: row if kwargs["kind"] == "shot_card" else None,
+    )
+    result = generation.preview_prompt_text(
+        None,
+        project_id="project-1",
+        actor=CurrentUser(id="user-1", username="user-1", display_name="用户", role="customer"),
+        request=generation.PromptPreviewRequest(),
+    )
+    assert result.output_duration_seconds == target_duration
+    assert f"00:{target_duration:02d}.000" in result.prompt_text
+
+
+@pytest.mark.parametrize("original_script", ["人工核对后的台词", ""])
+@pytest.mark.parametrize("stale_script", [False, True])
+def test_preview_uses_reviewed_shot_card_dialogue_including_explicit_silence(
+    monkeypatch, original_script: str, stale_script: bool
+) -> None:
+    import json
+
+    from app import generation
+    from app.auth import CurrentUser
+
+    shot = _motion_regression_shot()
+    shot["spoken_text"] = original_script
+    sources = {
+        "shot_card": {
+            "id": "shots-new",
+            "payload_json": json.dumps(
+                {
+                    "original_script": original_script,
+                    "duration_seconds": 4,
+                    "shots": [shot],
+                }
+            ),
+        },
+        "analysis": {
+            "id": "analysis-old",
+            "payload_json": json.dumps(
+                {
+                    "analysis": {"original_script": "旧版不应恢复的台词"},
+                }
+            ),
+        },
+    }
+    if stale_script:
+        sources["script"] = {
+            "id": "script-old",
+            "payload_json": json.dumps(
+                {
+                    "full_text": "旧版不应恢复的台词",
+                    "shot_card_version_id": "shots-old",
+                }
+            ),
+        }
+    monkeypatch.setattr(generation, "require_project_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        generation, "latest_version", lambda *args, **kwargs: sources.get(kwargs["kind"])
+    )
+    result = generation.preview_prompt_text(
+        None,
+        project_id="project-1",
+        actor=CurrentUser(id="u", username="u", display_name="用户", role="customer"),
+        request=generation.PromptPreviewRequest(),
+    )
+    assert "旧版不应恢复的台词" not in result.prompt_text
+    assert result.script_source == "analysis_original"
+    if original_script:
+        assert original_script in result.prompt_text
+
+
+@pytest.mark.parametrize(("source_duration", "target_duration"), [(30, 30), (4.25, 5)])
+def test_realtime_preview_keeps_source_timeline_and_preserves_conflict_details(
+    source_duration, target_duration
+) -> None:
+    from fastapi import HTTPException
+
+    from app.auth import CurrentUser
+    from app.generation_routes import CompileH3PreviewRequest, compile_h3_preview
+
+    actor = CurrentUser(id="u", username="u", display_name="用户", role="customer")
+    shot = _motion_regression_shot()
+    shot["end_time"] = source_duration
+    result = compile_h3_preview(
+        "project-1",
+        CompileH3PreviewRequest(shots=[shot], original_script="", analysis_version_id="analysis-1"),
+        None,
+        actor,
+    )
+    assert f"00:{target_duration:02d}.000" in result.h3_prompt_text
+
+    shot["motion"]["subject_motion_state"] = "STATIC"
+    with pytest.raises(HTTPException) as exc:
+        compile_h3_preview(
+            "project-1",
+            CompileH3PreviewRequest(
+                shots=[shot], original_script="", analysis_version_id="analysis-1"
+            ),
+            None,
+            actor,
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.detail["shot_id"] == "courtyard-1"
+
+
+@pytest.mark.parametrize("final_composition", [True, False])
+def test_locked_legacy_replica_rechecks_conflicts_before_billing(
+    monkeypatch, final_composition: bool
+) -> None:
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from fastapi import HTTPException
+
+    from app import generation, quote_contracts
+    from app.auth import CurrentUser
+
+    class QuoteReached(RuntimeError):
+        pass
+
+    rows = {
+        "prompt-old": {
+            "id": "prompt-old",
+            "payload_json": json.dumps(
+                {
+                    "status": "LOCKED",
+                    "prompt_text": "历史提示词",
+                    "final_composition": final_composition,
+                    "shot_card_version_id": "shots-old",
+                    "first_frame_asset_id": "frame-1",
+                    "output_duration_seconds": 4,
+                    "resolution": "768P",
+                    "ratio": "adaptive",
+                }
+            ),
+        },
+        "shots-old": {
+            "id": "shots-old",
+            "payload_json": json.dumps({"shots": [_motion_regression_shot("STATIC")]}),
+        },
+    }
+    for name in ("require_not_auditor", "require_project_access", "require_confirmed_first_frame"):
+        monkeypatch.setattr(generation, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(generation, "_find_idempotent_batch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(generation, "is_customer_production", lambda: False)
+    monkeypatch.setattr(generation, "version_stale_reasons", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        generation, "read_runtime_limits", lambda *args: {"max_generation_count_per_batch": 4}
+    )
+    monkeypatch.setattr(
+        generation, "require_version", lambda *args, **kwargs: rows[kwargs["version_id"]]
+    )
+    monkeypatch.setattr(
+        generation, "require_asset_access", lambda *args, **kwargs: {"project_id": "project-1"}
+    )
+    quote = Mock(side_effect=QuoteReached)
+    reserve = Mock()
+    monkeypatch.setattr(quote_contracts, "validate_quote", quote)
+    monkeypatch.setattr(generation, "_reserve_generation_credit", reserve)
+    with pytest.raises(HTTPException if final_composition else QuoteReached) as exc:
+        generation.create_generation_batch(
+            SimpleNamespace(rollback=lambda: None),
+            project_id="project-1",
+            actor=CurrentUser(id="u", username="u", display_name="用户", role="customer"),
+            request=generation.GenerationBatchRequest(
+                prompt_version_id="prompt-old",
+                first_frame_asset_id="frame-1",
+                output_duration_seconds=4,
+                quantity=1,
+                idempotency_key="motion-gate",
+            ),
+        )
+    if final_composition:
+        assert exc.value.status_code == 409
+        assert exc.value.detail["shot_id"] == "courtyard-1"
+        quote.assert_not_called()
+    else:
+        quote.assert_called_once()
+    reserve.assert_not_called()
+
+
+def test_compilation_freezes_review_inputs_and_revision_tracks_the_actual_prompt(
+    monkeypatch,
+) -> None:
+    """成片复核读取当次输入快照；手改提示词后不能再拿旧稿判定新成片。"""
+    import json
+    from types import SimpleNamespace
+
+    from app import generation
+    from app.auth import CurrentUser
+
+    shot = _motion_regression_shot()
+    rows = {
+        "script-1": {
+            "payload_json": json.dumps({"full_text": "看院子", "shot_card_version_id": "shots-1"})
+        },
+        "shots-1": {"payload_json": json.dumps({"duration_seconds": 4, "shots": [shot]})},
+        "source-1": {"payload_json": json.dumps({"timestamp_seconds": 0})},
+    }
+    for name in (
+        "require_not_auditor",
+        "require_project_access",
+        "require_latest_version",
+        "write_audit",
+        "insert_audit",
+    ):
+        monkeypatch.setattr(generation, name, lambda *args, **kwargs: None)
+    for name in ("version_stale_reasons", "shot_card_stale_reasons"):
+        monkeypatch.setattr(generation, name, lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        generation, "require_version", lambda *args, **kwargs: rows[kwargs["version_id"]]
+    )
+    monkeypatch.setattr(
+        generation,
+        "require_asset_access",
+        lambda *args, **kwargs: {"project_id": "project-1", "storage_uri": "cos://test/frame.png"},
+    )
+    monkeypatch.setattr(
+        generation,
+        "confirmed_first_frame_sources",
+        lambda *args, **kwargs: {
+            "source_frame_selection_version_id": "source-1",
+            "first_frame_replace_scene": False,
+        },
+    )
+    saved = []
+
+    def save_version(*args, **kwargs):
+        row = {
+            "id": f"prompt-{len(saved) + 1}",
+            "asset_id": kwargs["asset_id"],
+            "payload_json": json.dumps(kwargs["payload"]),
+        }
+        saved.append(row)
+        rows[row["id"]] = row
+        return row
+
+    monkeypatch.setattr(generation, "insert_version", save_version)
+    conn = SimpleNamespace(
+        execute=lambda *args, **kwargs: None,
+        commit=lambda: None,
+        rollback=lambda: None,
+    )
+    actor = CurrentUser(id="u", username="u", display_name="用户", role="customer")
+    row = generation.compile_prompt_version(
+        conn,
+        project_id="project-1",
+        actor=actor,
+        request=generation.PromptCompileRequest(
+            script_version_id="script-1",
+            shot_card_version_id="shots-1",
+            first_frame_asset_id="frame-1",
+            output_duration_seconds=8,
+        ),
+    )
+    payload = json.loads(row["payload_json"])
+    expected = payload["replica_expectations"]
+    assert expected["shots"] == [shot]
+    assert expected["source_duration_seconds"] == 4
+    assert expected["output_duration_seconds"] == 8
+    assert expected["script_text"] == "看院子"
+    assert expected["opening_action"] == ""
+    assert expected["replace_scene"] is False
+    assert expected["prompt_text"] == payload["prompt_text"]
+
+    revised_text = payload["prompt_text"] + "\n用户确认：行进中抬左手示意。"
+    revised = generation.revise_prompt_version(
+        conn,
+        project_id="project-1",
+        actor=actor,
+        request=generation.PromptRevisionRequest(
+            base_prompt_version_id=row["id"],
+            prompt_text=revised_text,
+        ),
+    )
+    revised_payload = json.loads(revised["payload_json"])
+    assert revised_payload["replica_expectations"]["prompt_text"] == revised_text
+    assert revised_payload["replica_expectations"]["shots"] == expected["shots"]
+    assert json.loads(row["payload_json"])["replica_expectations"]["prompt_text"] != revised_text
 
 
 def test_silent_prompt_drops_narration_rules_that_contradict_no_voice_over() -> None:
@@ -1004,7 +1495,8 @@ def test_compound_motion_state_keeps_both_clauses() -> None:
     )
 
     assert "朝镜头方向行走" in text
-    assert "仅做手势" in text
+    assert "同时做手势" in text
+    assert "仅做手势" not in text
 
 
 def test_legacy_shot_without_motion_is_warned_not_silently_skipped(
@@ -1059,3 +1551,84 @@ def test_short_source_fills_with_continuous_action_not_uniform_slow_motion() -> 
     assert "同风格的连续动作" in text
     assert "不新增剧情事件" in text
     assert "等比放慢" not in text
+
+
+@pytest.mark.parametrize("duration", [5, 10])
+@pytest.mark.parametrize("script", ["大家好，今天带你看院子。", " 大家好，\n今天带你看院子。 "])
+def test_final_original_dialogue_keeps_cross_sentence_timing_and_silent_beat(
+    duration: int, script: str
+) -> None:
+    from app.h3_prompts import compile_replica_final_text, dialogue
+
+    shots = [
+        {
+            "shot_id": "s1",
+            "start_time": 0,
+            "end_time": 1,
+            "segment_kind": "ACTION_BEAT",
+            "action": "人物介绍庭院",
+            "spoken_text": "大家好，",
+        },
+        {
+            "shot_id": "s2",
+            "start_time": 1,
+            "end_time": 2,
+            "segment_kind": "ACTION_BEAT",
+            "action": "人物停顿片刻",
+            "spoken_text": "",
+        },
+        {
+            "shot_id": "s3",
+            "start_time": 2,
+            "end_time": 5,
+            "segment_kind": "SHOT_CUT",
+            "action": "人物继续介绍庭院",
+            "spoken_text": "今天带你看院子。",
+        },
+    ]
+    text = compile_replica_final_text(
+        shot_payload={"shots": shots},
+        script_text=script,
+        duration=duration,
+        source_duration=5,
+        timeline_policy="preserve",
+        source_frame_time=0,
+    )
+
+    factor = duration // 5
+    first = f"本段口播时间：00:00.000–00:0{factor}.000"
+    silent = f"本段口播时间：00:0{factor}.000–00:0{2 * factor}.000；本段无口播"
+    last = f"本段口播时间：00:0{2 * factor}.000–00:{duration:02d}.000"
+    assert text.index(first) < text.index("<d>[Chinese] 大家好，</d>") < text.index(silent)
+    assert text.index(silent) < text.index(last) < text.index("<d>[Chinese] 今天带你看院子。</d>")
+    assert dialogue(text) == "".join(script.split())
+    assert text.count("<d>") == 2
+    assert text.count("大家好，") == text.count("今天带你看院子。") == 1
+    assert f"[Shot 2] At 00:0{2 * factor}.000" in text
+    assert "[Shot 3]" not in text
+    assert not prompt_issues(text, mode="I2VA", duration=duration, labels=["<Picture 1>"])
+
+
+def test_final_original_dialogue_changes_when_segment_timing_changes() -> None:
+    from app.h3_prompts import compile_replica_final_text, dialogue
+
+    first = {"shot_id": "s1", "start_time": 0, "end_time": 2, "segment_kind": "ACTION_BEAT"}
+    second = {"shot_id": "s2", "start_time": 2, "end_time": 5, "segment_kind": "ACTION_BEAT"}
+    script = "大家好，今天带你看院子。"
+    split = [{**first, "spoken_text": "大家好，"}, {**second, "spoken_text": "今天带你看院子。"}]
+    joined = [{**first, "spoken_text": script}, {**second, "spoken_text": ""}]
+    prompts = [
+        compile_replica_final_text(
+            shot_payload={"shots": shots},
+            script_text=script,
+            duration=5,
+            source_duration=5,
+            timeline_policy="preserve",
+            source_frame_time=0,
+        )
+        for shots in (split, joined)
+    ]
+
+    assert prompts[0] != prompts[1]
+    assert all(dialogue(text) == script for text in prompts)
+    assert "本段口播时间：00:02.000–00:05.000；本段无口播" in prompts[1]

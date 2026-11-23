@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
@@ -15,17 +16,18 @@ from typing import Any
 from fastapi import HTTPException
 
 from app import content_store
-from app.analysis import VideoAnalysisProvider
+from app.analysis import UrllibApilioChatTransport, VideoAnalysisProvider, VideoCallBudget
 from app.analysis_routes import (
     acquire_analysis_task,
     cancel_analysis_task_on_drain,
     complete_analysis_task,
     fail_analysis_task,
+    get_video_analysis_provider,
     hold_analysis_task_submission,
     perform_analysis_task,
     prepare_analysis_task,
 )
-from app.billing_meter import billing_context
+from app.billing_meter import billing_context, meter_call
 from app.character_image_generation import (
     CharacterImageProvider,
     acquire_character_generation_task,
@@ -117,6 +119,12 @@ from app.replica_prompt import (
     fail_replica_prompt_task,
     perform_replica_prompt_task,
     prepare_replica_prompt_task,
+)
+from app.replica_result_review import (
+    ReplicaResultReview,
+    replica_expectations,
+    review_generated_replica,
+    unavailable_replica_review,
 )
 from app.script_from_audio import (
     ScriptFromAudioTaskLease,
@@ -949,6 +957,115 @@ def run_worker_once(
     return processed
 
 
+class _ReplicaReviewTransport(UrllibApilioChatTransport):
+    def post(
+        self, url: str, *, headers: Mapping[str, str], body: bytes
+    ) -> tuple[bytes, Mapping[str, str]]:
+        # 只计真实供应商请求；输入缺失而未观察的视频不能产生虚假的质检用量。
+        with meter_call("quality_inspection"):
+            return super().post(url, headers=headers, body=body)
+
+
+def _review_pg_replica_result(
+    *, lease: dict[str, Any], result_url: str, output_seconds: float | None = None
+) -> ReplicaResultReview:
+    expectations = replica_expectations(lease)
+    if expectations is None:
+        return ReplicaResultReview("NOT_REQUIRED", [])
+
+    with pg_transaction() as raw_conn:
+        conn = BusinessConnection.postgres(raw_conn)
+        row = conn.execute(
+            "SELECT quality_status, quality_issue_codes FROM generation_tasks "
+            "WHERE id = %s AND status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING') "
+            "AND locked_by = %s AND locked_until = %s "
+            "AND locked_until::timestamptz > now() AND superseded_by_task_id IS NULL "
+            "FOR UPDATE",
+            (str(lease["id"]), str(lease["locked_by"]), str(lease["locked_until"])),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("成片复核租约已失效")
+        status = str(row["quality_status"])
+        if status in {"REPLICA_REVIEW_PASSED", "REPLICA_REVIEW_REQUIRED"}:
+            raw_codes = row["quality_issue_codes"]
+            codes = raw_codes if isinstance(raw_codes, list) else json.loads(str(raw_codes or "[]"))
+            return ReplicaResultReview(status, codes)
+        if status == "REPLICA_REVIEW_PENDING":
+            # 已提交过的复核可能仍在远端执行；崩溃恢复交付已有视频，不能重复付费调用。
+            conn.execute(
+                "UPDATE billing_attempts AS attempt SET state='UNKNOWN',usage=NULL,"
+                "cost_fen=NULL,completed_at=now() FROM billing_operations AS operation "
+                "WHERE attempt.operation_id=operation.id AND operation.source_id=%s "
+                "AND attempt.service='quality_inspection' AND attempt.state='PENDING'",
+                (str(lease["id"]),),
+            )
+            return unavailable_replica_review()
+        conn.execute(
+            "UPDATE generation_tasks SET quality_status = 'REPLICA_REVIEW_PENDING', "
+            "provider_result_url = %s, "
+            "actual_output_seconds = COALESCE(%s, actual_output_seconds), "
+            "updated_at = now() WHERE id = %s",
+            (result_url, output_seconds, str(lease["id"])),
+        )
+
+    # 先持久化已有成片与复核意图，再外呼；全过程不持数据库事务，也不重发生成请求。
+    remaining = (
+        datetime.fromisoformat(str(lease["locked_until"])) - datetime.now(UTC)
+    ).total_seconds()
+    timeout = min(90.0, remaining - 15.0)
+    if timeout < 15.0:
+        return unavailable_replica_review()
+    try:
+        with pg_transaction() as raw_conn:
+            provider = get_video_analysis_provider(
+                BusinessConnection.postgres(raw_conn),
+                transport=_ReplicaReviewTransport(timeout_seconds=timeout),
+                video_call_budget=VideoCallBudget(
+                    attempt_deadline=time.monotonic() + remaining - 10.0,
+                    max_provider_calls=1,
+                    max_retries_per_model=0,
+                ),
+            )
+        observed_duration = output_seconds
+        if observed_duration is None:
+            observed_duration = lease.get("actual_output_seconds")
+        return review_generated_replica(
+            provider=provider,
+            video_url=result_url,
+            expectations=expectations,
+            prompt_text=str(lease["prompt_text"]),
+            output_duration_seconds=float(
+                observed_duration
+                if observed_duration is not None
+                else lease["output_duration_seconds"]
+            ),
+        )
+    except Exception as exc:
+        logger.warning("成片复核暂不可用：task=%s reason=%s", lease["id"], type(exc).__name__)
+        return unavailable_replica_review()
+
+
+def _deliver_pg_generation_result(
+    *, lease: dict[str, Any], result_url: str, output_seconds: float | None = None
+) -> None:
+    quality = _review_pg_replica_result(
+        lease=lease, result_url=result_url, output_seconds=output_seconds
+    )
+    with pg_transaction() as raw_conn:
+        conn = BusinessConnection.postgres(raw_conn)
+        if lease["status"] != "ARCHIVING":
+            mark_generation_task_archiving(conn, lease=lease, result_url=result_url)
+        finalize_generation_direct_result(
+            conn,
+            lease=lease,
+            quality_status=quality.quality_status,
+            quality_issue_codes=quality.issue_codes,
+            output_seconds=output_seconds
+            if output_seconds is not None
+            else lease.get("actual_output_seconds"),
+        )
+
+
 def _run_pg_generation_step(
     *,
     lease: dict[str, Any],
@@ -977,19 +1094,7 @@ def _run_pg_generation_step(
         and lease.get("archive_status") == "ARCHIVE_FAILED"
         and lease.get("provider_result_url")
     ):
-        with pg_transaction() as raw_conn:
-            conn = BusinessConnection.postgres(raw_conn)
-            mark_generation_task_archiving(
-                conn,
-                lease=lease,
-                result_url=str(lease["provider_result_url"]),
-            )
-            finalize_generation_direct_result(
-                conn,
-                lease=lease,
-                quality_status="NOT_REQUIRED",
-                quality_issue_codes=[],
-            )
+        _deliver_pg_generation_result(lease=lease, result_url=str(lease["provider_result_url"]))
         return
     elif status == "SUBMITTING":
         # M6b #1：付费提交前签发发送意图（父行锁内线性化）；无意图不得调用供应商。
@@ -1156,21 +1261,15 @@ def _run_pg_generation_step(
                 provider_request=work.provider_request,
                 release_lease=False,
             )
-            mark_generation_task_archiving(
-                conn,
-                lease=lease,
-                result_url=result.result_url,
-            )
-            finalize_generation_direct_result(
-                conn,
-                lease=lease,
-                quality_status="NOT_REQUIRED",
-                quality_issue_codes=[],
-                output_seconds=result.output_seconds,
-            )
+        _deliver_pg_generation_result(
+            lease=lease, result_url=result.result_url, output_seconds=result.output_seconds
+        )
         return
 
     if status == "RUNNING":
+        if replica_expectations(lease) is not None and lease.get("provider_result_url"):
+            _deliver_pg_generation_result(lease=lease, result_url=str(lease["provider_result_url"]))
+            return
         provider_task_id = str(lease["provider_task_id"])
         try:
             with pg_transaction() as raw_conn:
@@ -1223,30 +1322,13 @@ def _run_pg_generation_step(
                     delay_seconds=15,
                 )
             return
-        with pg_transaction() as raw_conn:
-            conn = BusinessConnection.postgres(raw_conn)
-            mark_generation_task_archiving(
-                conn,
-                lease=lease,
-                result_url=query.result_url,
-            )
-            finalize_generation_direct_result(
-                conn,
-                lease=lease,
-                quality_status="NOT_REQUIRED",
-                quality_issue_codes=[],
-                output_seconds=query.output_seconds,
-            )
+        _deliver_pg_generation_result(
+            lease=lease, result_url=query.result_url, output_seconds=query.output_seconds
+        )
         return
 
     if status == "ARCHIVING":
-        with pg_transaction() as raw_conn:
-            finalize_generation_direct_result(
-                BusinessConnection.postgres(raw_conn),
-                lease=lease,
-                quality_status="NOT_REQUIRED",
-                quality_issue_codes=[],
-            )
+        _deliver_pg_generation_result(lease=lease, result_url=str(lease["provider_result_url"]))
 
 
 _RECONCILE_INTERVAL_ENV = "VIDEO_REPLICA_RECONCILE_INTERVAL_SECONDS"

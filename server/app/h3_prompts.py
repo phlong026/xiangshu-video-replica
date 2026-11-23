@@ -6,15 +6,21 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.storyboard_consistency import (
+    parse_subject_motion_states,
+    storyboard_consistency_issues,
+)
+
 logger = logging.getLogger(__name__)
 
-FORMATTER_VERSION = "h3-format.v1"
+FORMATTER_VERSION = "h3-format.v2"
 MAX_PROMPT_CHARS = 7000
 Mode = Literal["T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA"]
 RULES = Path(__file__).with_name("prompt_rules")
@@ -204,16 +210,24 @@ _CAMERA_MOTION_TEXT = {
 
 def _subject_motion_clause(motion: dict[str, Any]) -> str:
     """把人物的运动状态（含并列主态）与位移方向渲染成一个叙事短语。"""
-    states = [part for part in str(motion.get("subject_motion_state") or "").split("+") if part]
+    raw_state = str(motion.get("subject_motion_state") or "").strip()
+    states = parse_subject_motion_states(raw_state) if raw_state else ()
     raw_direction = str(motion.get("subject_direction") or "")
     direction = _MOTION_DIRECTION_TEXT.get(raw_direction, "")
+    direction_state = next(
+        (state for state in states if state in {"WALKING", "RUNNING"}),
+        "TURNING",
+    )
 
     clauses: list[str] = []
-    for index, state in enumerate(states):
+    for state in states:
         text = _MOTION_STATE_TEXT.get(state, "")
         if not text:
             continue
-        if index == 0 and direction and state in _DIRECTION_PREFIXABLE_STATES:
+        # “仅手势”只适用于单一主态；边走边做手势不能再要求“仅”做手势。
+        if state == "GESTURING_ONLY" and len(states) > 1:
+            text = "做手势"
+        if direction and state == direction_state and state in _DIRECTION_PREFIXABLE_STATES:
             text = f"{direction}{text}"
         clauses.append(text)
     if not clauses and direction:
@@ -259,6 +273,84 @@ def _shot_action_motion_narrative(shot: dict[str, Any]) -> str:
     return "；".join(segments)
 
 
+def require_consistent_storyboard(shot_payload: Mapping[str, Any]) -> None:
+    """编译时重算事实冲突，旧快照和客户端缓存的检查结果不能绕过生成门禁。"""
+    shots = shot_payload.get("shots")
+    if not isinstance(shots, list):
+        return
+    original_script = shot_payload.get("original_script")
+    issues = storyboard_consistency_issues(
+        shots,
+        original_script=original_script if isinstance(original_script, str) else None,
+    )
+    if not issues:
+        return
+    first = issues[0]
+    shot_id = first.get("shot_id", "")
+    location = f"分镜 {shot_id}" if shot_id else "分镜表"
+    reason = first["message"].rstrip("。")
+    raise HTTPException(
+        409,
+        detail={
+            "code": "STORYBOARD_CONSISTENCY_REQUIRED",
+            "shot_id": shot_id,
+            "message": f"{location}需要核对：{reason}，确认后再继续生成。",
+            "issues": issues,
+        },
+    )
+
+
+_SOURCE_FIXTURE_REFERENCE = re.compile(
+    r"(?:源(?:视频|场景)?|原(?:视频|场景|有|来的?))[^，。；、！？\n]{0,24}?"
+    r"(?:石桌|沙盘|桌子?|椅子?|大门|门口|门把手|窗户?|台阶|楼梯|柜子?|院墙|围墙|水池|柱子?)"
+)
+_SOURCE_FIXTURE_EXCLUSION = re.compile(
+    r"不(?:再|得|要|可|会|应)?(?:使用|恢复|依赖|添加|靠近|走向|走到|跑向|触碰|接触)|"
+    r"无需|禁止|没有|不存在"
+)
+
+
+def _require_scene_actions_reviewed(shots: list[dict[str, Any]], *, opening_action: str) -> None:
+    # 没有目标场景物体清单，不能声称普通“门/桌”不存在；只拦明确仍指向源场景的动作。
+    for index, shot in enumerate(shots):
+        motion = shot.get("motion")
+        if index == 0 and opening_action.strip():
+            values = [opening_action]
+        else:
+            values = [str(shot.get("action") or "")]
+            if isinstance(motion, dict):
+                values.extend(
+                    str(motion.get(key) or "")
+                    for key in ("subject_displacement", "hand_action", "relative_motion")
+                )
+        if not any(
+            _SOURCE_FIXTURE_REFERENCE.search(clause)
+            and not _SOURCE_FIXTURE_EXCLUSION.search(clause)
+            for value in values
+            for clause in re.split(r"[，,。；;\n]|但是|但", value)
+        ):
+            continue
+        shot_id = str(shot.get("shot_id") or f"s{index + 1}")
+        correction = "请按已确认首帧改写本段的动作与运动描述"
+        if index == 0:
+            correction += "，或补充开场衔接"
+        raise HTTPException(
+            409,
+            detail={
+                "code": "SCENE_ACTION_REVIEW_REQUIRED",
+                "shot_id": shot_id,
+                "message": f"分镜 {shot_id} 的动作仍引用原场景道具，{correction}后再继续。",
+            },
+        )
+
+
+def _motion_timestamp(seconds: float) -> str:
+    total_ms = round(max(0.0, seconds) * 1000)
+    minutes, remainder_ms = divmod(total_ms, 60_000)
+    whole_seconds, milliseconds = divmod(remainder_ms, 1000)
+    return f"{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
+
+
 def compile_replica_final_text(
     *,
     shot_payload: dict[str, Any],
@@ -285,14 +377,22 @@ def compile_replica_final_text(
             "FIRST_FRAME_ALIGNMENT_REQUIRED",
             "首帧来自视频中段或缺少开场时间记录，请选择开场帧或填写动作衔接方案。",
         )
+    require_consistent_storyboard(shot_payload)
+    if replace_scene:
+        _require_scene_actions_reviewed(shot_payload["shots"], opening_action=opening_action)
     # 口播长度不设门禁。曾有两条：15 秒专属的 60–90 字区间，以及通用的
     # duration*6 上限。前者是 H3 只支持 4/15 两档时的遗留，只在 duration == 15
     # 生效，造成 14 秒放行、15 秒硬拦的一秒断崖，其上限 90 还与后者在 15 秒处
     # 完全重合；同类产品对文案长度一律只给估算建议、不设准入。长度与时长的
-    # 匹配改由 _narration_lines() 的时间轴对齐承担，而不是拒绝编译。
+    # 匹配只提供节奏指令；提示词正确不等于成片已逐字完成口播。
     if re.search(r"</?d>|<(?:Picture|Video|Audio)\s", script_text):
         conflict("SCRIPT_TAG_INVALID", "确认文案请使用纯文本，不包含提示词标签。")
     scale = duration / source_duration if source_duration != duration else 1.0
+    source_spoken_texts = [str(shot.get("spoken_text") or "") for shot in shot_payload["shots"]]
+    # 原稿已有人声时间证据，保留跨句与无声阶段；改写稿不能套用旧台词的分段。
+    preserve_source_speech_timing = bool(script_text.strip()) and "".join(
+        script_text.split()
+    ) == "".join("".join(source_spoken_texts).split())
     lines = [
         "For the target video, at 0.00 seconds into the target video, "
         "<Picture 1> (from [Shot 1]) is fully referenced.",
@@ -361,13 +461,21 @@ def compile_replica_final_text(
     # 的提示词无人察觉，所以逐段收集后在末尾给一条警告。
     legacy_without_motion: list[str] = []
     # 官方格式（docs/reference/minimax-h3-prompt-guide）只有真实切镜的
-    # [Shot N] At MM:SS.mmm 标记（[Shot 1] 不带时间）；逐镜头起止时间、
-    # 总时长等一律不进正文，成片时长由 H3 请求的 duration 参数承载。
+    # [Shot N] At MM:SS.mmm 标记（[Shot 1] 不带时间）。同镜头动作段用普通
+    # 文字保留时间，不能为了表达动作节拍而额外制造一次切镜。
     for index, shot in enumerate(shot_payload["shots"]):
         if index > 0 and shot.get("segment_kind") == "SHOT_CUT":
             shot_number += 1
             start = float(shot["start_time"]) * scale
             lines.append(f"[Shot {shot_number}] At {int(start // 60):02d}:{start % 60:06.3f}")
+        if shot.get("segment_kind") == "ACTION_BEAT" and (
+            shot.get("action") or (index == 0 and opening_action.strip())
+        ):
+            lines.append(
+                f"连续动作时间：{_motion_timestamp(float(shot['start_time']) * scale)}–"
+                f"{_motion_timestamp(float(shot['end_time']) * scale)}；"
+                "保持本镜头的动作、空间与机位连续，不新增切镜。"
+            )
         # 官方指南的镜头结构是「首帧锚点 → 动作起点 → 连续发展 → 结束状态」，
         # 动作与运动因此在静态字段之前下发：模型先读到人物在动，再读到景别、
         # 构图、场景等画面参数，避免整段被读成静止画面。
@@ -399,6 +507,18 @@ def compile_replica_final_text(
         for key in shot_keys:
             if shot.get(key):
                 lines.append(f"{key}: {_anchor_presenter_to_first_frame(shot[key])}")
+        if preserve_source_speech_timing:
+            time_range = (
+                f"{_motion_timestamp(float(shot['start_time']) * scale)}–"
+                f"{_motion_timestamp(float(shot['end_time']) * scale)}"
+            )
+            spoken = source_spoken_texts[index]
+            narration = (
+                f"The on-screen person shown in <Picture 1> (S1) says: <d>[Chinese] {spoken}</d>"
+                if spoken.strip()
+                else "本段无口播，保留动作与环境音，不添加台词。"
+            )
+            lines.append(f"本段口播时间：{time_range}；{narration}")
         if not isinstance(shot.get("motion"), dict):
             legacy_without_motion.append(str(shot.get("shot_id") or f"s{index + 1}"))
     if legacy_without_motion:
@@ -409,11 +529,11 @@ def compile_replica_final_text(
             len(legacy_without_motion),
             ", ".join(legacy_without_motion),
         )
-    if script_text:
+    if script_text and not preserve_source_speech_timing:
         lines.append(
             f"The on-screen person shown in <Picture 1> (S1) says: <d>[Chinese] {script_text}</d>"
         )
-    else:
+    elif not script_text:
         lines.append("无口播，不添加台词或人声旁白。")
     soundscape = (
         "按已确认首帧的最终场景适配非语义环境音；不得恢复源场景广播、固定道具声音或任何源人声。"
