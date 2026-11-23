@@ -1895,7 +1895,14 @@ export function TaskDetailPage() {
       if (!current()) return;
       const id = archived.result_asset_id;
       if (!id) throw new Error("成片仍在保存中，请稍后再试。");
-      const preview = await createGenerationResultPreviewUrl(id);
+      // 归档和预览签名是两个独立结果：签名失败不能抹掉已成功保存的资产。
+      let preview: string | undefined;
+      try {
+        preview = await createGenerationResultPreviewUrl(id);
+      } catch {
+        if (current())
+          notify("成片已保存，但预览链接获取失败；可以直接发布或重试预览。");
+      }
       if (!current()) return;
       const asset: StudioAsset = {
         ...result,
@@ -1915,7 +1922,11 @@ export function TaskDetailPage() {
           item.id === task.id ? { ...item, resultId: id } : item,
         ),
       }));
-      setPreviewLoad({ key: context, status: "ready", asset });
+      setPreviewLoad({
+        key: context,
+        status: preview ? "ready" : "error",
+        asset,
+      });
     } catch (cause) {
       if (!current()) return;
       if (isResultUrlExpired(cause)) {
