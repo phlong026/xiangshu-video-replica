@@ -59,6 +59,27 @@ def client(response: dict[str, Any]) -> tuple[HiflyClient, WireTransport]:
     return HiflyClient(api_key="test-only", transport=transport), transport
 
 
+def test_cover_generation_preserves_title_and_has_its_own_deadline() -> None:
+    vendor, transport = client(
+        {"code": 0, "cover_id": "cover-test", "url": "https://media.example/cover.jpg"}
+    )
+    title = "自建房预算\n这三笔钱别省"
+
+    result = vendor.create_cover(template="template-test", content=title)
+
+    assert result["cover_id"] == "cover-test"
+    assert transport.payload == {
+        "template": "template-test",
+        "content": title,
+        "canvas_preset": "9:16",
+        "output_format": "jpg",
+    }
+    # 同步成图实测超过普通 JSON 请求的 60 秒，不能让它提前超时。
+    assert transport.timeouts == [180.0]
+    vendor.cover_styles()
+    assert transport.timeouts[-1] is None
+
+
 @pytest.mark.parametrize(
     "response",
     [{"code": 0, "left": 0}, {"code": 0, "left": 42}, {"code": 0, "data": {"credit": 42}}],
