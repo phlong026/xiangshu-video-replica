@@ -683,6 +683,7 @@ _CLEANUP_ORDER = (
     "viral_link_resolution_receipts",
     "viral_media_preparations",
     "viral_video_visibility",
+    "viral_content_sources",
     "viral_videos",
     "projects",
     "users",
@@ -708,6 +709,15 @@ def _one(dsn: str, sql: str, params: tuple[Any, ...] = ()) -> Any:
 def _truncate(dsn: str) -> None:
     for table in _CLEANUP_ORDER:
         _exec(dsn, f"DELETE FROM {table}")
+
+
+def _seed_operator_source(dsn: str, video_id: str) -> None:
+    _exec(
+        dsn,
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('test-operator','admin_link_import','douyin',%s,'')",
+        (video_id,),
+    )
 
 
 def _seed_base(dsn: str) -> None:
@@ -851,6 +861,7 @@ def test_public_import_rechecks_publication_at_each_delivery_boundary(pg_state, 
         "pushed_at,homepage_featured) "
         "VALUES('douyin','publication-guard','人工发布',6000,1,now(),1)",
     )
+    _seed_operator_source(pg_state, "publication-guard")
     _exec(
         pg_state,
         "INSERT INTO viral_media_preparations(id,platform,video_id,media_kind,status,storage_uri) "
@@ -986,6 +997,7 @@ def test_import_commit_acknowledgement_loss_preserves_published_project_copy(pg_
         "INSERT INTO viral_videos(platform,video_id,title,collection_published,pushed_at) "
         "VALUES('douyin','vid-1','已推送素材',1,now())",
     )
+    _seed_operator_source(pg_state, "vid-1")
     _exec(
         pg_state,
         "INSERT INTO viral_media_preparations(id,platform,video_id,media_kind,status,storage_uri) "

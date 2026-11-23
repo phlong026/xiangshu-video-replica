@@ -2,6 +2,24 @@
 
 from app.viral_homepage import live_homepage_sql
 
+MANAGED_SOURCE_KINDS_SQL = "('admin_link_import','admin_upload','admin_search','collection')"
+
+
+def managed_source_sql(alias: str = "v") -> str:
+    """平台运营资格来自主动采集，个人缓存、分类和历史发布位均不能代替。"""
+    return (
+        "(EXISTS (SELECT 1 FROM viral_content_sources managed_origin "
+        f"WHERE managed_origin.platform={alias}.platform "
+        f"AND managed_origin.video_id={alias}.video_id "
+        f"AND managed_origin.source_kind IN {MANAGED_SOURCE_KINDS_SQL}) "
+        # 旧管理员导入可能缺来源行，只认可确切的导入/上传审计；旧的误上架不算接管。
+        "OR EXISTS (SELECT 1 FROM audit_logs managed_audit "
+        "WHERE managed_audit.entity_type='viral_video' "
+        f"AND managed_audit.entity_id={alias}.platform||':'||{alias}.video_id "
+        "AND managed_audit.actor_user_id IS NOT NULL "
+        "AND managed_audit.action IN ('viral_video.admin_link_import','viral_video.admin_upload')))"
+    )
+
 
 def ready_sql(alias: str = "v") -> str:
     return (
@@ -65,7 +83,8 @@ def customer_visible_sql(alias: str = "v", *, at: str = "now()") -> str:
     # 只有管理员上传或手工推送授予公共展示权限；历史采集的首页标记不能代替推送。
     # 发布期由运营排期和下架控制，与源站发布时间、采集快照无关。
     predicate = (
-        f"({ready_sql(alias)} AND {alias}.deleted_at IS NULL AND NOT EXISTS "
+        f"({managed_source_sql(alias)} AND {ready_sql(alias)} "
+        f"AND {alias}.deleted_at IS NULL AND NOT EXISTS "
         f"(SELECT 1 FROM viral_video_visibility cs_vis WHERE cs_vis.platform={alias}.platform "
         f"AND cs_vis.video_id={alias}.video_id AND cs_vis.status!='AVAILABLE') "
         f"AND regexp_replace({alias}.title,'<em[^>]*>|</em>','','gi') "

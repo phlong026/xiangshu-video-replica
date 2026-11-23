@@ -122,6 +122,7 @@ def test_twelve_video_preparation_estimate_reads_new_price_and_deduplicates(clie
                 "VALUES('wechat_channels',%s,'费用夹具',%s)",
                 (target["video_id"], json.dumps({"export_id": target["video_id"]})),
             )
+            _managed_video_source(raw, target["video_id"], "wechat_channels")
     body = {"action": "prepare", "items": targets + [targets[0]]}
     first = client.post("/api/control/viral/operations/estimate", headers=headers, json=body).json()
     assert first["logicalCallsMax"] == 12 and first["normalRetryCallsMax"] == 36
@@ -455,6 +456,7 @@ def route_state(sessions_dsn: str) -> Iterator[str]:
             "INSERT INTO viral_videos (platform, video_id, title, published_at) "
             "VALUES ('douyin', 'admin-video/opaque=id', '后台下架测试', 1788700000)"
         )
+        _managed_video_source(conn, "admin-video/opaque=id")
         _seed_customer_with_session(conn)
     yield sessions_dsn
     close_pg_pool()
@@ -498,6 +500,19 @@ def _admin_session(
     return {ADMIN_CSRF_HEADER: response.json()["csrf_token"]}
 
 
+def _managed_video_source(
+    conn: psycopg.Connection, video_id: str, platform: str = "douyin"
+) -> None:
+    """显式声明既有运营库存；本期采集场景另行登记自己的批次与时间。"""
+    conn.execute(
+        "INSERT INTO viral_content_sources"
+        "(batch_id,source_kind,platform,video_id,keyword,collected_at) "
+        "VALUES(%s,'admin_link_import',%s,%s,'',now()-interval '30 days') "
+        "ON CONFLICT DO NOTHING",
+        (f"managed-fixture:{platform}:{video_id}", platform, video_id),
+    )
+
+
 @pytest.mark.parametrize("result", ["complete", "partial", "failure"])
 def test_admin_refreshes_wechat_statistics_once_without_customer_charge(
     client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, result: str
@@ -529,6 +544,7 @@ def test_admin_refreshes_wechat_statistics_once_without_customer_charge(
             "VALUES('wechat_channels','opaque/video=id','互动测试',180,"
             '\'{"export_id":"test-export"}\')'
         )
+        _managed_video_source(conn, "opaque/video=id", "wechat_channels")
     path = "/api/control/viral/videos/wechat_channels/opaque%2Fvideo%3Did/statistics"
     headers = _admin_session(client)
     body = {"reason": "补齐视频号互动字段", "confirm": True}
@@ -594,6 +610,7 @@ def test_statistics_provider_wait_does_not_hold_video_row_lock(
             "INSERT INTO viral_videos(platform,video_id,title,native_json) "
             "VALUES('wechat_channels','concurrent-video','原始标题','{\"export_id\":\"export/test\"}')"
         )
+        _managed_video_source(conn, "concurrent-video", "wechat_channels")
 
     class Source:
         def wechat_video_detail(self, **kwargs):
@@ -1129,6 +1146,7 @@ def test_homepage_pin_orders_featured_list_and_unpin_restores(
             "INSERT INTO viral_videos(platform,video_id,title,category) VALUES"
             "('douyin','admin-video/second=id','第二条待选视频','施工')"
         )
+        _managed_video_source(conn, "admin-video/second=id")
         conn.execute(
             "UPDATE viral_videos SET published_at=%s,collection_published=1,pushed_at=now() "
             "WHERE video_id='admin-video/second=id'",
@@ -1218,7 +1236,11 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
             "INSERT INTO viral_videos(platform,video_id,title) "
             "VALUES('xiaohongshu','parsed-link','用户解析小红书')"
         )
-    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 2
+        conn.execute(
+            "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+            "VALUES('customer-parsed','customer_import','xiaohongshu','parsed-link','')"
+        )
+    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 1
     page = client.get("/api/control/viral/videos?query=后台&limit=1", headers=headers)
     assert page.status_code == 200, page.text
     assert page.json()["total"] == 1
@@ -1316,7 +1338,7 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
         ).json()
         == deleted.json()
     )
-    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 1
+    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 0
     with psycopg.connect(route_state) as conn:
         bus = BusinessConnection.postgres(conn)
         assert original is not None
@@ -1404,6 +1426,7 @@ def test_manual_publication_uses_push_marker_when_collection_is_paused(
                 "VALUES('douyin',%s,'人工发布内容',%s,1,%s,CASE WHEN %s THEN now() END)",
                 (video_id, now - age, featured, pushed),
             )
+            _managed_video_source(raw, video_id)
             raw.execute(
                 "INSERT INTO viral_media_preparations(id,platform,video_id,"
                 "media_kind,status,storage_uri) "
@@ -1443,20 +1466,25 @@ def test_manual_publication_uses_push_marker_when_collection_is_paused(
 
 
 @pytest.mark.pg
-def test_link_imported_material_cannot_be_featured(
+def test_customer_only_imported_material_cannot_be_featured(
     client: TestClient,
     route_state: str,
 ) -> None:
-    """链接导入素材不进首页：单条与批量都要拒，否则它会绕过采集侧质量门槛。"""
+    """客户个人素材不进运营内容池：已归档也不能用后台 ID 直接上首页。"""
     headers = _admin_session(client)
     with psycopg.connect(route_state) as conn:
+        conn.execute("DELETE FROM viral_content_sources WHERE video_id='admin-video/opaque=id'")
+        conn.execute(
+            "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+            "VALUES('personal-import','customer_import','douyin','admin-video/opaque=id','')"
+        )
         conn.execute(
             "UPDATE viral_videos SET category='链接导入',"
             " cover_url='https://cdn.example.com/imported.jpg',"
             " cover_key='viral/cover/douyin/imported'"
             " WHERE video_id='admin-video/opaque=id'"
         )
-        # 归档已完成：拒的理由必须是「链接导入」，而不是「尚未归档」。
+        # 客户创作也可能完成媒体归档；是否可运营取决于管理员采集来源。
         conn.execute(
             "INSERT INTO viral_media_preparations"
             "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
@@ -1469,8 +1497,8 @@ def test_link_imported_material_cannot_be_featured(
         headers={**headers, "Idempotency-Key": "feature-link-import"},
         json={"action": "feature", "reason": "导入素材尝试上首页", "confirm": True},
     )
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"]["code"] == "VIRAL_LINK_IMPORT_NOT_CURATABLE"
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"]["code"] == "VIRAL_VIDEO_NOT_FOUND"
     batch = client.post(
         "/api/control/viral/videos/curation:batch",
         headers={**headers, "Idempotency-Key": "batch-feature-link-import"},
@@ -1481,8 +1509,8 @@ def test_link_imported_material_cannot_be_featured(
             "confirm": True,
         },
     )
-    assert batch.status_code == 409, batch.text
-    assert batch.json()["detail"]["code"] == "VIRAL_LINK_IMPORT_NOT_CURATABLE"
+    assert batch.status_code == 404, batch.text
+    assert batch.json()["detail"]["code"] == "VIRAL_VIDEO_NOT_FOUND"
     with psycopg.connect(route_state) as conn:
         assert conn.execute(
             "SELECT homepage_featured FROM viral_videos WHERE video_id='admin-video/opaque=id'"
@@ -1516,15 +1544,20 @@ def test_collected_video_list_projects_card_fields_and_status_segments(
             "VALUES('douyin','ready-video','已归档视频','阿伟',"
             "'https://cdn.example.com/ready.jpg','viral/cover/douyin/ready-video','[\"乡村别墅\"]')"
         )
+        _managed_video_source(conn, "ready-video")
         conn.execute(
             "INSERT INTO viral_media_preparations"
             "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
             "('ready-media','douyin','ready-video','video','SUCCEEDED','fake://test/ready.mp4')"
         )
-        # 小红书同样进入后台内容池；客户是否可见仍取决于推送标记。
+        # 客户解析的小红书只供个人创作，不进入后台运营内容池。
         conn.execute(
             "INSERT INTO viral_videos(platform,video_id,title) "
             "VALUES('xiaohongshu','parsed-link','用户解析小红书')"
+        )
+        conn.execute(
+            "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+            "VALUES('customer-parsed','customer_import','xiaohongshu','parsed-link','')"
         )
         conn.execute(
             "INSERT INTO viral_media_preparations"
@@ -1534,7 +1567,7 @@ def test_collected_video_list_projects_card_fields_and_status_segments(
     page = client.get("/api/control/viral/videos", headers=headers)
     assert page.status_code == 200, page.text
     items = {item["video_id"]: item for item in page.json()["items"]}
-    assert set(items) == {"admin-video/opaque=id", "ready-video", "parsed-link"}
+    assert set(items) == {"admin-video/opaque=id", "ready-video"}
     pending = items["admin-video/opaque=id"]
     assert pending["author"] == "庭院设计阿伟"
     assert pending["author_avatar"] == "https://cdn.example.com/avatar.jpg"
@@ -1566,6 +1599,7 @@ def test_collected_video_list_projects_card_fields_and_status_segments(
             "INSERT INTO viral_videos(platform,video_id,title,homepage_featured) "
             "VALUES('douyin','failed-video','归档失败视频',1)"
         )
+        _managed_video_source(conn, "failed-video")
         conn.execute(
             "INSERT INTO viral_media_preparations"
             "(id,platform,video_id,media_kind,status) VALUES"
@@ -1596,11 +1630,14 @@ def test_viral_category_catalog_includes_off_page_and_explicit_uncategorized(
                     "2000-01-01" if index == 51 else "2099-01-01",
                 ),
             )
+            _managed_video_source(raw, f"catalog-{index}")
         raw.execute(
             "INSERT INTO viral_videos(platform,video_id,title,category) VALUES"
             "('douyin','catalog-empty','目录验证',''),"
             "('wechat_channels','catalog-space','目录验证','  ')"
         )
+        _managed_video_source(raw, "catalog-empty")
+        _managed_video_source(raw, "catalog-space", "wechat_channels")
     page = client.get("/api/control/viral/videos", headers=headers, params={"limit": 25}).json()
     assert "分页以外" in page["categories"]
     assert "catalog-51" not in {item["video_id"] for item in page["items"]}
@@ -1781,6 +1818,8 @@ def test_viral_overview_counts_share_the_list_segments(
             "('douyin','ready-video','已归档视频',1),"
             "('douyin','failed-video','归档失败视频',0)"
         )
+        _managed_video_source(conn, "ready-video")
+        _managed_video_source(conn, "failed-video")
         conn.execute(
             "INSERT INTO viral_media_preparations"
             "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
@@ -1841,6 +1880,7 @@ def test_viral_batch_curation_features_and_deletes_with_one_audit_per_item(
             "INSERT INTO viral_videos(platform,video_id,title) "
             "VALUES('douyin','second-video','第二条待上首页')"
         )
+        _managed_video_source(conn, "second-video")
         conn.execute(
             "INSERT INTO viral_media_preparations"
             "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
@@ -1927,6 +1967,8 @@ def test_viral_batch_curation_is_all_or_nothing(
             "('douyin','loose-video','封面取不到的视频','https://cdn.example.com/loose.jpg'),"
             "('douyin','no-media-video','尚未归档的视频',NULL)"
         )
+        _managed_video_source(conn, "loose-video")
+        _managed_video_source(conn, "no-media-video")
         conn.execute(
             "INSERT INTO viral_media_preparations"
             "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
@@ -3102,6 +3144,7 @@ def test_viral_batch_prepare_queues_instead_of_rejecting(
             "INSERT INTO viral_videos(platform,video_id,title) "
             "VALUES('douyin','unprepared-video','尚未转存')"
         )
+        _managed_video_source(conn, "unprepared-video")
 
     payload = {
         "action": "feature",
@@ -3648,6 +3691,9 @@ def test_viral_batch_feature_queues_unready_items_of_one_platform_together(
             "('douyin','unready-a','未就绪甲'),('douyin','unready-b','未就绪乙'),"
             "('wechat_channels','unready-c','未就绪丙')"
         )
+        _managed_video_source(conn, "unready-a")
+        _managed_video_source(conn, "unready-b")
+        _managed_video_source(conn, "unready-c", "wechat_channels")
     try:
         response = client.post(
             "/api/control/viral/videos/curation:batch",
@@ -3787,6 +3833,7 @@ def test_homepage_order_schedule_share_customer_clock_and_conflict_guard(
                 "collection_published=1,title='庭院设计',likes=excluded.likes",
                 (ident, 100 - index),
             )
+            _managed_video_source(conn, ident)
             conn.execute(
                 "INSERT INTO viral_media_preparations"
                 "(id,platform,video_id,media_kind,status,storage_uri) "
@@ -3988,6 +4035,7 @@ def test_batch_twenty_prepared_videos_publish_once_and_new_decision_wins(
                 "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin',%s,'庭院设计')",
                 (ident,),
             )
+            _managed_video_source(raw, ident)
     response = client.post(
         "/api/control/viral/videos/curation:batch",
         headers={**headers, "Idempotency-Key": "twenty-home"},
@@ -4091,6 +4139,7 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
                     int(state == "featured"),
                 ),
             )
+            _managed_video_source(raw, state)
             if index >= 2:
                 raw.execute(
                     "INSERT INTO "
@@ -4245,6 +4294,7 @@ def test_batch_hide_block_are_atomic_and_cancel_pending_homepage(
             "INSERT INTO viral_videos(platform,video_id,title,homepage_featured) "
             "VALUES('douyin','batch-other','内容',1)"
         )
+        _managed_video_source(raw, "batch-other")
     response = client.post(
         "/api/control/viral/videos/curation:batch",
         headers={**headers, "Idempotency-Key": f"batch-{action}"},
@@ -4330,6 +4380,7 @@ def test_homepage_simultaneous_http_reorder_rejects_one_stale_snapshot(
                 "VALUES('douyin',%s,'庭院并发',1,%s)",
                 (ident, rank),
             )
+            _managed_video_source(raw, ident)
     barrier = threading.Barrier(2)
     from concurrent.futures import ThreadPoolExecutor
 
@@ -4467,7 +4518,9 @@ def test_pending_homepage_schedule_worker_and_observed_milestone(
         assert [v.video_id for v in visible.items] == (
             [ident] if not cancel and window in ("current", "undated") else []
         )
-        milestone = raw.execute("SELECT homepage_at FROM viral_content_sources").fetchone()[0]
+        milestone = raw.execute(
+            "SELECT homepage_at FROM viral_content_sources WHERE video_id=%s", (ident,)
+        ).fetchone()[0]
         assert (milestone is not None) is (not cancel and window in ("current", "undated"))
         if window == "future" and not cancel:
             assert observe_due_homepages(conn) == 0
@@ -4477,7 +4530,9 @@ def test_pending_homepage_schedule_worker_and_observed_milestone(
                 (ident,),
             )
             assert observe_due_homepages(conn) == 1
-            first = raw.execute("SELECT homepage_at FROM viral_content_sources").fetchone()[0]
+            first = raw.execute(
+                "SELECT homepage_at FROM viral_content_sources WHERE video_id=%s", (ident,)
+            ).fetchone()[0]
             assert first > now and observe_due_homepages(conn) == 0
         if window == "expired" or cancel:
             assert observe_due_homepages(conn) == 0
@@ -4615,6 +4670,7 @@ def test_homepage_page_revision_total_share_one_pg_snapshot(
                 "collection_published,pushed_at) VALUES('douyin',%s,'庭院快照',1,%s,1,now())",
                 (ident, rank),
             )
+            _managed_video_source(raw, ident)
             raw.execute(
                 "INSERT INTO viral_media_preparations"
                 " (id,platform,video_id,media_kind,status,storage_uri) "
@@ -4705,6 +4761,8 @@ def test_homepage_move_has_no_thousand_item_capacity_limit(client: TestClient, r
             "CASE WHEN n=1001 THEN now()+interval '1 day' END "
             "FROM generate_series(1,1001) n"
         )
+        for number in range(1, 1002):
+            _managed_video_source(raw, f"scale-{number}")
     before = client.get("/api/control/viral/homepage", headers=headers).json()
     assert len(before["items"]) == 1001 and before["capacity"] is None
     body = {
@@ -4741,6 +4799,7 @@ def test_batch_failure_projection_and_filters_are_per_video(client: TestClient, 
                 "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin',%s,'庭院')",
                 (ident,),
             )
+            _managed_video_source(raw, ident)
         raw.execute(
             "INSERT INTO viral_refresh_tasks"
             " (id,platform,sort,status,collection_config_json,checkpoint_json) "

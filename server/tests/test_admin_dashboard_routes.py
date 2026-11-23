@@ -287,6 +287,43 @@ def test_global_todos_match_their_target_lists(
     assert todos["pending_orders"] == 1
 
 
+def test_content_failure_todo_only_counts_operator_material(
+    admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
+) -> None:
+    with psycopg.connect(dashboard_pg_dsn) as conn:
+        for video_id, source in (
+            ("failed-private", "customer_import"),
+            ("failed-ops", "admin_upload"),
+        ):
+            conn.execute(
+                "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin',%s,'失败素材')",
+                (video_id,),
+            )
+            conn.execute(
+                "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+                "VALUES('dashboard-source',%s,'douyin',%s,'')",
+                (source, video_id),
+            )
+            conn.execute(
+                "INSERT INTO viral_media_preparations(id,platform,video_id,media_kind,status) "
+                "VALUES(%s,'douyin',%s,'video','FAILED')",
+                (video_id, video_id),
+            )
+    try:
+        response = client.get("/api/control/dashboard/summary", headers=admin_headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["todos"]["content_prepare_failed"] == 1
+    finally:
+        with psycopg.connect(dashboard_pg_dsn) as conn:
+            conn.execute(
+                "DELETE FROM viral_media_preparations WHERE id IN ('failed-private','failed-ops')"
+            )
+            conn.execute("DELETE FROM viral_content_sources WHERE batch_id='dashboard-source'")
+            conn.execute(
+                "DELETE FROM viral_videos WHERE video_id IN ('failed-private','failed-ops')"
+            )
+
+
 def test_failed_todo_counts_oral_failures_when_no_video_failed(
     admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
 ) -> None:

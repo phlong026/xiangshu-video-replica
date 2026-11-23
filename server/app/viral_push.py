@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from app.db_portable import BusinessConnection
 from app.storage import StorageAdapter
+from app.viral_content_state import managed_source_sql
 from app.viral_media import VIRAL_STORAGE_PREFIX, _storage_video_id
 from app.viral_tikhub import ViralVideo
 
@@ -96,10 +97,11 @@ def mark_viral_push_published(
     ).fetchone()
     now_iso = datetime.now(UTC).isoformat()
     applied = conn.execute(
-        """
+        f"""
         UPDATE viral_videos v SET collection_published = 1,
             pushed_at = COALESCE(v.pushed_at, %s)
         WHERE v.platform = %s AND v.video_id = %s AND v.deleted_at IS NULL
+            AND {managed_source_sql()}
             AND EXISTS (
                 SELECT 1 FROM viral_media_preparations m
                 WHERE m.platform = v.platform AND m.video_id = v.video_id
@@ -177,28 +179,32 @@ def _feature_homepage_top(conn: BusinessConnection, *, platform: str, video_id: 
     ).fetchone()
     capacity = int(capacity_row[0]) if capacity_row is not None and capacity_row[0] else None
     conn.execute(
-        """
+        f"""
         UPDATE viral_videos v SET homepage_featured = 1,
             homepage_rank = COALESCE((
                 SELECT MIN(v2.homepage_rank) FROM viral_videos v2
                 WHERE v2.platform = v.platform AND v2.homepage_featured = 1
                     AND v2.pushed_at IS NOT NULL AND v2.deleted_at IS NULL
+                    AND {managed_source_sql("v2")}
             ), 0) - 1,
             homepage_featured_at = now()
         WHERE v.platform = %s AND v.video_id = %s
+            AND {managed_source_sql()}
         """,
         (platform, video_id),
     )
     if capacity is not None and capacity > 0:
         conn.execute(
-            """
+            f"""
             UPDATE viral_videos SET homepage_featured = 0, homepage_rank = NULL,
                 homepage_featured_at = NULL
             WHERE platform = %s AND homepage_featured = 1
+                AND {managed_source_sql("viral_videos")}
                 AND (platform, video_id) NOT IN (
                     SELECT platform, video_id FROM viral_videos
                     WHERE platform = %s AND homepage_featured = 1
                         AND pushed_at IS NOT NULL AND deleted_at IS NULL
+                        AND {managed_source_sql("viral_videos")}
                     ORDER BY homepage_rank ASC NULLS LAST, pushed_at DESC NULLS LAST, video_id
                     LIMIT %s
                 )

@@ -209,6 +209,11 @@ def _seed_reference(
         (platform, video_id, likes),
     )
     raw.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('diagnosis-reference','admin_link_import',%s,%s,'') ON CONFLICT DO NOTHING",
+        (platform, video_id),
+    )
+    raw.execute(
         "INSERT INTO viral_media_preparations "
         "(id, platform, video_id, media_kind, status, storage_uri) "
         "VALUES (%s, %s, %s, 'video', 'SUCCEEDED', 'local://diagnosis/reference.mp4')",

@@ -734,6 +734,7 @@ _TRUNCATED_TABLES = (
     "character_versions, character_assets, character_asset_reviews, "
     "character_generation_tasks, project_main_characters, viral_videos, "
     "viral_video_favorites, viral_video_visibility, viral_media_preparations, "
+    "viral_content_sources, "
     "viral_refresh_tasks, viral_import_tasks, viral_link_resolution_receipts, "
     "viral_fetch_state, viral_runtime_controls, oral_tasks, oral_avatars, "
     "wallet_transactions, wallets"
@@ -4059,7 +4060,12 @@ def test_publish_freezes_hash_and_enforces_published_view_uniqueness_on_pg(
 
 
 def _publish_test_media(bus: BusinessConnection) -> None:
-    """分页夹具代表运营已确认推送的归档；采集本身不授予公共展示权限。"""
+    """分页夹具代表已有采集来源且运营已确认推送的归档。"""
+    bus.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "SELECT 'cw058-published','collection',platform,video_id,'' FROM viral_videos "
+        "ON CONFLICT DO NOTHING"
+    )
     bus.execute(
         "UPDATE viral_videos SET collection_published=1, pushed_at=now(), cover_key='cover.jpg'"
     )

@@ -5,6 +5,7 @@ from datetime import date
 from app.billing_reports import date_bounds
 from app.db_portable import BusinessConnection
 from app.viral_content_cohort import STAGES, cohort_sql
+from app.viral_content_state import MANAGED_SOURCE_KINDS_SQL, managed_source_sql
 from app.viral_resource_metering import resource_records, resource_summary
 
 
@@ -78,20 +79,22 @@ def content_overview(
     resource_unknown = sum(row["cost_fen"] is None for row in resources["records"])
     resources.pop("records")
     top = conn.execute(
-        """SELECT e.platform,e.video_id,v.title,count(*) AS requests
+        f"""SELECT e.platform,e.video_id,v.title,count(*) AS requests
           FROM viral_content_usage_events e LEFT JOIN viral_videos v
           ON v.platform=e.platform AND v.video_id=e.video_id
-          WHERE e.created_at>=%s AND e.created_at<%s GROUP BY e.platform,e.video_id,v.title
+          WHERE e.created_at>=%s AND e.created_at<%s AND {managed_source_sql()}
+          GROUP BY e.platform,e.video_id,v.title
           ORDER BY count(*) DESC,e.platform,e.video_id LIMIT 10""",
         (lower, upper),
     ).fetchall()
     keywords = conn.execute(
         # C10 归因去重：同一视频被多个关键词命中时只归给最早命中的那个词，
         # 否则关键词榜的 collected 之和会大于真实采集数、效果被稀释。
-        """WITH first_hit AS (
+        f"""WITH first_hit AS (
              SELECT DISTINCT ON (platform,video_id) platform,video_id,keyword
              FROM viral_content_sources
              WHERE collected_at>=%s AND collected_at<%s AND keyword<>''
+               AND source_kind IN {MANAGED_SOURCE_KINDS_SQL}
              ORDER BY platform,video_id,collected_at,batch_id
            ), flagged AS (
              SELECT f.keyword,f.platform,f.video_id,
@@ -99,6 +102,7 @@ def content_overview(
              FROM first_hit f
              JOIN viral_content_sources s
                ON s.platform=f.platform AND s.video_id=f.video_id
+              AND s.source_kind IN {MANAGED_SOURCE_KINDS_SQL}
              GROUP BY f.keyword,f.platform,f.video_id
            )
            SELECT keyword,platform,count(*) AS collected,
@@ -116,7 +120,8 @@ def content_overview(
     sources_by_kind = conn.execute(
         "SELECT s.source_kind,count(DISTINCT (s.platform,s.video_id)) AS videos "
         "FROM viral_content_sources s WHERE s.collected_at>=%s AND s.collected_at<%s "
-        "AND s.platform IN ('douyin','wechat_channels','xiaohongshu')"
+        "AND s.platform IN ('douyin','wechat_channels','xiaohongshu') "
+        f"AND s.source_kind IN {MANAGED_SOURCE_KINDS_SQL}"
         + kind_platform_filter
         + " GROUP BY s.source_kind ORDER BY videos DESC,s.source_kind",
         tuple(kind_params),
@@ -127,7 +132,7 @@ def content_overview(
         "platform": platform,
         "measurementStartedAt": str(started),
         "cohortRule": (
-            "同一区间进入内容池的视频（关键词采集、管理端搜索、客户导入）"
+            "同一区间由后台主动采集或上传的视频（不含客户个人导入）"
             "按平台和视频去重，后续阶段只跟踪这一批；逐步交集转化，"
             "不混入全部库存；保留已屏蔽的视频，已永久清理的视频无法追踪。"
         ),

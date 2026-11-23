@@ -73,6 +73,7 @@ from app.viral_content_state import (
     archive_task_status_sql,
     content_state_sql,
     customer_visible_sql,
+    managed_source_sql,
 )
 from app.viral_homepage import live_homepage_sql, pending_homepage_sql
 from app.viral_keywords import ViralKeywordConfig
@@ -91,6 +92,17 @@ RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE = (
     "Runtime settings writes require the PostgreSQL runtime."
 )
 ViralRefreshStatus = Literal["not_configured", "configured_only", "refreshing", "ok", "error"]
+
+
+def _require_managed_video(conn: BusinessConnection, platform: str, video_id: str) -> None:
+    # 个人解析可能已有共享缓存，不能凭「已入库/已转存」授予后台运营资格。
+    row = conn.execute(
+        "SELECT 1 FROM viral_videos v WHERE v.platform=%s AND v.video_id=%s "
+        f"AND v.deleted_at IS NULL AND {managed_source_sql()}",
+        (platform, video_id),
+    ).fetchone()
+    if row is None:
+        raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不在后台爆款库，请先在后台导入。")
 
 
 class QueueModeResponse(BaseModel):
@@ -225,7 +237,9 @@ def _viral_runtime_response(conn: psycopg.Connection) -> ViralRuntimeResponse:
     platforms: list[ViralPlatformStatus] = []
     for platform in ("douyin", "wechat_channels"):
         cached = conn.execute(
-            "SELECT count(*) FROM viral_videos WHERE platform = %s", (platform,)
+            "SELECT count(*) FROM viral_videos WHERE platform = %s "
+            f"AND {managed_source_sql('viral_videos')}",
+            (platform,),
         ).fetchone()
         fetched = conn.execute(
             "SELECT max(fetched_at) FROM viral_fetch_state WHERE platform = %s",
@@ -687,7 +701,8 @@ def update_viral_video_availability(
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
         video = conn.execute(
-            "SELECT 1 FROM viral_videos WHERE platform = %s AND video_id = %s",
+            "SELECT 1 FROM viral_videos WHERE platform = %s AND video_id = %s "
+            f"AND {managed_source_sql('viral_videos')}",
             (platform, video_id),
         ).fetchone()
         if video is None:
@@ -880,7 +895,8 @@ _COLLECTED_VIRAL_ROW_SELECT = f"""
         COALESCE(m.status,'NOT_STARTED') AS media_status,m.storage_uri,
         r.status AS archive_status,r.error_message_redacted AS archive_error,
         COALESCE(vis.status,'AVAILABLE') AS availability
-    FROM viral_videos v LEFT JOIN viral_media_preparations m
+    FROM (SELECT * FROM viral_videos managed_video
+          WHERE {managed_source_sql("managed_video")}) v LEFT JOIN viral_media_preparations m
         ON m.platform=v.platform AND m.video_id=v.video_id AND m.media_kind='video'
     LEFT JOIN LATERAL (
         SELECT {archive_task_status_sql("rt", "v.video_id")} AS status,
@@ -1030,7 +1046,7 @@ def read_collected_viral_videos(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=50)] = 25,
 ) -> dict[str, object]:
-    filters = "v.platform IN ('douyin','wechat_channels','xiaohongshu')"
+    filters = f"v.platform IN ('douyin','wechat_channels','xiaohongshu') AND {managed_source_sql()}"
     filters += (
         ""
         if cohort_stage
@@ -1125,7 +1141,8 @@ def read_collected_viral_videos(
         categories = conn.execute(
             "SELECT DISTINCT category FROM ("
             "SELECT btrim(category) AS category FROM viral_videos "
-            "WHERE platform IN ('douyin','wechat_channels','xiaohongshu') UNION "
+            "WHERE platform IN ('douyin','wechat_channels','xiaohongshu') "
+            f"AND {managed_source_sql('viral_videos')} UNION "
             "SELECT btrim(item->>'category') FROM viral_runtime_controls, "
             "jsonb_array_elements(keywords_json::jsonb) item WHERE id=1) catalog "
             "WHERE COALESCE(category,'')!='' ORDER BY category"
@@ -1956,7 +1973,8 @@ def _enqueue_archive_batch(
     conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
     for video_id in video_ids:
         exists = conn.execute(
-            "SELECT 1 FROM viral_videos WHERE platform=%s AND video_id=%s AND deleted_at IS NULL",
+            "SELECT 1 FROM viral_videos WHERE platform=%s AND video_id=%s AND deleted_at IS NULL "
+            f"AND {managed_source_sql('viral_videos')}",
             (platform, video_id),
         ).fetchone()
         if exists is None:
@@ -2063,7 +2081,7 @@ def archive_collected_viral_video(
         # 人工转存不受「定时采集开关」约束（开关只停关键词采集）。
         video = conn.execute(
             "SELECT 1 FROM viral_videos WHERE platform=%s AND video_id=%s "
-            "AND deleted_at IS NULL FOR UPDATE",
+            f"AND deleted_at IS NULL AND {managed_source_sql('viral_videos')} FOR UPDATE",
             (platform, video_id),
         ).fetchone()
         if video is None:
@@ -2145,7 +2163,8 @@ def refresh_collected_wechat_statistics(
         if (
             raw.execute(
                 "SELECT 1 FROM viral_videos WHERE platform='wechat_channels' "
-                "AND video_id=%s AND deleted_at IS NULL",
+                "AND video_id=%s AND deleted_at IS NULL "
+                f"AND {managed_source_sql('viral_videos')}",
                 (video_id,),
             ).fetchone()
             is None
@@ -2343,6 +2362,7 @@ def read_admin_viral_cover(
         raise http_error(404, "OBJECT_NOT_FOUND", "封面不存在。")
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
+        _require_managed_video(conn, platform, video_id)
         video = get_viral_video(conn, platform=platform, video_id=video_id)
         if video is None or not video.cover_key:
             raise http_error(404, "OBJECT_NOT_FOUND", "封面不存在。")
@@ -2356,6 +2376,7 @@ def read_admin_viral_cover(
     except StorageBackendUnavailable:
         raise http_error(503, "STORAGE_BACKEND_UNAVAILABLE", "封面暂时无法读取。") from None
     with pg_transaction() as raw:
+        _require_managed_video(BusinessConnection.postgres(raw), platform, video_id)
         if (
             get_viral_video(BusinessConnection.postgres(raw), platform=platform, video_id=video_id)
             is None
@@ -2382,6 +2403,7 @@ def preview_collected_viral_video(
 
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
+        _require_managed_video(conn, platform, video_id)
         video = get_viral_video(conn, platform=platform, video_id=video_id)
         if video is None:
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
@@ -2394,6 +2416,7 @@ def preview_collected_viral_video(
         raise http_error(409, "VIRAL_MEDIA_NOT_READY", "云端素材尚未准备完成。") from exc
     # Recheck after storage I/O so a concurrent deletion cannot return a fresh URL.
     with pg_transaction() as raw:
+        _require_managed_video(BusinessConnection.postgres(raw), platform, video_id)
         if (
             get_viral_video(BusinessConnection.postgres(raw), platform=platform, video_id=video_id)
             is None
@@ -2409,6 +2432,7 @@ def _prepare_feature_cover(platform: str, video_id: str) -> tuple[str, str] | No
 
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
+        _require_managed_video(conn, platform, video_id)
         video = get_viral_video(conn, platform=platform, video_id=video_id)
         if video is None or video.cover_key or not video.cover_url:
             return None
@@ -2438,7 +2462,6 @@ def curate_collected_viral_video(
     actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
-    from app.viral_store import LINK_IMPORT_CATEGORY
 
     prepared_cover = (
         _prepare_feature_cover(platform, video_id) if payload.action == "feature" else None
@@ -2449,13 +2472,14 @@ def curate_collected_viral_video(
         # 所有首页写入先取同一事务锁，避免与重排的行锁顺序相反。
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
         row = conn.execute(
-            "SELECT cover_url,cover_key,homepage_featured,category FROM viral_videos "
-            "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL FOR UPDATE",
+            "SELECT cover_url,cover_key,homepage_featured FROM viral_videos "
+            "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL "
+            f"AND {managed_source_sql('viral_videos')} FOR UPDATE",
             (platform, video_id),
         ).fetchone()
         if row is None:
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
-        cover_url, cover_key, homepage_featured, category = row
+        cover_url, cover_key, homepage_featured = row
         if payload.action in ("pin", "unpin") and not homepage_featured:
             raise http_error(409, "VIRAL_VIDEO_NOT_FEATURED", "只有已展示到首页的视频才能置顶。")
         if payload.action == "prepare":
@@ -2480,14 +2504,6 @@ def curate_collected_viral_video(
                 "deleted": False,
             }
         if payload.action == "feature":
-            if str(category or "") == LINK_IMPORT_CATEGORY:
-                # 链接导入是用户自己的项目素材，不进首页内容池；否则它会绕过采集
-                # 侧的质量门槛直接出现在所有客户的爆款网格里。
-                raise http_error(
-                    409,
-                    "VIRAL_LINK_IMPORT_NOT_CURATABLE",
-                    "链接导入的素材不进首页，请先由后台采集同主题内容。",
-                )
             ready = conn.execute(
                 "SELECT 1 FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
                 "AND media_kind='video' AND status='SUCCEEDED' AND storage_uri IS NOT NULL",
@@ -2553,7 +2569,8 @@ def curate_collected_viral_video(
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
             min_rank = conn.execute(
                 "SELECT COALESCE(MIN(homepage_rank),1)-1 FROM viral_videos "
-                "WHERE deleted_at IS NULL AND homepage_featured=1"
+                "WHERE deleted_at IS NULL AND homepage_featured=1 "
+                f"AND {managed_source_sql('viral_videos')}"
             ).fetchone()
             assert min_rank is not None  # 聚合查询恒有一行
             next_rank = int(min_rank[0])
@@ -2687,10 +2704,15 @@ def curate_collected_viral_videos_batch(
     actor: ContentWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
-    from app.viral_store import LINK_IMPORT_CATEGORY
 
     prepared_covers: dict[tuple[str, str], tuple[str, str]] = {}
     if payload.action == "feature":
+        # 整批先验来源，再补封面，避免非法条目导致拒绝前已发生部分存储外呼。
+        with pg_transaction() as raw:
+            for target in payload.items:
+                _require_managed_video(
+                    BusinessConnection.postgres(raw), target.platform, target.video_id
+                )
         # 封面补齐全走事务外（下载 + 独立连接），事务内只做校验与写库：
         # 与单条路径同一套 CoverEnricher，但不在长事务里做网络 IO。
         for target in payload.items:
@@ -2757,26 +2779,19 @@ def curate_collected_viral_videos_batch(
         unready_entries: dict[str, list[dict[str, object]]] = {}
         for target in payload.items:
             row = conn.execute(
-                "SELECT title,cover_url,cover_key,category FROM viral_videos "
-                "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL FOR UPDATE",
+                "SELECT title,cover_url,cover_key FROM viral_videos "
+                "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL "
+                f"AND {managed_source_sql('viral_videos')} FOR UPDATE",
                 (target.platform, target.video_id),
             ).fetchone()
             if row is None:
                 raise http_error(
-                    404, "VIRAL_VIDEO_NOT_FOUND", "批量中有视频已被删除，请刷新后重试。"
+                    404, "VIRAL_VIDEO_NOT_FOUND", "批量中有视频不在后台爆款库，请刷新后重试。"
                 )
             title = str(row[0])
             if payload.action == "push":
                 # 人工「推送到前端」：媒体+封面已就绪的当场置位上架；
                 # 未就绪的转入「准备后就绪自动上架」队列（意图与操作人随任务走）。
-                # 链接导入是单个客户的自有素材，与「上首页」同一理由不得进入
-                # 全体客户的爆款列表——否则绕过采集侧质量门槛。
-                if str(row[3] or "") == LINK_IMPORT_CATEGORY:
-                    raise http_error(
-                        409,
-                        "VIRAL_LINK_IMPORT_NOT_CURATABLE",
-                        f"「{title}」是链接导入的素材，不进客户爆款列表，批量操作未执行。",
-                    )
                 hidden = conn.execute(
                     "SELECT status FROM viral_video_visibility WHERE platform=%s "
                     "AND video_id=%s AND status!='AVAILABLE'",
@@ -2854,12 +2869,6 @@ def curate_collected_viral_videos_batch(
                 unready_entries.setdefault(target.platform, []).append(push_entry)
                 continue
             if payload.action == "feature":
-                if str(row[3] or "") == LINK_IMPORT_CATEGORY:
-                    raise http_error(
-                        409,
-                        "VIRAL_LINK_IMPORT_NOT_CURATABLE",
-                        f"「{title}」是链接导入的素材，不进首页，批量操作未执行。",
-                    )
                 ready = conn.execute(
                     "SELECT 1 FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
                     "AND media_kind='video' AND status='SUCCEEDED' AND storage_uri IS NOT NULL",
@@ -3168,7 +3177,8 @@ def reorder_viral_homepage(
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
         rows = conn.execute(
             "SELECT video_id FROM viral_videos WHERE platform=%s AND homepage_featured=1 "
-            "AND deleted_at IS NULL ORDER BY homepage_rank ASC NULLS LAST,likes DESC,"
+            f"AND deleted_at IS NULL AND {managed_source_sql('viral_videos')} "
+            "ORDER BY homepage_rank ASC NULLS LAST,likes DESC,"
             "published_at DESC NULLS LAST,video_id ASC FOR UPDATE",
             (payload.platform,),
         ).fetchall()
@@ -3232,7 +3242,7 @@ def schedule_viral_homepage(
         row = conn.execute(
             "SELECT homepage_starts_at,homepage_ends_at FROM viral_videos WHERE platform=%s "
             f"AND video_id=%s AND (homepage_featured=1 OR {pending_homepage_sql('viral_videos')}) "
-            "AND deleted_at IS NULL FOR UPDATE",
+            f"AND deleted_at IS NULL AND {managed_source_sql('viral_videos')} FOR UPDATE",
             (platform, video_id),
         ).fetchone()
         if row is None:
@@ -3303,7 +3313,10 @@ def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
             "SELECT collection_enabled, keywords_json, next_collection_at, "
             "collection_interval_days FROM viral_runtime_controls WHERE id = 1"
         ).fetchone()
-        base = "v.deleted_at IS NULL AND v.platform IN ('douyin','wechat_channels','xiaohongshu')"
+        base = (
+            "v.deleted_at IS NULL AND v.platform IN ('douyin','wechat_channels','xiaohongshu') "
+            f"AND {managed_source_sql()}"
+        )
         ready = (
             "EXISTS (SELECT 1 FROM viral_media_preparations m2"
             " WHERE m2.platform=v.platform AND m2.video_id=v.video_id"
@@ -3503,7 +3516,8 @@ def read_viral_recycle_bin(
         ).fetchall()
         count = conn.execute(
             "SELECT count(*) FROM viral_videos WHERE deleted_at IS NOT NULL "
-            "AND platform IN ('douyin','wechat_channels','xiaohongshu')"
+            "AND platform IN ('douyin','wechat_channels','xiaohongshu') "
+            f"AND {managed_source_sql('viral_videos')}"
         ).fetchone()[0]
         items = []
         for row in rows:
@@ -3541,7 +3555,8 @@ def restore_viral_video(
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
         row = conn.execute(
             "SELECT deleted_at,deleted_at>=now()-interval '30 days' FROM "
-            "viral_videos WHERE platform=%s AND video_id=%s FOR UPDATE",
+            "viral_videos WHERE platform=%s AND video_id=%s "
+            f"AND {managed_source_sql('viral_videos')} FOR UPDATE",
             (platform, video_id),
         ).fetchone()
         if row is None or row[0] is None:
@@ -3634,7 +3649,8 @@ def move_viral_homepage(
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
         rows = conn.execute(
             "SELECT video_id,homepage_rank FROM viral_videos WHERE platform=%s "
-            "AND homepage_featured=1 AND deleted_at IS NULL ORDER BY homepage_rank ASC NULLS LAST,"
+            "AND homepage_featured=1 AND deleted_at IS NULL "
+            f"AND {managed_source_sql('viral_videos')} ORDER BY homepage_rank ASC NULLS LAST,"
             "likes DESC,published_at DESC NULLS LAST,video_id ASC FOR UPDATE",
             (payload.platform,),
         ).fetchall()

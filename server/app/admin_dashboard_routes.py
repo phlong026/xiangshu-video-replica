@@ -17,7 +17,7 @@ from app.billing_catalog import SERVICES
 from app.billing_reports import UNMETERED_DELIVERED_CHARGE, date_bounds, statistics
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
-from app.viral_content_state import content_state_sql
+from app.viral_content_state import content_state_sql, managed_source_sql
 
 router = APIRouter(prefix="/api/control", tags=["admin-dashboard"])
 
@@ -227,6 +227,7 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
                 SELECT count(*) FROM viral_videos v
                 WHERE v.deleted_at IS NULL
                   AND v.platform IN ('douyin', 'wechat_channels')
+                  AND {managed_source_sql()}
                   AND ({content_state_sql("v")}) = 'prepare_failed'
                 """,
             )
