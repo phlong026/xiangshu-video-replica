@@ -138,13 +138,19 @@ const {
   requestPublishAccountVerify: vi.fn(),
 }));
 
-const { publishBrowserRequest, nativeInvoke, nativeIsTauri } = vi.hoisted(
-  () => ({
-    publishBrowserRequest: vi.fn(),
-    nativeInvoke: vi.fn(),
-    nativeIsTauri: vi.fn(() => false),
-  }),
-);
+const {
+  publishBrowserRequest,
+  nativeInvoke,
+  nativeIsTauri,
+  archiveGenerationTask,
+  createGenerationResultPreviewUrl,
+} = vi.hoisted(() => ({
+  publishBrowserRequest: vi.fn(),
+  archiveGenerationTask: vi.fn(),
+  createGenerationResultPreviewUrl: vi.fn(),
+  nativeInvoke: vi.fn(),
+  nativeIsTauri: vi.fn(() => false),
+}));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: nativeInvoke,
   isTauri: nativeIsTauri,
@@ -168,6 +174,8 @@ vi.mock("../api", async (importOriginal) => ({
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
   publishBrowserRequest,
+  archiveGenerationTask,
+  createGenerationResultPreviewUrl,
   saveViralFavorite,
   removeViralFavorite,
 }));
@@ -288,6 +296,71 @@ describe("V1.4 任务详情真实成片预览", () => {
     retryStudioTask.mockReset();
     renameStudioGenerationTask.mockReset();
     loadStudioTaskDetail.mockReset();
+  });
+
+  it("临时成片从任务详情归档后，以返回的新素材编号进入发布", async () => {
+    const value = studio();
+    useStudio.mockReturnValue(value);
+    loadTaskPreview.mockResolvedValue({
+      id: "direct-1",
+      name: "临时成片",
+      kind: "video",
+      url: "/signed/direct",
+      source: "任务中心",
+      group: "任务结果",
+      delivery: "direct",
+      generationTaskId: "generation-1",
+      saved: false,
+    });
+    archiveGenerationTask.mockResolvedValueOnce({
+      result_asset_id: "archived-1",
+    });
+    createGenerationResultPreviewUrl.mockResolvedValueOnce("/signed/archive");
+    render(<TaskDetailPage />);
+    const save = await screen.findByRole("button", { name: "保存成片" });
+    expect(screen.getByRole("button", { name: "去发布管理" })).toBeDisabled();
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "去发布管理" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "去发布管理" }));
+    expect(archiveGenerationTask).toHaveBeenCalledExactlyOnceWith(
+      "generation-1",
+    );
+    expect(value.navigate).toHaveBeenCalledWith("publishing", {
+      selectedAssetId: "archived-1",
+    });
+  });
+
+  it("换素材回到原任务的创作类型并打开创作选择器", () => {
+    const value = studio(taskA.id, {
+      data: data([
+        {
+          ...taskA,
+          type: "视频生成",
+          draftSnapshot: {
+            ...createState("video").draft,
+            prompt: "原提示",
+            referenceIds: ["frame"],
+          },
+        },
+      ]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "更换素材" }));
+    expect(value.navigate).toHaveBeenCalledWith(
+      "reference",
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          prompt: "原提示",
+          referenceIds: ["frame"],
+        }),
+        returnTo: "task-detail",
+      }),
+    );
+    expect(value.openPicker).toHaveBeenCalledWith("reference");
   });
 
   it("首屏外任务按 URL 中的类型和后端 ID 读取，失败可受控重试", async () => {
@@ -1340,6 +1413,14 @@ describe("工作台我的成片", () => {
       within(section).getByRole("button", { name: /生成中 1 · 排队 0/ }),
     );
     expect(value.navigate).toHaveBeenCalledWith("tasks");
+  });
+
+  it("全部成片复用分页任务列表但不显示未出片任务", () => {
+    const value = studio(undefined, { data: data([taskA, runningTask]) });
+    useStudio.mockReturnValue(value);
+    render(<TasksPage worksOnly />);
+    expect(screen.getByText(taskA.title)).toBeInTheDocument();
+    expect(screen.queryByText(runningTask.title)).not.toBeInTheDocument();
   });
 
   it("从成片卡进入发布页并选中已保存的成片", async () => {

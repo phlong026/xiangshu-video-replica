@@ -22,6 +22,7 @@ export type StudioPage =
   | "reference"
   | "oral"
   | "tasks"
+  | "works"
   | "task-detail"
   | "people"
   | "person-ip"

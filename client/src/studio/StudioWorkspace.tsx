@@ -2792,6 +2792,13 @@ function StudioPageContent({
           <TasksPage />
         </>
       );
+    case "works":
+      return (
+        <>
+          <h1>全部成片</h1>
+          <TasksPage worksOnly />
+        </>
+      );
     case "task-detail":
       return <TaskDetailPage />;
     case "people":

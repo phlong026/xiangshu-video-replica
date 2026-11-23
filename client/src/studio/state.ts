@@ -31,6 +31,7 @@ export const pageTitles: Record<StudioPage, string> = {
   reference: "视频生成 · 参考生视频",
   oral: "数字人口播",
   tasks: "任务中心",
+  works: "全部成片",
   "task-detail": "任务详情与结果",
   people: "人物库",
   "person-ip": "人物详情",
