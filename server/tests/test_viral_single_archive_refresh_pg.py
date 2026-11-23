@@ -246,6 +246,11 @@ def _seed_video(
             json.dumps(native if native is not None else video.native, ensure_ascii=False),
         ),
     )
+    raw.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('archive-operator','admin_link_import',%s,%s,'') ON CONFLICT DO NOTHING",
+        (platform, video_id),
+    )
 
 
 def _seed_running_task(raw: psycopg.Connection, *, platform: str = PLATFORM) -> None:
@@ -365,6 +370,48 @@ def archive_state(route_state: str, monkeypatch: pytest.MonkeyPatch) -> Iterator
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     yield route_state
     close_pg_pool()
+
+
+def test_old_archive_task_cannot_prepare_customer_only_material(
+    archive_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_archive(archive_state)
+    with psycopg.connect(archive_state) as raw:
+        raw.execute(
+            "DELETE FROM viral_content_sources WHERE platform=%s AND video_id=%s",
+            (PLATFORM, VIDEO_ID),
+        )
+        raw.execute(
+            "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+            "VALUES('private-old-task','customer_import',%s,%s,'')",
+            (PLATFORM, VIDEO_ID),
+        )
+    before = _stored_video(archive_state)
+    http = _Http({})
+    _install_http(monkeypatch, http)
+    storage = _storage()
+    with pytest.raises(ViralLinkError) as caught:
+        viral_collection._run_single_archive(_lease(), storage, VIDEO_ID)
+    assert caught.value.code == "VIRAL_VIDEO_NOT_FOUND"
+    assert caught.value.retryable is False
+    assert http.calls == []
+    assert _stored_video(archive_state) == before
+    assert storage.head_object(viral_media.viral_media_key(PLATFORM, VIDEO_ID, "video")) is None
+    with psycopg.connect(archive_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_media_preparations WHERE platform=%s AND video_id=%s",
+                (PLATFORM, VIDEO_ID),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_operations WHERE api_metadata->>'refresh_task_id'=%s",
+                (_lease().id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 # 真实管线的边界不依赖数据库，便于在 PG 尚未配置时运行。

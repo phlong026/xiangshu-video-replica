@@ -51,6 +51,11 @@ def _future_lock() -> str:
 
 def _seed_ready_media(raw: psycopg.Connection, *, video_id: str = VIDEO_ID) -> None:
     raw.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('push-operator','admin_link_import','douyin',%s,'') ON CONFLICT DO NOTHING",
+        (video_id,),
+    )
+    raw.execute(
         "INSERT INTO viral_media_preparations"
         "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
         "(%s,'douyin',%s,'video','SUCCEEDED','fake://test/video.mp4')",
@@ -325,6 +330,10 @@ def test_auto_publish_homepage_capacity_evicts_oldest(route_state: str) -> None:
             "UPDATE viral_videos SET homepage_featured=1, homepage_rank=5, pushed_at=now() "
             "WHERE video_id='capacity-old'"
         )
+        raw.execute(
+            "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+            "VALUES('capacity-operator','admin_link_import','douyin','capacity-old','')"
+        )
         published = auto_publish_viral_video(
             BusinessConnection.postgres(raw),
             platform="douyin",
@@ -476,9 +485,8 @@ def test_push_restores_hidden_video_but_not_blocked(client: TestClient, route_st
     assert blocked.json()["detail"]["code"] == "VIRAL_VIDEO_UNAVAILABLE"
 
 
-def test_push_rejects_link_imported_video(client: TestClient, route_state: str) -> None:
-    """链接导入素材不得推送到前端：与「上首页」同一理由——那是单个客户的自有
-    素材，推送会让它绕过采集质量门槛出现在所有客户的爆款列表里。"""
+def test_push_rejects_customer_only_video(client: TestClient, route_state: str) -> None:
+    """只有客户来源的素材不得通过旧后台 ID 直接接管并发布。"""
     require_pg_or_explicit_skip()
     headers = _admin_session(client)
     with psycopg.connect(route_state) as raw:
@@ -486,6 +494,12 @@ def test_push_rejects_link_imported_video(client: TestClient, route_state: str) 
         _seed_ready_media(raw)
         raw.execute(
             "UPDATE viral_videos SET category='链接导入' WHERE video_id=%s",
+            (VIDEO_ID,),
+        )
+        raw.execute("DELETE FROM viral_content_sources WHERE video_id=%s", (VIDEO_ID,))
+        raw.execute(
+            "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+            "VALUES('customer-only','customer_import','douyin',%s,'')",
             (VIDEO_ID,),
         )
 
@@ -499,8 +513,8 @@ def test_push_rejects_link_imported_video(client: TestClient, route_state: str) 
             "items": [{"platform": "douyin", "video_id": VIDEO_ID}],
         },
     )
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"]["code"] == "VIRAL_LINK_IMPORT_NOT_CURATABLE"
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["code"] == "VIRAL_VIDEO_NOT_FOUND"
     with psycopg.connect(route_state) as raw:
         row = raw.execute(
             "SELECT collection_published, pushed_at FROM viral_videos WHERE video_id=%s",
@@ -545,6 +559,37 @@ def test_first_manual_push_preserves_existing_schedule(client, route_state, wind
                 ).total
                 == 0
             )
+
+
+def test_private_legacy_feature_does_not_consume_operator_capacity(route_state):
+    from app.viral_push import auto_publish_viral_video
+
+    with psycopg.connect(route_state) as raw:
+        _reset_video(raw)
+        _seed_ready_media(raw)
+        raw.execute("UPDATE viral_runtime_controls SET homepage_capacity=2 WHERE id=1")
+        conn = BusinessConnection.postgres(raw)
+        assert auto_publish_viral_video(conn, platform="douyin", video_id=VIDEO_ID)
+        raw.execute(
+            "INSERT INTO viral_videos(platform,video_id,title,homepage_featured,homepage_rank,"
+            "pushed_at) VALUES('douyin','private-old','个人历史素材',1,-100,now()),"
+            "('douyin','new-operator','新运营素材',0,NULL,NULL)"
+        )
+        raw.execute(
+            "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+            "VALUES('private-legacy','customer_import','douyin','private-old','')"
+        )
+        _seed_ready_media(raw, video_id="new-operator")
+        assert auto_publish_viral_video(conn, platform="douyin", video_id="new-operator")
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in raw.execute(
+                "SELECT video_id,homepage_featured,homepage_rank FROM viral_videos"
+            ).fetchall()
+        }
+        assert rows[VIDEO_ID][0] == 1
+        assert rows["new-operator"] == (1, -2)
+        assert rows["private-old"] == (1, -100)
 
 
 def test_background_republish_cannot_restore_evicted_homepage_item(route_state):
@@ -592,6 +637,11 @@ def test_homepage_observations_require_customer_visible_push(route_state):
     with psycopg.connect(route_state) as raw:
         _reset_video(raw)
         _seed_ready_media(raw)
+        # 本例单独构造发布前后来源，避免默认运营种子影响待观察行数。
+        raw.execute(
+            "DELETE FROM viral_content_sources WHERE platform='douyin' AND video_id=%s",
+            (VIDEO_ID,),
+        )
         raw.execute("UPDATE viral_videos SET homepage_featured=1 WHERE video_id=%s", (VIDEO_ID,))
         conn = BusinessConnection.postgres(raw)
         record_content_source(

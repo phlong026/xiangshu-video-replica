@@ -26,6 +26,7 @@ from app.storage import (
 from app.viral_media import ViralMediaPipeline
 from app.viral_media_preparation import ViralMediaBusy
 from app.viral_store import (
+    apply_customer_resolution,
     get_viral_video,
     is_customer_visible_viral_video,
     viral_video_availability,
@@ -139,7 +140,9 @@ def _require_import_video(
         conn, platform=platform, video_id=video_id, user_id=user_id
     ):
         raise _error(404, "VIRAL_VIDEO_NOT_FOUND", "爆款视频不存在或已下架。", retryable=False)
-    return video
+    # 客户重新解析不覆盖共享运营行；本人任务使用其最近成功回执中的时长和
+    # 标题。访问守卫先行，回执不能绕过下架、隐藏或排期限制。
+    return apply_customer_resolution(conn, video, user_id=user_id)
 
 
 def enqueue_viral_import_task(

@@ -568,6 +568,9 @@ class ViralMediaPipeline:
                 stored = coordinator.cached(
                     platform=video.platform, video_id=video.video_id, kind=kind
                 )
+                if stored is None and kind == "audio" and prefer == "audio" and not video.audio_url:
+                    # 共享行没有音频地址时，保留旧媒体接口可读视频缓存的回落行为。
+                    return self.fetch(video, prefer="video")
                 if stored is None:
                     from app.viral_media_preparation import ViralMediaBusy
 
@@ -692,6 +695,9 @@ class ViralMediaPipeline:
 
     def _resolve_kind(self, video: ViralVideo, prefer: str | None = None) -> tuple[str, str]:
         if video.platform in (PLATFORM_DOUYIN, PLATFORM_XIAOHONGSHU):
+            # 私有解析可能只更新个人回执和音频缓存，共享运营行无需拥有 audio_url。
+            if self._cached_only and prefer == "audio":
+                return "audio", "audio/mpeg"
             if prefer == "video":
                 if video.play_url or self._cached_only or self._recover_video is not None:
                     return "video", "video/mp4"

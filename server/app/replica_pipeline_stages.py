@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -39,6 +40,7 @@ from app.project_character_selection import choose_project_character_version
 from app.source_frames import confirm_source_frame, enqueue_source_frame_task
 from app.storyboard_consistency import storyboard_consistency_issues
 from app.viral_import import ViralImportError, ViralImportRequest, enqueue_viral_import_task
+from app.viral_store import apply_customer_resolution, get_viral_video
 
 # 首帧候选数量：与前端 GenerateFirstFramesRequest 默认一致（1–3 上界）。
 _FIRST_FRAME_QUANTITY = 3
@@ -105,14 +107,38 @@ def _save_stage_detail(
     )
 
 
-def _video_duration_ms(conn: BusinessConnection, platform: str, video_id: str) -> int:
+def _video_duration_ms(
+    conn: BusinessConnection,
+    platform: str,
+    video_id: str,
+    *,
+    user_id: str,
+    project_id: str,
+    asset_id: str,
+) -> float:
+    # 已导入的素材确定本次分析时长；后来重新解析不能改变这次素材的计费长度。
     row = conn.execute(
-        "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
-        (platform, video_id),
+        "SELECT metadata_json FROM assets WHERE id=%s AND project_id=%s "
+        "AND created_by_user_id=%s AND kind='reference_video'",
+        (asset_id, project_id, user_id),
     ).fetchone()
-    if row is None or row["duration_ms"] is None:
+    try:
+        metadata = json.loads(str(row["metadata_json"])) if row is not None else {}
+    except (TypeError, ValueError):
+        metadata = {}
+    duration = metadata.get("duration_seconds") if isinstance(metadata, dict) else None
+    if (
+        isinstance(duration, (int, float))
+        and not isinstance(duration, bool)
+        and math.isfinite(duration)
+        and duration > 0
+    ):
+        return float(duration) * 1000
+    # 旧资产可能尚无时长元数据，沿用本人回执与共享目录的兼容回落。
+    video = get_viral_video(conn, platform=platform, video_id=video_id)
+    if video is None:
         return 0
-    return int(row["duration_ms"])
+    return float(apply_customer_resolution(conn, video, user_id=user_id).duration_ms)
 
 
 def _version_payload(conn: BusinessConnection, version_id: str) -> dict[str, object] | None:
@@ -324,7 +350,14 @@ def _enqueue_source_analysis(
                     )
                 detail["sourceDurationMs"] = duration_seconds * 1000
             else:
-                duration_ms = _video_duration_ms(conn, lease.platform, lease.video_id)
+                duration_ms = _video_duration_ms(
+                    conn,
+                    lease.platform,
+                    lease.video_id,
+                    user_id=lease.owner_user_id,
+                    project_id=lease.project_id,
+                    asset_id=asset_id,
+                )
                 if duration_ms <= 0:
                     raise rp.ReplicaPipelineError(
                         422, "ANALYZE_NO_DURATION", "素材时长未知，无法拆解。"

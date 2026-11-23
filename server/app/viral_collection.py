@@ -38,6 +38,7 @@ from app.viral_collection_budget import collection_budget
 from app.viral_collection_failures import classify_collection_failure
 from app.viral_collection_schedule import advance_collection_time
 from app.viral_content_observations import record_content_source, record_content_stage
+from app.viral_content_state import managed_source_sql
 from app.viral_keywords import ViralKeywordConfig
 from app.viral_link import (
     DOUYIN_CANONICAL_URL_TEMPLATE,
@@ -563,6 +564,20 @@ def _store_douyin_play_url(
 
 def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video_id: str) -> None:
     """Prepare an existing item only; never search, bill customers or replace a list."""
+    # 在途旧任务也要重新核对来源，不能靠个人创作留下的共享缓存变成运营素材。
+    with _connection() as conn:
+        managed = conn.execute(
+            "SELECT 1 FROM viral_videos v WHERE v.platform=%s AND v.video_id=%s "
+            f"AND v.deleted_at IS NULL AND {managed_source_sql()}",
+            (lease.platform, video_id),
+        ).fetchone()
+        if managed is None:
+            raise ViralLinkError(
+                404,
+                "VIRAL_VIDEO_NOT_FOUND",
+                "视频不在后台爆款库，停止转存。",
+                retryable=False,
+            )
     with _keep_lease(lease) as check, video_billing_context(lease.platform, video_id):
         check()
         _settle_interrupted_media_refreshes(lease)
@@ -826,6 +841,7 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
                     "UPDATE viral_videos v SET homepage_featured=1, collection_published=1, "
                     "homepage_featured_at=COALESCE(homepage_featured_at,now()) "
                     "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL "
+                    f"AND {managed_source_sql()} "
                     "AND homepage_intent_version=%s AND homepage_featured=0 "
                     "AND (homepage_ends_at IS NULL OR homepage_ends_at>now()) "
                     "AND NOT EXISTS (SELECT 1 FROM viral_video_visibility vis WHERE "

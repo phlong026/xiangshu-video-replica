@@ -158,6 +158,14 @@ def _viral_seed(platform: str = "douyin", video_id: str = "v-1"):
     )
 
 
+def _seed_admin_source(raw, *, platform: str, video_id: str) -> None:
+    raw.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('search-operator','admin_link_import',%s,%s,'') ON CONFLICT DO NOTHING",
+        (platform, video_id),
+    )
+
+
 def test_upsert_keeps_existing_category_when_search_category_is_empty(
     route_state: str,
 ) -> None:
@@ -1460,6 +1468,7 @@ def _seed_source_video(raw, uid, *, platform: str, video_id: str, tariff: int | 
             json.dumps({"export_id": "exp-1", "object_nonce_id": "nonce-1"}),
         ),
     )
+    _seed_admin_source(raw, platform=platform, video_id=video_id)
     raw.execute(
         "UPDATE viral_videos SET collection_published=1,pushed_at=now() "
         "WHERE platform=%s AND video_id=%s",
@@ -1703,6 +1712,7 @@ def test_workspace_video_search_matches_public_visibility(
         raw.execute("DELETE FROM viral_videos WHERE video_id='v-1' AND platform='douyin'")
         video = replace(_viral_seed(), title="专用可见性核验", cover_url=None)
         upsert_viral_videos(conn, [video])
+        _seed_admin_source(raw, platform=video.platform, video_id=video.video_id)
         raw.execute(
             "UPDATE viral_videos SET collection_published=%s,pushed_at=now() WHERE video_id='v-1'",
             (0 if state == "unpublished" else 1,),
@@ -1804,6 +1814,8 @@ def test_regular_published_list_returns_next_visibility_boundary(
             conn, [replace(_viral_seed(video_id=key), cover_url=None) for key in ids]
         )
         for key in ids:
+            if key != ids[1]:
+                _seed_admin_source(raw, platform="douyin", video_id=key)
             raw.execute(
                 "INSERT INTO viral_media_preparations "
                 "(id,platform,video_id,media_kind,status,storage_uri) "

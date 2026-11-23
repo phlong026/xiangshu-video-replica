@@ -1,10 +1,6 @@
-"""ADM-C01 内容漏斗全来源口径（2026-10-08 拍板）。
+"""运营内容漏斗按管理员主动采集隔离，历史来源记录保留供个人任务使用。
 
-此前 viral_content_sources 只有关键词批次采集与管理端实时搜索两个写入方，
-客户链接导入只 upsert viral_videos、转存只 record_content_stage（UPDATE），
-导致内容概览"本期采集"恒为 0。本文件锁定三件事：
-
-1. customer_import 来源进入漏斗，且 keyword='' 不污染关键词榜；
+1. customer_import 不计入运营漏斗，也不污染关键词榜；
 2. content_overview 输出 sourcesByKind 来源分布；
 3. 迁移 20261008T1000 对起计以来已入池、无来源行的视频做一次性回填。
 """
@@ -50,7 +46,7 @@ def _insert_pool_video(
     )
 
 
-def test_customer_import_source_enters_funnel_and_keyword_rank_excludes_blank() -> None:
+def test_customer_import_source_is_excluded_from_operator_funnel() -> None:
     require_pg_or_explicit_skip()
     dsn = create_test_database("cohort_overview_test")
     try:
@@ -88,11 +84,40 @@ def test_customer_import_source_enters_funnel_and_keyword_rank_excludes_blank() 
                 end=date.today() + timedelta(days=1),
             )
         funnel = {step["stage"]: step["count"] for step in overview["funnel"]}
-        assert funnel["collected"] == 2, "客户导入必须计入本期采集"
+        assert funnel["collected"] == 1, "客户导入不能计入后台运营采集"
         kinds = {row["sourceKind"]: row["videos"] for row in overview["sourcesByKind"]}
-        assert kinds == {"customer_import": 1, "collection": 1}
-        # keyword='' 的导入来源只进漏斗，不进关键词榜（与 keywordRule 口径一致）。
+        assert kinds == {"collection": 1}
+        # 个人导入来源同时退出运营漏斗和关键词榜。
         assert [k["keyword"] for k in overview["bestKeywords"]] == ["庭院"]
+    finally:
+        drop_test_database("cohort_overview_test")
+
+
+def test_private_read_before_operator_import_does_not_count_as_keyword_use() -> None:
+    require_pg_or_explicit_skip()
+    dsn = create_test_database("cohort_overview_test")
+    try:
+        command.upgrade(_alembic_config(dsn), "head")
+        from app.db_portable import BusinessConnection
+        from app.viral_content_overview import content_overview
+
+        with psycopg.connect(dsn) as raw:
+            _insert_pool_video(raw, "adopted")
+            raw.execute(
+                "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,"
+                "keyword,detail_at) VALUES "
+                "('private-first','customer_import','douyin','adopted','',now()),"
+                "('operator-later','admin_search','douyin','adopted','庭院',NULL)"
+            )
+            overview = content_overview(
+                BusinessConnection.postgres(raw),
+                start=date.today(),
+                end=date.today() + timedelta(days=1),
+            )
+        assert overview["bestKeywords"] == [
+            {"keyword": "庭院", "platform": "douyin", "collected": 1, "used": 0}
+        ]
+        assert overview["sourcesByKind"] == [{"sourceKind": "admin_search", "videos": 1}]
     finally:
         drop_test_database("cohort_overview_test")
 

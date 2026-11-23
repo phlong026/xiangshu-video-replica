@@ -40,11 +40,16 @@ def gate_client(client):
 
 
 def _seed_viral_video(raw, uid: str, *, video_id: str) -> None:
-    """内容池里的一条视频 + 账号有钱：只服务首页时钟窗口用例."""
+    """明确的运营视频和可用余额，只服务首页时钟窗口用例。"""
     raw.execute(
         "INSERT INTO viral_videos (platform, video_id, title, author, native_json) "
         "VALUES ('douyin', %s, 'T', 'A', '{}') ON CONFLICT (platform, video_id) "
         "DO UPDATE SET deleted_at = NULL",
+        (video_id,),
+    )
+    raw.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('homepage-clock','admin_link_import','douyin',%s,'') ON CONFLICT DO NOTHING",
         (video_id,),
     )
     raw.execute(

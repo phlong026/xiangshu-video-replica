@@ -43,6 +43,11 @@ def detail_client(client):
 
 def _publish_ready(raw, *, platform: str, video_id: str) -> None:
     raw.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('detail-operator','admin_link_import',%s,%s,'') ON CONFLICT DO NOTHING",
+        (platform, video_id),
+    )
+    raw.execute(
         "UPDATE viral_videos SET collection_published=1,homepage_featured=0,pushed_at=now(), "
         "homepage_starts_at=NULL,homepage_ends_at=NULL,cover_url=NULL,deleted_at=NULL "
         "WHERE platform=%s AND video_id=%s",
@@ -327,12 +332,17 @@ def test_detail_auditor_never_starts_a_charge(detail_client, route_state) -> Non
 
 
 def _seed_featured_video(raw, *, video_id: str) -> None:
-    """首页展示网格的完整可见条件：已归档封面 + 视频媒体就绪 + 已入集."""
+    """运营首页素材：明确的管理员来源、已归档封面、就绪媒体和发布位。"""
     raw.execute(
         "INSERT INTO viral_videos (platform, video_id, title, author, native_json) "
         "VALUES ('douyin', %s, %s, 'A', '{}') ON CONFLICT (platform, video_id) "
         "DO UPDATE SET deleted_at = NULL",
         (video_id, f"P1 {video_id}"),
+    )
+    raw.execute(
+        "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+        "VALUES('featured-operator','admin_link_import','douyin',%s,'') ON CONFLICT DO NOTHING",
+        (video_id,),
     )
     raw.execute(
         "INSERT INTO viral_media_preparations "

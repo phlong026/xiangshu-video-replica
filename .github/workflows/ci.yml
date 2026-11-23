@@ -162,11 +162,17 @@ jobs:
           persist-credentials: false
       - name: Install system dependencies (Tauri + ffmpeg)
         run: |
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i \
-              's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-              /etc/apt/apt-mirrors.txt
-          fi
+          # 不同托管镜像使用 mirror 列表或 deb822 源；统一避开已观察到慢下载的区域镜像。
+          for source in \
+            /etc/apt/apt-mirrors.txt \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$source" ]; then
+              sudo sed -E -i \
+                's#http://(azure\.archive\.ubuntu\.com|[a-z0-9-]+\.ec2\.archive\.ubuntu\.com)/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+                "$source"
+            fi
+          done
           sudo apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \

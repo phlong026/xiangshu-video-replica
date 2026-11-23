@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn, cast
@@ -47,7 +46,6 @@ from app.viral_link import (
     supported_link_platform,
 )
 from app.viral_media import (
-    CoverEnricher,
     UrlFetcher,
     ViralMediaDNSUnavailable,
     ViralMediaError,
@@ -57,14 +55,12 @@ from app.viral_media_preparation import ViralMediaBusy
 from app.viral_routes import ViralVideoItem
 from app.viral_store import (
     LINK_IMPORT_CATEGORY,
-    update_viral_cover,
     upsert_viral_videos,
 )
 from app.viral_tikhub import ViralSourceError, ViralVideo
 from app.viral_wechat_link import WechatLinkClient, wechat_link_client_from_settings
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
-logger = logging.getLogger(__name__)
 _LINK_RECEIPT_LEASE = timedelta(minutes=2)
 # 与上传/拆解预检保持一致：30 秒硬上限 + 舍入容差。
 _MAX_LINK_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERANCE_SECONDS
@@ -543,10 +539,9 @@ def resolve_viral_link(
             from app.usage_billing import finish_source
 
             finish_source(conn, str(receipt["id"]), units=1, succeeded=True)
-            # 客户导入也是内容池来源：不登记会让漏斗"本期采集"漏掉这批视频
-            # （2026-10-08 拍板：漏斗口径=全来源进 cohort）。keyword 留空串，
-            # 关键词榜按 keyword<>'' 排除导入来源。
-            inserted = upsert_viral_videos(conn, [video], commit=False)
+            # 个人解析回执保存本次结果；共享记录只补新行，避免客户重复粘贴覆盖
+            # 运营维护的信息。customer_import 只记录个人来源，不授予运营资格。
+            inserted = upsert_viral_videos(conn, [video], commit=False, update_existing=False)
             record_content_source(
                 conn,
                 batch_id=f"import:{receipt['id']}",
@@ -556,29 +551,8 @@ def resolve_viral_link(
                 keyword="",
                 is_new=(video.platform, video.video_id) in inserted,
             )
-    # ADM-C04：导入路径同样把源站封面归档为自有副本——此前只有采集/转存跑
-    # CoverEnricher，链接导入的封面停留在会过期的源站链接。失败保留源站链接
-    # 兜底（CoverEnricher 内部已容错），不阻塞解析响应。
-    try:
-        enriched_cover = CoverEnricher(
-            storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024), metered=True
-        ).enrich(video)
-        if getattr(enriched_cover, "cover_key", None):
-            with db.write() as (conn, _cover_actor):
-                with conn:
-                    update_viral_cover(
-                        conn,
-                        platform=video.platform,
-                        video_id=video.video_id,
-                        cover_key=str(enriched_cover.cover_key),
-                    )
-    except Exception as exc:
-        logger.warning(
-            "链接导入封面归档失败（保留源站链接兜底）%s/%s: %s",
-            video.platform,
-            video.video_id,
-            exc,
-        )
+    # 响应与个人回执沿用本次解析封面；平台封面只由后台采集处理，客户解析
+    # 不再写共享 cover_key 或封面对象，避免并发接管时覆盖运营素材。
     return response
 
 

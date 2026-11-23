@@ -30,6 +30,7 @@ from app.auth import Database, ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessRow
 from app.permissions import require_not_auditor
+from app.viral_store import apply_customer_resolution, get_viral_video
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
 
@@ -113,15 +114,11 @@ def initiate_replica_pipeline(
         if result["replay"] is False:
             # 新任务与项目仍未提交。先核对源片和长档价目，失败时整笔回滚，
             # 避免启动收费拆解/首帧；同键重放不受当前目录或价目修改影响。
-            video_row = conn.execute(
-                "SELECT duration_ms FROM viral_videos WHERE platform = %s AND video_id = %s",
-                (request.platform, request.video_id),
-            ).fetchone()
-            duration_ms = None if video_row is None else video_row["duration_ms"]
+            video = get_viral_video(conn, platform=request.platform, video_id=request.video_id)
+            if video is not None:
+                video = apply_customer_resolution(conn, video, user_id=actor.id)
             try:
-                duration = rp.require_output_duration(
-                    int(duration_ms) if duration_ms is not None else None
-                )
+                duration = rp.require_output_duration(None if video is None else video.duration_ms)
             except rp.ReplicaPipelineError as exc:
                 raise HTTPException(
                     exc.status_code, detail={"code": exc.code, "message": exc.message}

@@ -17,12 +17,11 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from app.db_portable import BusinessConnection
-from app.viral_content_state import customer_visible_sql
+from app.viral_content_state import customer_visible_sql, managed_source_sql
 from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail
 
 VIRAL_FETCH_TTL = timedelta(hours=1)
-# 链接导入素材的分类标记：既是管理端可读的来源标识，也是「不进首页」的判据。
-# 链接导入只保证拿到媒体本身，互动字段由管理端按「字段待补全」提示。
+# 客户解析新素材时的默认分类；运营资格由独立来源记录决定，不能再由分类推断。
 LINK_IMPORT_CATEGORY = "链接导入"
 STATISTICS_CHECKED_AT_KEY = "_statistics_checked_at"
 STATISTICS_RETRY_AT_KEY = "_statistics_retry_at"
@@ -40,7 +39,7 @@ _METADATA_LOOKUP_CHUNK_SIZE = 400
 _NATIVE_JSON_RMW_LOCK = threading.RLock()
 ViralAvailability = Literal["available", "hidden", "unavailable"]
 
-_UPSERT_SQL = """
+_INSERT_SQL = """
 INSERT INTO viral_videos (
     platform, video_id, category, title, author, author_avatar, verified,
     cover_url, cover_key, duration_ms, likes, comments, shares, collects,
@@ -52,6 +51,11 @@ INSERT INTO viral_videos (
     %s, %s, %s, %s,
     %s, %s, %s
 )
+"""
+
+_UPSERT_SQL = (
+    _INSERT_SQL
+    + """
 ON CONFLICT (platform, video_id) DO UPDATE SET
     category = CASE WHEN excluded.category = '' THEN viral_videos.category
                     ELSE excluded.category END,
@@ -76,6 +80,7 @@ ON CONFLICT (platform, video_id) DO UPDATE SET
     native_json = excluded.native_json,
     updated_at = CURRENT_TIMESTAMP
 """
+)
 
 _ORDER_BY = {
     "hot": "COALESCE(likes, -1) DESC, COALESCE(published_at, -1) DESC, video_id",
@@ -245,14 +250,25 @@ def _record_statistics(
 
 
 def upsert_viral_videos(
-    conn: BusinessConnection, videos: list[ViralVideo], *, commit: bool = True
+    conn: BusinessConnection,
+    videos: list[ViralVideo],
+    *,
+    commit: bool = True,
+    update_existing: bool = True,
 ) -> set[tuple[str, str]]:
-    """按 (platform, video_id) 去重写入/刷新条目."""
+    """按 (platform, video_id) 去重；客户解析仅补新行，不改写已存在的运营信息。"""
     inserted: set[tuple[str, str]] = set()
+    # 冲突判断由数据库串行化；不能先查来源再写，否则并发管理员导入尚未提交的
+    # 来源记录不可见，客户请求仍可能覆盖管理员刚保存的标题、分类和封面。
+    sql = (
+        _UPSERT_SQL
+        if update_existing
+        else _INSERT_SQL + " ON CONFLICT (platform, video_id) DO NOTHING"
+    )
     with _NATIVE_JSON_RMW_LOCK:
         for video in _merge_cached_statistics_metadata(conn, videos):
             row = conn.execute(
-                _UPSERT_SQL + " RETURNING platform,video_id,(xmax=0) AS inserted",
+                sql + " RETURNING platform,video_id,(xmax=0) AS inserted",
                 _video_row(video),
             ).fetchone()
             if row is not None and row["inserted"]:
@@ -500,6 +516,29 @@ def get_viral_video(conn: BusinessConnection, *, platform: str, video_id: str) -
     return _row_to_video(row) if row is not None else None
 
 
+def apply_customer_resolution(
+    conn: BusinessConnection, video: ViralVideo, *, user_id: str
+) -> ViralVideo:
+    """本人创作使用最近成功解析的元数据；不改共享行，也不授予素材访问权。"""
+    receipt = conn.execute(
+        "SELECT response_json::jsonb->'item' AS item FROM viral_link_resolution_receipts "
+        "WHERE owner_user_id=%s AND status='SUCCEEDED' "
+        "AND response_json::jsonb->'item'->>'platform'=%s "
+        "AND response_json::jsonb->'item'->>'videoId'=%s "
+        "ORDER BY updated_at DESC, id DESC LIMIT 1",
+        (user_id, video.platform, video.video_id),
+    ).fetchone()
+    if receipt is None:
+        return video
+    item = receipt["item"]
+    title, duration = item.get("title"), item.get("durationMs")
+    return replace(
+        video,
+        title=title if isinstance(title, str) else video.title,
+        duration_ms=duration if type(duration) is int and duration > 0 else video.duration_ms,
+    )
+
+
 def viral_publication_clock(
     conn: BusinessConnection, *, platform: str, featured_only: bool
 ) -> tuple[str, str | None]:
@@ -536,9 +575,11 @@ def is_customer_visible_viral_video(
 
 
 def customer_accessible_viral_sql(alias: str = "v") -> str:
-    # 私有素材凭本人解析回执或既有导入成果继续创作；已推送条目仍严格受公共排期约束。
+    # 私有素材凭本人回执继续创作；历史误推送位不能撤销本人的使用权，也不能
+    # 授予其他客户访问。确有运营来源的已推送条目仍严格受公共发布状态约束。
     return (
-        f"({customer_visible_sql(alias)} OR ({alias}.pushed_at IS NULL "
+        f"({customer_visible_sql(alias)} OR (({alias}.pushed_at IS NULL "
+        f"OR NOT {managed_source_sql(alias)}) "
         f"AND {alias}.deleted_at IS NULL AND NOT EXISTS "
         "(SELECT 1 FROM viral_video_visibility access_vis "
         f"WHERE access_vis.platform={alias}.platform "

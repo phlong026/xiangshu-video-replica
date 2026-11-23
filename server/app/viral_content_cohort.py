@@ -4,6 +4,7 @@ from datetime import date
 from typing import Literal
 
 from app.billing_reports import date_bounds
+from app.viral_content_state import MANAGED_SOURCE_KINDS_SQL
 
 CohortStage = Literal["collected", "prepared", "homepage", "detail"]
 STAGES: dict[str, str] = {
@@ -34,7 +35,8 @@ def cohort_sql(
         "FROM viral_content_sources s "
         "JOIN viral_videos v ON v.platform=s.platform AND v.video_id=s.video_id "
         "WHERE s.collected_at>=%s AND s.collected_at<%s "
-        "AND s.platform IN ('douyin','wechat_channels','xiaohongshu')"
+        "AND s.platform IN ('douyin','wechat_channels','xiaohongshu') "
+        f"AND s.source_kind IN {MANAGED_SOURCE_KINDS_SQL}"
         + platform_filter
         + " GROUP BY s.platform,s.video_id",
         params,
