@@ -30,6 +30,8 @@ from app import replica_pipeline as rp
 from app import replica_pipeline_stages as stages
 from app.db_portable import BusinessConnection
 from app.replica_pipeline_confirm import freeze_confirm_quote as real_freeze_confirm_quote
+from app.replica_pipeline_stages import _version_payload as real_version_payload
+from app.replica_pipeline_stages import _video_duration_ms as real_video_duration_ms
 
 DATABASE = "rplc_pipeline_stages_test"
 
@@ -870,8 +872,17 @@ def test_compose_advances_to_await_confirm(
 
 
 @pytest.mark.parametrize(
-    ("source_seconds", "output_seconds"),
-    [(4.0, 4), (15.0, 15), (15.001, 16), (16.1, 17), (16.5, 17), (29.4, 30), (30.0, 30)],
+    ("source_seconds", "output_seconds", "uploaded"),
+    [
+        (4.0, 4, False),
+        (15.0, 15, False),
+        (15.001, 16, False),
+        (16.1, 17, False),
+        (16.5, 17, False),
+        (29.4, 30, False),
+        (30.0, 30, False),
+        pytest.param(16.1, 17, True, id="upload-metadata-missing"),
+    ],
 )
 def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
     biz: BusinessConnection,
@@ -879,6 +890,7 @@ def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
     monkeypatch: pytest.MonkeyPatch,
     source_seconds: float,
     output_seconds: int,
+    uploaded: bool,
 ) -> None:
     """真编译器不得触发压缩确认；报价、任务与预占共同使用向上取整后的秒数。"""
     from cryptography.fernet import Fernet
@@ -894,10 +906,14 @@ def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
     )
     from app.auth import CurrentUser
 
-    slot = f"real-{source_seconds}"
+    slot = f"real-{source_seconds}" + ("-upload" if uploaded else "")
     project_id, user_id = f"p-{slot}", f"u-{slot}"
     source_id, frame_id = f"source-{slot}", f"frame-{slot}"
-    pipeline_id = _seed_pipeline(biz, status=rp.STATUS_COMPOSING, slot=slot)
+    pipeline_id = _seed_pipeline(
+        biz,
+        status=rp.STATUS_FIRST_FRAMING if uploaded else rp.STATUS_COMPOSING,
+        slot=slot,
+    )
     actor = CurrentUser(id=user_id, username=user_id, display_name="测试", role="customer")
     for asset_id, kind, content_type in (
         (source_id, "reference_video", "video/mp4"),
@@ -908,6 +924,10 @@ def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
             "content_type, created_by_user_id) VALUES (%s, %s, %s, %s, 'test-hash', 10, %s, %s)",
             (asset_id, project_id, kind, f"local://test/{asset_id}", content_type, user_id),
         )
+    biz.execute(
+        "UPDATE assets SET metadata_json = %s WHERE id = %s",
+        (json.dumps({"duration_seconds": source_seconds}), source_id),
+    )
     analysis_result = analyze_video(
         video_uri="fake", video_duration_seconds=source_seconds, provider=FakeGemini()
     )
@@ -925,6 +945,14 @@ def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
         created_by_user_id=user_id,
         shots=analysis_result.analysis.shots,
     )
+    if uploaded:
+        # 分析和分镜已落库后，上游资产元数据缺失也不能改写冻结时间轴。
+        biz.execute("UPDATE assets SET metadata_json = '{}' WHERE id = %s", (source_id,))
+        biz.execute(
+            "UPDATE replica_pipeline_tasks SET platform = 'upload', video_id = %s WHERE id = %s",
+            (source_id, pipeline_id),
+        )
+        monkeypatch.setattr(stages, "_video_duration_ms", real_video_duration_ms)
 
     def version(kind: str, payload: dict[str, Any]) -> Any:
         return insert_version(
@@ -969,13 +997,18 @@ def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
                 {
                     "shotCardVersionId": shots["id"],
                     "scriptVersionId": script["id"],
-                    "firstFrame": {"firstFrameAssetId": frame_id},
+                    "firstFrame": {
+                        "substage": "candidates",
+                        "sourceFrameSelectionVersionId": source["id"],
+                    }
+                    if uploaded
+                    else {"firstFrameAssetId": frame_id},
                 }
             ),
             pipeline_id,
         ),
     )
-    _stub_domains["version_payload"] = {str(shots["id"]): json.loads(str(shots["payload_json"]))}
+    monkeypatch.setattr(stages, "_version_payload", real_version_payload)
     # 目录时长即使被刷新为 8 秒，也不能覆盖本次拆解的不可变媒体时间轴。
     _stub_domains["duration_ms"] = 8000
     monkeypatch.setattr(stages, "compile_prompt_version", generation.compile_prompt_version)
@@ -993,13 +1026,21 @@ def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
         "INSERT INTO wallets (user_id, available_credits, reserved_credits) VALUES (%s, 1000, 0)",
         (user_id,),
     )
+    if uploaded:
+        assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "waiting"
+        assert "first_frame_enqueue_kwargs" in _stub_domains
+        _stub_domains["sub_status"] = {
+            ("first_frame_tasks", "ff-1"): ("SUCCEEDED", {"result_version_id": candidates["id"]})
+        }
+        _release_for_next_round(biz, pipeline_id)
+        assert stages.drive_pipeline_once(biz, _acquire(biz, slot=slot)) == "advanced"
     lease = _acquire(biz, slot=slot)
-    result = stages.run_pipeline_stage(biz, lease)
-    assert result.kind == "advanced", result
+    assert stages.drive_pipeline_once(biz, lease) == "advanced"
     row = biz.execute(
         "SELECT * FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
     ).fetchone()
     assert row is not None and row["status"] == rp.STATUS_AWAIT_CONFIRM
+    assert row["locked_by"] is None and row["locked_until"] is None
     prompt = biz.execute(
         "SELECT payload_json FROM versions WHERE id = %s", (row["prompt_version_id"],)
     ).fetchone()

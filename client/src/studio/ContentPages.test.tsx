@@ -5055,7 +5055,7 @@ function oralReplicaFixture(accountId: string) {
     result: { text: "原转写文案" },
   });
   getOralPrice.mockResolvedValue({
-    quote_token: "fixture-oral-original-quote",
+    quote_token: "quote-1",
     quote_expires_at: Math.floor(Date.now() / 1000) + 120,
     max_credits: 18,
     estimated_credits: 18,
@@ -5147,7 +5147,7 @@ describe("数字人口播请求恢复", () => {
     const firstRequest = createOralTask.mock.calls[0]?.[0];
     view.unmount();
     getOralPrice.mockResolvedValue({
-      quote_token: "fixture-oral-restored-quote",
+      quote_token: "quote-2",
       quote_expires_at: Math.floor(Date.now() / 1000) + 120,
       max_credits: 21,
       estimated_credits: 21,
@@ -5172,15 +5172,11 @@ describe("数字人口播请求恢复", () => {
     expect(createOralTask).toHaveBeenCalledTimes(2);
     expect(createOralTask.mock.calls[1]?.[0]).toEqual({
       ...firstRequest,
-      quoteToken: "fixture-oral-restored-quote",
+      quoteToken: "quote-2",
       maxCredits: 21,
     });
-    expect(JSON.stringify(window.localStorage)).not.toContain(
-      "fixture-oral-original-quote",
-    );
-    expect(JSON.stringify(window.localStorage)).not.toContain(
-      "fixture-oral-restored-quote",
-    );
+    expect(JSON.stringify(window.localStorage)).not.toContain("quote-1");
+    expect(JSON.stringify(window.localStorage)).not.toContain("quote-2");
   });
 
   it("重开后已同键重试时，旧页面晚到的明确拒绝不能清掉正在恢复的请求", async () => {
@@ -5360,9 +5356,7 @@ describe("数字人口播编辑草稿", () => {
     expect(getOralPrice).toHaveBeenCalledOnce();
     expect(createViralImportTask).toHaveBeenCalledOnce();
     expect(createOralTask).not.toHaveBeenCalled();
-    expect(JSON.stringify(window.localStorage)).not.toContain(
-      "fixture-oral-original-quote",
-    );
+    expect(JSON.stringify(window.localStorage)).not.toContain("quote-1");
   });
 
   it("主动清空的草稿也会保存，并与其他账号、上传视频隔离", async () => {
