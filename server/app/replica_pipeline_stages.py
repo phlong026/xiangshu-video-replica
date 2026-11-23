@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from app import replica_pipeline as rp
 from app.analysis import enqueue_analysis_task
@@ -37,6 +37,7 @@ from app.generation import (
 from app.image_tasks import enqueue_first_frame_task
 from app.project_character_selection import choose_project_character_version
 from app.source_frames import confirm_source_frame, enqueue_source_frame_task
+from app.storyboard_consistency import storyboard_consistency_issues
 from app.viral_import import ViralImportError, ViralImportRequest, enqueue_viral_import_task
 
 # 首帧候选数量：与前端 GenerateFirstFramesRequest 默认一致（1–3 上界）。
@@ -412,6 +413,43 @@ def _stage_poll_analysis(
     detail = _stage_detail(row)
     detail["analysisVersionId"] = str(analysis_version_id)
     detail["shotCardVersionId"] = str(shot_card["id"])
+    payload = _version_payload(conn, str(shot_card["id"])) or {}
+    shots = payload.get("shots")
+    script = payload.get("original_script")
+    if not isinstance(script, str):
+        source = (_version_payload(conn, str(analysis_version_id)) or {}).get("analysis")
+        script = source.get("original_script") if isinstance(source, dict) else None
+    issues = (
+        storyboard_consistency_issues(
+            cast(list[dict[str, Any]], shots), script if isinstance(script, str) else None
+        )
+        if isinstance(shots, list)
+        else []
+    )
+    review = detail.get("storyboardReview")
+    now = datetime.now(UTC)
+    if issues:
+        started = (
+            review.get("startedElapsedSeconds")
+            if isinstance(review, dict)
+            else rp.effective_elapsed_seconds(row, now=now)
+        )
+        detail["storyboardReview"] = {
+            "issues": issues,
+            "analysisVersionId": str(analysis_version_id),
+            "shotCardVersionId": str(shot_card["id"]),
+            "startedElapsedSeconds": started,
+        }
+        _save_stage_detail(conn, lease.id, detail)
+        return WAITING
+    if isinstance(review, dict):
+        elapsed = rp.effective_elapsed_seconds(row, now=now)
+        started = float(review.get("startedElapsedSeconds", elapsed))
+        # 使用有效运行时间差，避免与全局开关挂起的时间重复抵扣。
+        detail["storyboardReviewWaitSeconds"] = float(
+            cast(float, detail.get("storyboardReviewWaitSeconds", 0))
+        ) + max(0.0, elapsed - started)
+        detail.pop("storyboardReview", None)
     _save_stage_detail(conn, lease.id, detail)
     rp.advance_status(
         conn,
@@ -448,9 +486,12 @@ def _stage_bridge_script(
     if payload is None:
         return _failed("SCRIPT_ANALYSIS_MISSING", "分析版本不存在。")
     analysis_payload = payload.get("analysis")
-    script_text = (
-        analysis_payload.get("original_script") if isinstance(analysis_payload, dict) else None
-    )
+    shot_payload = _version_payload(conn, shot_card_version_id) or {}
+    script_text = shot_payload.get("original_script")
+    if not isinstance(script_text, str):
+        script_text = (
+            analysis_payload.get("original_script") if isinstance(analysis_payload, dict) else None
+        )
     text = script_text.strip()[:8000] if isinstance(script_text, str) else ""
     actor = _pipeline_actor(conn, lease.owner_user_id)
     request = ScriptRequest(
