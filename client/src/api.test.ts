@@ -1,5 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { sampleFactsShot } from "./test/shotFacts";
 
 const nativeDownload = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
@@ -91,6 +92,9 @@ import {
   readFirstFrameCandidates,
   readReplicaPromptShots,
   readReplicaPromptSpokenScript,
+  readShotCardPayload,
+  readShotConsistencyIssues,
+  readSourceReview,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
@@ -104,6 +108,7 @@ import {
   rewriteProjectScript,
   SESSION_EXPIRED_EVENT,
   saveGenerationPrompt,
+  saveShotCards,
   selectCharacterReferences,
   setCustomerSessionToken,
   setInternalAccessToken,
@@ -214,6 +219,154 @@ describe("长视频轮询的账号生命周期", () => {
       waitForReplicaPromptTask("compat-task"),
     ]);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("分镜一致性与扩展信息", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("长视频解析保留全部结构化事实和原始证据", () => {
+    const shot = sampleFactsShot();
+    expect(readReplicaPromptShots([shot])[0]?.facts).toEqual(shot.facts);
+  });
+
+  it.each([{ no_schema: true }, ["损坏的结构"], "损坏的结构", false, 123])(
+    "长片保留损坏的原始事实 %j，不静默丢弃",
+    (raw) => {
+      expect(
+        readReplicaPromptShots([{ ...sampleFactsShot(), facts: raw }])[0]
+          ?.facts,
+      ).toEqual(raw);
+    },
+  );
+
+  it("短片恢复与保存保留事实和原片校对元信息", async () => {
+    const shots = [sampleFactsShot()];
+    const sourceReview = {
+      status: "INCOMPLETE",
+      attempted: true,
+      issues: [
+        {
+          code: "SOURCE_REVIEW_INCOMPLETE",
+          shot_id: "s1",
+          message: "门旁人物动作待确认",
+        },
+      ],
+    };
+    const version = {
+      id: "card-1",
+      project_id: "project-1",
+      asset_id: "asset-1",
+      kind: "shot_cards",
+      version_number: 1,
+      created_by_user_id: null,
+      created_at: "2026-11-23T00:00:00Z",
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 4,
+        shots,
+        source_review: sourceReview,
+      },
+    };
+    expect(readShotCardPayload(version)).toMatchObject({
+      shots,
+      source_review: sourceReview,
+    });
+    expect(
+      readAnalysisPayload({
+        ...version,
+        payload: {
+          analysis: {
+            summary: "庭院",
+            duration_seconds: 4,
+            original_script: "",
+            shots,
+            source_review: sourceReview,
+          },
+        },
+      }),
+    ).toMatchObject({ shots, source_review: sourceReview });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => version });
+    vi.stubGlobal("fetch", fetcher);
+    await saveShotCards("analysis-1", shots);
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ shots });
+  });
+
+  it("损坏的复核问题不能过滤成空数组后被误报通过", () => {
+    expect(
+      readSourceReview({
+        status: "PASSED",
+        attempted: true,
+        issues: [{ message: { invalid: true } }],
+      })?.status,
+    ).toBe("INCOMPLETE");
+  });
+
+  it("长视频保留结构化运动、动作边界与环境信息", () => {
+    const shot = {
+      shot_id: "s1",
+      start_time: 0.125,
+      end_time: 1.375,
+      subject: "讲解者",
+      action: "走向门口",
+      segment_kind: "ACTION_BEAT",
+      boundary_reason: "同镜头内开始走动",
+      scene_lighting: "左侧柔光",
+      ambient_sound: "鸟鸣",
+      motion: {
+        subject_motion_state: "WALKING+GESTURING_ONLY",
+        subject_direction: "unknown",
+        subject_displacement: "走向门口",
+        hand_action: "抬手",
+        camera_motion: "ORBIT",
+        relative_motion: "摄影机环绕人物",
+      },
+    };
+    expect(readReplicaPromptShots([shot])).toEqual([shot]);
+  });
+
+  it("一致性问题只保留安全的字符串字段", () => {
+    const issue = {
+      code: "MOTION_CONFLICT",
+      shot_id: "s1",
+      message: "人物运动状态与动作矛盾",
+    };
+    expect(
+      readShotConsistencyIssues([
+        issue,
+        null,
+        { code: "BAD", message: {} },
+        { code: "BAD", message: "", shot_id: "s2" },
+      ]),
+    ).toEqual([issue]);
+  });
+
+  it("保存被拒绝时保留具体分镜问题供编辑器展示", async () => {
+    const issue = {
+      code: "MOTION_CONFLICT",
+      shot_id: "s1",
+      message: "人物运动状态与动作矛盾",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: {
+            code: "SHOT_CARD_INCONSISTENT",
+            message: "请修正分镜后保存",
+            issues: [issue],
+          },
+        }),
+      }),
+    );
+    await expect(saveShotCards("analysis-1", [])).rejects.toMatchObject({
+      code: "SHOT_CARD_INCONSISTENT",
+      consistencyIssues: [issue],
+    });
   });
 });
 

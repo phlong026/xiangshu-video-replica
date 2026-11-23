@@ -43,7 +43,17 @@ def _valid_payload() -> dict:
                 "action": "面向镜头讲解",
                 "scene": "乡村小巷",
                 "spoken_text": "",
-                "transition": "硬切",
+                "transition": "视频开始",
+                "segment_kind": "ACTION_BEAT",
+                "boundary_reason": "视频开始",
+                "motion": {
+                    "subject_motion_state": "STATIC",
+                    "subject_direction": "in_place",
+                    "subject_displacement": "无位移",
+                    "hand_action": "双手自然垂下",
+                    "camera_motion": "STATIC",
+                    "relative_motion": "人物和机位均未移动",
+                },
             },
             {
                 "shot_id": "s2",
@@ -57,6 +67,16 @@ def _valid_payload() -> dict:
                 "scene": "庭院",
                 "spoken_text": "",
                 "transition": "无切换",
+                "segment_kind": "ACTION_BEAT",
+                "boundary_reason": "人物侧身示意",
+                "motion": {
+                    "subject_motion_state": "TURNING+GESTURING_ONLY",
+                    "subject_direction": "in_place",
+                    "subject_displacement": "无位移",
+                    "hand_action": "右手示意",
+                    "camera_motion": "UNKNOWN",
+                    "relative_motion": "摄影机是否移动无法判断",
+                },
             },
         ],
     }
@@ -109,6 +129,51 @@ def test_default_payload_shape_matches_parser() -> None:
     parsed = parse_replica_storyboard_payload(raw, media_info={"duration_seconds": 120})
     assert len(parsed["shots"]) >= 2
     assert parsed["warnings"] == []
+
+
+def test_storyboard_preserves_validated_motion_segments_and_scene_details() -> None:
+    payload = _valid_payload()
+    payload["shots"][0].update(
+        segment_kind="ACTION_BEAT",
+        boundary_reason="视频开始",
+        transition="视频开始",
+        scene_dressing="石桌和木椅",
+        scene_lighting="自然侧光",
+        wardrobe_pose_detail="浅色上衣，站在桌边",
+        ambient_sound="可辨识鸟鸣",
+        music_style_hint="无可辨识配乐",
+        motion={
+            "subject_motion_state": "GESTURING_ONLY",
+            "subject_direction": "in_place",
+            "subject_displacement": "无位移",
+            "hand_action": "右手示意石桌",
+            "camera_motion": "STATIC",
+            "relative_motion": "人物站位和机位均未移动",
+        },
+    )
+    parsed = parse_replica_storyboard_payload(json.dumps(payload, ensure_ascii=False))
+    assert parsed["shots"][0] == payload["shots"][0]
+
+
+def test_legacy_storyboard_warns_about_missing_motion_without_inventing_static() -> None:
+    payload = _valid_payload()
+    for shot in payload["shots"]:
+        shot.pop("motion", None)
+        shot.pop("segment_kind", None)
+    parsed = parse_replica_storyboard_payload(json.dumps(payload, ensure_ascii=False))
+    assert "motion" not in parsed["shots"][0]
+    assert "segment_kind" not in parsed["shots"][0]
+    assert {"STORYBOARD_MOTION_MISSING", "STORYBOARD_SEGMENT_KIND_MISSING"} <= {
+        issue["code"] for issue in parsed["warnings"]
+    }
+
+
+def test_invalid_motion_is_not_forwarded_as_verified_evidence() -> None:
+    payload = _valid_payload()
+    payload["shots"][0]["motion"] = {"subject_motion_state": "STATIC", "internal": "坏字段"}
+    parsed = parse_replica_storyboard_payload(json.dumps(payload, ensure_ascii=False))
+    assert "motion" not in parsed["shots"][0]
+    assert "STORYBOARD_MOTION_INVALID" in {issue["code"] for issue in parsed["warnings"]}
 
 
 @pytest.mark.parametrize(
@@ -234,7 +299,10 @@ def test_storyboard_filters_bad_rows_and_normalizes_only_known_fields() -> None:
         },
         valid,
     ]
-    assert parsed["warnings"] == []
+    assert {warning["code"] for warning in parsed["warnings"]} == {
+        "STORYBOARD_MOTION_MISSING",
+        "STORYBOARD_SEGMENT_KIND_MISSING",
+    }
 
 
 @pytest.mark.parametrize("bad_text", [{"text": "错误类型"}, ["错误类型"]])
@@ -271,7 +339,11 @@ def test_storyboard_omits_invalid_numbers_and_warns_about_missing_timeline(
         json.dumps(payload, ensure_ascii=False), media_info={"duration_seconds": 60}
     )
     assert parsed["shots"] == [{"subject": "讲解者"}]
-    assert [warning["code"] for warning in parsed["warnings"]] == ["STORYBOARD_DURATION_MISMATCH"]
+    assert {warning["code"] for warning in parsed["warnings"]} == {
+        "STORYBOARD_DURATION_MISMATCH",
+        "STORYBOARD_MOTION_MISSING",
+        "STORYBOARD_SEGMENT_KIND_MISSING",
+    }
     json.dumps(parsed, allow_nan=False)
 
 

@@ -712,3 +712,402 @@ def test_concurrent_enqueue_respects_mode_and_reserves_once(
     with psycopg.connect(rp_state) as pg:
         assert pg.execute("SELECT count(*) FROM replica_prompt_tasks").fetchone() == (1,)
         assert pg.execute("SELECT count(*) FROM wallet_transactions").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("mode", ["analysis", "storyboard"])
+@pytest.mark.parametrize("outcome", ["returned", "timeout", "budget_unavailable"])
+def test_source_review_cost_is_one_physical_request_without_extra_customer_charge(
+    rp_state: str, monkeypatch: pytest.MonkeyPatch, mode: str, outcome: str
+) -> None:
+    import json
+    import time
+    from dataclasses import replace
+
+    from app.analysis import (
+        ApilioGemini,
+        UrllibApilioChatTransport,
+        VideoCallBudget,
+        _default_analysis_payload,
+        analyze_video,
+        default_replica_storyboard_payload,
+    )
+    from app.billing_meter import billing_context
+    from app.replica_prompt import ReplicaPromptTaskWork
+    from app.usage_billing import finish_operation
+
+    _seed_asset(rp_state, duration_seconds=4)
+    task, _ = _enqueue(rp_state, duration_seconds=4, mode="storyboard")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_cost_fen) "
+            "VALUES('quality_inspection',false,7) ON CONFLICT(service) "
+            "DO UPDATE SET enabled=false,unit_cost_fen=7"
+        )
+        operation_id = str(
+            conn.execute(
+                "SELECT id FROM billing_operations WHERE source_id=%s", (task["id"],)
+            ).fetchone()[0]
+        )
+        lease = acquire_replica_prompt_task(conn, worker_id="source-review-cost")
+    assert lease is not None
+    calls: list[float] = []
+    initial = (
+        _default_analysis_payload(4)
+        if mode == "analysis"
+        else default_replica_storyboard_payload(4)
+    )
+
+    def physical(transport: Any, *args: Any, **kwargs: Any):
+        calls.append(transport.timeout_seconds)
+        if len(calls) == 2:
+            # 外呼意图已独立提交；请求期间另一连接可立即锁定并读取记录。
+            with psycopg.connect(rp_state) as pg:
+                assert pg.execute(
+                    "SELECT state FROM billing_attempts WHERE operation_id=%s "
+                    "AND service='quality_inspection' FOR UPDATE NOWAIT",
+                    (operation_id,),
+                ).fetchall() == [("PENDING",)]
+            if outcome == "timeout":
+                raise TimeoutError("source review timed out")
+        value = (
+            initial
+            if len(calls) == 1
+            else {
+                "analysis": initial,
+                "review_observations": [
+                    {
+                        "shot_id": shot["shot_id"],
+                        "start_time": shot["start_time"],
+                        "end_time": shot["end_time"],
+                        "visual_observation": shot["action"] + "；" + shot["camera_motion"],
+                        "audio_observation": "只有环境声，没有可辨识口播",
+                    }
+                    for shot in initial["shots"]
+                ],
+            }
+        )
+        return json.dumps(
+            {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(value)}}]}
+        ).encode(), {}
+
+    monkeypatch.setattr(UrllibApilioChatTransport, "post", physical)
+    review_timeout = 120 if mode == "analysis" else 300
+    initial_timeout = 240 if mode == "analysis" else 945
+    deadline = 510 if mode == "analysis" else 1380
+    provider = ApilioGemini(
+        api_key="test-key",
+        transport=UrllibApilioChatTransport(timeout_seconds=initial_timeout),
+        video_call_budget=VideoCallBudget(
+            attempt_deadline=time.monotonic() + deadline,
+            source_review_timeout_seconds=review_timeout,
+        ),
+    )
+
+    def receipt() -> None:
+        assert len(calls) == 1
+        if outcome == "budget_unavailable":
+            assert provider._video_call_tracker is not None
+            provider._video_call_tracker.budget = replace(
+                provider._video_call_tracker.budget, attempt_deadline=time.monotonic() + 1
+            )
+
+    with billing_context(str(task["id"])):
+        if mode == "analysis":
+            result = analyze_video(
+                video_uri="https://example.com/source.mp4",
+                video_duration_seconds=4,
+                provider=provider,
+                on_provider_result=receipt,
+            ).analysis.model_dump(mode="json")
+        else:
+            result = perform_replica_prompt_task(
+                ReplicaPromptTaskWork(
+                    lease=lease,
+                    provider=provider,
+                    video_uri="https://example.com/source.mp4",
+                    asset_uri="cos://bucket/proj-1/a.mp4",
+                    media_info={"duration_seconds": 4},
+                    mode="storyboard",
+                ),
+                on_provider_result=receipt,
+            )
+    assert len(result["shots"]) == 2
+    assert result["source_review"]["attempted"] is (outcome != "budget_unavailable")
+    assert calls == (
+        [initial_timeout] if outcome == "budget_unavailable" else [initial_timeout, review_timeout]
+    )
+    with pg_transaction() as raw:
+        finish_operation(
+            BusinessConnection.postgres(raw), operation_id=operation_id, units=1, succeeded=True
+        )
+    with psycopg.connect(rp_state) as pg:
+        expected = {
+            "returned": [("ACTUAL", 1, 7)],
+            "timeout": [("UNKNOWN", None, None)],
+            "budget_unavailable": [],
+        }
+        assert (
+            pg.execute(
+                "SELECT state,usage,cost_fen FROM billing_attempts WHERE operation_id=%s "
+                "AND service='quality_inspection'",
+                (operation_id,),
+            ).fetchall()
+            == expected[outcome]
+        )
+        assert pg.execute("SELECT count(*) FROM billing_operations").fetchone() == (1,)
+        assert pg.execute(
+            "SELECT state,actual_units,charged_credits FROM billing_operations WHERE id=%s",
+            (operation_id,),
+        ).fetchone() == ("SUCCEEDED", 1, 1)
+    assert _wallet(rp_state) == (9, 0)
+    assert _ledger(rp_state, str(task["id"])) == ["RESERVE", "SETTLE"]
+
+
+def _seed_source_review_orphan(dsn: str, *, table: str) -> tuple[str, str, str]:
+    from pg_test_kit import assert_safe_test_database, database_name_of
+
+    from app.usage_billing import begin_source_attempt, finish_operation
+
+    assert_safe_test_database(database_name_of(dsn))
+    assert table in {"analysis_tasks", "replica_prompt_tasks"}
+    task_id = "orphan-" + table
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_cost_fen) "
+            "VALUES('quality_inspection',false,7) ON CONFLICT(service) "
+            "DO UPDATE SET enabled=false,unit_cost_fen=7"
+        )
+        conn.execute(
+            f"INSERT INTO {table} "  # noqa: S608 - 测试固定任务表白名单
+            "(id,project_id,asset_id,created_by_user_id,duration_seconds,status,"
+            "completed_at,updated_at) VALUES (%s,'proj-1','asset-1','owner-1',4,"
+            "'SUCCEEDED',now()-interval '31 minutes',now()-interval '31 minutes')",
+            (task_id,),
+        )
+        operation_id = accept_operation(
+            conn, user_id="owner-1", service="analysis", source_id=task_id, units=1
+        )
+        attempt_id = begin_source_attempt(conn, task_id, service="quality_inspection")
+        assert attempt_id is not None
+        finish_operation(conn, operation_id=operation_id, units=1, succeeded=True)
+        # 沿用既有成本回收测试的夹具老化方法；仅允许测试库，执行回收前恢复不可变守卫。
+        conn.execute("SET LOCAL session_replication_role=replica")
+        conn.execute(
+            "UPDATE billing_operations SET completed_at=now()-interval '31 minutes' WHERE id=%s",
+            (operation_id,),
+        )
+        conn.execute(
+            "UPDATE billing_attempts SET created_at=now()-interval '31 minutes' WHERE id=%s",
+            (attempt_id,),
+        )
+        conn.execute("SET LOCAL session_replication_role=origin")
+    return task_id, operation_id, attempt_id
+
+
+@pytest.mark.parametrize("table", ["analysis_tasks", "replica_prompt_tasks"])
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "none",
+        "running",
+        "lease",
+        "recent_call",
+        "recent_task",
+        "recent_operation",
+        "owner",
+        "other_service",
+        "known_usage",
+    ],
+)
+def test_source_review_orphan_recovery_is_fenced_and_never_rebills(
+    rp_state: str, table: str, guard: str
+) -> None:
+    _seed_asset(rp_state, duration_seconds=4)
+    task_id, operation_id, attempt_id = _seed_source_review_orphan(rp_state, table=table)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        # 这里只构造不同年龄与服务类型的历史夹具，不改变被测回收时的财务守卫。
+        conn.execute("SET LOCAL session_replication_role=replica")
+        if guard == "running":
+            conn.execute(f"UPDATE {table} SET status='RUNNING' WHERE id=%s", (task_id,))  # noqa: S608
+        elif guard == "lease":
+            conn.execute(
+                f"UPDATE {table} SET locked_by='live-worker',"
+                "locked_until=(now()+interval '1 minute')::text WHERE id=%s",
+                (task_id,),
+            )  # noqa: S608
+        elif guard == "recent_call":
+            conn.execute("UPDATE billing_attempts SET created_at=now() WHERE id=%s", (attempt_id,))
+        elif guard == "recent_task":
+            conn.execute(f"UPDATE {table} SET updated_at=now() WHERE id=%s", (task_id,))  # noqa: S608
+        elif guard == "recent_operation":
+            conn.execute(
+                "UPDATE billing_operations SET completed_at=now() WHERE id=%s", (operation_id,)
+            )
+        elif guard == "owner":
+            conn.execute(
+                "INSERT INTO users(id,username,display_name,role) "
+                "VALUES('other','other','Other','employee')"
+            )
+            conn.execute(f"UPDATE {table} SET created_by_user_id='other' WHERE id=%s", (task_id,))  # noqa: S608
+        elif guard == "other_service":
+            conn.execute(
+                "UPDATE billing_attempts SET service='analysis' WHERE id=%s", (attempt_id,)
+            )
+        elif guard == "known_usage":
+            conn.execute(
+                "UPDATE billing_attempts SET state='ACTUAL',usage=1,cost_fen=7,"
+                "completed_at=now() WHERE id=%s",
+                (attempt_id,),
+            )
+        conn.execute("SET LOCAL session_replication_role=origin")
+    with psycopg.connect(rp_state) as pg:
+        original = pg.execute(
+            "SELECT state,usage,cost_fen,completed_at FROM billing_attempts WHERE id=%s",
+            (attempt_id,),
+        ).fetchone()
+    for _ in range(2):
+        with pg_transaction() as raw:
+            reconcile_operations(BusinessConnection.postgres(raw))
+    with psycopg.connect(rp_state) as pg:
+        attempt = pg.execute(
+            "SELECT state,usage,cost_fen,completed_at FROM billing_attempts WHERE id=%s",
+            (attempt_id,),
+        ).fetchone()
+        if guard == "none":
+            assert attempt[:3] == ("UNKNOWN", None, None)
+            assert attempt[3] is not None
+        else:
+            assert attempt == original
+        assert pg.execute("SELECT count(*) FROM billing_operations").fetchone() == (1,)
+        assert pg.execute("SELECT count(*) FROM billing_attempts").fetchone() == (1,)
+        assert pg.execute(
+            "SELECT state,actual_units,charged_credits FROM billing_operations WHERE id=%s",
+            (operation_id,),
+        ).fetchone() == ("SUCCEEDED", 1, 1)
+    assert _wallet(rp_state) == (9, 0)
+    assert _ledger(rp_state, task_id) == ["RESERVE", "SETTLE"]
+
+
+@pytest.mark.parametrize("table", ["analysis_tasks", "replica_prompt_tasks"])
+def test_source_review_orphan_recovery_skips_a_locked_task(rp_state: str, table: str) -> None:
+    _seed_asset(rp_state, duration_seconds=4)
+    task_id, _, attempt_id = _seed_source_review_orphan(rp_state, table=table)
+    with psycopg.connect(rp_state) as locker:
+        locker.execute(f"SELECT id FROM {table} WHERE id=%s FOR UPDATE", (task_id,))  # noqa: S608
+        with pg_transaction() as raw:
+            conn = BusinessConnection.postgres(raw)
+            conn.execute("SET LOCAL statement_timeout='2s'")
+            reconcile_operations(conn)
+        assert locker.execute(
+            "SELECT state FROM billing_attempts WHERE id=%s", (attempt_id,)
+        ).fetchone() == ("PENDING",)
+    with pg_transaction() as raw:
+        reconcile_operations(BusinessConnection.postgres(raw))
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute(
+            "SELECT state FROM billing_attempts WHERE id=%s", (attempt_id,)
+        ).fetchone() == ("UNKNOWN",)
+    assert _wallet(rp_state) == (9, 0)
+
+
+def test_source_review_orphan_recovery_shares_one_limit_across_both_task_tables(
+    rp_state: str,
+) -> None:
+    _seed_asset(rp_state, duration_seconds=4)
+    first = _seed_source_review_orphan(rp_state, table="analysis_tasks")
+    second = _seed_source_review_orphan(rp_state, table="replica_prompt_tasks")
+    with pg_transaction() as raw:
+        reconcile_operations(BusinessConnection.postgres(raw), limit=1)
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute(
+            "SELECT state,count(*) FROM billing_attempts GROUP BY state ORDER BY state"
+        ).fetchall() == [("PENDING", 1), ("UNKNOWN", 1)]
+    with pg_transaction() as raw:
+        reconcile_operations(BusinessConnection.postgres(raw), limit=1)
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute(
+            "SELECT state,count(*) FROM billing_attempts GROUP BY state"
+        ).fetchall() == [("UNKNOWN", 2)]
+        assert pg.execute("SELECT count(*) FROM billing_operations").fetchone() == (2,)
+    assert _wallet(rp_state) == (8, 0)
+    assert _ledger(rp_state, first[0]) == _ledger(rp_state, second[0]) == ["RESERVE", "SETTLE"]
+
+
+def test_crashed_long_source_review_releases_parent_then_recovers_unknown_cost_once(
+    rp_state: str,
+) -> None:
+    from app.usage_billing import begin_source_attempt
+
+    _seed_asset(rp_state, duration_seconds=4, task_status="RUNNING")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        operation_id = accept_operation(
+            conn, user_id="owner-1", service="analysis", source_id="task-1", units=1
+        )
+        attempt_id = begin_source_attempt(conn, "task-1", service="quality_inspection")
+        assert attempt_id is not None
+    # 活任务和其客户预占、供应商成本均不能被回收器提前结束。
+    with pg_transaction() as raw:
+        assert reconcile_operations(BusinessConnection.postgres(raw)) == 0
+    assert _wallet(rp_state) == (9, 1)
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute(
+            "SELECT state FROM billing_attempts WHERE id=%s", (attempt_id,)
+        ).fetchone() == ("PENDING",)
+        pg.execute(
+            "UPDATE replica_prompt_tasks SET locked_until=(now()-interval '1 minute')::text "
+            "WHERE id='task-1'"
+        )
+    # 对照真实崩溃路径：到期认领仅把任务标失败并清租约，父账单仍等待回收。
+    with pg_transaction() as raw:
+        assert (
+            acquire_replica_prompt_task(
+                BusinessConnection.postgres(raw), worker_id="recovery-worker"
+            )
+            is None
+        )
+    task = _task_row(rp_state)
+    assert task["status"] == "FAILED" and task["error_code"] == ERROR_INTERRUPTED
+    assert task["locked_by"] is None and task["locked_until"] is None
+    with pg_transaction() as raw:
+        assert reconcile_operations(BusinessConnection.postgres(raw)) == 1
+    assert _wallet(rp_state) == (10, 0)
+    assert _ledger(rp_state) == ["RESERVE", "RELEASE"]
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute(
+            "SELECT state,charged_credits FROM billing_operations WHERE id=%s", (operation_id,)
+        ).fetchone() == ("FAILED", 0)
+        assert pg.execute(
+            "SELECT state FROM billing_attempts WHERE id=%s", (attempt_id,)
+        ).fetchone() == ("PENDING",)
+        # 只老化专用测试库的历史夹具；回收执行时财务不可变守卫保持开启。
+        pg.execute("SET LOCAL session_replication_role=replica")
+        pg.execute(
+            "UPDATE billing_operations SET completed_at=now()-interval '31 minutes' WHERE id=%s",
+            (operation_id,),
+        )
+        pg.execute(
+            "UPDATE billing_attempts SET created_at=now()-interval '31 minutes' WHERE id=%s",
+            (attempt_id,),
+        )
+        pg.execute(
+            "UPDATE replica_prompt_tasks SET completed_at=(now()-interval '31 minutes')::text,"
+            "updated_at=(now()-interval '31 minutes')::text WHERE id='task-1'"
+        )
+        pg.execute("SET LOCAL session_replication_role=origin")
+    for _ in range(2):
+        with pg_transaction() as raw:
+            assert reconcile_operations(BusinessConnection.postgres(raw)) == 0
+    with psycopg.connect(rp_state) as pg:
+        assert pg.execute(
+            "SELECT state,usage,cost_fen,completed_at IS NOT NULL FROM billing_attempts "
+            "WHERE id=%s",
+            (attempt_id,),
+        ).fetchone() == ("UNKNOWN", None, None, True)
+        assert pg.execute("SELECT count(*) FROM billing_operations").fetchone() == (1,)
+        assert pg.execute("SELECT count(*) FROM billing_attempts").fetchone() == (1,)
+    assert _wallet(rp_state) == (10, 0)
+    assert _ledger(rp_state) == ["RESERVE", "RELEASE"]

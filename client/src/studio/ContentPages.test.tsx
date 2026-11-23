@@ -202,7 +202,9 @@ const {
   deletePublishRecord: vi.fn(),
 }));
 vi.mock("./context", () => ({ useStudio }));
-vi.mock("../api", () => ({
+vi.mock("../api", async (importOriginal) => ({
+  readShotConsistencyIssues: (await importOriginal<typeof import("../api")>())
+    .readShotConsistencyIssues,
   createOralTask,
   createScriptFromAudioTask,
   getLatestScriptFromAudioTask,
@@ -358,6 +360,7 @@ vi.stubGlobal("IntersectionObserver", IntersectionObserverStub);
 
 import { saveReplicaPreference } from "./AdaptiveReplicaSetup";
 import {
+  AdaptiveReplicaControl,
   MaterialsPage,
   PublishPage,
   parsePublishDrafts,
@@ -5503,6 +5506,67 @@ describe("全自动复刻入口（M8 v1）", () => {
     vi.clearAllMocks();
     findActiveReplicaPipeline.mockResolvedValue({ pipelineId: null });
     fetchReplicaPipeline.mockReset();
+  });
+
+  it("分镜冲突停在待确认，并直接进入对应项目修正", async () => {
+    const value = studio({ review: false });
+    value.state.draft.projectId = "old-project";
+    value.state.draft.prompt = "上一项目提示词";
+    value.state.draft.promptEdited = true;
+    useStudio.mockReturnValue(value);
+    findActiveReplicaPipeline.mockResolvedValue({
+      pipelineId: "pipeline-review",
+    });
+    fetchReplicaPipeline.mockResolvedValue({
+      id: "pipeline-review",
+      projectId: "project-review",
+      platform: "upload",
+      videoId: "source-review",
+      status: "ANALYZING",
+      stage: "analyze",
+      createdAt: "2026-11-23T00:00:00Z",
+      awaitingSince: null,
+      stageDetail: {
+        storyboardReview: {
+          analysisVersionId: "analysis-review",
+          shotCardVersionId: "shots-review",
+          issues: [
+            {
+              code: "MOTION_CONFLICT",
+              shot_id: "s1",
+              message: "人物动作与运动状态矛盾",
+            },
+          ],
+        },
+      },
+    });
+    render(
+      <AdaptiveReplicaControl
+        video={{ id: "source-review", title: "待确认素材", durationMs: 10000 }}
+        uploadedSource={{
+          projectId: "project-review",
+          assetId: "source-review",
+        }}
+      />,
+    );
+    expect(
+      await screen.findByText("全自动复刻：拆解已完成，1 处待确认"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("s1：人物动作与运动状态矛盾")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认分镜后继续" }));
+    expect(value.refresh).toHaveBeenCalled();
+    expect(value.navigate).toHaveBeenCalledWith(
+      "replica",
+      expect.objectContaining({
+        storyboardReviewProjectId: "project-review",
+        draft: expect.objectContaining({
+          projectId: "project-review",
+          prompt: "",
+          sourceAssetId: "source-review",
+        }),
+      }),
+    );
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
   });
 
   it.each([

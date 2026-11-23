@@ -25,6 +25,7 @@ from fastapi import HTTPException
 from app.analysis import (
     LONG_ANALYSIS_KIND,
     REPLICA_PROMPT_KIND,
+    SOURCE_REVIEW_HANDOFF_SECONDS,
     AnalysisProviderFailed,
     UrllibApilioChatTransport,
     VideoAnalysisProvider,
@@ -33,6 +34,7 @@ from app.analysis import (
     insert_version,
     parse_replica_prompt_payload,
     parse_replica_storyboard_payload,
+    review_source_storyboard,
 )
 from app.analysis_routes import (
     analysis_provider_error,
@@ -72,6 +74,7 @@ DEFAULT_PROVIDER_TIMEOUT_SECONDS = 900.0
 REPLICA_PROMPT_CALL_BUDGET_SECONDS = REPLICA_PROMPT_TASK_LEASE_MINUTES * 60 - 120
 # 为配置读取与请求准备预留时间；超时不能恰好占满调用预算。
 REPLICA_PROMPT_PREPARATION_RESERVE_SECONDS = 120.0
+REPLICA_STORYBOARD_REVIEW_TIMEOUT_SECONDS = 300.0
 # 签名 URL 必须活过整个 provider 调用；拆解链路的 15 分钟在长任务上不够。
 REPLICA_PROMPT_URL_EXPIRES_MINUTES = 30
 
@@ -99,17 +102,28 @@ def provider_timeout_seconds() -> float:
     )
 
 
-def build_long_video_provider(conn: Database) -> VideoAnalysisProvider:
+def build_long_video_provider(conn: Database, *, mode: str = "prompt") -> VideoAnalysisProvider:
     """长视频专用路由（方案 D9）：出厂 4-carbon（快且零断连），备选退 flash.
 
     与分镜主链路共享 apilio 凭据与切镜候选线索，但模型独立——可用可选设置
     键 replica_prompt_model / replica_prompt_model_fallbacks 覆盖（留空走出厂值）。
     """
+    timeout = provider_timeout_seconds()
+    review_timeout = REPLICA_STORYBOARD_REVIEW_TIMEOUT_SECONDS if mode == "storyboard" else 0.0
+    if review_timeout:
+        timeout = min(
+            timeout,
+            REPLICA_PROMPT_CALL_BUDGET_SECONDS
+            - REPLICA_PROMPT_PREPARATION_RESERVE_SECONDS
+            - review_timeout
+            - SOURCE_REVIEW_HANDOFF_SECONDS,
+        )
     return get_video_analysis_provider(
         conn,
-        transport=UrllibApilioChatTransport(timeout_seconds=provider_timeout_seconds()),
+        transport=UrllibApilioChatTransport(timeout_seconds=timeout),
         video_call_budget=VideoCallBudget(
             attempt_deadline=time.monotonic() + REPLICA_PROMPT_CALL_BUDGET_SECONDS,
+            source_review_timeout_seconds=review_timeout,
         ),
         lane="replica_prompt",
     )
@@ -367,7 +381,7 @@ def prepare_replica_prompt_task(
                 "retryable": True,
             },
         )
-    resolved_provider = provider or build_long_video_provider(conn)
+    resolved_provider = provider or build_long_video_provider(conn, mode=lease.mode)
     asset_uri = str(row["storage_uri"])
     video_uri = asset_uri
     if resolved_provider.requires_https_video_url:
@@ -431,7 +445,22 @@ def perform_replica_prompt_task(
         # 透传服务端已验证的媒体信息：禁词硬拒绝与画幅/时长软警告都以它为准
         # （方案 T10），不让模型自报的媒体事实参与校验。
         if storyboard:
-            return parse_replica_storyboard_payload(response.text, media_info=work.media_info)
+            initial = parse_replica_storyboard_payload(
+                response.text, media_info=work.media_info, allow_invalid_facts=True
+            )
+            reviewed, response_ref = review_source_storyboard(
+                provider=work.provider,
+                video_uri=work.video_uri,
+                duration_seconds=work.lease.duration_seconds,
+                initial_payload=initial,
+                initial_response=response,
+                parse_payload=lambda text: parse_replica_storyboard_payload(
+                    text, media_info=work.media_info
+                ),
+                mode="storyboard",
+                media_info=work.media_info,
+            )
+            return {**reviewed, "provider_response_ref": response_ref}
         return parse_replica_prompt_payload(response.text, media_info=work.media_info)
 
 

@@ -29,6 +29,7 @@ Test matrix (T26 ADR §6 / BILL-03):
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from collections.abc import Iterator
@@ -272,6 +273,214 @@ def fair_state(fair_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     yield fair_dsn
     close_pg_pool()
+
+
+def _seed_replica_poll(fair_state: str) -> dict[str, Any]:
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, task_status="RUNNING")
+    _seed_reserved(fair_state, task_id="task-u1-0", available_credits=999, reserved_credits=1)
+    snapshot = json.loads(_PROMPT_SNAPSHOT)
+    snapshot["replica_expectations"] = {"shots": [{"shot_id": "s1"}]}
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE generation_tasks SET prompt_snapshot_json=%s,provider_task_id='paid-task'",
+            (json.dumps(snapshot),),
+        )
+    with pg_transaction() as raw:
+        lease = acquire_generation_continuation_lease(
+            BusinessConnection.postgres(raw), worker_id="review-worker"
+        )
+    assert lease is not None
+    return lease
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_replica_review_never_discards_paid_result_or_resubmits(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch, unavailable: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from app.replica_result_review import ReplicaResultReview
+
+    lease = _seed_replica_poll(fair_state)
+    calls: list[str] = []
+
+    def query(task_id: str) -> H3QueryResult:
+        calls.append("query")
+        return H3QueryResult(
+            status="SUCCEEDED", result_url="https://example.com/result.mp4", output_seconds=10.25
+        )
+
+    def provider_factory(conn: Any, **kwargs: Any) -> object:
+        assert kwargs["video_call_budget"].max_provider_calls == 1
+        assert kwargs["video_call_budget"].max_retries_per_model == 0
+        return object()
+
+    def review(**kwargs: Any) -> ReplicaResultReview:
+        calls.append("review")
+        assert kwargs["output_duration_seconds"] == 10.25
+        # 外呼时复核标记和付费结果已持久化，且没有事务锁挡住恢复 worker。
+        with psycopg.connect(fair_state) as pg:
+            assert pg.execute(
+                "SELECT quality_status, provider_result_url FROM generation_tasks "
+                "WHERE id='task-u1-0' FOR UPDATE NOWAIT"
+            ).fetchone() == ("REPLICA_REVIEW_PENDING", "https://example.com/result.mp4")
+        if unavailable:
+            raise TimeoutError("review unavailable")
+        return ReplicaResultReview("REPLICA_REVIEW_REQUIRED", ["REPLICA_ACTION_MISMATCH:s1"])
+
+    monkeypatch.setattr("app.generation_worker.get_video_analysis_provider", provider_factory)
+    monkeypatch.setattr("app.generation_worker.review_generated_replica", review)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    _run_pg_generation_step(
+        lease=lease,
+        storage=storage,
+        first_frame_storage=storage,
+        provider_override=SimpleNamespace(query_image_to_video=query),
+    )
+    assert calls == ["query", "review"]
+    with psycopg.connect(fair_state) as pg:
+        task = pg.execute(
+            "SELECT status, archive_status, quality_status, quality_issue_codes, "
+            "provider_result_url,actual_output_seconds FROM generation_tasks WHERE id='task-u1-0'"
+        ).fetchone()
+        assert task is not None
+        assert task[:3] == ("SUCCEEDED", "DIRECT", "REPLICA_REVIEW_REQUIRED")
+        assert json.loads(task[3]) == [
+            "REPLICA_REVIEW_UNAVAILABLE" if unavailable else "REPLICA_ACTION_MISMATCH:s1"
+        ]
+        assert task[4] == "https://example.com/result.mp4"
+        assert float(task[5]) == 10.25
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
+
+
+def test_replica_review_crash_recovers_without_another_model_call(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    lease = _seed_replica_poll(fair_state)
+    monkeypatch.setattr(
+        "app.generation_worker.get_video_analysis_provider", lambda *args, **kwargs: object()
+    )
+    calls: list[str] = []
+
+    def review(**kwargs: Any) -> None:
+        calls.append("review")
+        raise SystemExit("simulated worker exit after submission")
+
+    monkeypatch.setattr("app.generation_worker.review_generated_replica", review)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    provider = SimpleNamespace(
+        query_image_to_video=lambda *args: H3QueryResult(
+            status="SUCCEEDED", result_url="https://example.com/result.mp4", output_seconds=10.25
+        )
+    )
+    with pytest.raises(SystemExit):
+        _run_pg_generation_step(
+            lease=lease, storage=storage, first_frame_storage=storage, provider_override=provider
+        )
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute("UPDATE generation_tasks SET locked_until=(now()-interval '1 minute')::text")
+    with pg_transaction() as raw:
+        recovered = acquire_generation_continuation_lease(
+            BusinessConnection.postgres(raw), worker_id="recovered"
+        )
+    assert recovered is not None
+
+    def reject_query(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("已有成片不应重新查询或提交")
+
+    _run_pg_generation_step(
+        lease=recovered,
+        storage=storage,
+        first_frame_storage=storage,
+        provider_override=SimpleNamespace(query_image_to_video=reject_query),
+    )
+    assert calls == ["review"]
+    with psycopg.connect(fair_state) as pg:
+        task = pg.execute(
+            "SELECT status,quality_status,actual_output_seconds FROM generation_tasks "
+            "WHERE id='task-u1-0'"
+        ).fetchone()
+        assert task is not None and task[:2] == ("SUCCEEDED", "REPLICA_REVIEW_REQUIRED")
+        assert float(task[2]) == 10.25
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
+
+
+def test_replica_review_rejects_lost_lease_before_external_call(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.generation_worker import _review_pg_replica_result
+
+    lease = _seed_replica_poll(fair_state)
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute("UPDATE generation_tasks SET locked_by='another-worker'")
+
+    def reject_call(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("失租worker不得提交复核")
+
+    monkeypatch.setattr("app.generation_worker.get_video_analysis_provider", reject_call)
+    with pytest.raises(RuntimeError, match="租约"):
+        _review_pg_replica_result(lease=lease, result_url="https://example.com/result.mp4")
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1)]
+
+
+def test_late_replica_review_cannot_overwrite_recovered_result(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from app.generation import load_worker_task
+    from app.replica_result_review import ReplicaResultReview
+
+    lease = _seed_replica_poll(fair_state)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    monkeypatch.setattr(
+        "app.generation_worker.get_video_analysis_provider", lambda *args, **kwargs: object()
+    )
+    calls: list[str] = []
+
+    def reject_query(*args: Any) -> None:
+        raise AssertionError("恢复已有成片不能再查询或生成")
+
+    def review(**kwargs: Any) -> ReplicaResultReview:
+        calls.append("review")
+        with pg_transaction() as raw:
+            conn = BusinessConnection.postgres(raw)
+            conn.execute(
+                "UPDATE generation_tasks SET locked_by='takeover', "
+                "locked_until=(now()+interval '2 minutes')::text WHERE id='task-u1-0'"
+            )
+            recovered = load_worker_task(conn, "task-u1-0")
+        _run_pg_generation_step(
+            lease=recovered,
+            storage=storage,
+            first_frame_storage=storage,
+            provider_override=SimpleNamespace(query_image_to_video=reject_query),
+        )
+        return ReplicaResultReview("REPLICA_REVIEW_PASSED", [])
+
+    def query(*args: Any) -> H3QueryResult:
+        calls.append("query")
+        return H3QueryResult(
+            status="SUCCEEDED", result_url="https://example.com/result.mp4", output_seconds=10
+        )
+
+    monkeypatch.setattr("app.generation_worker.review_generated_replica", review)
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        _run_pg_generation_step(
+            lease=lease,
+            storage=storage,
+            first_frame_storage=storage,
+            provider_override=SimpleNamespace(query_image_to_video=query),
+        )
+    assert calls == ["query", "review"]
+    with psycopg.connect(fair_state) as pg:
+        assert pg.execute(
+            "SELECT status,quality_status,provider_result_url FROM generation_tasks "
+            "WHERE id='task-u1-0'"
+        ).fetchone() == ("SUCCEEDED", "REPLICA_REVIEW_REQUIRED", "https://example.com/result.mp4")
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -1459,3 +1668,212 @@ def test_find_dangling_billing_reservations_detects_bill_03(fair_state: str) -> 
     assert {d.task_id for d in dangling} == {"task-u1-0", "task-u1-3"}
     assert {d.billing_round for d in dangling} == {1}
     assert {d.user_id for d in dangling} == {"u1"}
+
+
+def _seed_billed_replica_review(fair_state: str) -> tuple[dict[str, Any], str]:
+    from app.usage_billing import accept_operation
+
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, task_status="RUNNING")
+    prompt_text = "人物从院子走向门口，固定机位，全片无台词。"
+    snapshot = json.loads(_PROMPT_SNAPSHOT)
+    snapshot.update(
+        prompt_text=prompt_text,
+        replica_expectations={
+            "shots": [
+                {
+                    "shot_id": "s1",
+                    "start_time": 0,
+                    "end_time": 10,
+                    "action": "人物从院子走向门口",
+                    "camera_motion": "固定机位",
+                }
+            ],
+            "source_duration_seconds": 10,
+            "output_duration_seconds": 10,
+            "opening_action": "",
+            "replace_scene": False,
+            "script_text": "",
+            "prompt_text": prompt_text,
+        },
+    )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_cost_fen) "
+            "VALUES('quality_inspection',false,7) ON CONFLICT(service) "
+            "DO UPDATE SET enabled=false,unit_cost_fen=7"
+        )
+        conn.execute(
+            "UPDATE generation_tasks SET prompt_snapshot_json=%s,provider_task_id='paid-task' "
+            "WHERE id='task-u1-0'",
+            (json.dumps(snapshot),),
+        )
+        operation_id = accept_operation(
+            conn, user_id="u1", service="video_768p", source_id="task-u1-0", units=10
+        )
+    with pg_transaction() as raw:
+        lease = acquire_generation_continuation_lease(
+            BusinessConnection.postgres(raw), worker_id="metered-review"
+        )
+    assert lease is not None
+    return lease, operation_id
+
+
+@pytest.mark.parametrize("outcome", ["success", "timeout", "invalid_expectations"])
+def test_replica_review_cost_records_only_physical_requests(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    from types import SimpleNamespace
+
+    from app.analysis import ApilioGemini, UrllibApilioChatTransport
+    from app.billing_meter import billing_context
+
+    lease, operation_id = _seed_billed_replica_review(fair_state)
+    if outcome == "invalid_expectations":
+        snapshot = json.loads(lease["prompt_snapshot_json"])
+        snapshot["replica_expectations"] = {}
+        lease["prompt_snapshot_json"] = json.dumps(snapshot)
+    calls: list[str] = []
+
+    def post(*args: Any, **kwargs: Any) -> tuple[bytes, dict[str, str]]:
+        calls.append("review")
+        # 外呼前成本意图已独立落库，供应商失败不能让记录消失。
+        with psycopg.connect(fair_state) as pg:
+            assert pg.execute(
+                "SELECT state FROM billing_attempts WHERE operation_id=%s "
+                "AND service='quality_inspection' FOR UPDATE NOWAIT",
+                (operation_id,),
+            ).fetchall() == [("PENDING",)]
+        if outcome == "timeout":
+            raise TimeoutError("simulated review timeout")
+        observed = {
+            "status": "MATCH",
+            "observed": "人物连续行走，背景与机位稳定，阶段顺序对应最终稿",
+            "timestamps": [0.1, 9.9],
+        }
+        payload = {
+            "shots": [{"shot_id": "s1", **dict.fromkeys(("action", "camera", "timing"), observed)}],
+            "speech": {**observed, "observed": "全片只有环境声，没有说话"},
+        }
+        return (
+            json.dumps(
+                {
+                    "choices": [
+                        {"finish_reason": "stop", "message": {"content": json.dumps(payload)}}
+                    ]
+                }
+            ).encode(),
+            {},
+        )
+
+    def provider_factory(conn: Any, **kwargs: Any) -> ApilioGemini:
+        return ApilioGemini(
+            api_key="test-key",
+            transport=kwargs["transport"],
+            video_call_budget=kwargs["video_call_budget"],
+        )
+
+    monkeypatch.setattr(UrllibApilioChatTransport, "post", post)
+    monkeypatch.setattr("app.generation_worker.get_video_analysis_provider", provider_factory)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    with billing_context(str(lease["id"])):
+        _run_pg_generation_step(
+            lease=lease,
+            storage=storage,
+            first_frame_storage=storage,
+            provider_override=SimpleNamespace(
+                query_image_to_video=lambda *_: H3QueryResult(
+                    status="SUCCEEDED",
+                    result_url="https://example.com/result.mp4",
+                    output_seconds=10,
+                )
+            ),
+        )
+    expected_calls = [] if outcome == "invalid_expectations" else ["review"]
+    assert calls == expected_calls
+    with psycopg.connect(fair_state) as pg:
+        attempts = pg.execute(
+            "SELECT state,usage,cost_fen FROM billing_attempts "
+            "WHERE operation_id=%s AND service='quality_inspection'",
+            (operation_id,),
+        ).fetchall()
+        expected_attempts = {
+            "invalid_expectations": [],
+            "success": [("ACTUAL", 1, 7)],
+            "timeout": [("UNKNOWN", None, None)],
+        }
+        assert attempts == expected_attempts[outcome]
+        assert pg.execute(
+            "SELECT state,actual_units,charged_credits FROM billing_operations WHERE id=%s",
+            (operation_id,),
+        ).fetchone() == ("SUCCEEDED", 10, 10)
+        assert pg.execute(
+            "SELECT available_credits,reserved_credits FROM wallets WHERE user_id='u1'"
+        ).fetchone() == (990, 0)
+        task = pg.execute(
+            "SELECT status,quality_status,provider_result_url FROM generation_tasks "
+            "WHERE id='task-u1-0'"
+        ).fetchone()
+        assert task == (
+            "SUCCEEDED",
+            "REPLICA_REVIEW_PASSED" if outcome == "success" else "REPLICA_REVIEW_REQUIRED",
+            "https://example.com/result.mp4",
+        )
+        assert pg.execute("SELECT count(*) FROM billing_operations").fetchone() == (1,)
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
+
+
+def test_replica_review_cost_recovery_closes_unknown_without_another_attempt(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from app.billing_meter import billing_context
+    from app.usage_billing import begin_source_attempt
+
+    _, operation_id = _seed_billed_replica_review(fair_state)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        attempt_id = begin_source_attempt(conn, "task-u1-0", service="quality_inspection")
+        assert attempt_id is not None
+        # 模拟进程被终止：发送意图与成本记录已提交，finally 没有执行。
+        conn.execute(
+            "UPDATE generation_tasks SET quality_status='REPLICA_REVIEW_PENDING', "
+            "provider_result_url='https://example.com/result.mp4',actual_output_seconds=10, "
+            "locked_until=(now()-interval '1 minute')::text WHERE id='task-u1-0'"
+        )
+    with pg_transaction() as raw:
+        recovered = acquire_generation_continuation_lease(
+            BusinessConnection.postgres(raw), worker_id="cost-recovery"
+        )
+    assert recovered is not None
+
+    def reject_provider(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("恢复已有成片不能再调用供应商")
+
+    monkeypatch.setattr("app.generation_worker.get_video_analysis_provider", reject_provider)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    with billing_context(str(recovered["id"])):
+        _run_pg_generation_step(
+            lease=recovered,
+            storage=storage,
+            first_frame_storage=storage,
+            provider_override=SimpleNamespace(query_image_to_video=reject_provider),
+        )
+    with psycopg.connect(fair_state) as pg:
+        assert pg.execute(
+            "SELECT id,state,usage,cost_fen,completed_at IS NOT NULL FROM billing_attempts "
+            "WHERE operation_id=%s AND service='quality_inspection'",
+            (operation_id,),
+        ).fetchall() == [(attempt_id, "UNKNOWN", None, None, True)]
+        assert pg.execute(
+            "SELECT state,actual_units,charged_credits FROM billing_operations WHERE id=%s",
+            (operation_id,),
+        ).fetchone() == ("SUCCEEDED", 10, 10)
+        assert pg.execute(
+            "SELECT available_credits,reserved_credits FROM wallets WHERE user_id='u1'"
+        ).fetchone() == (990, 0)
+        assert pg.execute(
+            "SELECT status,quality_status FROM generation_tasks WHERE id='task-u1-0'"
+        ).fetchone() == ("SUCCEEDED", "REPLICA_REVIEW_REQUIRED")
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]

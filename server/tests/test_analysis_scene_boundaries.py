@@ -94,10 +94,13 @@ def test_analysis_prompt_treats_candidate_times_as_review_hints() -> None:
     facts = json.loads(FakeGemini().analyze(video_uri="fake", duration_seconds=2).text)
 
     class Transport:
-        request: dict | None = None
+        requests: list[dict]
+
+        def __init__(self):
+            self.requests = []
 
         def post(self, url, *, headers, body):
-            self.request = json.loads(body)
+            self.requests.append(json.loads(body))
             return json.dumps(
                 {
                     "choices": [
@@ -132,11 +135,14 @@ def test_analysis_prompt_treats_candidate_times_as_review_hints() -> None:
         },
     )
 
-    assert transport.request is not None
-    system_prompt = transport.request["messages"][0]["content"]
+    assert len(transport.requests) == 2
+    system_prompt = transport.requests[0]["messages"][0]["content"]
     assert '"candidate_cut_times_seconds": [1.0]' in system_prompt
     assert "候选时间不是真实切镜结论" in system_prompt
-    assert transport.request["messages"][1]["content"][1]["image_url"]["url"].endswith("source.mp4")
+    assert all(
+        request["messages"][1]["content"][1]["image_url"]["url"].endswith("source.mp4")
+        for request in transport.requests
+    )
 
 
 def test_legacy_analysis_instruction_has_no_fixed_segment_count() -> None:

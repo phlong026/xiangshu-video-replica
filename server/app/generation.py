@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from math import floor, isfinite
+from math import ceil, floor, isfinite
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -53,7 +53,14 @@ from app.first_frames import (
     ImageInput,
     evaluate_generated_video_quality,
 )
-from app.h3_prompts import FORMATTER_VERSION, GenerationContext
+from app.h3_prompts import (
+    FORMATTER_VERSION,
+    GenerationContext,
+    anchor_storyboard_presenter,
+    normalize_consistent_storyboard,
+    render_first_frame_motion,
+    require_consistent_storyboard,
+)
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
@@ -83,16 +90,21 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
+from app.storyboard_facts import (
+    CAMERA_MOTION_LABELS,
+    subject_motion_phrase,
+)
 
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v7"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v9"
 H3_PROMPT_TEMPLATE_SPEC = (
     (
         "intro",
         "生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始；"
-        "人物严格按各镜头的动作与运镜描述真实运动，不得僵立原地。",
+        "人物严格按各镜头确认的动作与运镜执行；原片人物静止时保持静止，"
+        "有位移时保留位移，不额外添加动作。",
     ),
     (
         "continuity",
@@ -127,55 +139,21 @@ H3_PROMPT_TEMPLATE_SPEC = (
 H3_PROMPT_TEMPLATES = dict(H3_PROMPT_TEMPLATE_SPEC)
 H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
     json.dumps(
-        H3_PROMPT_TEMPLATE_SPEC,
+        (H3_PROMPT_TEMPLATE_VERSION, H3_PROMPT_TEMPLATE_SPEC),
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode()
 ).hexdigest()
 
 # Final replica compilation is a separate contract from the retained preview API.
-FINAL_REPLICA_TEMPLATE_VERSION = "h3.replica.final.v4"
+FINAL_REPLICA_TEMPLATE_VERSION = "h3.replica.final.v6"
 FINAL_REPLICA_TEMPLATE_HASH = hashlib.sha256(
-    b"h3.replica.final.v4:confirmed-script:first-frame-presenter-authority:"
+    b"h3.replica.final.v6:confirmed-script:first-frame-presenter-authority:"
     b"voice-gender-continuity:multi-person-role-separation:frame-scene-authority:"
-    b"complete-narration:source-video-exclusion:real-cuts:explicit-duration:human-opening"
+    b"complete-narration:source-video-exclusion:real-cuts:action-beat-timing:human-opening:"
+    b"storyboard-consistency:compound-motion:source-fixture-review:original-speech-timing:"
+    b"subject-bound-facts:orthogonal-motion:shared-motion-semantics"
 ).hexdigest()
-
-# 拆解结果 motion 枚举到中文运动指令的确定性映射：渲染逻辑在代码里，
-# 不依赖分析模型把“行走”写成好句子——只要状态枚举正确，Prompt 必然
-# 携带正向运动指令。
-SUBJECT_MOTION_STATE_CLAUSES = {
-    "STATIC": "人物保持站位，动作限于口播与手势，双脚位置不变",
-    "WALKING": "人物持续行走，每一步脚掌落地、重心自然转移、双臂随步态摆动，不得僵立原地",
-    "RUNNING": "人物持续跑动，步幅与摆臂真实连贯，不得僵立原地",
-    "TURNING": "人物原地转身，躯干与视线自然转动，双脚位置基本不变",
-    "GESTURING_ONLY": "人物站位固定，仅上半身与手部做手势和口播",
-    "OBJECT_MOTION": "画面主体为物体运动，无人物位移",
-    "NO_PERSON": "本镜头无人物出镜",
-}
-SUBJECT_DIRECTION_LABELS = {
-    "toward_camera": "向镜头方向",
-    "away_from_camera": "背离镜头方向",
-    "left": "向画面左侧",
-    "right": "向画面右侧",
-    "lateral": "横向移动",
-    "in_place": "原地",
-    "none": "无位移方向",
-}
-MOTION_CAMERA_MOTION_LABELS = {
-    "STATIC": "固定机位",
-    "PUSH_IN": "镜头缓慢推近",
-    "PULL_BACK": "镜头缓慢拉远",
-    "HANDHELD_TRACKING": "手持平稳跟拍",
-    "PAN": "镜头横摇",
-    "TILT": "镜头纵摇",
-    "FOLLOW": "镜头跟随主体",
-    "ORBIT": "镜头环绕主体",
-    "CRANE_UP": "镜头升高",
-    "CRANE_DOWN": "镜头降低",
-    "ZOOM_IN": "镜头光学变焦推近",
-    "ZOOM_OUT": "镜头光学变焦拉远",
-}
 PROMPT_STATUSES = {"SAVED", "LOCKED", "USED"}
 TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
@@ -570,6 +548,7 @@ class PreparedReconcileOperation:
     provider_task_id: str | None
     provider: H3Provider | None
     first_frame_uri: str
+    replica_review_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -1545,7 +1524,7 @@ def compile_prompt_version(
             first_frame_asset_id=request.first_frame_asset_id,
         )
 
-        shot_payload = json.loads(str(shot_card["payload_json"]))
+        shot_payload = normalize_consistent_storyboard(json.loads(str(shot_card["payload_json"])))
         source_duration_seconds = shot_timeline_duration(shot_payload)
         from app.h3_prompts import compile_replica_final_text, dialogue, prompt_issues
 
@@ -1617,6 +1596,16 @@ def compile_prompt_version(
             "output_duration_seconds": request.output_duration_seconds,
             "resolution": request.resolution,
             "ratio": request.ratio,
+            # 仅新编译稿启用成片复核；输入冻结在版本内，不读取之后可能改过的分镜。
+            "replica_expectations": {
+                "shots": shot_payload["shots"],
+                "source_duration_seconds": source_duration_seconds,
+                "output_duration_seconds": request.output_duration_seconds,
+                "opening_action": request.opening_action,
+                "replace_scene": first_frame_sources["first_frame_replace_scene"],
+                "script_text": str(script_payload["full_text"]),
+                "prompt_text": prompt_text,
+            },
             **first_frame_sources,
         }
         row = insert_version(
@@ -1675,8 +1664,8 @@ def preview_prompt_text(
     """无副作用地预览当前项目会编译出的 H3 Prompt 文本。
 
     镜头来源优先取最新镜头卡版本，共用的分析版本兜底；口播来源优先取最新
-    口播稿版本（原样复用其 shot_mappings，与正式编译文本保持一致），否则用
-    分析产出的原稿逐镜头映射。不落库、不写审计；正式编译仍要求首帧与
+    与当前分镜绑定的口播稿版本（保留 shot_mappings），否则用已核对分镜原稿，
+    旧分镜再回退原分析。不落库、不写审计；正式编译仍要求首帧与
     最新版本链（fail-closed 语义不受影响）。
     """
     require_project_access(
@@ -1705,8 +1694,15 @@ def preview_prompt_text(
 
     script_source: Literal["script_version", "analysis_original"]
     script = latest_version(conn, project_id=project_id, kind=SCRIPT_KIND)
-    if script is not None:
-        script_payload = json.loads(str(script["payload_json"]))
+    script_payload = json.loads(str(script["payload_json"])) if script is not None else None
+    if (
+        script_payload is not None
+        and shot_card is not None
+        and script_payload.get("shot_card_version_id") not in (None, str(shot_card["id"]))
+    ):
+        # 人工核对分镜后，旧文案的映射已失效；预览不能重新带回已纠正的台词。
+        script_payload = None
+    if script_payload is not None:
         script_source = "script_version"
     else:
         analysis_payload = (
@@ -1714,10 +1710,15 @@ def preview_prompt_text(
             if analysis is not None
             else {}
         )
-        original_script = str(analysis_payload.get("original_script") or "")
         spoken_texts = [str(shot.get("spoken_text") or "") for shot in shots]
+        original_script = shot_payload.get("original_script")
+        if not isinstance(original_script, str):
+            original_script = str(analysis_payload.get("original_script") or "") or "".join(
+                spoken_texts
+            )
         script_payload = {
-            "full_text": original_script or "".join(spoken_texts),
+            # 明确空串也是用户核对结果，不能按 falsey 值恢复旧版有声文案。
+            "full_text": original_script,
             "shot_mappings": [
                 {
                     "shot_id": str(shot.get("shot_id") or ""),
@@ -1731,8 +1732,8 @@ def preview_prompt_text(
     source_duration_seconds = shot_timeline_duration(shot_payload)
     duration_seconds = request.output_duration_seconds
     if duration_seconds is None:
-        # 复刻默认贴着源时长走；客户不再被二分到 4/15 两档。
-        duration_seconds = max(4, min(15, round(source_duration_seconds)))
+        # 复刻默认贴着源时长走；预览不能把可支持的 16–30 秒悄悄压缩到 15 秒。
+        duration_seconds = max(4, min(30, ceil(source_duration_seconds)))
     elif actor.role == "customer" and duration_seconds not in CUSTOMER_DURATION_OPTIONS:
         raise generation_error(
             422,
@@ -1818,6 +1819,10 @@ def revise_prompt_version(
                 "base_prompt_version_id": request.base_prompt_version_id,
             }
         )
+        expectations = payload.get("replica_expectations")
+        if isinstance(expectations, dict):
+            # 手改后最终提交稿是动作真源，旧分镜仅辅助复核，不能覆盖用户的新要求。
+            expectations.update(prompt_text=prompt_text, prompt_revised=True)
         row = insert_version(
             conn,
             project_id=project_id,
@@ -2461,6 +2466,14 @@ def create_generation_batch(
                 )
                 if final_issues:
                     raise generation_error(422, final_issues[0].code, final_issues[0].message)
+                expectations = final_payload.get("replica_expectations")
+                if isinstance(expectations, dict):
+                    # 直接提交编辑稿也会绕过 revise；复核必须跟随实际发出的最终正文。
+                    revised = request.prompt_text != expectations.get("prompt_text")
+                    expectations.update(
+                        prompt_text=request.prompt_text,
+                        prompt_revised=expectations.get("prompt_revised") is True or revised,
+                    )
             prompt = insert_version(
                 conn,
                 project_id=project_id,
@@ -2512,6 +2525,17 @@ def create_generation_batch(
                 "PROMPT_NOT_LOCKED",
                 "Generation requires a LOCKED prompt.",
             )
+        if prompt_snapshot.get("final_composition") is True and isinstance(
+            prompt_snapshot.get("shot_card_version_id"), str
+        ):
+            # 历史已锁稿不会再次经过编译；在报价和扣费前复查绑定版本，防止绕过新门禁。
+            bound_shots = require_version(
+                conn,
+                version_id=prompt_snapshot["shot_card_version_id"],
+                project_id=project_id,
+                kind="shot_card",
+            )
+            require_consistent_storyboard(json.loads(str(bound_shots["payload_json"])))
         frozen_duration = prompt_snapshot.get("output_duration_seconds")
         frozen_resolution = prompt_snapshot.get("resolution")
         frozen_ratio = prompt_snapshot.get("ratio", "adaptive")
@@ -4720,6 +4744,7 @@ def prepare_generation_reconcile_operation(
         provider_task_id=provider_task_id,
         provider=provider,
         first_frame_uri=str(prompt_snapshot.get("first_frame_uri") or ""),
+        replica_review_required="replica_expectations" in prompt_snapshot,
     )
 
 
@@ -4761,8 +4786,10 @@ def perform_generation_reconcile_operation(
     return ReconcileOperationOutcome(
         status="SUCCEEDED",
         result_url=query.result_url,
-        audio_quality_status="NOT_REQUIRED",
-        quality_issue_codes=[],
+        audio_quality_status="REPLICA_REVIEW_REQUIRED"
+        if work.replica_review_required
+        else "NOT_REQUIRED",
+        quality_issue_codes=["REPLICA_REVIEW_UNAVAILABLE"] if work.replica_review_required else [],
         output_seconds=query.output_seconds,
     )
 
@@ -5218,7 +5245,7 @@ def reconcile_submission_uncertain_task(
     must first confirm the charge did not occur before any resubmission.
     """
     row = conn.execute(
-        "SELECT status, provider_task_id FROM generation_tasks WHERE id = %s",
+        "SELECT status, provider_task_id, prompt_snapshot_json FROM generation_tasks WHERE id = %s",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -5247,6 +5274,9 @@ def reconcile_submission_uncertain_task(
     status = item.get("status")
     if status == "succeeded":
         result_url = _metaso_content_url(item, provider_task_id=str(provider_task_id))
+        replica_review_required = "replica_expectations" in json.loads(
+            str(row["prompt_snapshot_json"])
+        )
         _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
         task_state_guard = (
             "AND status = 'SUBMISSION_UNCERTAIN' AND result_asset_id IS NULL"
@@ -5280,8 +5310,8 @@ def reconcile_submission_uncertain_task(
                 """,
                 (
                     result_url,
-                    "NOT_REQUIRED",
-                    "[]",
+                    "REPLICA_REVIEW_REQUIRED" if replica_review_required else "NOT_REQUIRED",
+                    '["REPLICA_REVIEW_UNAVAILABLE"]' if replica_review_required else "[]",
                     task_id,
                 ),
             )
@@ -5823,6 +5853,7 @@ def load_worker_task(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
             generation_tasks.locked_by,
             generation_tasks.locked_until,
             generation_tasks.archive_retry_count,
+            generation_tasks.actual_output_seconds,
             generation_batches.project_id,
             generation_batches.created_by_user_id,
             generation_batches.request_snapshot_json,
@@ -6156,6 +6187,12 @@ def finalize_generation_direct_result(
 ) -> TaskResult:
     """Settle a provider-hosted result without copying video bytes to storage."""
 
+    from app.replica_result_review import replica_expectations
+
+    if quality_status == "NOT_REQUIRED" and replica_expectations(lease) is not None:
+        # 旧工作入口/对账恢复未执行成片复核时，保留交付但不能伪装已验收。
+        quality_status = "REPLICA_REVIEW_REQUIRED"
+        quality_issue_codes = ["REPLICA_REVIEW_UNAVAILABLE"]
     task_id = str(lease["id"])
     update = conn.execute(
         """
@@ -8032,6 +8069,10 @@ def estimate_spoken_duration(text: str) -> float:
 
 
 def map_script_to_shots(text: str, shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_text = "".join(str(shot.get("spoken_text") or "") for shot in shots)
+    preserve_source_timing = bool(text.strip()) and "".join(text.split()) == "".join(
+        source_text.split()
+    )
     sentences = [part for part in re.split(r"(?<=[。！？!？])", text) if part]
     if not sentences and text:
         sentences = [text]
@@ -8050,7 +8091,12 @@ def map_script_to_shots(text: str, shots: list[dict[str, Any]]) -> list[dict[str
         text_by_index[shot_index] = segment_text
     mappings: list[dict[str, Any]] = []
     for index, shot in enumerate(shots):
-        segment_text = text_by_index.get(index, "")
+        # 原口播可能跨动作阶段才说完一句，不能再次按标点把整句挪到第一个阶段。
+        segment_text = (
+            str(shot.get("spoken_text") or "")
+            if preserve_source_timing
+            else text_by_index.get(index, "")
+        )
         mappings.append(
             {
                 "shot_id": str(shot["shot_id"]),
@@ -8069,13 +8115,14 @@ def render_shot_motion_clause(shot: Mapping[str, Any]) -> str:
     旧版拆解结果没有 motion 时回退到 action 文本（行为不劣化）；
     motion 存在时由代码而不是模型措辞决定运动指令的强度。
     """
+    facts_narrative = render_first_frame_motion(shot)
+    if facts_narrative is not None:
+        return facts_narrative
     motion = shot.get("motion")
     if not isinstance(motion, Mapping):
         return str(shot.get("action", ""))
 
-    state = str(motion.get("subject_motion_state", ""))
-    state_clause = SUBJECT_MOTION_STATE_CLAUSES.get(state, "")
-    direction = SUBJECT_DIRECTION_LABELS.get(str(motion.get("subject_direction", "")), "")
+    state_clause = subject_motion_phrase(motion)
     displacement = str(motion.get("subject_displacement") or "")
     hand_action = str(motion.get("hand_action") or "")
     relative_motion = str(motion.get("relative_motion") or "")
@@ -8085,10 +8132,7 @@ def render_shot_motion_clause(shot: Mapping[str, Any]) -> str:
     if action:
         parts.append(action)
     if state_clause:
-        if direction and direction not in ("无位移方向",):
-            parts.append(f"{state_clause}（{direction}）")
-        else:
-            parts.append(state_clause)
+        parts.append(f"人物{state_clause}")
     if displacement and displacement not in ("无位移", "无人物出镜"):
         parts.append(f"位移：{displacement}")
     if hand_action and hand_action not in ("无人物出镜",):
@@ -8102,7 +8146,7 @@ def shot_camera_motion_text(shot: Mapping[str, Any]) -> str:
     """运镜描述：motion 枚举标签优先，旧数据用自由文本。"""
     motion = shot.get("motion")
     if isinstance(motion, Mapping):
-        label = MOTION_CAMERA_MOTION_LABELS.get(str(motion.get("camera_motion", "")))
+        label = CAMERA_MOTION_LABELS.get(str(motion.get("camera_motion", "")))
         if label:
             return label
     return str(shot.get("camera_motion", ""))
@@ -8187,6 +8231,7 @@ def compile_prompt_text(
     duration_seconds: int,
     resolution: str,
 ) -> str:
+    shot_payload = normalize_consistent_storyboard(shot_payload)
     lines = [
         H3_PROMPT_TEMPLATES["intro"].format(
             duration_seconds=duration_seconds,
@@ -8213,11 +8258,11 @@ def compile_prompt_text(
                 start=_format_shot_timestamp(start),
                 end=_format_shot_timestamp(end),
                 shot_type=shot["shot_type"],
-                composition=shot["composition"],
+                composition=anchor_storyboard_presenter(shot["composition"], shot),
                 camera_motion=shot_camera_motion_text(shot),
                 wardrobe_clause=shot_wardrobe_clause(shot),
                 motion_clause=render_shot_motion_clause(shot),
-                scene=shot_scene_text(shot),
+                scene=anchor_storyboard_presenter(shot_scene_text(shot), shot),
                 transition=shot["transition"],
                 spoken=spoken,
             )

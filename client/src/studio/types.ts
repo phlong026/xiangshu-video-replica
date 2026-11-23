@@ -397,6 +397,8 @@ export type StudioPublishAccount = {
   createdAt: string;
 };
 export type StudioState = {
+  /** 自动复刻的分镜复核入口；仅影响当前项目的保存反馈。 */
+  storyboardReviewProjectId?: string;
   page: StudioPage;
   draft: StudioDraft;
   selectedVideoId?: string;
