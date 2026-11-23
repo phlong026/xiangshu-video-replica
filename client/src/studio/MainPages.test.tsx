@@ -435,6 +435,54 @@ describe("V1.4 任务详情真实成片预览", () => {
     expect(value.openPicker).not.toHaveBeenCalledWith("reference");
   });
 
+  it("视频生成任务新建草稿回到视频创作而非视频拆解", () => {
+    const value = studio(taskA.id, {
+      data: data([
+        {
+          ...taskA,
+          type: "视频生成",
+          draftSnapshot: {
+            ...createState("video").draft,
+            firstFrameId: "frame-original",
+            referenceIds: [],
+          },
+        },
+      ]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "新建草稿" }));
+    expect(value.navigate).toHaveBeenCalledWith(
+      "video",
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          firstFrameId: "frame-original",
+        }),
+      }),
+    );
+  });
+
+  it("人物置换任务新建草稿继续进入人物置换模块", () => {
+    const value = studio(taskA.id, {
+      data: data([
+        {
+          ...taskA,
+          type: "人物置换",
+          draftSnapshot: createState("replacement").draft,
+        },
+      ]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "新建草稿" }));
+    expect(value.navigate).toHaveBeenCalledWith(
+      "replacement",
+      expect.objectContaining({ returnTo: "task-detail" }),
+    );
+  });
+
   it("首屏外任务按 URL 中的类型和后端 ID 读取，失败可受控重试", async () => {
     const loaded = {
       ...taskA,
