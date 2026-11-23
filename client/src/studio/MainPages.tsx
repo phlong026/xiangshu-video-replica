@@ -1861,6 +1861,16 @@ export function TaskDetailPage() {
             : "以任务返回结果为准",
     ],
   ];
+  const creationPage =
+    task.backendKind === "oral_task" || task.type === "数字人口播"
+      ? "oral"
+      : task.type === "人物置换"
+        ? "replacement"
+        : task.type === "视频生成"
+          ? (task.draftSnapshot?.referenceIds.length ?? 0) > 0
+            ? "reference"
+            : "video"
+          : "replica";
   const recreate = (
     page: "copy" | "oral" | "replica" | "video" | "reference" | "replacement",
     picker?: "reference" | "avatar" | "image" | "first-frame",
@@ -2182,9 +2192,7 @@ export function TaskDetailPage() {
               更换素材
             </Button>
             <Button
-              onClick={() =>
-                recreate(task.type === "数字人口播" ? "oral" : "replica")
-              }
+              onClick={() => recreate(creationPage)}
             >
               <Icon name="refresh" />
               新建草稿
