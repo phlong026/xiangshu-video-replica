@@ -780,11 +780,14 @@ export function StudioWorkspace({
   // Draft recovery is opt-in. A transient read failure is not an empty draft.
   useEffect(() => {
     void draftReadRevision;
-    if (review || currentUser.role === "auditor") return;
+    if (review) return;
+    const role = currentUser.role;
     let active = true;
     const permission = permissionGenerationRef.current;
     const current = () =>
-      active && permission === permissionGenerationRef.current;
+      active &&
+      role === currentUserRoleRef.current &&
+      permission === permissionGenerationRef.current;
     const previousRevision = lastDraftRevisionRef.current;
     setPendingRestore(null);
     setRestoreError("");
