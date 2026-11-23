@@ -478,7 +478,7 @@ export function TrainingMaterialsPage({
                   <StatusBadge tone={item.visible ? "good" : "neutral"}>
                     {item.visible ? "上架" : "已下架"}
                   </StatusBadge>
-                  <small>{item.download_count} 次下载</small>
+                  <small>{item.download_count} 次下载链接签发</small>
                 </span>
               </div>
               {readOnly ? null : (

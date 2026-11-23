@@ -2972,9 +2972,10 @@ export async function listTrainingMaterials(
 
 export async function trainingMaterialDownloadUrl(
   materialId: string,
+  purpose: "download" | "preview" = "download",
 ): Promise<string> {
   const result = await requestApiJson<{ url: string }>(
-    `/api/training-materials/${encodeURIComponent(materialId)}/download-url`,
+    `/api/training-materials/${encodeURIComponent(materialId)}/download-url?purpose=${purpose}`,
     "获取下载链接失败",
     { method: "POST" },
   );

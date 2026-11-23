@@ -5837,6 +5837,36 @@ describe("全自动复刻入口（M8 v1）", () => {
     ).toBeInTheDocument();
   });
 
+  it("培训 Office 文档默认不请求外部预览或签发，需显式下载", async () => {
+    useStudio.mockReturnValue(studio());
+    listTrainingMaterials.mockResolvedValue({
+      items: [
+        {
+          id: "office-test",
+          title: "内部演示测试件",
+          description: "",
+          kind: "doc",
+          kind_label: "文档",
+          content_type: "application/msword",
+          file_suffix: ".doc",
+          size_bytes: 24,
+          tags: ["资料"],
+          created_at: "2026-11-01T01:00:00Z",
+        },
+      ],
+      tag_facet: ["资料"],
+      page: 1,
+      page_size: 100,
+      total: 1,
+    });
+    render(<MaterialsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "预览" }));
+    const dialog = await screen.findByRole("dialog", { name: "素材预览" });
+    expect(dialog.querySelector("iframe")).toBeNull();
+    expect(within(dialog).getByText(/仅提供下载/)).toBeInTheDocument();
+    expect(trainingMaterialDownloadUrl).not.toHaveBeenCalled();
+  });
+
   it("培训下载重新签发地址并保留工作台页面", async () => {
     useStudio.mockReturnValue(studio());
     trainingMaterialDownloadUrl
@@ -5880,7 +5910,16 @@ describe("全自动复刻入口（M8 v1）", () => {
           },
         ]),
       );
-      expect(trainingMaterialDownloadUrl).toHaveBeenCalledTimes(2);
+      expect(trainingMaterialDownloadUrl).toHaveBeenNthCalledWith(
+        1,
+        "tm-1",
+        "preview",
+      );
+      expect(trainingMaterialDownloadUrl).toHaveBeenNthCalledWith(
+        2,
+        "tm-1",
+        "download",
+      );
     } finally {
       click.mockRestore();
     }
