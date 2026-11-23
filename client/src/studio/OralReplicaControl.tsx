@@ -27,6 +27,7 @@ import { Button, Field, StudioDialog } from "./ui";
 import { viralImportIdempotencyKey } from "./viralImport";
 
 type OralDefaults = { identityId: string; avatarId: string; voiceId: string };
+type OralDraft = { choice: OralDefaults; script: string };
 type OralRequestSnapshot = OralDefaults & {
   title: string;
   mode: "TTS";
@@ -38,6 +39,33 @@ type OralAttempt = {
   receipt?: { id: string; status: string };
 };
 const EMPTY: OralDefaults = { identityId: "", avatarId: "", voiceId: "" };
+
+function readDraft(accountId: string, video: StudioVideo): OralDraft | null {
+  try {
+    const raw = replicaPreference(accountId, `oral-draft:${video.id}`);
+    if (!raw) return null;
+    const draft = JSON.parse(raw) as Partial<OralDraft> | null;
+    const choice = draft?.choice;
+    if (
+      !choice ||
+      typeof choice.identityId !== "string" ||
+      typeof choice.avatarId !== "string" ||
+      typeof choice.voiceId !== "string" ||
+      typeof draft.script !== "string"
+    )
+      return null;
+    return {
+      choice: {
+        identityId: choice.identityId,
+        avatarId: choice.avatarId,
+        voiceId: choice.voiceId,
+      },
+      script: draft.script,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function attemptField(video: StudioVideo) {
   return `oral-attempt:${video.id}`;
@@ -210,6 +238,20 @@ export function OralReplicaControl({
     setStage(saved.receipt ? "receipt" : "compose");
   };
 
+  const rememberDraft = (text: string, selected: OralDefaults = choice) => {
+    const saved = saveReplicaPreference(
+      user.id,
+      `oral-draft:${video.id}`,
+      JSON.stringify({ choice: selected, script: text }),
+    );
+    if (!saved) {
+      setError(
+        "文案暂未保存到浏览器，请先复制文案，恢复本地存储后再关闭页面。",
+      );
+    }
+    return saved;
+  };
+
   const enter = useRef(() => {});
   enter.current = () => {
     onHandled();
@@ -219,6 +261,14 @@ export function OralReplicaControl({
       const saved = readAttempt(user.id, video);
       if (saved) {
         restoreAttempt(saved);
+        return;
+      }
+      const draft = readDraft(user.id, video);
+      if (draft) {
+        setChoice(draft.choice);
+        setScript(draft.script);
+        setQuote(null);
+        setStage("compose");
         return;
       }
       setStage(valid ? "prepare" : "settings");
@@ -236,7 +286,13 @@ export function OralReplicaControl({
       JSON.stringify([choice.identityId, choice.avatarId, choice.voiceId]),
     );
     setError("");
-    setStage(editDefaultsOnly ? null : "prepare");
+    const draft = readDraft(user.id, video);
+    if (draft) {
+      if (!rememberDraft(draft.script)) return;
+      setScript(draft.script);
+      setQuote(null);
+    }
+    setStage(editDefaultsOnly ? null : draft ? "compose" : "prepare");
   };
 
   const quoteScript = async (text: string) => {
@@ -308,6 +364,7 @@ export function OralReplicaControl({
         if (!mounted.current) return;
         const text = result?.text?.trim() ?? "";
         setScript(text);
+        rememberDraft(text);
         setQuote(null);
         setStage("compose");
         if (!text) {
@@ -530,6 +587,7 @@ export function OralReplicaControl({
                 setScript(event.target.value);
                 setQuote(null);
                 setError("");
+                rememberDraft(event.target.value);
               }}
             />
           </Field>
@@ -537,6 +595,18 @@ export function OralReplicaControl({
             <p role="alert">口播文案超过 1 万字，请精简后再报价。</p>
           )}
           {error && <p role="alert">{error}</p>}
+          {!pendingAttempt && (
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setEditDefaultsOnly(false);
+                setStage("settings");
+              }}
+            >
+              更换素材
+            </Button>
+          )}
           {isCurrentQuote(quote) ? (
             <>
               <p>
@@ -577,6 +647,16 @@ export function OralReplicaControl({
             <Button
               variant="outline"
               onClick={() => {
+                const current = readAttempt(user.id, video);
+                if (
+                  current &&
+                  (!current.receipt ||
+                    current.idempotencyKey !== attempt.idempotencyKey)
+                ) {
+                  restoreAttempt(current);
+                  return;
+                }
+                if (!rememberDraft(script)) return;
                 if (!saveAttempt(user.id, video, null)) {
                   setError("无法保存新版本状态，请检查浏览器本地存储后重试。");
                   return;

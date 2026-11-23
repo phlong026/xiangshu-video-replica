@@ -5276,6 +5276,159 @@ describe("数字人口播请求恢复", () => {
   });
 });
 
+describe("数字人口播编辑草稿", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    createOralTask.mockReset();
+    getOralPrice.mockReset();
+    getLatestScriptFromAudioTask.mockReset();
+  });
+
+  it("改稿关闭后直接恢复编辑稿，刷新也不会被原转写覆盖", async () => {
+    const { video } = oralReplicaFixture("oral-edited-draft");
+    const view = render(<OralReplicaHarness video={video} />);
+    await prepareOralReplica();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "  我改写的第一段\n保留换行和空格  " },
+    });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "一键复刻 · 数字人口播" }),
+    );
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "  我改写的第一段\n保留换行和空格  ",
+    );
+    expect(screen.getByLabelText("口播文案")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "获取口播报价" })).toBeEnabled();
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+    view.unmount();
+    render(<OralReplicaHarness video={video} />);
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "  我改写的第一段\n保留换行和空格  ",
+    );
+    expect(screen.queryByRole("button", { name: "确认并生成口播" })).toBeNull();
+    expect(getOralPrice).toHaveBeenCalledOnce();
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    expect(createOralTask).not.toHaveBeenCalled();
+    expect(JSON.stringify(window.localStorage)).not.toContain(
+      "fixture-oral-original-quote",
+    );
+  });
+
+  it("主动清空的草稿也会保存，并与其他账号、上传视频隔离", async () => {
+    const { video, value } = oralReplicaFixture("oral-empty-draft-a");
+    const view = render(<OralReplicaHarness video={video} />);
+    await prepareOralReplica();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "" },
+    });
+    view.unmount();
+    const otherVideo = render(
+      <OralReplicaHarness video={{ ...video, id: "upload:different-draft" }} />,
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "用数字人口播复刻" }),
+    ).toBeInTheDocument();
+    otherVideo.unmount();
+    oralReplicaFixture("oral-empty-draft-b");
+    const otherAccount = render(<OralReplicaHarness video={video} />);
+    expect(
+      await screen.findByRole("dialog", { name: "用数字人口播复刻" }),
+    ).toBeInTheDocument();
+    otherAccount.unmount();
+    useStudio.mockReturnValue(value);
+    render(<OralReplicaHarness video={video} />);
+    expect(await screen.findByLabelText("口播文案")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "获取口播报价" })).toBeDisabled();
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+  });
+
+  it("编辑后更换默认素材仍保留文案，不再提取原视频", async () => {
+    const { video, value } = oralReplicaFixture("oral-draft-change-assets");
+    value.data.people[0].voices.push({
+      id: "v-2",
+      name: "第二个声音",
+      confirmed: true,
+      status: "READY",
+    });
+    createOralTask.mockResolvedValue({
+      id: "oral-new-voice",
+      status: "QUEUED",
+    });
+    const view = render(<OralReplicaHarness video={video} />);
+    await prepareOralReplica();
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "更换声音时保留我编辑的文案" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "更换素材" }));
+    fireEvent.change(screen.getByLabelText("口播声音"), {
+      target: { value: "v-2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存默认素材并继续" }));
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "更换声音时保留我编辑的文案",
+    );
+    view.unmount();
+    render(<OralReplicaHarness video={video} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "获取口播报价" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认并生成口播" }),
+    );
+    await screen.findByRole("dialog", { name: "口播任务已受理" });
+    expect(createOralTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        voiceId: "v-2",
+        scriptText: "更换声音时保留我编辑的文案",
+      }),
+    );
+    expect(createViralImportTask).toHaveBeenCalledOnce();
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+  });
+
+  it("受理后须显式新建版本；新版本草稿刷新后保留并使用新请求键", async () => {
+    const { video } = oralReplicaFixture("oral-explicit-new-version");
+    createOralTask.mockResolvedValue({
+      id: "oral-first-version",
+      status: "QUEUED",
+    });
+    const view = render(<OralReplicaHarness video={video} />);
+    fireEvent.click(await prepareOralReplica());
+    const receipt = await screen.findByRole("dialog", {
+      name: "口播任务已受理",
+    });
+    const previousKey = createOralTask.mock.calls[0]?.[0].idempotencyKey;
+    fireEvent.click(
+      within(receipt).getByRole("button", { name: "新建一个口播版本" }),
+    );
+    fireEvent.change(screen.getByLabelText("口播文案"), {
+      target: { value: "第二版的文案" },
+    });
+    view.unmount();
+    render(<OralReplicaHarness video={video} />);
+    expect(await screen.findByLabelText("口播文案")).toHaveValue(
+      "第二版的文案",
+    );
+    expect(screen.getByLabelText("口播文案")).toBeEnabled();
+    expect(createOralTask).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "获取口播报价" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认并生成口播" }),
+    );
+    await screen.findByRole("dialog", { name: "口播任务已受理" });
+    expect(createOralTask).toHaveBeenCalledTimes(2);
+    expect(createOralTask.mock.calls[1]?.[0].idempotencyKey).not.toBe(
+      previousKey,
+    );
+    expect(createOralTask.mock.calls[1]?.[0].scriptText).toBe("第二版的文案");
+    expect(getLatestScriptFromAudioTask).toHaveBeenCalledOnce();
+  });
+});
+
 describe("全自动复刻入口（M8 v1）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
