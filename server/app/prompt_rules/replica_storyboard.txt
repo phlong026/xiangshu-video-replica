@@ -58,11 +58,15 @@ color_tone：描述可见色调、明暗与对比，不推断灯具参数。
   segment_kind：真实剪辑切换为 SHOT_CUT，同镜头动作阶段为 ACTION_BEAT；
   首段用 ACTION_BEAT 并标记视频开始；
   boundary_reason：本段开始的可观察依据；
-  motion：完整的六字段运动对象，见下文。
+  facts：规范化源片事实，见下文；
+  motion：从 facts 派生的六字段兼容运动对象，见下文。
 - 描述只写画面里可观察的事实，不加效果承诺。
 
 六、人物运动与摄影机运动分别记录
-motion.subject_motion_state：STATIC / WALKING / RUNNING / TURNING /
+{STORYBOARD_FACTS_CONTRACT}
+
+以下旧字段均由同一 facts 派生，不再分别猜测。
+motion.subject_motion_state：STATIC / WALKING / RUNNING / MOVING / TURNING /
 GESTURING_ONLY / OBJECT_MOTION / NO_PERSON / UNKNOWN。
 STATIC、OBJECT_MOTION、NO_PERSON、UNKNOWN 必须单独使用，WALKING 与 RUNNING
 不能并列。同一主体同时行走和做手势可写 WALKING+GESTURING_ONLY；先走后停

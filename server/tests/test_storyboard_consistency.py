@@ -236,6 +236,76 @@ def test_manual_save_rejects_conflict_but_legacy_missing_motion_stays_readable()
     assert len(validate_shot_cards(payload["shots"], duration_seconds=8)) == 2
 
 
+def _review_with_observations(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(payload)
+    for index, shot in enumerate(payload["shots"]):
+        motion = shot["motion"]
+        moving = motion["subject_motion_state"] == "WALKING"
+        shot["facts"] = {
+            "schema_version": "storyboard.facts.v1",
+            "camera_shot_id": "c1",
+            "entry_boundary": "VIDEO_START" if index == 0 else "CONTINUOUS",
+            "subjects": [
+                {"subject_id": "p1", "label": "主讲人", "kind": "PERSON", "visibility": "VISIBLE"}
+            ],
+            "primary_subject_id": "p1",
+            "actions": [
+                {
+                    "subject_id": "p1",
+                    "description": shot["action"],
+                    "translation": "MOVING" if moving else "STATIONARY",
+                    "gait": "WALKING" if moving else "NONE",
+                    "turning": "NONE",
+                    "gesture": "GESTURING"
+                    if "GESTURING_ONLY" in motion["subject_motion_state"]
+                    else "NONE",
+                    "direction": motion["subject_direction"],
+                    "path": motion["subject_displacement"],
+                    "hand_detail": motion["hand_action"],
+                }
+            ],
+            "camera": {"motion": motion["camera_motion"], "detail": shot["camera_motion"]},
+            "relative_motion": motion["relative_motion"],
+            "evidence": [
+                {
+                    "source": "VIDEO",
+                    "fields": [
+                        "subjects",
+                        "actions",
+                        "camera",
+                        "entry_boundary",
+                        "relative_motion",
+                    ],
+                    "start_time": shot["start_time"],
+                    "end_time": shot["end_time"],
+                    "observation": shot["action"] + "；" + shot["camera_motion"],
+                    "status": "CURRENT",
+                },
+                {
+                    "source": "AUDIO",
+                    "fields": ["spoken_text"],
+                    "start_time": shot["start_time"],
+                    "end_time": shot["end_time"],
+                    "observation": "只有环境声，没有可辨识口播",
+                    "status": "CURRENT",
+                },
+            ],
+        }
+    return {
+        "analysis": payload,
+        "review_observations": [
+            {
+                "shot_id": shot["shot_id"],
+                "start_time": shot["start_time"],
+                "end_time": shot["end_time"],
+                "visual_observation": shot["action"] + "；" + shot["camera_motion"],
+                "audio_observation": "只有环境声，没有可辨识口播",
+            }
+            for shot in payload["shots"]
+        ],
+    }
+
+
 class _ReviewProvider:
     requires_https_video_url = True
 
@@ -254,7 +324,9 @@ class _ReviewProvider:
         assert kwargs["issues"]
         if self.reviewed is None:
             raise ValueError("复核结果无法解析")
-        return ProviderResponse(text=json.dumps(self.reviewed), raw={"id": "review"})
+        return ProviderResponse(
+            text=json.dumps(_review_with_observations(self.reviewed)), raw={"id": "review"}
+        )
 
     def repair_json(self, **kwargs: Any) -> ProviderResponse:
         raise AssertionError("事实冲突不得交给纯文本格式修复")
@@ -301,7 +373,7 @@ class _QueueTransport:
 def test_video_fact_review_respects_shared_call_budget(max_calls: int) -> None:
     broken = _payload()
     broken["shots"][0] = _static_shot("主讲人从院子走向门口")
-    transport = _QueueTransport([broken, _payload()])
+    transport = _QueueTransport([broken, _review_with_observations(_payload())])
     provider = ApilioGemini(
         api_key="test-only",
         transport=transport,
@@ -322,16 +394,30 @@ def test_video_fact_review_respects_shared_call_budget(max_calls: int) -> None:
 
 
 def test_long_storyboard_review_keeps_video_and_does_not_repeat_forever() -> None:
+    from app.replica_prompt import (
+        ReplicaPromptTaskLease,
+        ReplicaPromptTaskWork,
+        perform_replica_prompt_task,
+    )
+
     broken = default_replica_storyboard_payload(60)
     broken["shots"][0]["action"] = "主讲人从院子走向门口"
     transport = _QueueTransport([broken, broken])
     provider = ApilioGemini(api_key="test-only", transport=transport)
-    response = provider.analyze_replica_storyboard(
-        video_uri="https://example.com/video.mp4", duration_seconds=60
+    payload = perform_replica_prompt_task(
+        ReplicaPromptTaskWork(
+            lease=ReplicaPromptTaskLease("task", "project", "asset", "user", 60, "worker"),
+            provider=provider,
+            video_uri="https://example.com/video.mp4",
+            asset_uri="asset://source",
+            media_info={"duration_seconds": 60},
+            mode="storyboard",
+        )
     )
     assert len(transport.requests) == 2
-    assert json.loads(response.text)["shots"][0]["motion"]["subject_motion_state"] == "STATIC"
-    assert "consistency_review" in response.raw
+    assert payload["shots"][0]["motion"]["subject_motion_state"] == "STATIC"
+    assert payload["source_review"]["status"] == "INCOMPLETE"
+    assert "source_review" in payload["provider_response_ref"]["raw"]
 
 
 def test_generated_replica_review_has_small_budget_and_observes_real_video() -> None:

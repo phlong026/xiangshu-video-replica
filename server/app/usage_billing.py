@@ -563,6 +563,37 @@ def _reconcile_first_frame_auxiliary_costs(conn: BusinessConnection, *, limit: i
     )
 
 
+def _reconcile_source_review_costs(conn: BusinessConnection, *, limit: int) -> None:
+    """收口进程中断遗留的源片复核成本，不猜用量、不改变客户结算。"""
+    remaining = max(0, limit)
+    # 两类源片任务共用总上限；表名仅来自固定白名单，不接收调用者输入。
+    for table in ("analysis_tasks", "replica_prompt_tasks"):
+        if remaining == 0:
+            break
+        closed = conn.execute(
+            f"""WITH stale AS (
+                SELECT a.id FROM {table} t
+                JOIN billing_operations o ON o.source_id=t.id AND o.user_id=t.created_by_user_id
+                JOIN billing_attempts a ON a.operation_id=o.id
+                WHERE o.service='analysis' AND o.state IN ('SUCCEEDED','FAILED','CANCELLED')
+                  AND o.completed_at < now()-interval '30 minutes'
+                  AND t.status IN ('SUCCEEDED','FAILED')
+                  AND t.locked_by IS NULL AND t.locked_until IS NULL
+                  AND t.completed_at::timestamptz < now()-interval '30 minutes'
+                  AND t.updated_at::timestamptz < now()-interval '30 minutes'
+                  AND a.service='quality_inspection' AND a.state='PENDING'
+                  AND a.usage IS NULL AND a.cost_fen IS NULL
+                  AND a.created_at < now()-interval '30 minutes'
+                ORDER BY a.created_at,a.id LIMIT %s
+                FOR UPDATE OF t,a SKIP LOCKED
+            ) UPDATE billing_attempts a SET state='UNKNOWN',completed_at=now()
+              FROM stale WHERE a.id=stale.id AND a.state='PENDING'
+              RETURNING a.id""",  # noqa: S608 - 固定任务表白名单
+            (remaining,),
+        ).fetchall()
+        remaining -= len(closed)
+
+
 def _reconcile_table_for(service: str) -> str | None:
     return {
         "analysis": "analysis_tasks",
@@ -626,6 +657,10 @@ def finalize_pending_operation(
         if task is None and service == "character":
             task = conn.execute(
                 "SELECT * FROM character_generation_tasks WHERE id=%s FOR UPDATE", (source_id,)
+            ).fetchone()
+        if task is None and service == "analysis":
+            task = conn.execute(
+                "SELECT * FROM replica_prompt_tasks WHERE id=%s FOR UPDATE", (source_id,)
             ).fetchone()
         if task is None:
             return False
@@ -705,6 +740,7 @@ def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
     Recoverable in-flight requests stay pending. No HTTP polling is billed.
     """
     _reconcile_first_frame_auxiliary_costs(conn, limit=limit)
+    _reconcile_source_review_costs(conn, limit=limit)
     # 人工重新入队可能清掉任务检查点，仍需按成本元数据收尾中断的后台解析。
     media_refreshes = conn.execute(
         "SELECT o.id FROM billing_operations o WHERE o.state='PENDING' "
@@ -784,6 +820,8 @@ def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
             AND t.result_asset_id IS NOT NULL)))
           OR EXISTS(SELECT 1 FROM analysis_tasks t WHERE t.id=o.source_id AND t.status IN
             ('SUCCEEDED','FAILED','CANCELLED'))
+          OR EXISTS(SELECT 1 FROM replica_prompt_tasks t WHERE t.id=o.source_id AND t.status IN
+            ('SUCCEEDED','FAILED'))
           OR EXISTS(SELECT 1 FROM script_rewrite_tasks t WHERE t.id=o.source_id AND t.status
             IN ('SUCCEEDED','FAILED','CANCELLED','SUBMISSION_UNCERTAIN'))
           OR EXISTS(SELECT 1 FROM script_from_audio_tasks t WHERE t.id=o.source_id AND

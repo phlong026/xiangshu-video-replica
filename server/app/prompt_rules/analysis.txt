@@ -5,7 +5,7 @@
 服务端已验证的媒体信息：
 {MEDIA_INFO_JSON}
 
-目标生成上下文：
+兼容输出模式（不含目标人物、换景、改写台词或目标时长）：
 {GENERATION_CONTEXT_JSON}
 
 FFmpeg 切镜候选线索：
@@ -62,7 +62,7 @@ transition 描述进入本段的方式；连续阶段写“同镜头连续，无
 每段严格包含：shot_id、start_time、end_time、shot_type、composition、
 camera_motion、subject、person_count、action、scene、scene_dressing、
 scene_lighting、wardrobe_pose_detail、ambient_sound、music_style_hint、
-spoken_text、transition、motion、segment_kind、boundary_reason。
+spoken_text、transition、motion、segment_kind、boundary_reason、facts。
 
 shot_id 按时间顺序为 s1、s2……，它是时间段编号，不是 H3 Shot 编号。
 shot_type 写实际景别；composition 写主体位置、朝向、画面范围和重要空间关系。
@@ -90,9 +90,11 @@ wardrobe_pose_detail 只描述源片服装、配饰和姿态，不写面部五�
 描述实际的物体或场景变化；不能把整个镜头内容都填成“无人物”。
 
 五、人物运动与摄影机运动分开
-motion 严格包含六个字段：
+{STORYBOARD_FACTS_CONTRACT}
 
-subject_motion_state：STATIC / WALKING / RUNNING / TURNING /
+以下 motion 是从 facts 派生的兼容字段，严格包含六个字段：
+
+subject_motion_state：STATIC / WALKING / RUNNING / MOVING / TURNING /
 GESTURING_ONLY / OBJECT_MOTION / NO_PERSON / UNKNOWN。
 选择该段主导状态；位移与手势同等主导时用“+”并列，如 WALKING+GESTURING_ONLY
 （边走边说边做手势），不得只留其一。并列只用于同等主导的状态，不用于凑数；
@@ -123,8 +125,8 @@ camera_motion 文本说明“画面逐渐放大，推近或变焦无法区分”
 relative_motion：描述人物与摄影机的相对变化，如“人物靠近，画面占比增大”
 “人物前进，摄影机后退，主体画面占比基本不变”；不确定则明确说明。
 
-选枚举前先在 action、subject_displacement、hand_action 与段落级
-camera_motion 文本中写清可观察依据；枚举取值必须与这些字段的描述一致，
+选枚举前先在 facts.actions[].description、path、hand_detail 与 facts.camera.detail 中
+写清可观察依据，再派生旧字段；枚举取值必须与这些字段的描述一致，
 不要求另行输出推理过程。
 
 六、台词和声音
@@ -199,6 +201,64 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
           "hand_action": "行走时抬起右手示意",
           "camera_motion": "STATIC",
           "relative_motion": "人物横向移动，画面占比基本不变"
+        },
+        "facts": {
+          "schema_version": "storyboard.facts.v1",
+          "camera_shot_id": "c1",
+          "entry_boundary": "VIDEO_START",
+          "subjects": [
+            {
+              "subject_id": "p1",
+              "label": "画面中间穿浅色上衣的讲解者",
+              "kind": "PERSON",
+              "visibility": "VISIBLE"
+            }
+          ],
+          "primary_subject_id": "p1",
+          "actions": [
+            {
+              "subject_id": "p1",
+              "description": "讲解者从画面左侧起步，边走边抬起右手示意，持续走向石桌",
+              "translation": "MOVING",
+              "gait": "WALKING",
+              "turning": "NONE",
+              "gesture": "GESTURING",
+              "direction": "lateral",
+              "path": "从画面左侧走向石桌，步数无法确定",
+              "hand_detail": "行走时抬起右手示意"
+            }
+          ],
+          "camera": {
+            "motion": "STATIC",
+            "detail": "固定机位"
+          },
+          "relative_motion": "人物横向移动，画面占比基本不变",
+          "evidence": [
+            {
+              "source": "VIDEO",
+              "fields": [
+                "subjects",
+                "actions",
+                "camera",
+                "entry_boundary",
+                "relative_motion"
+              ],
+              "start_time": 0,
+              "end_time": 4.0,
+              "observation": "讲解者从画面左侧起步，边走边抬起右手示意，持续走向石桌；视频开始；固定机位",
+              "status": "CURRENT"
+            },
+            {
+              "source": "AUDIO",
+              "fields": [
+                "spoken_text"
+              ],
+              "start_time": 0,
+              "end_time": 4.0,
+              "observation": "听到讲解者说：大家好，今天带大家看这个院子。",
+              "status": "CURRENT"
+            }
+          ]
         }
       },
       {
@@ -214,7 +274,7 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
         "scene": "庭院",
         "scene_dressing": "石桌与两把木椅，背景为院墙",
         "scene_lighting": "午后自然光，柔和顺光",
-        "wardrobe_pose_detail": "浅色上衣，深色长裤，行走时手臂自然摆动",
+        "wardrobe_pose_detail": "浅色上衣，深色长裤，已停下并自然垂手",
         "ambient_sound": "鸟鸣与远处车流",
         "music_style_hint": "无可辨识配乐",
         "spoken_text": "",
@@ -228,6 +288,64 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
           "hand_action": "双手自然垂下",
           "camera_motion": "STATIC",
           "relative_motion": "人物与机位均未移动"
+        },
+        "facts": {
+          "schema_version": "storyboard.facts.v1",
+          "camera_shot_id": "c1",
+          "entry_boundary": "CONTINUOUS",
+          "subjects": [
+            {
+              "subject_id": "p1",
+              "label": "画面中间穿浅色上衣的讲解者",
+              "kind": "PERSON",
+              "visibility": "VISIBLE"
+            }
+          ],
+          "primary_subject_id": "p1",
+          "actions": [
+            {
+              "subject_id": "p1",
+              "description": "讲解者已在石桌前停下，面向镜头，双手自然垂下",
+              "translation": "STATIONARY",
+              "gait": "NONE",
+              "turning": "NONE",
+              "gesture": "NONE",
+              "direction": "in_place",
+              "path": "无位移",
+              "hand_detail": "双手自然垂下"
+            }
+          ],
+          "camera": {
+            "motion": "STATIC",
+            "detail": "固定机位"
+          },
+          "relative_motion": "人物与机位均未移动",
+          "evidence": [
+            {
+              "source": "VIDEO",
+              "fields": [
+                "subjects",
+                "actions",
+                "camera",
+                "entry_boundary",
+                "relative_motion"
+              ],
+              "start_time": 4.0,
+              "end_time": 6.0,
+              "observation": "讲解者已在石桌前停下，面向镜头，双手自然垂下；同镜头连续，无切镜；固定机位",
+              "status": "CURRENT"
+            },
+            {
+              "source": "AUDIO",
+              "fields": [
+                "spoken_text"
+              ],
+              "start_time": 4.0,
+              "end_time": 6.0,
+              "observation": "听到鸟鸣与远处车流，没有可辨识口播",
+              "status": "CURRENT"
+            }
+          ]
         }
       },
       {
@@ -257,6 +375,64 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
           "hand_action": "抬起左手指向桌面，随后做开合讲解手势",
           "camera_motion": "PUSH_IN",
           "relative_motion": "镜头缓慢推近，人物画面占比逐渐增大"
+        },
+        "facts": {
+          "schema_version": "storyboard.facts.v1",
+          "camera_shot_id": "c2",
+          "entry_boundary": "CUT",
+          "subjects": [
+            {
+              "subject_id": "p1",
+              "label": "画面中间穿浅色上衣的讲解者",
+              "kind": "PERSON",
+              "visibility": "PARTIAL"
+            }
+          ],
+          "primary_subject_id": "p1",
+          "actions": [
+            {
+              "subject_id": "p1",
+              "description": "讲解者站在石桌旁，抬左手指向桌面并做讲解手势",
+              "translation": "STATIONARY",
+              "gait": "NONE",
+              "turning": "NONE",
+              "gesture": "GESTURING",
+              "direction": "in_place",
+              "path": "无位移，原地讲解",
+              "hand_detail": "抬起左手指向桌面，随后做开合讲解手势"
+            }
+          ],
+          "camera": {
+            "motion": "PUSH_IN",
+            "detail": "缓慢推近"
+          },
+          "relative_motion": "镜头缓慢推近，人物画面占比逐渐增大",
+          "evidence": [
+            {
+              "source": "VIDEO",
+              "fields": [
+                "subjects",
+                "actions",
+                "camera",
+                "entry_boundary",
+                "relative_motion"
+              ],
+              "start_time": 6.0,
+              "end_time": 12,
+              "observation": "讲解者站在石桌旁，抬左手指向桌面并做讲解手势；硬切；缓慢推近",
+              "status": "CURRENT"
+            },
+            {
+              "source": "AUDIO",
+              "fields": [
+                "spoken_text"
+              ],
+              "start_time": 6.0,
+              "end_time": 12,
+              "observation": "听到讲解者说：这个石桌是整院的中心。",
+              "status": "CURRENT"
+            }
+          ]
         }
       }
     ]
