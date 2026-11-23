@@ -332,6 +332,44 @@ describe("V1.4 任务详情真实成片预览", () => {
     });
   });
 
+  it("成片归档成功但预览签名失败仍可发布，允许单独重试预览", async () => {
+    const value = studio();
+    useStudio.mockReturnValue(value);
+    loadTaskPreview.mockResolvedValue({
+      id: "direct-2",
+      name: "待保存成片",
+      kind: "video",
+      url: "/signed/direct",
+      source: "任务中心",
+      group: "任务结果",
+      delivery: "direct",
+      generationTaskId: "generation-2",
+      saved: false,
+    });
+    archiveGenerationTask.mockResolvedValueOnce({
+      result_asset_id: "archived-2",
+    });
+    createGenerationResultPreviewUrl.mockRejectedValueOnce(
+      new Error("预览签发失败"),
+    );
+    render(<TaskDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "保存成片" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "去发布管理" })).toBeEnabled(),
+    );
+    expect(value.notify).toHaveBeenCalledWith(
+      "成片已保存，但预览链接获取失败；可以直接发布或重试预览。",
+    );
+    expect(
+      screen.getByRole("button", { name: "重试预览" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "去发布管理" }));
+    expect(value.navigate).toHaveBeenCalledWith("publishing", {
+      selectedAssetId: "archived-2",
+    });
+  });
+
   it("换素材回到原任务的创作类型并打开创作选择器", () => {
     const value = studio(taskA.id, {
       data: data([
