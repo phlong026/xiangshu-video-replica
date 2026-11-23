@@ -232,7 +232,10 @@ def test_cached_video_without_source_link_remains_playable_and_transcribable(mon
 
     storage = FakeStorageAdapter(provider="cos", bucket="test")
     stored = storage.put_object("viral/prepared/upload.mp4", b"video", content_type="video/mp4")
-    monkeypatch.setattr("app.viral_media.ViralMediaPreparation.cached", lambda self, **kw: stored)
+    monkeypatch.setattr(
+        "app.viral_media.ViralMediaPreparation.cached",
+        lambda self, **kw: stored if kw["kind"] == "video" else None,
+    )
     video = replace(_video("douyin"), play_url=None, audio_url=None)
     result = ViralMediaPipeline(client=None, storage=storage, shared=True, cached_only=True).fetch(
         video, prefer=prefer

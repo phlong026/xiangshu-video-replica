@@ -74,14 +74,8 @@ def test_replica_import_rejects_out_of_range_duration(monkeypatch, duration_ms):
     monkeypatch.setattr(viral_import, "require_not_auditor", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         viral_import,
-        "get_viral_video",
+        "_require_import_video",
         lambda *_args, **_kwargs: SimpleNamespace(duration_ms=duration_ms),
-    )
-    monkeypatch.setattr(
-        viral_import, "viral_video_availability", lambda *_args, **_kwargs: "available"
-    )
-    monkeypatch.setattr(
-        viral_import, "is_customer_visible_viral_video", lambda *_args, **_kwargs: True
     )
     actor = CurrentUser(id="u1", username="u1", display_name="用户", role="customer")
     request = viral_import.ViralImportRequest(
@@ -736,9 +730,14 @@ def _seed_base(dsn: str) -> None:
 
 
 @pytest.mark.parametrize("platform", ["douyin", "wechat_channels", "xiaohongshu"])
+@pytest.mark.parametrize("legacy_pushed", [False, True])
+@pytest.mark.parametrize("receipt_duration", [None, 0])
 def test_private_link_receipt_preserves_owner_import_without_public_listing(
-    pg_state, monkeypatch, platform
+    pg_state, monkeypatch, platform, legacy_pushed, receipt_duration
 ):
+    from contextlib import contextmanager
+
+    from app import viral_routes
     from app.auth import CurrentUser
     from app.storage import FakeStorageAdapter
     from app.viral_import import (
@@ -765,10 +764,18 @@ def test_private_link_receipt_preserves_owner_import_without_public_listing(
         "VALUES(%s,'private-link','本人链接素材','链接导入',6000)",
         (platform,),
     )
+    if legacy_pushed:
+        _exec(
+            pg_state,
+            "UPDATE viral_videos SET collection_published=1,pushed_at=now(),"
+            "homepage_featured=1 WHERE video_id='private-link'",
+        )
     response = {
         "item": {"platform": platform, "videoId": "private-link"},
         "importIdempotencyKey": "personal-link",
     }
+    if receipt_duration is not None:
+        response["item"]["durationMs"] = receipt_duration
     _exec(
         pg_state,
         "INSERT INTO viral_link_resolution_receipts(id,owner_user_id,idempotency_key,"
@@ -778,6 +785,9 @@ def test_private_link_receipt_preserves_owner_import_without_public_listing(
         (json.dumps(response),),
     )
     storage = FakeStorageAdapter(provider="cos", bucket="personal-import")
+    monkeypatch.setattr(
+        storage, "_signed_url", lambda method, key, expires_at: f"https://archive.invalid/{key}"
+    )
     ViralMediaPreparation(storage=storage).fetch(
         platform=platform,
         video_id="private-link",
@@ -791,6 +801,20 @@ def test_private_link_receipt_preserves_owner_import_without_public_listing(
         raise AssertionError("个人导入worker只读取已归档素材")
 
     monkeypatch.setattr(UrlFetcher, "iter_fetch", forbid_source)
+    actor = CurrentUser(id="u1", username="u1", display_name="本人", role="employee")
+
+    class CustomerDb:
+        @contextmanager
+        def write(self):
+            with pg_transaction() as raw:
+                yield BusinessConnection.postgres(raw), actor
+
+    monkeypatch.setattr(viral_routes, "get_media_storage", lambda conn: storage)
+    media = viral_routes.fetch_viral_video_media(
+        viral_routes.ViralMediaRequest(platform=platform, videoId="private-link", kind="audio"),
+        CustomerDb(),
+    )
+    assert media.kind == "video" and media.cacheHit
     request = ViralImportRequest(platform=platform, videoId="private-link", purpose="replica")
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
@@ -812,7 +836,7 @@ def test_private_link_receipt_preserves_owner_import_without_public_listing(
         assert denied.value.status_code == 404
         row = enqueue_viral_import_task(
             conn,
-            actor=CurrentUser(id="u1", username="u1", display_name="本人", role="employee"),
+            actor=actor,
             request=request,
             idempotency_key="personal-link",
         )
@@ -837,7 +861,9 @@ def test_private_link_receipt_preserves_owner_import_without_public_listing(
 
 
 @pytest.mark.parametrize("phase", ["enqueue", "prepare", "complete"])
-@pytest.mark.parametrize("state", ["never_pushed", "hidden", "future", "expired", "deleted"])
+@pytest.mark.parametrize(
+    "state", ["never_pushed", "withdrawn", "hidden", "future", "expired", "deleted"]
+)
 def test_public_import_rechecks_publication_at_each_delivery_boundary(pg_state, phase, state):
     from app.auth import CurrentUser
     from app.storage import FakeStorageAdapter
@@ -868,6 +894,26 @@ def test_public_import_rechecks_publication_at_each_delivery_boundary(pg_state, 
         "VALUES('publication-media','douyin','publication-guard','video','SUCCEEDED',"
         "'cos://guard/source.mp4')",
     )
+    if state != "never_pushed":
+        _exec(
+            pg_state,
+            "INSERT INTO viral_link_resolution_receipts(id,owner_user_id,idempotency_key,"
+            "normalized_url,purpose,request_hash,status,response_json,lease_owner,"
+            "lease_expires_at) "
+            "VALUES('guard-receipt','u1','resolve-guard','https://example.invalid/share',"
+            "'replica','hash','SUCCEEDED',%s,'owner',now())",
+            (
+                json.dumps(
+                    {
+                        "item": {
+                            "platform": "douyin",
+                            "videoId": "publication-guard",
+                            "durationMs": 6000,
+                        }
+                    }
+                ),
+            ),
+        )
     actor = CurrentUser(id="u1", username="u1", display_name="本人", role="employee")
     request = ViralImportRequest(platform="douyin", videoId="publication-guard", purpose="replica")
     if phase != "enqueue":
@@ -889,6 +935,7 @@ def test_public_import_rechecks_publication_at_each_delivery_boundary(pg_state, 
     else:
         assignment = {
             "never_pushed": "pushed_at=NULL",
+            "withdrawn": "collection_published=0",
             "future": "homepage_starts_at=now()+interval '1 day'",
             "expired": "homepage_ends_at=now()-interval '1 day'",
             "deleted": "deleted_at=now()",
@@ -1193,3 +1240,331 @@ def test_viral_import_idempotency_key_is_unique_per_owner_on_real_pg(pg_state: s
     _seed_import_task(pg_state, task_id="vi-3", owner="u2", idempotency_key="shared-key")
 
     assert cast(int, _one(pg_state, "SELECT count(*) FROM viral_import_tasks")) == 2
+
+
+@pytest.mark.parametrize("operator_category", ["建房", "链接导入"])
+def test_customer_resolution_preserves_operator_metadata_and_own_receipt(
+    pg_state, monkeypatch, operator_category
+):
+    from contextlib import contextmanager
+    from dataclasses import replace
+
+    from app import usage_billing, viral_import_routes
+    from app.auth import CurrentUser
+    from app.storage import FakeStorageAdapter
+    from app.viral_link import ResolvedViralLink
+    from app.viral_store import upsert_viral_videos
+
+    _seed_base(pg_state)
+    resolved = ResolvedViralLink(
+        platform="douyin",
+        video_id="7672703482771972081",
+        title="客户本次解析的标题",
+        author="客户解析作者",
+        cover_url="https://cdn.example/personal-cover.jpg",
+        video_url="https://cdn.example/current-video.mp4",
+        audio_url=None,
+        duration_ms=6000,
+        source_description="本次解析描述",
+    )
+    operator_video = replace(
+        viral_import_routes._resolved_video(resolved),
+        category=operator_category,
+        title="运营已编辑的标题",
+        author="运营作者",
+        cover_url="https://cdn.example/operator-cover.jpg",
+        cover_key="operator-cover.jpg",
+        tags=["运营标签"],
+        native={"source_description": "运营已维护描述"},
+    )
+    with pg_transaction() as raw:
+        upsert_viral_videos(BusinessConnection.postgres(raw), [operator_video])
+    _seed_operator_source(pg_state, resolved.video_id)
+    _exec(
+        pg_state,
+        "UPDATE viral_videos SET collection_published=1,pushed_at=now(),homepage_featured=1",
+    )
+    before = _rows(pg_state, "SELECT * FROM viral_videos")[0]
+    actor = CurrentUser(id="u1", username="u1", display_name="本人", role="employee")
+    storage = FakeStorageAdapter(provider="cos", bucket="resolution")
+    storage.put_object("operator-cover.jpg", b"operator-cover", content_type="image/jpeg")
+    preflights = []
+    cover_downloads = []
+
+    class CustomerDb:
+        @contextmanager
+        def write(self):
+            with pg_transaction() as raw:
+                yield BusinessConnection.postgres(raw), actor
+
+    monkeypatch.setattr(
+        viral_import_routes,
+        "douyidou_link_client_from_settings",
+        lambda conn: SimpleNamespace(resolve=lambda url, purpose: resolved),
+    )
+    monkeypatch.setattr(viral_import_routes, "get_media_storage", lambda conn: storage)
+    monkeypatch.setattr(
+        viral_import_routes,
+        "preflight_resolved_media",
+        lambda item, **kwargs: preflights.append(item),
+    )
+    monkeypatch.setattr(
+        viral_import_routes.UrlFetcher,
+        "fetch",
+        lambda self, url: cover_downloads.append(url) or b"new-cover",
+    )
+    for name in (
+        "accept_operation",
+        "begin_source_attempt",
+        "complete_source_attempt",
+        "finish_source",
+    ):
+        monkeypatch.setattr(usage_billing, name, lambda *args, **kwargs: None)
+
+    response = viral_import_routes.resolve_viral_link(
+        viral_import_routes.ViralLinkResolutionRequest(
+            url=f"https://www.douyin.com/video/{resolved.video_id}", purpose="replica"
+        ),
+        CustomerDb(),
+        "customer-current-result",
+    )
+    assert response.item.title == resolved.title
+    assert response.item.coverUrl == resolved.cover_url
+    assert preflights == [resolved]
+    assert _rows(pg_state, "SELECT * FROM viral_videos")[0] == before
+    receipt = _rows(pg_state, "SELECT * FROM viral_link_resolution_receipts")[0]
+    assert receipt["owner_user_id"] == "u1" and receipt["status"] == "SUCCEEDED"
+    assert json.loads(receipt["response_json"])["item"]["title"] == resolved.title
+    assert {
+        row["source_kind"]
+        for row in _rows(pg_state, "SELECT source_kind FROM viral_content_sources")
+    } == {"admin_link_import", "customer_import"}
+    assert cover_downloads == []
+    assert list(storage._objects) == ["operator-cover.jpg"]
+
+
+@pytest.mark.parametrize("operator_owned", [False, True])
+@pytest.mark.parametrize("purpose", ["replica", "copy"])
+def test_customer_re_resolution_uses_own_latest_metadata_and_cached_media(
+    pg_state, monkeypatch, operator_owned, purpose
+):
+    from contextlib import contextmanager
+    from dataclasses import replace
+
+    from app import usage_billing, viral_import_routes
+    from app.auth import CurrentUser
+    from app.storage import FakeStorageAdapter
+    from app.viral_import import (
+        ViralImportRequest,
+        complete_viral_import_task,
+        enqueue_viral_import_task,
+        perform_viral_import_task,
+        prepare_viral_import_task,
+    )
+    from app.viral_link import ResolvedViralLink
+    from app.viral_media_preparation import ViralMediaPreparation
+    from app.viral_store import upsert_viral_videos
+
+    _seed_base(pg_state)
+    _exec(
+        pg_state,
+        "INSERT INTO viral_runtime_controls(id,import_enabled) VALUES(1,1) "
+        "ON CONFLICT(id) DO UPDATE SET import_enabled=1",
+    )
+    old = ResolvedViralLink(
+        platform="douyin",
+        video_id="7672703482771972081",
+        title="首次解析标题",
+        author="作者",
+        cover_url=None,
+        video_url="https://cdn.example/video.mp4",
+        audio_url=None,
+        duration_ms=0,
+        source_description="首次尚未知晓时长",
+    )
+    current = replace(
+        old,
+        title="本人本次解析标题",
+        duration_ms=6000,
+        audio_url="https://cdn.example/audio.m4a" if purpose == "copy" else None,
+    )
+    if operator_owned:
+        operator = replace(
+            viral_import_routes._resolved_video(old), title="运营标题", category="建房"
+        )
+        with pg_transaction() as raw:
+            upsert_viral_videos(BusinessConnection.postgres(raw), [operator])
+        _seed_operator_source(pg_state, old.video_id)
+        _exec(pg_state, "UPDATE viral_videos SET collection_published=1,pushed_at=now()")
+    actor = CurrentUser(id="u1", username="u1", display_name="本人", role="employee")
+    storage = FakeStorageAdapter(provider="cos", bucket="personal-re-resolution")
+    resolutions = iter([old, current])
+
+    class CustomerDb:
+        @contextmanager
+        def write(self):
+            with pg_transaction() as raw:
+                yield BusinessConnection.postgres(raw), actor
+
+    def preflight(resolved, *, purpose, storage):
+        kind = "audio" if purpose == "copy" and resolved.audio_url else "video"
+        ViralMediaPreparation(storage=storage).fetch(
+            platform=resolved.platform,
+            video_id=resolved.video_id,
+            kind=kind,
+            prepare=lambda key, check: storage.put_object(
+                key, f"cached-{kind}".encode(), content_type=f"{kind}/mp4"
+            ),
+        )
+
+    def forbid_source(*args, **kwargs):
+        raise AssertionError("个人任务只能读取已经预检归档的媒体")
+
+    monkeypatch.setattr(
+        viral_import_routes,
+        "douyidou_link_client_from_settings",
+        lambda conn: SimpleNamespace(resolve=lambda url, purpose: next(resolutions)),
+    )
+    monkeypatch.setattr(viral_import_routes, "get_media_storage", lambda conn: storage)
+    monkeypatch.setattr(viral_import_routes, "preflight_resolved_media", preflight)
+    monkeypatch.setattr(viral_import_routes.UrlFetcher, "iter_fetch", forbid_source)
+    for name in (
+        "accept_operation",
+        "begin_source_attempt",
+        "complete_source_attempt",
+        "finish_source",
+    ):
+        monkeypatch.setattr(usage_billing, name, lambda *args, **kwargs: None)
+    url = f"https://www.douyin.com/video/{old.video_id}"
+    first = viral_import_routes.resolve_viral_link(
+        viral_import_routes.ViralLinkResolutionRequest(url=url, purpose="copy"),
+        CustomerDb(),
+        "first-resolution",
+    )
+    assert first.item.durationMs == 0
+    before = _rows(pg_state, "SELECT * FROM viral_videos")[0]
+    if purpose == "copy" and not operator_owned:
+        # 旧个人视频缓存已回收，最新解析只准备音频；全局行的 audio_url 仍为空。
+        _exec(pg_state, "DELETE FROM viral_media_preparations WHERE media_kind='video'")
+    latest = viral_import_routes.resolve_viral_link(
+        viral_import_routes.ViralLinkResolutionRequest(url=url, purpose=purpose),
+        CustomerDb(),
+        "latest-resolution",
+    )
+    assert latest.item.durationMs == 6000 and latest.item.title == current.title
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        with pytest.raises(ViralImportError) as denied:
+            enqueue_viral_import_task(
+                conn,
+                actor=CurrentUser(id="u2", username="u2", display_name="其他人", role="employee"),
+                request=ViralImportRequest(
+                    platform="douyin", videoId=old.video_id, purpose="replica"
+                ),
+                idempotency_key="must-not-borrow-other-receipt",
+            )
+        assert denied.value.status_code == (422 if operator_owned else 404)
+        row = enqueue_viral_import_task(
+            conn,
+            actor=actor,
+            request=ViralImportRequest(platform="douyin", videoId=old.video_id, purpose=purpose),
+            idempotency_key=latest.import_idempotency_key,
+        )
+        task_id, project_id = str(row["id"]), str(row["project_id"])
+        assert (
+            conn.execute("SELECT name FROM projects WHERE id=%s", (project_id,)).fetchone()[0]
+            == current.title
+        )
+    lease = _acquire("latest-receipt-worker")
+    assert lease is not None and lease.id == task_id
+    with pg_transaction() as raw:
+        work = prepare_viral_import_task(
+            BusinessConnection.postgres(raw), lease=lease, storage=storage
+        )
+    assert work.video.title == current.title and work.video.duration_ms == 6000
+    outcome = perform_viral_import_task(work)
+    assert outcome.duration_seconds == 6
+    assert outcome.media_kind == ("audio" if purpose == "copy" else "video")
+    with pg_transaction() as raw:
+        complete_viral_import_task(BusinessConnection.postgres(raw), lease=lease, outcome=outcome)
+    assert _import_row(pg_state, task_id)["status"] == "SUCCEEDED"
+    assert (
+        json.loads(_rows(pg_state, "SELECT metadata_json FROM assets")[0]["metadata_json"])[
+            "duration_seconds"
+        ]
+        == 6
+    )
+    assert _rows(pg_state, "SELECT * FROM viral_videos")[0] == before
+
+
+def test_customer_first_import_allows_later_admin_takeover_without_duplicate(pg_state):
+    from dataclasses import replace
+
+    from test_viral_media import _video
+
+    from app.viral_store import upsert_viral_videos
+
+    _seed_base(pg_state)
+    private = replace(_video("douyin", "takeover"), category="链接导入", title="个人解析标题")
+    with pg_transaction() as raw:
+        inserted = upsert_viral_videos(
+            BusinessConnection.postgres(raw), [private], update_existing=False
+        )
+    assert inserted == {("douyin", "takeover")}
+    operator = replace(private, category="建房", title="运营确认标题", tags=["管理员标签"])
+    with pg_transaction() as raw:
+        assert upsert_viral_videos(BusinessConnection.postgres(raw), [operator]) == set()
+    _seed_operator_source(pg_state, operator.video_id)
+    before = _rows(pg_state, "SELECT * FROM viral_videos")[0]
+    with pg_transaction() as raw:
+        assert (
+            upsert_viral_videos(BusinessConnection.postgres(raw), [private], update_existing=False)
+            == set()
+        )
+    assert _rows(pg_state, "SELECT * FROM viral_videos") == [before]
+    assert before["title"] == operator.title and before["category"] == "建房"
+
+
+def test_customer_conflict_waits_for_uncommitted_operator_without_overwriting(pg_state):
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    from threading import Event
+    from time import monotonic
+
+    from test_viral_media import _video
+
+    from app.viral_store import upsert_viral_videos
+
+    _seed_base(pg_state)
+    operator = replace(_video("douyin", "concurrent-import"), category="建房", title="后台标题")
+    private = replace(operator, category="链接导入", title="个人标题")
+    connected = Event()
+    customer_pid = []
+
+    def import_customer():
+        with psycopg.connect(pg_state) as raw:
+            customer_pid.append(raw.info.backend_pid)
+            connected.set()
+            return upsert_viral_videos(
+                BusinessConnection.postgres(raw), [private], update_existing=False
+            )
+
+    with psycopg.connect(pg_state) as operator_raw, ThreadPoolExecutor(max_workers=1) as executor:
+        upsert_viral_videos(BusinessConnection.postgres(operator_raw), [operator])
+        pending = executor.submit(import_customer)
+        try:
+            assert connected.wait(5)
+            deadline = monotonic() + 5
+            while not _one(pg_state, "SELECT pg_blocking_pids(%s)", (customer_pid[0],)):
+                assert monotonic() < deadline, "客户写入应等待管理员尚未提交的同视频行"
+                Event().wait(0.01)
+            # 运营来源在客户语句开始之后才写入，客户不能依赖该语句的旧快照保护元数据。
+            operator_raw.execute(
+                "INSERT INTO viral_content_sources(batch_id,source_kind,platform,video_id,keyword) "
+                "VALUES('concurrent-admin','admin_link_import','douyin','concurrent-import','')"
+            )
+        finally:
+            operator_raw.commit()
+        assert pending.result(timeout=5) == set()
+    row = _rows(pg_state, "SELECT * FROM viral_videos")[0]
+    assert row["title"] == operator.title and row["category"] == operator.category
