@@ -42,7 +42,7 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import (
@@ -272,9 +272,12 @@ def list_training_materials(
 
 @router.post("/training-materials/{material_id}/download-url")
 def create_training_material_download_url(
-    material_id: str, conn: Database, actor: AuthenticatedUser
+    material_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+    purpose: Literal["download", "preview"] = "download",
 ) -> dict[str, object]:
-    """签发短时效防盗链直链（30 分钟），并原子递增下载计数。
+    """签发短时效防盗链直链（30 分钟）；仅统计成功签发的下载链接。
 
     直链为「持有即访问」的公开 URL——过期自动失效；界面在媒体 error 时
     重签一次（方案 §5.2）。签发需登录会话。
@@ -290,10 +293,6 @@ def create_training_material_download_url(
             ).fetchone()
             if row is None:
                 raise _http(404, "TRAINING_MATERIAL_NOT_FOUND", "素材不存在或已下架。")
-            business.execute(
-                "UPDATE training_materials SET download_count = download_count + 1 WHERE id = %s",
-                (material_id,),
-            )
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE) from exc
     storage, _version = get_training_material_storage()
@@ -309,6 +308,19 @@ def create_training_material_download_url(
         raise _http(
             503, "TRAINING_MATERIAL_STORAGE_FAILED", "素材存储通道暂不可用，请稍后重试。"
         ) from exc
+    if purpose == "download":
+        with pg_transaction() as pg:
+            updated = (
+                BusinessConnection.postgres(pg)
+                .execute(
+                    "UPDATE training_materials SET download_count = download_count + 1 "
+                    "WHERE id = %s AND deleted_at IS NULL AND visible = 1 RETURNING id",
+                    (material_id,),
+                )
+                .fetchone()
+            )
+            if updated is None:
+                raise _http(404, "TRAINING_MATERIAL_NOT_FOUND", "素材不存在或已下架。")
     return {"url": url, "expires_at": str(expire)}
 
 

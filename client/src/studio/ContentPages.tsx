@@ -14,6 +14,7 @@ import {
   createMaterialUploadIntent,
   createPublishRecord,
   createViralImportTask,
+  customerVisibleErrorMessage,
   downloadMaterialAsset,
   downloadVideoToFile,
   fetchCoverStyles,
@@ -2557,14 +2558,6 @@ const TRAINING_TABS: Array<{ id: string; label: string }> = [
 const TRAINING_PAGE_SIZE = 24;
 // 骨架屏占位卡数量：静态键名数组，避免数组索引 key（biome noArrayIndexKey）。
 const SKELETON_KEYS = ["s1", "s2", "s3", "s4", "s5", "s6"];
-// Office Online 预览入口（用户拍板，2026-11-12）：直链 URL 会经微软服务转码
-// 渲染；预览失败/超限时弹层内常驻下载按钮兜底（方案 §5.2）。
-function officeViewerUrl(directUrl: string): string {
-  return `https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(
-    directUrl,
-  )}`;
-}
-
 function formatMaterialSizeBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -2588,6 +2581,8 @@ export function MaterialsPage() {
   // 全量素材元数据（当前标签筛选维度）：素材库是运营上传的小体量只读列表，
   // 全量在手才能做类型计数、站内搜索与纯前端分页，不必为计数加服务端 facet。
   const [library, setLibrary] = useState<TrainingMaterialPublicItem[]>([]);
+  const [truncated, setTruncated] = useState(false);
+  const loadRevision = useRef(0);
   const [tagFacet, setTagFacet] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -2603,6 +2598,8 @@ export function MaterialsPage() {
     useState<TrainingMaterialPublicItem | null>(null);
 
   const load = useCallback(async (tagFilter: string[]) => {
+    const revision = ++loadRevision.current;
+    const current = () => revision === loadRevision.current;
     try {
       setLoading(true);
       setError("");
@@ -2613,6 +2610,7 @@ export function MaterialsPage() {
         page: 1,
         pageSize: 100,
       });
+      if (!current()) return;
       const collected = [...first.items];
       const pages = Math.min(Math.ceil(first.total / 100), 10);
       for (let next = 2; next <= pages; next += 1) {
@@ -2621,14 +2619,17 @@ export function MaterialsPage() {
           page: next,
           pageSize: 100,
         });
+        if (!current()) return;
         collected.push(...part.items);
       }
       setLibrary(collected);
+      setTruncated(first.total > collected.length);
       setTagFacet(first.tag_facet);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "读取培训素材失败");
+      if (current())
+        setError(cause instanceof Error ? cause.message : "读取培训素材失败");
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, []);
 
@@ -2636,6 +2637,9 @@ export function MaterialsPage() {
   useEffect(() => {
     void load(tags);
     setPage(1);
+    return () => {
+      loadRevision.current += 1;
+    };
   }, [load, tags]);
 
   async function ensurePreviewUrl(
@@ -2646,7 +2650,7 @@ export function MaterialsPage() {
     if (cached && !forceRefresh) return cached;
     try {
       setBusyId(item.id);
-      const url = await trainingMaterialDownloadUrl(item.id);
+      const url = await trainingMaterialDownloadUrl(item.id, "preview");
       setPreviewUrls((current) => ({ ...current, [item.id]: url }));
       return url;
     } catch (cause) {
@@ -2673,13 +2677,24 @@ export function MaterialsPage() {
   }
 
   async function openPreview(item: TrainingMaterialPublicItem) {
+    if (isOfficeDoc(item)) {
+      setPreviewItem(item);
+      return;
+    }
     const url = await ensurePreviewUrl(item);
     if (url) setPreviewItem(item);
   }
 
   async function download(item: TrainingMaterialPublicItem) {
-    const url = await ensurePreviewUrl(item, true);
-    if (!url) return;
+    let url: string;
+    try {
+      url = await trainingMaterialDownloadUrl(item.id, "download");
+    } catch (cause) {
+      notify(
+        customerVisibleErrorMessage(cause, "获取下载链接失败，请稍后重试。"),
+      );
+      return;
+    }
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `${item.title}${item.file_suffix}`;
@@ -2772,7 +2787,9 @@ export function MaterialsPage() {
           value={search}
         />
         {!loading ? (
-          <span className="content-material-total">共 {total} 个素材</span>
+          <span className="content-material-total">
+            {truncated ? "前 1000 条中匹配" : "共"} {total} 个素材
+          </span>
         ) : null}
       </div>
       {tagFacet.length > 0 ? (
@@ -2967,7 +2984,11 @@ export function MaterialsPage() {
               </button>
             </header>
             <div className="content-material-dialog__body">
-              {previewUrl ? (
+              {isOfficeDoc(previewItem) ? (
+                <p className="le-hint">
+                  此格式仅提供下载，请使用本机应用打开。
+                </p>
+              ) : previewUrl ? (
                 previewItem.kind === "video" ? (
                   // biome-ignore lint/a11y/useMediaCaption: 平台培训视频不提供字幕轨。
                   <video
@@ -2989,11 +3010,6 @@ export function MaterialsPage() {
                     alt={`${previewItem.title} 预览`}
                     src={previewUrl}
                     onError={() => void resignOnMediaError(previewItem)}
-                  />
-                ) : isOfficeDoc(previewItem) ? (
-                  <iframe
-                    src={officeViewerUrl(previewUrl)}
-                    title={`${previewItem.title} 预览`}
                   />
                 ) : (
                   <iframe

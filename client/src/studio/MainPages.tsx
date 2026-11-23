@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  archiveGenerationTask,
   type CustomerProfile,
+  createGenerationResultPreviewUrl,
   createGenerationTaskPreviewUrl,
   createViralImportTask,
   customerVisibleErrorMessage,
@@ -75,7 +77,10 @@ const statusNames: Record<StudioTask["status"], string> = {
   cancelled: "已取消",
 };
 
-function taskDetailPatch(task: StudioTask, returnTo: "workbench" | "tasks") {
+function taskDetailPatch(
+  task: StudioTask,
+  returnTo: "workbench" | "tasks" | "works",
+) {
   return {
     selectedTaskId: task.id,
     selectedTaskKind: task.backendKind,
@@ -183,7 +188,8 @@ function WorkbenchWorks() {
       const asset = await loadTaskPreview(task);
       if (request !== publishRequest.current) return;
       if (!asset?.saved) {
-        notify("请先在任务详情保存成片，再前往发布。");
+        navigate("task-detail", taskDetailPatch(task, "workbench"));
+        notify("请在任务详情保存成片后再发布。");
         return;
       }
       updateData((current) => ({
@@ -220,14 +226,14 @@ function WorkbenchWorks() {
     >
       <div className="studio-home-section-heading">
         <h2 id="studio-home-works-title">我的成片</h2>
-        <Button variant="quiet" onClick={() => navigate("tasks")}>
-          查看全部任务
+        <Button variant="quiet" onClick={() => navigate("works")}>
+          查看全部成片
         </Button>
       </div>
       {work.length ? (
         <>
           <p className="studio-works-summary">
-            共 {work.length} 支成片
+            最近 {work.length} 条成片记录
             {active.length ? ` · ${active.length} 个任务进行中` : ""}
           </p>
           <div className="studio-works-grid">
@@ -966,6 +972,22 @@ export function WorkbenchPage() {
           </div>
           {uploadedSource && uploadedVideo && (
             <div className="studio-upload-replica">
+              {uploadedVideo.durationMs != null &&
+                uploadedVideo.durationMs > 30_000 && (
+                  <>
+                    <Hint>
+                      一键口播可以只保留音轨；手动查看镜头需选择原视频。
+                    </Hint>
+                    <Button onClick={() => navigate("long-replica")}>
+                      手动拆解原视频
+                    </Button>
+                  </>
+                )}
+              {uploadedVideo.durationMs != null &&
+                uploadedVideo.durationMs >= 4_000 &&
+                uploadedVideo.durationMs <= 30_000 && (
+                  <Button onClick={() => navigate("replica")}>手动复刻</Button>
+                )}
               <AdaptiveReplicaControl
                 key={`${accountContextKey}:${uploadedVideo.id}`}
                 video={uploadedVideo}
@@ -1054,7 +1076,7 @@ const TOOL_ENTRIES: ReadonlyArray<
 ];
 
 function WorkbenchTools() {
-  const { navigate, review, patchState, discardSavedDraft } = useStudio();
+  const { navigate, patchState, discardSavedDraft } = useStudio();
   return (
     <section
       className="studio-home-tools"
@@ -1101,7 +1123,7 @@ function WorkbenchTools() {
   );
 }
 
-export function TasksPage() {
+export function TasksPage({ worksOnly = false }: { worksOnly?: boolean }) {
   const {
     data,
     navigate,
@@ -1124,12 +1146,14 @@ export function TasksPage() {
     "generation" | "oral" | null
   >(null);
   const matchesStatus = (task: StudioTask) =>
-    status === "all" ||
-    (status === "active"
-      ? ["running", "queued"].includes(task.status)
-      : status === "attention"
-        ? ["failed", "uncertain"].includes(task.status)
-        : ["completed", "partial"].includes(task.status));
+    worksOnly
+      ? taskHasDeliverable(task)
+      : status === "all" ||
+        (status === "active"
+          ? ["running", "queued"].includes(task.status)
+          : status === "attention"
+            ? ["failed", "uncertain"].includes(task.status)
+            : ["completed", "partial"].includes(task.status));
   const tasks = data.tasks.filter(
     (task) => matchesStatus(task) && (kind === "全部" || kind === task.type),
   );
@@ -1301,16 +1325,23 @@ export function TasksPage() {
           工具并轨一行（用户拍板 2026-11-15）：页签左、类型筛选与历史任务
           入口右，不再上下错位悬浮。 */}
       <div className="studio-filter-bar">
-        <Tabs
-          value={status}
-          onChange={setStatus}
-          items={[
-            { id: "all", label: "全部" },
-            { id: "active", label: `进行中 ${activeCount}` },
-            { id: "attention", label: `待处理 ${attentionCount}` },
-            { id: "completed", label: "已完成" },
-          ]}
-        />
+        {!worksOnly && (
+          <Tabs
+            value={status}
+            onChange={setStatus}
+            items={[
+              { id: "all", label: "全部" },
+              { id: "active", label: `进行中 ${activeCount}` },
+              { id: "attention", label: `待处理 ${attentionCount}` },
+              { id: "completed", label: "已完成" },
+            ]}
+          />
+        )}
+        {worksOnly ? (
+          <Button onClick={() => navigate("tasks")}>查看全部任务</Button>
+        ) : (
+          <Button onClick={() => navigate("works")}>查看全部成片</Button>
+        )}
         <div className="studio-task-toolbar-right">
           <FilterSelect
             label="类型"
@@ -1324,7 +1355,9 @@ export function TasksPage() {
         </div>
       </div>
       <p className="studio-result-count" role="status">
-        共 {tasks.length} 条任务
+        {worksOnly
+          ? `已加载 ${tasks.length} 条成片记录`
+          : `共 ${tasks.length} 条任务`}
       </p>
       <div className="studio-table-wrap">
         <table className="studio-table">
@@ -1431,7 +1464,10 @@ export function TasksPage() {
                         onClick={() =>
                           navigate(
                             "task-detail",
-                            taskDetailPatch(task, "tasks"),
+                            taskDetailPatch(
+                              task,
+                              worksOnly ? "works" : "tasks",
+                            ),
                           )
                         }
                       >
@@ -1549,14 +1585,16 @@ export function TaskDetailPage() {
     data,
     navigate,
     openLive,
+    openPicker,
     review,
-    patchState,
     updateData,
     notify,
     refresh,
     user,
   } = useStudio();
-  const [actionBusy, setActionBusy] = useState<"download" | "retry">();
+  const [actionBusy, setActionBusy] = useState<
+    "download" | "retry" | "archive"
+  >();
   const [previewLoad, setPreviewLoad] = useState<{
     key?: string;
     asset?: StudioAsset;
@@ -1595,7 +1633,7 @@ export function TaskDetailPage() {
     (taskMatchesRoute &&
       verifiedDetailRef.current?.key === detailContextKey &&
       verifiedDetailRef.current?.userId === user.id);
-  const previewContextKey = `${user.id}:${detailKey ?? state.selectedTaskId ?? "none"}`;
+  const previewContextKey = `${user.id}:${user.role}:${detailKey ?? state.selectedTaskId ?? "none"}`;
   const previewContextRef = useRef(previewContextKey);
   previewContextRef.current = previewContextKey;
   useEffect(() => {
@@ -1812,9 +1850,21 @@ export function TaskDetailPage() {
     ],
     ["提交时间", formatTaskTime(task.submitted)],
     // IA 改版第 5 项：成片不再归档进素材库（素材库已替换为平台培训内容）。
-    ["资产状态", result?.saved ? "已保存到素材库" : "以任务返回结果为准"],
+    [
+      "资产状态",
+      result?.saved
+        ? "已保存"
+        : previewStatus === "expired"
+          ? "已过期"
+          : result?.delivery === "direct"
+            ? "临时成片"
+            : "以任务返回结果为准",
+    ],
   ];
-  const recreate = (page: "copy" | "oral" | "replica") => {
+  const recreate = (
+    page: "copy" | "oral" | "replica" | "video" | "reference" | "replacement",
+    picker?: "reference" | "avatar" | "image" | "first-frame",
+  ) => {
     const hasOralInputs =
       task.backendKind === "oral_task" &&
       (task.scriptText?.trim() ||
@@ -1826,9 +1876,55 @@ export function TaskDetailPage() {
       );
       return;
     }
-    patchState({ draft: draftFromTask(task) });
-    navigate(page, { returnTo: "task-detail" });
+    navigate(page, { draft: draftFromTask(task), returnTo: "task-detail" });
+    if (picker) openPicker(picker);
     if (!review) notify("已创建新的创作草稿，请核对正文与素材后重新确认。");
+  };
+  const archiveResult = async () => {
+    const taskId = result?.generationTaskId;
+    if (!result || !taskId || actionBusy || review || user.role === "auditor")
+      return;
+    const context = previewContextKey;
+    const operation = ++previewRequestRef.current;
+    const current = () =>
+      previewContextRef.current === context &&
+      previewRequestRef.current === operation;
+    setActionBusy("archive");
+    try {
+      const archived = await archiveGenerationTask(taskId);
+      if (!current()) return;
+      const id = archived.result_asset_id;
+      if (!id) throw new Error("成片仍在保存中，请稍后再试。");
+      const preview = await createGenerationResultPreviewUrl(id);
+      if (!current()) return;
+      const asset: StudioAsset = {
+        ...result,
+        id,
+        assetId: id,
+        url: preview,
+        delivery: undefined,
+        saved: true,
+      };
+      updateData((current) => ({
+        ...current,
+        assets: [
+          asset,
+          ...current.assets.filter((item) => item.id !== asset.id),
+        ],
+        tasks: current.tasks.map((item) =>
+          item.id === task.id ? { ...item, resultId: id } : item,
+        ),
+      }));
+      setPreviewLoad({ key: context, status: "ready", asset });
+    } catch (cause) {
+      if (!current()) return;
+      if (isResultUrlExpired(cause)) {
+        setPreviewLoad({ key: context, status: "expired", asset: result });
+      } else
+        notify(customerVisibleErrorMessage(cause, "保存成片失败，请重试。"));
+    } finally {
+      if (previewContextRef.current === context) setActionBusy(undefined);
+    }
   };
   const downloadResult = async () => {
     if (review) {
@@ -1984,9 +2080,22 @@ export function TaskDetailPage() {
               <Icon name="download" />
               {actionBusy === "download" ? "正在下载…" : "下载成片"}
             </Button>
+            {!review &&
+              user.role !== "auditor" &&
+              result?.delivery === "direct" &&
+              previewStatus !== "expired" && (
+                <Button
+                  disabled={Boolean(actionBusy)}
+                  onClick={() => void archiveResult()}
+                >
+                  {actionBusy === "archive" ? "保存中…" : "保存成片"}
+                </Button>
+              )}
             <Button
               variant="primary"
-              disabled={!result?.saved || !taskDeliverable}
+              disabled={
+                !result?.saved || !taskDeliverable || user.role === "auditor"
+              }
               onClick={() =>
                 navigate("publishing", { selectedAssetId: result?.id })
               }
@@ -2005,7 +2114,7 @@ export function TaskDetailPage() {
           {result && !result.saved && previewStatus !== "expired" && (
             <Hint>
               {DIRECT_RESULT_RETENTION_HINT}
-              成片请在有效期内下载到本地留存；发布可从发布管理页直接发起。
+              请在有效期内下载留存，或保存成片后前往发布。
             </Hint>
           )}
           {!review && taskDeliverable && (
@@ -2042,12 +2151,21 @@ export function TaskDetailPage() {
               调整脚本
             </Button>
             <Button
-              onClick={() =>
-                navigate("materials", {
-                  returnTo: "task-detail",
-                  selectedTaskId: task.id,
-                })
-              }
+              disabled={user.role === "auditor"}
+              onClick={() => {
+                if (task.backendKind === "oral_task")
+                  recreate("oral", "avatar");
+                else if (task.type === "人物置换")
+                  recreate("replacement", "image");
+                else if (task.type === "视频生成")
+                  recreate(
+                    (task.draftSnapshot?.referenceIds.length ?? 0) > 0
+                      ? "reference"
+                      : "video",
+                    "reference",
+                  );
+                else recreate("replica", "first-frame");
+              }}
             >
               <Icon name="image" />
               更换素材

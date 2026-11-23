@@ -481,6 +481,8 @@ export function StudioWorkspace({
   const [restorePromptVisible, setRestorePromptVisible] = useState(false);
   const [discardBusy, setDiscardBusy] = useState(false);
   const [restoreError, setRestoreError] = useState("");
+  const [draftReadRevision, setDraftReadRevision] = useState(0);
+  const [draftReadErrorAccount, setDraftReadErrorAccount] = useState<string>();
   if (currentUserRoleRef.current !== currentUser.role) {
     currentUserRoleRef.current = currentUser.role;
     permissionGenerationRef.current += 1;
@@ -600,9 +602,11 @@ export function StudioWorkspace({
 
   const [cloudDraftQueue] = useState(() =>
     createCloudDraftQueue((draft: StudioDraft) => {
+      const accountGeneration = draftAccountGenerationRef.current;
       const record = persistCloudDraft(draft, lastDraftRevisionRef.current);
       return record.then((saved) => {
-        lastDraftRevisionRef.current = saved.revision;
+        if (accountGeneration === draftAccountGenerationRef.current)
+          lastDraftRevisionRef.current = saved.revision;
       });
     }),
   );
@@ -624,6 +628,7 @@ export function StudioWorkspace({
     if (saveAccountRef.current !== currentUser.id) {
       // 单独记录换号，既挡住 A→B→A 的旧回执，也不把普通编辑当成换号。
       draftAccountGenerationRef.current += 1;
+      lastDraftRevisionRef.current = undefined;
       setDiscardBusy(false);
     }
     if (
@@ -772,36 +777,43 @@ export function StudioWorkspace({
     void restoreDraftAssets(draft);
   }, [restoreDraftAssets]);
 
-  // 挂载时读云端草稿与我的文案；失败静默（只读路径，不阻塞工作区）。
-  // LEFTOVER-ON-OPEN：草稿只挂成一条可拒绝的提示，绝不直接回填。以前这里
-  // 直接 setState 覆盖 draft，于是每次打开软件都带着上次的项目、来源视频和
-  // 分镜进来——复刻页拿到 projectId 就自动把上次的拆解结果拉回来，用户永远
-  // 看不到干净的首屏，也没有任何入口能把它清掉。
+  // Draft recovery is opt-in. A transient read failure is not an empty draft.
   useEffect(() => {
+    void draftReadRevision;
     if (review) return;
+    const role = currentUser.role;
     let active = true;
-    // 换账号要连提示一起换：留着上一个账号的待恢复草稿，就等于给下一个人
-    // 一个能把别人内容读进工作区的按钮。
+    const permission = permissionGenerationRef.current;
+    const current = () =>
+      active &&
+      role === currentUserRoleRef.current &&
+      permission === permissionGenerationRef.current;
+    const previousRevision = lastDraftRevisionRef.current;
     setPendingRestore(null);
     setRestoreError("");
+    setDraftReadErrorAccount(undefined);
     void loadCloudDraft()
-      .then(async (restore) => {
-        const saved = await loadSavedScriptList().catch(() => []);
-        if (!active) return;
-        // 记下服务端版本号（T35）：本窗口之后的保存/放弃都按它围栏。
+      .then((restore) => {
+        if (!current() || lastDraftRevisionRef.current !== previousRevision)
+          return;
         lastDraftRevisionRef.current = restore ? restore.revision : undefined;
-        if (saved.length)
-          setState((previous) => ({ ...previous, savedScripts: saved }));
         if (restore && !draftTouchedRef.current && shouldPromptRestore(restore))
           setPendingRestore({ ...restore, accountId: currentUser.id });
+      })
+      .catch(() => {
+        if (current()) setDraftReadErrorAccount(currentUser.id);
+      });
+    void loadSavedScriptList()
+      .then((saved) => {
+        if (current() && saved.length)
+          setState((previous) => ({ ...previous, savedScripts: saved }));
       })
       .catch(() => {});
     return () => {
       active = false;
       referenceAssetsRequestRef.current += 1;
-      window.clearTimeout(draftSaveTimerRef.current);
     };
-  }, [review, currentUser.id]);
+  }, [review, currentUser.id, currentUser.role, draftReadRevision]);
 
   // 「上次未完成的工作」提醒：每天只展示一次、5 秒后自动收起。展示即记账
   // （localStorage 存当天日期），手动「恢复/放弃」与自动收起都算已提醒；
@@ -1515,35 +1527,48 @@ export function StudioWorkspace({
     // 加载整体重跑一遍（double bootstrap，第一遍全部作废）。
   }, [review, workspaceUser.id, revision]);
 
-  // Silent tasks poll: the shell reads everything once on entry, so a batch
-  // that finishes while the customer watches would otherwise stay "running"
-  // until a manual refresh. Only the tasks slice updates, failures stay
-  // quiet (the next tick retries; the explicit 重试加载 path reports errors),
-  // and the poll pauses while the tab is hidden or a live panel is busy.
+  // Discard in-flight responses after account/role changes and avoid overlapping polls.
   useEffect(() => {
     if (review) return;
+    let active = true;
+    let running = false;
+    const permission = permissionGenerationRef.current;
+    const accountGeneration = draftAccountGenerationRef.current;
+    const current = () =>
+      active &&
+      permission === permissionGenerationRef.current &&
+      accountGeneration === draftAccountGenerationRef.current;
     const timer = window.setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden || running || !current()) return;
+      running = true;
       retryWallet();
-      void reloadTasks(currentUser)
-        .then(async (firstPage) => {
-          // 第一页之外（「加载更多」出来）仍在进行中的任务按 ID 补刷（FIX-07）。
-          const stale = await refreshStaleTasks(tasksRef.current, firstPage);
-          const tasks = [...firstPage, ...stale];
-          setData((previous) => {
-            // MATERIAL-PERF-D（P1-3）：任务无实质变化时返回原引用，跳过
-            // 全树重渲染（此前每 20s 必然重渲染整个工作区）。
-            const merged = mergePolledTasks(previous.tasks, tasks);
-            if (sameTasks(previous.tasks, merged)) return previous;
-            return { ...previous, tasks: merged };
-          });
-        })
-        .catch(() => {});
-      void reloadStats().then((stats) => {
-        if (stats) setData((previous) => ({ ...previous, stats }));
+      const tasks = reloadTasks(currentUser).then(async (firstPage) => {
+        if (!current()) return;
+        const stale = await refreshStaleTasks(tasksRef.current, firstPage);
+        if (!current()) return;
+        setData((previous) => {
+          if (!current()) return previous;
+          const merged = mergePolledTasks(previous.tasks, [
+            ...firstPage,
+            ...stale,
+          ]);
+          return sameTasks(previous.tasks, merged)
+            ? previous
+            : { ...previous, tasks: merged };
+        });
+      });
+      const stats = reloadStats().then((result) => {
+        if (current() && result)
+          setData((previous) =>
+            current() ? { ...previous, stats: result } : previous,
+          );
+      });
+      void Promise.allSettled([tasks, stats]).then(() => {
+        running = false;
       });
     }, TASKS_POLL_INTERVAL_MS);
     return () => {
+      active = false;
       window.clearInterval(timer);
     };
   }, [review, currentUser, retryWallet]);
@@ -2344,7 +2369,7 @@ export function StudioWorkspace({
   // 任务详情沿用任务列表导航高亮，便于查看结果后回到列表。
   const activeNav = state.page.startsWith("person-")
     ? "people"
-    : state.page === "task-detail"
+    : state.page === "task-detail" || state.page === "works"
       ? "tasks"
       : creationPages.has(state.page)
         ? "replica"
@@ -2523,6 +2548,17 @@ export function StudioWorkspace({
                   onClick={discardPendingRestore}
                 >
                   {discardBusy ? "清除中…" : "放弃"}
+                </Button>
+              </div>
+            )}
+            {draftReadErrorAccount === currentUser.id && (
+              <div className="studio-restore-error" role="alert">
+                未能读取云端草稿，当前编辑不会被覆盖。
+                <Button
+                  variant="quiet"
+                  onClick={() => setDraftReadRevision((value) => value + 1)}
+                >
+                  重试读取草稿
                 </Button>
               </div>
             )}
@@ -2790,6 +2826,13 @@ function StudioPageContent({
         <>
           <h1>任务列表</h1>
           <TasksPage />
+        </>
+      );
+    case "works":
+      return (
+        <>
+          <h1>全部成片</h1>
+          <TasksPage worksOnly />
         </>
       );
     case "task-detail":

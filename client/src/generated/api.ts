@@ -3457,7 +3457,7 @@ export interface paths {
     put?: never;
     /**
      * Create Training Material Download Url
-     * @description 签发短时效防盗链直链（30 分钟），并原子递增下载计数。
+     * @description 签发短时效防盗链直链（30 分钟）；仅统计成功签发的下载链接。
      *
      *     直链为「持有即访问」的公开 URL——过期自动失效；界面在媒体 error 时
      *     重签一次（方案 §5.2）。签发需登录会话。
@@ -24551,7 +24551,9 @@ export interface operations {
   };
   create_training_material_download_url_api_training_materials__material_id__download_url_post: {
     parameters: {
-      query?: never;
+      query?: {
+        purpose?: "download" | "preview";
+      };
       header?: {
         "X-Dev-User-Id"?: string | null;
         Authorization?: string | null;

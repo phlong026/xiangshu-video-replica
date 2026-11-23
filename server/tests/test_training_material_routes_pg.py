@@ -425,6 +425,7 @@ def test_admin_upload_validation_idempotency_and_tags(
 def test_customer_listing_tag_filter_facet_and_direct_link(
     client: TestClient,
     app_under_test: tuple[FastAPI, FakePan123Storage, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = app_under_test[1]
     headers = _admin_session(client)
@@ -489,12 +490,22 @@ def test_customer_listing_tag_filter_facet_and_direct_link(
     # 直链签发：防盗链签名 URL + 到期时间；下载计数自增。
     before_page = client.get("/api/control/training-materials", headers=headers).json()
     before = {item["title"]: item["download_count"] for item in before_page["items"]}
+    address = f"/api/training-materials/{video_id}/download-url"
+    assert client.post(address, params={"purpose": "preview"}, headers=auth).status_code == 200
+
+    def signing_failed(file_id: int, *, ttl_seconds: int) -> tuple[str, int]:
+        raise RuntimeError("offline signing fixture")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "resolve_direct_link", signing_failed)
+        assert client.post(address, headers=auth).status_code == 503
+
     download = client.post(f"/api/training-materials/{video_id}/download-url", headers=auth)
     assert download.status_code == 200, download.text
     body = download.json()
     assert "auth_key=" in body["url"]
     assert int(body["expires_at"]) > int(time.time())
-    assert storage.links_served == 1
+    assert storage.links_served == 2
     after = client.get("/api/control/training-materials", headers=headers).json()
     after_counts = {item["title"]: item["download_count"] for item in after["items"]}
     assert after_counts["封面视频"] == before["封面视频"] + 1
