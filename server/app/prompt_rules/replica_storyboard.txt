@@ -22,8 +22,8 @@ color_tone：描述可见色调、明暗与对比，不推断灯具参数。
 
 三、spoken_script（逐句口播文案）
 按时间顺序保留完整可辨识口播，每句一个对象：start_time、end_time 为秒数
-（数字），text 为该句原文；每句话只出现一次；无口播时为空数组。
-听不清的内容不要编造，可整句跳过。
+（数字），text 为该句原文；同一次发声不重复记录，真实重复发声按实际次数
+保留；无口播时为空数组。听不清的必要位置写“[听不清]”，不得猜测或整句补造。
 
 四、replica_prompt（复刻提示词，一段完整文字，不许分段编号、不许列表）
 写一段可直接投喂视频生成模型的完整中文提示词，用于复刻这条视频的整体效果：
@@ -50,6 +50,40 @@ color_tone：描述可见色调、明暗与对比，不推断灯具参数。
   person_count：画面中可辨识人数（数字）；
   action：该段时间内发生的动作与画面变化；
   scene：场景/环境；
+  scene_dressing / scene_lighting：可见陈设道具和光线质感；
+  wardrobe_pose_detail：人物服装、配饰和姿态；不写面部五官或发型；
+  ambient_sound / music_style_hint：可辨识环境声和配乐，不用画面推断声音；
   spoken_text：该段时间内的口播原文（与 spoken_script 对应；无则空字符串）；
-  transition：与下一段的衔接方式（硬切/叠化/无切换等）。
+  transition：进入本段的方式（视频开始/硬切/叠化/同镜头连续，无切镜）；
+  segment_kind：真实剪辑切换为 SHOT_CUT，同镜头动作阶段为 ACTION_BEAT；
+  首段用 ACTION_BEAT 并标记视频开始；
+  boundary_reason：本段开始的可观察依据；
+  motion：完整的六字段运动对象，见下文。
 - 描述只写画面里可观察的事实，不加效果承诺。
+
+六、人物运动与摄影机运动分别记录
+motion.subject_motion_state：STATIC / WALKING / RUNNING / TURNING /
+GESTURING_ONLY / OBJECT_MOTION / NO_PERSON / UNKNOWN。
+STATIC、OBJECT_MOTION、NO_PERSON、UNKNOWN 必须单独使用，WALKING 与 RUNNING
+不能并列。同一主体同时行走和做手势可写 WALKING+GESTURING_ONLY；先走后停
+需要拆为连续 ACTION_BEAT，不把先后阶段用“+”合并。
+motion.subject_direction：toward_camera / away_from_camera / left / right /
+lateral / in_place / none / unknown。左右以画面为坐标，左右手以人物自身为坐标。
+motion.subject_displacement：可观察的起点、终点与路径；无法判断就明确说明，
+不可编造步数。人物走向门口不能同时标记 STATIC 或无位移。
+motion.hand_action：可观察的左右手动作；遮挡时写无法判断。
+motion.camera_motion：STATIC / PUSH_IN / PULL_BACK / HANDHELD_TRACKING / PAN /
+TILT / FOLLOW / ORBIT / CRANE_UP / CRANE_DOWN / ZOOM_IN / ZOOM_OUT / UNKNOWN。
+motion.relative_motion：人物与机位的相对变化。人物行走不等于摄影机移动；
+固定机位可以拍到行走的人，跟拍时人物画面占比不变也不代表人物静止。
+段落级 camera_motion 保留方向、速度、幅度与可观察依据，不能与枚举相矛盾。
+分不清推近和变焦时填写 UNKNOWN，保留“画面放大但原因无法判断”的描述。
+
+person_count 统计本段出现的不同可见真人（含局部露出者），镜像不重复计数，
+海报、照片、屏幕中的人像不计入。人数为零不能填写人物行走或静止；人数大于
+零不能填写 NO_PERSON。subject 明确主要主体，motion 只属于该主体；多人各自
+的动作在 action 中分别说明。准备、否定、旁白和回忆不等于当前发生的动作。
+所有 shot_id 唯一；transition 描述进入本段，不描述离开本段。
+按时间拼接 spoken_text 必须与 spoken_script 的 text 拼接一致（忽略排版空白和
+普通标点；数字的小数点、正负号与百分比单位需准确）；
+一句话跨段时只保留该段说出的部分，不把整句复制到两段。

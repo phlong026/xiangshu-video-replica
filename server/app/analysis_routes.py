@@ -75,6 +75,7 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
+from app.storyboard_consistency import StoryboardConsistencyError
 from app.task_lease import recover_analysis_interrupted
 
 router = APIRouter(prefix="/api", tags=["analysis"])
@@ -692,12 +693,29 @@ def update_analysis_shots(
                 status_code=422,
                 detail={"code": "SHOT_CARD_INVALID", "message": str(exc)},
             ) from exc
+        except StoryboardConsistencyError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "STORYBOARD_CONSISTENCY_REQUIRED",
+                    "message": str(exc),
+                    "issues": exc.issues,
+                },
+            ) from exc
 
         shot_card = create_shot_card_version(
             conn,
             analysis_version=row,
             created_by_user_id=actor.id,
             shots=shots,
+            manually_reviewed=True,
+        )
+        # 用户已完成确认，不必等待最长五分钟的子任务轮询退避；仍由 worker 重算门禁。
+        conn.execute(
+            "UPDATE replica_pipeline_tasks SET next_poll_at = now() "
+            "WHERE project_id = %s AND status = 'ANALYZING' "
+            "AND stage_detail #>> '{storyboardReview,analysisVersionId}' = %s",
+            (str(row["project_id"]), analysis_id),
         )
         write_audit(
             conn,

@@ -34,9 +34,10 @@ def test_example_passes_the_strict_provider_contract() -> None:
     # 与 analyze_video 的拆包顺序一致：严格解析器吃信封内的 analysis 对象。
     # 不抛 ValidationError 即通过：ProviderShotCard 的 motion/segment_kind/
     # boundary_reason/person_count 严格合同与时间轴合同全部生效。
-    parse_analysis_response(
+    analysis = parse_analysis_response(
         json.dumps(payload["analysis"]), duration_seconds=EXAMPLE_DURATION_SECONDS
     )
+    assert analysis.consistency_issues == []
 
 
 def test_example_timeline_covers_example_duration() -> None:

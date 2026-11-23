@@ -34,7 +34,8 @@ visual_style：写实实拍、动画等可观察风格，以及有依据的拍�
 pace：根据真实剪辑、动作和说话节奏描述，不一律写节奏明快。
 camera_language：概括实际机位变化，区分连续镜头与多镜头剪辑。
 color_tone：描述可见色调、明暗与对比，不推断灯具参数。
-original_script：按时间顺序保留完整可辨识口播，每句话只出现一次；无口播为空字符串。
+original_script：按时间顺序保留完整可辨识口播；同一次发声不重复记录，
+原片真实重复说出的内容仍按实际次数保留；无口播为空字符串。
 
 三、时间段与真实镜头
 shots 是按时间排序的分析时间段，不代表每一段都发生切镜。
@@ -77,6 +78,8 @@ action 写清“谁 → 开始状态 → 可观察动作 → 结束状态”，�
 ——起点、连续发展与结束状态齐备；反例：“主讲人在讲解”——丢掉了位移与
 行走，等于把在动的镜头默认成静止。
 多人时分别描述各人的动作，互动时交代动作发起者、接收者和相关物体。
+motion 只描述 subject 指定的主要主体；不要把配角的行走填成主讲人的运动。
+否定、准备动作、旁白台词中描述的路线不等于人物已经完成这些动作。
 不把未被画面证实的心理活动写成动作。
 
 scene 写场所；scene_dressing 写可见陈设和道具；scene_lighting 写可见光线
@@ -94,6 +97,12 @@ GESTURING_ONLY / OBJECT_MOTION / NO_PERSON / UNKNOWN。
 选择该段主导状态；位移与手势同等主导时用“+”并列，如 WALKING+GESTURING_ONLY
 （边走边说边做手势），不得只留其一。并列只用于同等主导的状态，不用于凑数；
 无并列时只写单一状态。其他同时发生的次要动作在 action 中补充。
+STATIC、NO_PERSON、OBJECT_MOTION、UNKNOWN 必须单独使用；WALKING 与 RUNNING
+不能并列。GESTURING_ONLY 单独使用表示原地手势，与 WALKING 并列时只补充
+同一人物同时做手势，不表示人物站着。先走后停属于时间先后，应拆为连续
+ACTION_BEAT 段，不用“+”把不同时间的相互排斥状态混在同一段。
+person_count=0 时不得填写人物行走、跑动、转身、静止或手势状态；人数大于零
+时不得填写 NO_PERSON。人物动作、位移方向、幅度和人数必须相互一致。
 
 subject_direction：toward_camera / away_from_camera / left / right /
 lateral / in_place / none / unknown。
@@ -122,7 +131,8 @@ camera_motion 文本中写清可观察依据；枚举取值必须与这些字段
 spoken_text 只填写本段实际说出的可辨识内容，不润色、不补开场钩子、不翻译。
 无说话内容填写空字符串。听不清的必要位置标记“[听不清]”，禁止猜台词或数字。
 一句话跨两个分析时间段时，两段分别写各自实际说出的部分，禁止两边重复整句。
-original_script 与按时间拼接的 spoken_text 在忽略排版空白后应一致。
+original_script 与按时间拼接的 spoken_text 在忽略排版空白和普通标点后应一致，
+数字的小数点、正负号和百分比单位仍需保持准确。
 画面字幕与音轨不一致时，spoken_text 以可听见的口播为准，不把字幕当作已说出口。
 无法确定说话人时不要猜；需要说明时写在 action 中，不把解释插入口播正文。
 
@@ -165,13 +175,13 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
       {
         "shot_id": "s1",
         "start_time": 0,
-        "end_time": 7.5,
+        "end_time": 4.0,
         "shot_type": "全景",
         "composition": "人物居中偏右，保留庭院纵深",
         "camera_motion": "固定机位",
         "subject": "画面中间穿浅色上衣的讲解者",
         "person_count": 1,
-        "action": "讲解者从画面左侧起步，边走边抬起右手示意，走到石桌前停下面向镜头",
+        "action": "讲解者从画面左侧起步，边走边抬起右手示意，持续走向石桌",
         "scene": "庭院",
         "scene_dressing": "石桌与两把木椅，背景为院墙",
         "scene_lighting": "午后自然光，柔和顺光",
@@ -185,15 +195,44 @@ music_style_hint：记录实际听到的配乐特征；无配乐写“无可辨�
         "motion": {
           "subject_motion_state": "WALKING+GESTURING_ONLY",
           "subject_direction": "lateral",
-          "subject_displacement": "从画面左侧走向石桌，约四五步后停住",
-          "hand_action": "行走时抬起右手示意，停下后双手自然垂下",
+          "subject_displacement": "从画面左侧走向石桌，步数无法确定",
+          "hand_action": "行走时抬起右手示意",
           "camera_motion": "STATIC",
           "relative_motion": "人物横向移动，画面占比基本不变"
         }
       },
       {
         "shot_id": "s2",
-        "start_time": 7.5,
+        "start_time": 4.0,
+        "end_time": 6.0,
+        "shot_type": "全景",
+        "composition": "人物居中偏右，保留庭院纵深",
+        "camera_motion": "固定机位",
+        "subject": "画面中间穿浅色上衣的讲解者",
+        "person_count": 1,
+        "action": "讲解者已在石桌前停下，面向镜头，双手自然垂下",
+        "scene": "庭院",
+        "scene_dressing": "石桌与两把木椅，背景为院墙",
+        "scene_lighting": "午后自然光，柔和顺光",
+        "wardrobe_pose_detail": "浅色上衣，深色长裤，行走时手臂自然摆动",
+        "ambient_sound": "鸟鸣与远处车流",
+        "music_style_hint": "无可辨识配乐",
+        "spoken_text": "",
+        "transition": "同镜头连续，无切镜",
+        "segment_kind": "ACTION_BEAT",
+        "boundary_reason": "同一镜头内人物停止行走",
+        "motion": {
+          "subject_motion_state": "STATIC",
+          "subject_direction": "in_place",
+          "subject_displacement": "无位移",
+          "hand_action": "双手自然垂下",
+          "camera_motion": "STATIC",
+          "relative_motion": "人物与机位均未移动"
+        }
+      },
+      {
+        "shot_id": "s3",
+        "start_time": 6.0,
         "end_time": 12,
         "shot_type": "近景",
         "composition": "石桌居中，人物手部入画",
