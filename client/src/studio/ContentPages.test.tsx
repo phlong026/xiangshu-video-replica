@@ -5839,7 +5839,7 @@ describe("全自动复刻入口（M8 v1）", () => {
 
   it("培训 Office 文档默认不请求外部预览或签发，需显式下载", async () => {
     useStudio.mockReturnValue(studio());
-    listTrainingMaterials.mockResolvedValue({
+    listTrainingMaterials.mockResolvedValueOnce({
       items: [
         {
           id: "office-test",
