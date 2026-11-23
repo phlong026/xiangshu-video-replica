@@ -5871,10 +5871,9 @@ describe("全自动复刻入口（M8 v1）", () => {
     );
     expect(await screen.findByText("共 1001 个素材")).toBeInTheDocument();
 
-    fireEvent.change(
-      screen.getByRole("searchbox", { name: "搜索素材" }),
-      { target: { value: "最后一条教材" } },
-    );
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索素材" }), {
+      target: { value: "最后一条教材" },
+    });
     expect(await screen.findByText("最后一条教材")).toBeInTheDocument();
     expect(screen.getByText("共 1 个素材")).toBeInTheDocument();
   });
