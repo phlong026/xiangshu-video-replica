@@ -594,7 +594,11 @@ export function CustomerWalletPanel({
                       {benefit ? <span>{benefit}</span> : null}
                       {belowMinimum ? (
                         <span>
-                          低于起充金额 {formatFen(wallet.min_recharge_fen)}
+                          低于起充金额{" "}
+                          {formatFen(
+                            wallet.package_min_recharge_fen ??
+                              wallet.min_recharge_fen,
+                          )}
                           ，暂不可购
                         </span>
                       ) : null}

@@ -66,7 +66,6 @@ from app.customer_ledger import (
     outcome_placeholders,
     read_ledger_page,
 )
-from app.customer_pricing import read_pricing
 from app.db_pg import pg_transaction
 from app.db_portable import (
     BusinessConnection,
@@ -86,7 +85,11 @@ from app.payment_provider import (
 from app.permissions import require_not_auditor
 from app.recharge_packages import RechargePackage, build_package_snapshot, read_package
 from app.security_rate_limit import _server_now, client_ip_from_request
-from app.settings import SettingsRepository, effective_customer_billing_settings
+from app.settings import (
+    SettingsRepository,
+    custom_recharge_billing_settings,
+    effective_customer_billing_settings,
+)
 from app.sql_pagination import PAGE_CLAUSE
 from app.sub_account_permissions import SERVICE_FEATURE
 from app.sub_account_quota import read_quota_used
@@ -255,9 +258,11 @@ def _stage_recharge_preconditions(
     """Billing settings + amount validation + provider configuration, shared."""
     settings_repo = SettingsRepository(conn)
     billing = (
-        settings_repo.read_customer_billing_settings(user_id=customer_user_id)
+        settings_repo.read_customer_billing_settings(
+            user_id=customer_user_id, for_custom_recharge=validate_amount
+        )
         if customer_user_id is not None
-        else settings_repo.read_billing_settings()
+        else custom_recharge_billing_settings(settings_repo.read_billing_settings())
     )
     if customer_user_id is not None:
         try:
@@ -273,14 +278,6 @@ def _stage_recharge_preconditions(
                     "message": "The controlled payment rehearsal is not configured safely.",
                 },
             ) from exc
-    if customer_user_id is not None:
-        price_version, credit_config = read_pricing(conn)
-        if credit_config is not None:
-            billing = {
-                **billing,
-                "points_per_yuan": credit_config.points_per_yuan,
-                "credit_price_version": price_version,
-            }
     if validate_amount:
         validate_recharge_amount(amount_fen, billing)
     elif amount_fen < billing["min_recharge_fen"]:
@@ -1274,7 +1271,6 @@ def read_customer_wallet(request: Request) -> WalletResponse:
                     "message": "The controlled payment rehearsal is not configured safely.",
                 },
             ) from exc
-        price_version, credit_config = read_pricing(BusinessConnection.postgres(conn))
         return WalletResponse(
             available_credits=int(row[0]),
             reserved_credits=int(row[1]),
@@ -1283,8 +1279,9 @@ def read_customer_wallet(request: Request) -> WalletResponse:
             internal_unit_price_fen=billing["charged_unit_price_fen"],
             min_recharge_fen=billing["min_recharge_fen"],
             recharge_step_fen=billing["recharge_step_fen"],
-            points_per_yuan=credit_config.points_per_yuan if credit_config else None,
-            credit_price_version=price_version,
+            package_min_recharge_fen=billing["package_min_recharge_fen"],
+            points_per_yuan=billing.get("points_per_yuan"),
+            credit_price_version=billing["credit_price_version"],
         )
 
 

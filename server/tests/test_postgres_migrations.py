@@ -65,7 +65,105 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # recharge_orders.closed_at 与 CLOSED 扫描部分索引，链尾随之前移。
 # 20261117T1000_kuaishou_publish_platform 仅扩发布域三张表的平台 CHECK。
 # 20261120T1000_account_diagnosis 新建账号诊断报告与免费额度两张表并种子价目行。
-HEAD_REVISION = "20261122T1000_replica_prompt_mode"
+HEAD_REVISION = "20261124T1000_recharge_minimum_step"
+
+
+def test_recharge_policy_migration_preserves_packages_and_order_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from alembic import command
+    from cryptography.fernet import Fernet
+
+    from app.db_portable import BusinessConnection
+    from app.settings import SettingsRepository
+
+    monkeypatch.delenv("VIDEO_REPLICA_DATABASE_URL", raising=False)
+    dsn = _rehearsal_dsn()
+    _drop_database("t06_migrate_test")
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute('CREATE DATABASE "t06_migrate_test"')
+    config = _alembic_config(dsn.replace("postgresql://", "postgresql+psycopg://"))
+    previous = "20261122T1000_replica_prompt_mode"
+    try:
+        command.upgrade(config, previous)
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("INSERT INTO runtime_settings (id) VALUES (1) ON CONFLICT DO NOTHING")
+            conn.execute(
+                "UPDATE runtime_settings SET internal_base_unit_price_fen=300, "
+                "min_recharge_fen=12000, recharge_step_fen=3000 "
+                "WHERE id=1"
+            )
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, role) "
+                "VALUES ('policy-user', 'policy-user', 'Policy User', 'customer')"
+            )
+            conn.execute(
+                "INSERT INTO recharge_packages (id, name, amount_fen, credits) "
+                "VALUES ('policy-package', '基础会员（后台配置原文）', 198000, 20000)"
+            )
+            snapshot = json.dumps(
+                {"package_id": "policy-package", "amount_fen": 198000, "credits": 20000}
+            )
+            for order_id, amount, credits, package_id, package_snapshot in [
+                ("policy-custom", 10000, 100, None, None),
+                ("policy-package-order", 198000, 20000, "policy-package", snapshot),
+            ]:
+                conn.execute(
+                    "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, "
+                    "channel, status, pricing_scope, base_unit_price_fen_snapshot, "
+                    "charged_unit_price_fen_snapshot, min_recharge_fen_snapshot, "
+                    "recharge_step_fen_snapshot, amount_fen, credits, package_id, "
+                    "package_snapshot_json) VALUES (%s, 'policy-user', %s, 'zpay', 'alipay', "
+                    "'PENDING', 'CUSTOMER_STANDARD', 100, 100, 10000, 1000, %s, %s, %s, %s)",
+                    (order_id, order_id, amount, credits, package_id, package_snapshot),
+                )
+            packages_before = conn.execute("SELECT * FROM recharge_packages ORDER BY id").fetchall()
+            orders_before = conn.execute("SELECT * FROM recharge_orders ORDER BY id").fetchall()
+        command.upgrade(config, HEAD_REVISION)
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute(
+                "SELECT min_recharge_fen, recharge_step_fen FROM runtime_settings WHERE id=1"
+            ).fetchone() == (50_000, 10_000)
+            defaults = dict(
+                conn.execute(
+                    "SELECT column_name, column_default FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name='runtime_settings' "
+                    "AND column_name IN ('min_recharge_fen', 'recharge_step_fen')"
+                ).fetchall()
+            )
+            assert defaults == {"min_recharge_fen": "50000", "recharge_step_fen": "10000"}
+            repo = SettingsRepository(
+                BusinessConnection.postgres(conn), fernet=Fernet(Fernet.generate_key())
+            )
+            billing = repo.read_billing_settings()
+            saved = repo.save_billing_settings(
+                internal_base_unit_price_fen=billing["internal_base_unit_price_fen"],
+                oral_unit_price_fen=billing["oral_unit_price_fen"],
+                min_recharge_fen=billing["min_recharge_fen"],
+                recharge_step_fen=billing["recharge_step_fen"],
+                actor_user_id=None,
+            )
+            assert saved["internal_base_unit_price_fen"] == 300
+            assert saved["min_recharge_fen"] == 50_000
+            assert saved["recharge_step_fen"] == 10_000
+            assert [
+                tuple(row)
+                for row in conn.execute("SELECT * FROM recharge_packages ORDER BY id").fetchall()
+            ] == packages_before
+            assert [
+                tuple(row)
+                for row in conn.execute("SELECT * FROM recharge_orders ORDER BY id").fetchall()
+            ] == orders_before
+        command.downgrade(config, previous)
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute(
+                "SELECT min_recharge_fen, recharge_step_fen FROM runtime_settings WHERE id=1"
+            ).fetchone() == (50_000, 10_000)
+            assert conn.execute("SELECT * FROM recharge_orders ORDER BY id").fetchall() == (
+                orders_before
+            )
+    finally:
+        _drop_database("t06_migrate_test")
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

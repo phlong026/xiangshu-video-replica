@@ -56,6 +56,7 @@ const props = () => ({
 });
 async function choose() {
   fireEvent.click(await screen.findByRole("button", { name: /套餐A/ }));
+  fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
 }
 
 beforeEach(() => {
@@ -187,7 +188,8 @@ describe("充值订单与二维码围栏", () => {
     );
     const p = props();
     render(<CustomerRechargeDialog {...p} />);
-    const button = await screen.findByRole("button", { name: /套餐A/ });
+    fireEvent.click(await screen.findByRole("button", { name: /套餐A/ }));
+    const button = screen.getByRole("button", { name: "确认充值" });
     vi.mocked(p.store.loadSessionToken).mockReturnValue(credential.promise);
     fireEvent.click(button);
     fireEvent.click(button);

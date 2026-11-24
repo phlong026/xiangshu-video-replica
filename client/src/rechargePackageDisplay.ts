@@ -114,11 +114,18 @@ export function matchingPackagesForAmount(
 
 /** 套餐是否低于生效起充额（后端下单会 422 RECHARGE_PACKAGE_BELOW_MINIMUM）。
  *
- * 钱包快照未就绪（null）时不判禁用：等快照到位后按 ``min_recharge_fen`` 判定。
+ * 旧单价可能推高自定义充值下限，套餐仍使用全局下限；旧服务未返回专用字段时回退。
  */
 export function packageBelowMinimum(
   pkg: Pick<CustomerRechargePackage, "amount_fen">,
-  wallet: { min_recharge_fen: number } | null,
+  wallet: {
+    min_recharge_fen: number;
+    package_min_recharge_fen?: number | null;
+  } | null,
 ): boolean {
-  return wallet !== null && pkg.amount_fen < wallet.min_recharge_fen;
+  return (
+    wallet !== null &&
+    pkg.amount_fen <
+      (wallet.package_min_recharge_fen ?? wallet.min_recharge_fen)
+  );
 }

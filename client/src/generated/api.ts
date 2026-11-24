@@ -17073,6 +17073,8 @@ export interface components {
       min_recharge_fen?: number | null;
       /** Recharge Step Fen */
       recharge_step_fen?: number | null;
+      /** Package Min Recharge Fen */
+      package_min_recharge_fen?: number | null;
       /** Points Per Yuan */
       points_per_yuan?: number | null;
       /** Credit Price Version */
