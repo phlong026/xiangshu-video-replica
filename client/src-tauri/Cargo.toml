@@ -1,6 +1,6 @@
 [package]
 name = "video-replica-desktop"
-version = "2.6.12"
+version = "2.6.13"
 description = "Internal video replica desktop app"
 authors = ["Internal AI Team"]
 edition = "2021"
