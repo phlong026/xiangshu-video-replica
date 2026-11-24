@@ -492,7 +492,7 @@ def test_recharge_requires_a_live_customer_session(client: TestClient) -> None:
     # No Bearer header at all → SESSION_TOKEN_REQUIRED.
     response = client.post(
         "/api/customer/recharge-orders",
-        json={"amount_fen": 10000},
+        json={"amount_fen": 50000},
         headers={IDEMPOTENCY_KEY_HEADER: "idem-no-session-1"},
     )
     assert response.status_code == 401, response.text
@@ -504,7 +504,7 @@ def test_recharge_requires_a_live_customer_session(client: TestClient) -> None:
     # Wrong token type (device instead of session) → SESSION_REPLACED.
     response = client.post(
         "/api/customer/recharge-orders",
-        json={"amount_fen": 10000},
+        json={"amount_fen": 50000},
         headers={
             **_bearer(customer["device_token"]),
             IDEMPOTENCY_KEY_HEADER: "idem-device-token-1",
@@ -530,14 +530,14 @@ def test_recharge_fails_when_admin_revoked_the_session(client: TestClient) -> No
     # Recharge succeeds while session is live.
     fresh = client.post(
         "/api/customer/recharge-orders",
-        json={"amount_fen": 10000},
+        json={"amount_fen": 50000},
         headers={
             **_bearer(session_token),
             IDEMPOTENCY_KEY_HEADER: "idem-fresh-recharge",
         },
     )
     assert fresh.status_code == 201, fresh.text
-    assert fresh.json()["amount_fen"] == 10000
+    assert fresh.json()["amount_fen"] == 50000
 
     # Admin suspends the code: this triggers LOGOUT with code_suspended reason.
     suspended = _admin_code_action(client, "code-a", "suspend", reason="风控暂停")
@@ -552,7 +552,7 @@ def test_recharge_fails_when_admin_revoked_the_session(client: TestClient) -> No
     # Recharge now fails with SESSION_EXPIRED: the lease was pulled into the past.
     stale = client.post(
         "/api/customer/recharge-orders",
-        json={"amount_fen": 10000},
+        json={"amount_fen": 50000},
         headers={
             **_bearer(session_token),
             IDEMPOTENCY_KEY_HEADER: "idem-stale-recharge",
@@ -1936,11 +1936,11 @@ def test_both_online_devices_can_create_account_recharge_orders(client: TestClie
     for index, token in enumerate((customer["session_token"], second["session_token"])):
         response = client.post(
             "/api/customer/recharge-orders",
-            json={"amount_fen": 10000},
+            json={"amount_fen": 50000},
             headers={**_bearer(token), IDEMPOTENCY_KEY_HEADER: f"recharge-device-{index}"},
         )
         assert response.status_code == 201, response.text
-        assert response.json()["amount_fen"] == 10000
+        assert response.json()["amount_fen"] == 50000
 
 
 @pytest.mark.parametrize("path", [LOGIN_PATH, SWITCH_PATH])

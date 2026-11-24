@@ -2031,7 +2031,8 @@ def test_customer_unit_price_controls_adjustment_order_snapshot(client: TestClie
     order = _order_row(adjustment.json()["order_id"])
     assert order[4] == BASE_UNIT_PRICE_FEN
     assert order[5] == 500
-    assert order[7] == 500
+    assert order[6] == MIN_RECHARGE_FEN
+    assert order[7] == RECHARGE_STEP_FEN
     assert order[8] == 1000
 
 

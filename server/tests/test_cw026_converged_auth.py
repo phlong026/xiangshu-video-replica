@@ -737,7 +737,7 @@ def test_switch_after_snapshot_fences_late_write_with_zero_deltas(
 def _recharge_post(client: TestClient, token: str, idem_key: str) -> object:
     return client.post(
         "/api/customer/recharge-orders",
-        json={"amount_fen": 10000},
+        json={"amount_fen": 50000},
         headers={**_bearer(token), IDEMPOTENCY_KEY_HEADER: idem_key},
     )
 
