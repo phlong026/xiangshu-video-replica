@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Button, StudioDialog } from "./ui";
+import { type ReactNode, useState } from "react";
+import { Button, Icon, StudioDialog } from "./ui";
 
 const preferences = new Map<string, string>();
 
@@ -27,6 +27,82 @@ export function saveReplicaPreference(
   }
   preferences.set(key, value);
   return persisted;
+}
+
+export function ReplicaDefaultSummary({
+  label,
+  name,
+  imageUrl,
+  loading = false,
+  unavailable = false,
+  disabled = false,
+  emptyLabel = "选择人物",
+  onChoose,
+}: {
+  label: string;
+  name?: string;
+  imageUrl?: string;
+  loading?: boolean;
+  unavailable?: boolean;
+  disabled?: boolean;
+  emptyLabel?: string;
+  onChoose: () => void;
+}) {
+  return (
+    <fieldset
+      className="replica-default-summary"
+      aria-label={label}
+      aria-busy={loading}
+    >
+      <span className="replica-default-summary__avatar" aria-hidden="true">
+        {imageUrl && name ? (
+          <img src={imageUrl} alt="" />
+        ) : (
+          <Icon name="person" size={22} />
+        )}
+      </span>
+      <div className="replica-default-summary__text">
+        <span>{label}</span>
+        <strong>
+          {loading
+            ? "正在读取…"
+            : name || (unavailable ? "默认素材暂不可用" : "尚未设置")}
+        </strong>
+      </div>
+      <Button
+        className="replica-default-summary__action"
+        variant="quiet"
+        aria-label={name ? `更换${label}` : emptyLabel}
+        disabled={disabled || loading}
+        onClick={onChoose}
+      >
+        {name ? "更换" : emptyLabel}
+      </Button>
+    </fieldset>
+  );
+}
+
+export function ReplicaDetailActions({
+  children,
+  secondaryAction,
+  settings,
+  feeNote,
+}: {
+  children: ReactNode;
+  secondaryAction?: ReactNode;
+  settings: ReactNode;
+  feeNote: string;
+}) {
+  return (
+    <div className="replica-detail-control">
+      {settings}
+      <div className="replica-detail-actions">
+        {children}
+        {secondaryAction}
+      </div>
+      <p className="replica-detail-fee">{feeNote}</p>
+    </div>
+  );
 }
 
 const guide = [

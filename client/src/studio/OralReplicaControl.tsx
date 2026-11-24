@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   createOralTask,
   createScriptFromAudioTask,
@@ -12,6 +12,8 @@ import {
 } from "../api";
 import { isInsufficientCredits } from "../insufficientCredits";
 import {
+  ReplicaDefaultSummary,
+  ReplicaDetailActions,
   replicaPreference,
   saveReplicaPreference,
 } from "./AdaptiveReplicaSetup";
@@ -168,6 +170,8 @@ export function OralReplicaControl({
   onHandled,
   importVideo,
   importError,
+  presentation = "default",
+  secondaryAction,
 }: {
   video: ReplicaSource;
   requested: boolean;
@@ -177,6 +181,8 @@ export function OralReplicaControl({
     Pick<ViralImportTask, "projectId" | "sourceAssetId"> | undefined
   >;
   importError?: string;
+  presentation?: "default" | "detail";
+  secondaryAction?: ReactNode;
 }) {
   const { user, data, notify, navigate, refresh, openLive } = useStudio();
   const [stage, setStage] = useState<
@@ -467,24 +473,72 @@ export function OralReplicaControl({
       navigate("tasks");
     });
 
-  const close = () => setStage(null);
+  const close = () => {
+    if (presentation === "detail" && stage === "settings" && editDefaultsOnly) {
+      setChoice(readDefaults(user.id));
+    }
+    setStage(null);
+  };
+  const openDefaultSettings = () => {
+    if (presentation === "detail") setChoice(readDefaults(user.id));
+    setError("");
+    setEditDefaultsOnly(true);
+    setStage("settings");
+  };
+  // 摘要展示已保存的默认素材；弹窗中尚未保存的选择不能冒充默认值。
+  const defaults = presentation === "detail" ? readDefaults(user.id) : EMPTY;
+  const defaultPerson = data.people.find(
+    (item) => item.id === defaults.identityId,
+  );
+  const defaultAvatar = availableAvatars(defaultPerson).find(
+    (item) => item.id === defaults.avatarId,
+  );
+  const defaultVoice = availableVoices(defaultPerson).find(
+    (item) => item.id === defaults.voiceId,
+  );
+  const defaultName =
+    defaultAvatar && defaultVoice
+      ? `${defaultAvatar.name} · ${defaultVoice.name}`
+      : undefined;
+  const primaryAction = (
+    <Button variant="primary" disabled={busy} onClick={onRequest}>
+      一键复刻 · 数字人口播
+    </Button>
+  );
 
   return (
     <>
-      <Button variant="primary" disabled={busy} onClick={onRequest}>
-        一键复刻 · 数字人口播
-      </Button>
-      <Button
-        variant="quiet"
-        disabled={busy || pendingAttempt}
-        onClick={() => {
-          setError("");
-          setEditDefaultsOnly(true);
-          setStage("settings");
-        }}
-      >
-        更换默认分身和声音
-      </Button>
+      {presentation === "detail" ? (
+        <ReplicaDetailActions
+          secondaryAction={secondaryAction}
+          settings={
+            <ReplicaDefaultSummary
+              label="默认分身和声音"
+              name={defaultName}
+              imageUrl={defaultPerson?.portrait}
+              loading={data.loading}
+              unavailable={Boolean(defaults.identityId && !defaultName)}
+              disabled={busy || pendingAttempt}
+              emptyLabel="选择分身和声音"
+              onChoose={openDefaultSettings}
+            />
+          }
+          feeNote="转写可能消耗积分，成片生成前确认费用。"
+        >
+          {primaryAction}
+        </ReplicaDetailActions>
+      ) : (
+        <>
+          {primaryAction}
+          <Button
+            variant="quiet"
+            disabled={busy || pendingAttempt}
+            onClick={openDefaultSettings}
+          >
+            更换默认分身和声音
+          </Button>
+        </>
+      )}
       {stage === "settings" && (
         <StudioDialog title="设置数字人口播默认素材" onClose={close}>
           <Field label="人物">

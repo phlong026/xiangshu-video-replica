@@ -1,6 +1,13 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { RefObject } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode, RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   TrainingMaterialPublicItem,
   ViralImportPurpose,
@@ -48,6 +55,8 @@ import { openWalletIfInsufficientCredits } from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
 import {
   AdaptiveReplicaGuide,
+  ReplicaDefaultSummary,
+  ReplicaDetailActions,
   replicaPreference,
   saveReplicaPreference,
 } from "./AdaptiveReplicaSetup";
@@ -436,13 +445,38 @@ function ViralCover({
 }
 
 /** 统计行（参考统计行四字段常显）：点赞 / 评论 / 转发 / 收藏。 */
-function ViralStatsRow({ video }: { video: StudioVideo }) {
+function ViralStatsRow({
+  video,
+  detail = false,
+}: {
+  video: StudioVideo;
+  detail?: boolean;
+}) {
   const stats: Array<[string, string, string]> = [
     ["heart", "点赞", viralLikesLabel(video)],
     ["comment", "评论", viralMetricLabel(video.comments)],
     ["share", "转发", viralMetricLabel(video.shares)],
     ["star", "收藏", viralMetricLabel(video.collections)],
   ];
+  if (detail) {
+    return (
+      <dl className="viral-detail-stats" aria-label="原平台互动数据">
+        {stats.map(([icon, label, value]) => (
+          <div key={icon}>
+            <dt>
+              <Icon name={icon} size={18} />
+              {label === "收藏"
+                ? "原平台收藏"
+                : label === "转发"
+                  ? "分享"
+                  : label}
+            </dt>
+            <dd title={label}>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
   return (
     <div className="viral-card-stats">
       {stats.map(([icon, label, value]) => (
@@ -452,6 +486,72 @@ function ViralStatsRow({ video }: { video: StudioVideo }) {
         </span>
       ))}
     </div>
+  );
+}
+
+function ViralDescription({ video }: { video: StudioVideo }) {
+  // 有的来源将发布全文放在标题中；只做展示回退，不改写或丢弃原文。
+  const description = video.description?.trim() || video.title.trim();
+  const tags = video.tags ?? [];
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const paragraph = useRef<HTMLParagraphElement>(null);
+  const descriptionId = useId();
+  useEffect(() => {
+    setExpanded(false);
+    const element = paragraph.current;
+    if (!element || !description) return;
+    const measure = () => {
+      const lineHeight = Number.parseFloat(
+        getComputedStyle(element).lineHeight,
+      );
+      const collapsedHeight =
+        (Number.isFinite(lineHeight) ? lineHeight : 24) * 3;
+      setOverflowing(element.scrollHeight > collapsedHeight + 1);
+    };
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(measure);
+      observer.observe(element);
+      return () => observer.disconnect();
+    }
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [description]);
+
+  if (!description && !tags.length) return null;
+  return (
+    <section className="viral-detail-description" aria-label="视频描述">
+      {description && (
+        <>
+          <h2>视频描述</h2>
+          <p
+            className={expanded ? "is-expanded" : undefined}
+            id={descriptionId}
+            ref={paragraph}
+          >
+            {description}
+          </p>
+          {overflowing && (
+            <Button
+              variant="quiet"
+              aria-expanded={expanded}
+              aria-controls={descriptionId}
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded ? "收起" : "展开全文"}
+            </Button>
+          )}
+        </>
+      )}
+      {tags.length > 0 && (
+        <ul className="viral-detail-tags" aria-label="视频话题">
+          {tags.map((tag) => (
+            <li key={tag}>{tag.startsWith("#") ? tag : `#${tag}`}</li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -487,12 +587,16 @@ function ReplicaPipelineControl({
   requested,
   onRequest,
   onHandled,
+  presentation = "default",
+  secondaryAction,
 }: {
   video: ReplicaSource;
   uploadedSource?: { projectId: string; assetId: string };
   requested: boolean;
   onRequest: () => void;
   onHandled: () => void;
+  presentation?: "default" | "detail";
+  secondaryAction?: ReactNode;
 }) {
   const { notify, user, state, navigate, refresh } = useStudio();
   const sourcePlatform = uploadedSource ? "upload" : video.platformKey;
@@ -508,6 +612,47 @@ function ReplicaPipelineControl({
   >(null);
   const [characterId, setCharacterId] = useState("");
   const [editDefaultsOnly, setEditDefaultsOnly] = useState(false);
+  const [defaultCharacter, setDefaultCharacter] = useState<{
+    accountId: string;
+    character?: ReplicaPipelineCharacter;
+    loading?: boolean;
+    unavailable?: boolean;
+  }>();
+  const currentDefault =
+    defaultCharacter?.accountId === user.id ? defaultCharacter : undefined;
+  useEffect(() => {
+    if (presentation !== "detail") return;
+    let cancelled = false;
+    const accountId = user.id;
+    const saved = replicaPreference(accountId, "short-character");
+    if (!saved) {
+      setDefaultCharacter({ accountId });
+      return;
+    }
+    setDefaultCharacter({ accountId, loading: true });
+    void listReplicaPipelineCharacters()
+      .then(({ characters: available }) => {
+        if (
+          cancelled ||
+          replicaPreference(accountId, "short-character") !== saved
+        )
+          return;
+        const character = available.find(
+          (item) => item.characterVersionId === saved,
+        );
+        setDefaultCharacter({ accountId, character, unavailable: !character });
+      })
+      .catch(() => {
+        if (
+          !cancelled &&
+          replicaPreference(accountId, "short-character") === saved
+        )
+          setDefaultCharacter({ accountId, unavailable: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [presentation, user.id]);
   const startRef = useRef(false);
   const mounted = useRef(false);
   useEffect(() => {
@@ -644,6 +789,11 @@ function ReplicaPipelineControl({
       const validated = result.characters.find(
         (item) => item.characterVersionId === saved,
       );
+      setDefaultCharacter({
+        accountId: user.id,
+        character: validated,
+        unavailable: Boolean(saved && !validated),
+      });
       if (!choose && validated) {
         startRef.current = false;
         await submitPreparation(validated.characterVersionId);
@@ -734,25 +884,58 @@ function ReplicaPipelineControl({
           >
             重新检查任务
           </Button>
+          {presentation === "detail" && secondaryAction}
         </div>
       );
     }
+    const primaryAction = (
+      <Button
+        disabled={busy || recovering}
+        variant="primary"
+        onClick={onRequest}
+      >
+        {busy
+          ? "准备中…"
+          : presentation === "detail"
+            ? "一键自动复刻"
+            : "全自动复刻"}
+      </Button>
+    );
     return (
       <>
-        <Button
-          disabled={busy || recovering}
-          variant="primary"
-          onClick={onRequest}
-        >
-          {busy ? "准备中…" : "全自动复刻"}
-        </Button>
-        <Button
-          disabled={busy || recovering}
-          variant="quiet"
-          onClick={() => void loadCharacters(true)}
-        >
-          更换默认人物
-        </Button>
+        {presentation === "detail" ? (
+          <ReplicaDetailActions
+            settings={
+              <ReplicaDefaultSummary
+                label="默认人物"
+                name={
+                  currentDefault?.character
+                    ? `${currentDefault.character.name} · 版本 ${currentDefault.character.versionNumber}`
+                    : undefined
+                }
+                loading={currentDefault?.loading}
+                unavailable={currentDefault?.unavailable}
+                disabled={busy || recovering}
+                onChoose={() => void loadCharacters(true)}
+              />
+            }
+            secondaryAction={secondaryAction}
+            feeNote="拆解与首帧按规则计费，生成前确认成片费用。"
+          >
+            {primaryAction}
+          </ReplicaDetailActions>
+        ) : (
+          <>
+            {primaryAction}
+            <Button
+              disabled={busy || recovering}
+              variant="quiet"
+              onClick={() => void loadCharacters(true)}
+            >
+              更换默认人物
+            </Button>
+          </>
+        )}
         {characters && (
           <StudioDialog
             title="设置 AI 视频默认人物"
@@ -785,6 +968,12 @@ function ReplicaPipelineControl({
                       "short-character",
                       characterId,
                     );
+                    setDefaultCharacter({
+                      accountId: user.id,
+                      character: characters.find(
+                        (item) => item.characterVersionId === characterId,
+                      ),
+                    });
                     if (editDefaultsOnly) setCharacters(null);
                     else void submitPreparation(characterId);
                   }}
@@ -926,6 +1115,9 @@ function ReplicaPipelineControl({
       {status && ["DELIVERED", "DELIVERED_PARTIAL"].includes(status.status) ? (
         <p className="admin-hint">成片已生成，可在任务中心查看与下载</p>
       ) : null}
+      {presentation === "detail" && secondaryAction && (
+        <div className="replica-detail-actions">{secondaryAction}</div>
+      )}
     </div>
   );
 }
@@ -1020,7 +1212,8 @@ export function ViralFavoriteButton({
       disabled={saving}
       onClick={() => void toggle()}
     >
-      {compact ? <Icon name="star" size={18} /> : saved ? "已收藏" : "收藏"}
+      <Icon name="star" size={18} />
+      {!compact && (saved ? "已收藏" : "收藏")}
     </Button>
   );
 }
@@ -2138,9 +2331,13 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
 export function AdaptiveReplicaControl({
   video,
   uploadedSource,
+  presentation = "default",
+  secondaryAction,
 }: {
   video: ReplicaSource;
   uploadedSource?: { projectId: string; assetId: string };
+  presentation?: "default" | "detail";
+  secondaryAction?: ReactNode;
 }) {
   const { state, user, patchState, notify } = useStudio();
   const [guide, setGuide] = useState<"first" | "manual" | null>(null);
@@ -2187,6 +2384,8 @@ export function AdaptiveReplicaControl({
         (duration > 30_000 ? (
           <OralReplicaControl
             video={video}
+            presentation={presentation}
+            secondaryAction={secondaryAction}
             requested={requested}
             onRequest={onRequest}
             onHandled={() => setRequested(false)}
@@ -2205,21 +2404,30 @@ export function AdaptiveReplicaControl({
         ) : (
           <ReplicaPipelineControl
             video={video}
+            presentation={presentation}
+            secondaryAction={secondaryAction}
             uploadedSource={uploadedSource}
             requested={requested}
             onRequest={onRequest}
             onHandled={() => setRequested(false)}
           />
         ))}
-      <Button
-        variant="quiet"
-        onClick={() => {
-          saveReplicaPreference(user.id, "guide-v1", "1");
-          setGuide("manual");
-        }}
-      >
-        使用教程
-      </Button>
+      {presentation === "detail" && !canStart && (
+        <p className="viral-media-status" role="status">
+          视频时长未知、不足 4 秒或缺少来源信息，可先提取文案。
+        </p>
+      )}
+      {presentation !== "detail" && (
+        <Button
+          variant="quiet"
+          onClick={() => {
+            saveReplicaPreference(user.id, "guide-v1", "1");
+            setGuide("manual");
+          }}
+        >
+          使用教程
+        </Button>
+      )}
       {guide && (
         <AdaptiveReplicaGuide
           onClose={() => setGuide(null)}
@@ -2247,6 +2455,7 @@ export function ViralDetailPage() {
     extractScriptFromUpload,
   } = useStudio();
   const accountId = user.id;
+  const [guideOpen, setGuideOpen] = useState(false);
   const selectedVideo = state.selectedVideoId
     ? data.videos.find((item) => item.id === state.selectedVideoId)
     : undefined;
@@ -2440,17 +2649,54 @@ export function ViralDetailPage() {
     }
     void start(video, "replica", goReplica);
   };
+  const title =
+    video.title.trim() ||
+    video.description?.trim().split(/\r?\n/)[0] ||
+    "未命名视频";
+  const manualAction = canReplicate ? (
+    <Button
+      disabled={
+        importState.status === "loading" || detailAvailability !== "available"
+      }
+      variant="outline"
+      onClick={beginReplicate}
+    >
+      {importState.status === "loading" ? "导入中…" : "手动复刻"}
+    </Button>
+  ) : undefined;
+  const showAdaptive =
+    !review &&
+    user.role !== "auditor" &&
+    detailStatus === "idle" &&
+    detailAvailability === "available" &&
+    remoteVideo?.platformKey === targetPlatform &&
+    remoteVideo?.nativeId === targetVideoId &&
+    remoteVideo;
   return (
     <section className="content-page content-detail">
       <header className="content-detail-heading">
-        <h1>爆款视频 / 视频详情</h1>
         <Button
           variant="quiet"
           onClick={() => navigate(state.returnTo ?? "viral")}
         >
-          ‹ 返回列表
+          ‹ {state.returnTo === "workbench" ? "返回工作台" : "返回爆款列表"}
+        </Button>
+        <Button
+          variant="quiet"
+          onClick={() => {
+            saveReplicaPreference(user.id, "guide-v1", "1");
+            setGuideOpen(true);
+          }}
+        >
+          使用教程
         </Button>
       </header>
+      {guideOpen && (
+        <AdaptiveReplicaGuide
+          onClose={() => setGuideOpen(false)}
+          onComplete={() => setGuideOpen(false)}
+        />
+      )}
       <section className="content-detail-grid content-detail-grid-viral">
         <div className="content-player content-player-viral">
           {playback.status === "playing" ? (
@@ -2484,16 +2730,16 @@ export function ViralDetailPage() {
             </button>
           )}
           <span className="viral-card-duration">{video.duration}</span>
-          {/* 封面浮层：标题与互动统计压图；标签已从卡片移除，不再显示。
-              右侧面板只留作者、发布信息与操作按钮。 */}
-          {playback.status !== "playing" && (
-            <div className="viral-card-overlay viral-detail-cover-overlay">
-              <h2>{video.title}</h2>
-              <ViralStatsRow video={video} />
-            </div>
-          )}
         </div>
-        <Panel className="content-detail-info">
+        <article className="content-detail-info">
+          <div className="viral-detail-title-row">
+            <h1 title={title}>{title}</h1>
+            <ViralFavoriteButton
+              video={video}
+              savedFromServer={review ? undefined : detailFavorite}
+              onSavedChange={setDetailFavorite}
+            />
+          </div>
           <div className="content-detail-author">
             {video.authorAvatar ? (
               <img alt="" src={video.authorAvatar} />
@@ -2505,17 +2751,19 @@ export function ViralDetailPage() {
                 {video.author}
                 {video.verified && <em title="认证作者">✓</em>}
               </strong>
-              <span>
-                <PlatformLogo platform={video.platform} /> {video.platform} ·{" "}
-                {video.category || "推荐"}
-                {video.hasPlayableAudio ? " · 有原声" : ""}
-              </span>
+              <div className="viral-detail-source">
+                <span>
+                  <PlatformLogo platform={video.platform} /> {video.platform} ·{" "}
+                  {video.category || "推荐"}
+                  {video.hasPlayableAudio ? " · 有原声" : ""}
+                </span>
+                <span>发布 {published}</span>
+                <span>时长 {video.duration}</span>
+              </div>
             </div>
           </div>
-          <div className="viral-detail-metrics">
-            <span className="viral-detail-published">发布 {published}</span>
-            <span>时长 {video.duration}</span>
-          </div>
+          <ViralDescription key={viralIdentity(video)} video={video} />
+          <ViralStatsRow video={video} detail />
           {detailError && (
             <p className="viral-media-status is-error" role="status">
               {detailError}
@@ -2534,56 +2782,44 @@ export function ViralDetailPage() {
               {importState.message}
             </p>
           )}
-          <div className="content-detail-actions">
-            <div className="content-detail-action">
-              <Button
-                disabled={
-                  importState.status === "loading" ||
-                  detailAvailability !== "available"
-                }
-                variant="outline"
-                onClick={requestExtract}
-              >
-                提取文案
-              </Button>
-            </div>
-            {canReplicate && (
-              <div className="content-detail-action">
-                <Button
-                  disabled={
-                    importState.status === "loading" ||
-                    detailAvailability !== "available"
-                  }
-                  variant="outline"
-                  onClick={beginReplicate}
-                >
-                  {importState.status === "loading" ? "导入中…" : "去复刻"}
-                </Button>
-              </div>
-            )}
-            {!review &&
-              user.role !== "auditor" &&
-              detailStatus === "idle" &&
-              detailAvailability === "available" &&
-              remoteVideo?.platformKey === targetPlatform &&
-              remoteVideo?.nativeId === targetVideoId &&
-              remoteVideo && (
-                <div className="content-detail-action">
-                  <AdaptiveReplicaControl
-                    key={`${user.id}:${viralIdentity(video)}`}
-                    video={video}
-                  />
-                </div>
-              )}
-            <div className="content-detail-action">
-              <ViralFavoriteButton
+          <section
+            className="viral-detail-transcript"
+            aria-label="视频口播文案"
+          >
+            <h2>视频口播文案</h2>
+            <Button
+              disabled={
+                importState.status === "loading" ||
+                detailAvailability !== "available"
+              }
+              variant="outline"
+              onClick={requestExtract}
+            >
+              提取文案
+            </Button>
+          </section>
+          <section className="viral-detail-create" aria-label="开始复刻">
+            <h2>开始复刻</h2>
+            {showAdaptive ? (
+              <AdaptiveReplicaControl
+                key={`${user.id}:${viralIdentity(video)}`}
                 video={video}
-                savedFromServer={review ? undefined : detailFavorite}
-                onSavedChange={setDetailFavorite}
+                presentation="detail"
+                secondaryAction={manualAction}
               />
-            </div>
-          </div>
-        </Panel>
+            ) : (
+              (manualAction ?? (
+                <p className="viral-media-status" role="status">
+                  {detailStatus === "loading"
+                    ? "正在读取复刻信息…"
+                    : review
+                      ? "登录后可选择人物并开始复刻。"
+                      : "当前视频暂不可复刻。"}
+                </p>
+              ))
+            )}
+          </section>
+        </article>
       </section>
     </section>
   );

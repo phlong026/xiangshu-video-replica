@@ -939,7 +939,7 @@ describe("V1.4 workspace integration", () => {
 
       expect(
         screen.getByRole("heading", {
-          name: page === "viral" ? "爆款视频" : "爆款视频 / 视频详情",
+          name: page === "viral" ? "爆款视频" : reviewData.videos[0].title,
         }),
       ).toBeInTheDocument();
       if (page === "viral-detail") {
