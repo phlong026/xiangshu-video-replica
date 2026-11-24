@@ -1355,7 +1355,7 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     const view = render(<ViralDetailPage />);
     expect(
-      screen.getByRole("heading", { name: "爆款视频 / 视频详情" }),
+      screen.getByRole("heading", { name: "农村建房预算，别只盯着主体" }),
     ).toBeInTheDocument();
     expect(screen.getByText("乡墅建房笔记")).toBeInTheDocument();
     expect(screen.getByText("抖音 · 建房预算 · 有原声")).toBeInTheDocument();
@@ -1389,7 +1389,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.getByText("参考素材已导入")).toBeInTheDocument();
   });
 
-  it("详情封面浮层承载标题/互动统计，标签不显示在封面上", () => {
+  it("详情标题、描述与互动数据独立于播放器，话题与口播操作清晰分区", () => {
     const value = studio({
       state: {
         ...studio().state,
@@ -1400,22 +1400,34 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     const view = render(<ViralDetailPage />);
 
-    // 封面浮层：标题与统计压图；标签已从卡片移除，不再出现在浮层里。
-    const overlay = view.container.querySelector(".viral-detail-cover-overlay");
-    expect(overlay).not.toBeNull();
-    if (!overlay) return;
-    expect(overlay.querySelector("h2")?.textContent).toBe(
-      "农村建房预算，别只盯着主体",
-    );
-    expect(overlay.querySelectorAll(".viral-card-tags span")).toHaveLength(0);
-    expect(overlay.querySelectorAll(".viral-card-stats span")).toHaveLength(4);
-    expect(within(overlay as HTMLElement).queryByText("发布")).toBeNull();
+    const player = view.container.querySelector(".content-player-viral");
+    expect(player).not.toBeNull();
+    if (!player) throw new Error("详情播放器缺失");
+    expect(within(player as HTMLElement).queryByRole("heading")).toBeNull();
+    expect(within(player as HTMLElement).queryByTitle("点赞")).toBeNull();
 
-    // 面板只保留发布时间/时长，不再渲染标题与标签。
-    expect(view.container.querySelector(".viral-detail-tags")).toBeNull();
-    const metrics = view.container.querySelector(".viral-detail-metrics");
-    expect(metrics?.textContent).toContain("时长 01:28");
-    expect(metrics?.querySelector(".viral-card-stats")).toBeNull();
+    const info = screen.getByRole("article");
+    expect(
+      within(info).getByRole("heading", {
+        name: "农村建房预算，别只盯着主体",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(info).getByRole("region", { name: "视频描述" }),
+    ).toHaveTextContent("主体之外，门窗、水电、防水和庭院也要列进预算清单。");
+    expect(within(info).getByText("#农村自建房")).toBeInTheDocument();
+    expect(within(info).getByText("时长 01:28")).toBeInTheDocument();
+    expect(within(info).getByTitle("点赞")).toHaveTextContent("1.8万");
+    expect(within(info).getByTitle("评论")).toHaveTextContent("—");
+    expect(within(info).getByTitle("转发")).toHaveTextContent("326");
+    expect(within(info).getByTitle("收藏")).toHaveTextContent("842");
+    expect(within(info).getByText("原平台收藏")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("region", { name: "视频口播文案" })).getByRole(
+        "button",
+        { name: "提取文案" },
+      ),
+    ).toBeInTheDocument();
 
     // 封面盒使用 fitContainer：无内联宽度钳制，前景按 cover 裁切填充。
     const wrapper = view.container.querySelector(
@@ -1588,7 +1600,7 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("时长未知的爆款详情不提供去复刻，仅音频来源可交给文案提取", async () => {
+  it("时长未知的爆款详情不提供手动复刻，仅音频来源可交给文案提取", async () => {
     createViralImportTask.mockResolvedValue({
       taskId: "audio-import",
       status: "SUCCEEDED",
@@ -1630,7 +1642,7 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("超过15秒的爆款详情不提供去复刻入口", async () => {
+  it("超过30秒的爆款详情不提供手动复刻入口", async () => {
     const base = studio();
     const value = studio({
       data: {
@@ -1654,7 +1666,7 @@ describe("V1.4 内容与运营页面", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("低于4秒的爆款详情不提供去复刻入口", () => {
+  it("低于4秒的爆款详情不提供手动复刻入口", () => {
     const base = studio();
     const value = studio({
       data: {
@@ -1678,7 +1690,7 @@ describe("V1.4 内容与运营页面", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("4–15秒的爆款详情提供去复刻并带入参考素材", async () => {
+  it("4–30秒的爆款详情提供手动复刻并带入参考素材", async () => {
     createViralImportTask.mockResolvedValue({
       taskId: "replica-import",
       status: "SUCCEEDED",
@@ -1715,9 +1727,10 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<ViralDetailPage />);
 
-    const replicate = await screen.findByRole("button", { name: "去复刻" });
-    await waitFor(() => expect(replicate).toBeEnabled());
-    fireEvent.click(replicate);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "手动复刻" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "手动复刻" }));
     await waitFor(() =>
       expect(createViralImportTask).toHaveBeenCalledWith(
         "douyin",
@@ -2767,9 +2780,9 @@ describe("V1.4 内容与运营页面", () => {
         screen.queryByText(/统计来源：|最近核验：/),
       ).not.toBeInTheDocument();
       expect(screen.queryByText(/视频摘要/)).not.toBeInTheDocument();
-      expect(screen.queryByText(video.description)).not.toBeInTheDocument();
-      // 详情封面同样不再渲染标签浮层。
-      expect(screen.queryByText(`#${tag}`)).not.toBeInTheDocument();
+      expect(screen.getByText(video.description)).toBeInTheDocument();
+      expect(screen.getByText(`#${tag}`)).toBeInTheDocument();
+      expect(screen.getByTitle("收藏")).toHaveTextContent(/^—$/);
     },
   );
 
@@ -3810,7 +3823,11 @@ describe("V1.4 内容与运营页面", () => {
     expect(openViralVideoDetail).toHaveBeenCalledWith("douyin", "native-dy-1");
     // 查看详情免费：即便旧服务端回执里带了扣费数字，页面也不再展示计费回执。
     expect(screen.queryByText(/查看详情扣除/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/积分/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/2\s*积分/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText("转写可能消耗积分，成片生成前确认费用。"),
+    ).toBeInTheDocument();
+    expect(createViralImportTask).not.toHaveBeenCalled();
   });
 
   it.each(["viralExtractIntent", "viralReplicateIntent"] as const)(
@@ -3844,7 +3861,7 @@ describe("V1.4 内容与运营页面", () => {
         "douyin",
         "native-dy-1",
       );
-      for (const name of ["提取文案", "去复刻"]) {
+      for (const name of ["提取文案", "手动复刻"]) {
         const button = screen.getByRole("button", { name });
         expect(button).toBeDisabled();
         fireEvent.click(button);
@@ -3923,10 +3940,10 @@ describe("V1.4 内容与运营页面", () => {
       if (result === "error") await screen.findByText("详情网络断开");
       else if (result === "pending") await act(async () => Promise.resolve());
       else await screen.findByRole("heading", { name: "服务端已撤回的视频" });
-      expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "一键自动复刻" })).toBeNull();
       expect(findActiveReplicaPipeline).not.toHaveBeenCalled();
       expect(initiateReplicaPipeline).not.toHaveBeenCalled();
-      for (const name of ["提取文案", "去复刻"]) {
+      for (const name of ["提取文案", "手动复刻"]) {
         const button = screen.getByRole("button", { name });
         expect(button).toBeDisabled();
         fireEvent.click(button);
@@ -5650,14 +5667,14 @@ describe("全自动复刻入口（M8 v1）", () => {
           await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
         ).toBeEnabled();
         expect(
-          screen.queryByRole("button", { name: "全自动复刻" }),
+          screen.queryByRole("button", { name: "一键自动复刻" }),
         ).not.toBeInTheDocument();
         expect(initiateReplicaPipeline).not.toHaveBeenCalled();
         confirmSpy.mockRestore();
         view.unmount();
         return;
       }
-      const entry = await screen.findByRole("button", { name: "全自动复刻" });
+      const entry = await screen.findByRole("button", { name: "一键自动复刻" });
       await waitFor(() => expect(entry).toBeEnabled());
       expect(
         screen.queryByRole("button", { name: "刷新资源（按次计费）" }),
@@ -5712,7 +5729,8 @@ describe("全自动复刻入口（M8 v1）", () => {
         nativeId,
       );
       expect(initiateReplicaPipeline).toHaveBeenCalledOnce();
-      expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "一键自动复刻" })).toBeNull();
+      expect(screen.getByRole("button", { name: "手动复刻" })).toBeEnabled();
       resumed.unmount();
       // 切换账号时卸载旧轮询，不能沿用上一账号的任务状态。
       useStudio.mockReturnValue({
@@ -5726,11 +5744,12 @@ describe("全自动复刻入口（M8 v1）", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(
         "已有复刻任务查询失败",
       );
-      expect(screen.queryByRole("button", { name: "全自动复刻" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "一键自动复刻" })).toBeNull();
+      expect(screen.getByRole("button", { name: "手动复刻" })).toBeEnabled();
       fireEvent.click(screen.getByRole("button", { name: "重新检查任务" }));
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "全自动复刻" }),
+          screen.getByRole("button", { name: "一键自动复刻" }),
         ).toBeEnabled(),
       );
       expect(screen.queryByRole("status")).toBeNull();
@@ -6653,5 +6672,400 @@ describe("发布封面标题与确认", () => {
         expect.objectContaining({ cover_material_id: "asset:generated-cover" }),
       ),
     );
+  });
+});
+
+describe("爆款详情描述与默认素材", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.history.replaceState(null, "", "/");
+    openViralVideoDetail.mockReset();
+    findActiveReplicaPipeline
+      .mockReset()
+      .mockResolvedValue({ pipelineId: null });
+    listReplicaPipelineCharacters
+      .mockReset()
+      .mockResolvedValue({ characters: [] });
+    initiateReplicaPipeline.mockReset();
+  });
+
+  function renderDescription(overrides: Partial<StudioVideo>) {
+    const base = studio();
+    useStudio.mockReturnValue(
+      studio({
+        state: { ...base.state, selectedVideoId: "dy-1" },
+        data: {
+          ...base.data,
+          videos: [{ ...base.data.videos[0], ...overrides }],
+        },
+      }),
+    );
+    return render(<ViralDetailPage />);
+  }
+
+  it.each([
+    ["独立描述", "农村建房预算", "门窗、水电与庭院费用都要计入预算。"],
+    ["描述与标题相同", "农村建房预算要列全", "农村建房预算要列全"],
+  ])(
+    "免费详情返回%s时仍展示真实发布描述",
+    async (_case, title, description) => {
+      const base = studio();
+      useStudio.mockReturnValue(
+        studio({
+          review: false,
+          user: { ...base.user, id: `detail-description-${_case}` },
+          state: { ...base.state, selectedVideoId: "dy-1" },
+        }),
+      );
+      openViralVideoDetail.mockResolvedValue(
+        viralDetailView(
+          viralItem(1, {
+            title,
+            sourceDescription: description,
+            tags: ["建房预算"],
+          }),
+        ),
+      );
+      render(<ViralDetailPage />);
+
+      await waitFor(() =>
+        expect(
+          within(screen.getByRole("region", { name: "视频描述" })).getByText(
+            description,
+          ),
+        ).toBeInTheDocument(),
+      );
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+        title,
+      );
+      expect(screen.getByText("#建房预算")).toBeInTheDocument();
+      expect(createViralImportTask).not.toHaveBeenCalled();
+      expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+    },
+  );
+
+  it("描述为空时保留标题中的完整多行原文，不截成一句话", () => {
+    const original = [
+      "回乡建房，宅基地审批需要准备哪些材料？",
+      ...Array.from(
+        { length: 8 },
+        (_, index) => `第 ${index + 1} 项：准备原始资料，按当地要求核对。`,
+      ),
+      "#乡村生活 #宅基地建房",
+    ].join("\n");
+    renderDescription({ title: original, description: "   ", tags: [] });
+
+    const description = screen.getByRole("region", { name: "视频描述" });
+    expect(description.querySelector("p")?.textContent).toBe(original);
+  });
+
+  it("标题、描述与话题全空时不保留空描述区域", () => {
+    renderDescription({ title: " ", description: "\n", tags: [] });
+    expect(screen.queryByRole("region", { name: "视频描述" })).toBeNull();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+      "未命名视频",
+    );
+  });
+
+  it("超过三行的长描述可展开和收起，原文保持完整", () => {
+    const height = vi
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockReturnValue(200);
+    try {
+      const original = Array.from(
+        { length: 8 },
+        (_, index) => `完整发布内容第 ${index + 1} 段`,
+      ).join("\n");
+      renderDescription({ description: original });
+      const description = screen.getByRole("region", { name: "视频描述" });
+      const expand = within(description).getByRole("button", {
+        name: "展开全文",
+      });
+      expect(expand).toHaveAttribute("aria-expanded", "false");
+      expect(
+        document.getElementById(expand.getAttribute("aria-controls") ?? "")
+          ?.textContent,
+      ).toBe(original);
+
+      fireEvent.click(expand);
+      const collapse = within(description).getByRole("button", {
+        name: "收起",
+      });
+      expect(collapse).toHaveAttribute("aria-expanded", "true");
+      expect(description.querySelector("p")?.textContent).toBe(original);
+      fireEvent.click(collapse);
+      expect(
+        within(description).getByRole("button", { name: "展开全文" }),
+      ).toHaveAttribute("aria-expanded", "false");
+      expect(description.querySelector("p")?.textContent).toBe(original);
+    } finally {
+      height.mockRestore();
+    }
+  });
+
+  function adaptiveFixture(accountId: string) {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: accountId },
+    });
+    const video = { ...base.data.videos[0], durationMs: 24_000 };
+    useStudio.mockReturnValue(value);
+    return { value, video };
+  }
+
+  it("详情摘要按真实可用版本显示默认人物，普通入口保持原样", async () => {
+    const { video } = adaptiveFixture("detail-character-valid");
+    saveReplicaPreference(
+      "detail-character-valid",
+      "short-character",
+      "cv-real",
+    );
+    listReplicaPipelineCharacters.mockResolvedValue({
+      characters: [
+        { characterVersionId: "cv-real", name: "真实主角", versionNumber: 7 },
+      ],
+    });
+    const view = render(
+      <AdaptiveReplicaControl video={video} presentation="detail" />,
+    );
+    expect(
+      await within(screen.getByRole("group", { name: "默认人物" })).findByText(
+        "真实主角 · 版本 7",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更换默认人物" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "一键自动复刻" })).toBeEnabled();
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+
+    view.unmount();
+    listReplicaPipelineCharacters.mockClear();
+    render(<AdaptiveReplicaControl video={video} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "全自动复刻" })).toBeEnabled(),
+    );
+    expect(screen.queryByRole("group", { name: "默认人物" })).toBeNull();
+    expect(listReplicaPipelineCharacters).not.toHaveBeenCalled();
+  });
+
+  it("已失效的默认人物不能冒充有效版本，允许重新选择", async () => {
+    const { video } = adaptiveFixture("detail-character-expired");
+    saveReplicaPreference(
+      "detail-character-expired",
+      "short-character",
+      "cv-retired",
+    );
+    listReplicaPipelineCharacters.mockResolvedValue({
+      characters: [
+        {
+          characterVersionId: "cv-current",
+          name: "可用主角",
+          versionNumber: 2,
+        },
+      ],
+    });
+    render(<AdaptiveReplicaControl video={video} presentation="detail" />);
+    expect(await screen.findByText("默认素材暂不可用")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "选择人物" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "设置 AI 视频默认人物",
+    });
+    expect(within(dialog).getByLabelText("人物版本")).toHaveValue("");
+    expect(
+      within(dialog).getByRole("button", { name: "保存默认人物" }),
+    ).toBeDisabled();
+    expect(
+      within(dialog).getByRole("option", { name: "可用主角 · 版本 2" }),
+    ).toBeInTheDocument();
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+  });
+
+  it("切换账号后不展示旧账号默认人物，旧请求晚返回也不会覆盖", async () => {
+    const { value, video } = adaptiveFixture("detail-character-owner-a");
+    const oldCharacter = {
+      characterVersionId: "cv-a",
+      name: "账号甲主角",
+      versionNumber: 1,
+    };
+    saveReplicaPreference(
+      value.user.id,
+      "short-character",
+      oldCharacter.characterVersionId,
+    );
+    let resolveOld!: (result: { characters: (typeof oldCharacter)[] }) => void;
+    listReplicaPipelineCharacters.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const view = render(
+      <AdaptiveReplicaControl
+        key={value.user.id}
+        video={video}
+        presentation="detail"
+      />,
+    );
+    expect(screen.getByRole("group", { name: "默认人物" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+
+    const nextUser = { ...value.user, id: "detail-character-owner-b" };
+    useStudio.mockReturnValue({ ...value, user: nextUser });
+    view.rerender(
+      <AdaptiveReplicaControl
+        key={nextUser.id}
+        video={video}
+        presentation="detail"
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "选择人物" })).toBeEnabled(),
+    );
+    await act(async () => {
+      resolveOld({ characters: [oldCharacter] });
+    });
+    expect(screen.getByRole("group", { name: "默认人物" })).toHaveTextContent(
+      "尚未设置",
+    );
+    expect(screen.queryByText("账号甲主角 · 版本 1")).toBeNull();
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+  });
+
+  it("初始人物读取晚返回时不得覆盖后来保存的新默认", async () => {
+    const { value, video } = adaptiveFixture("detail-character-race");
+    const oldCharacter = {
+      characterVersionId: "cv-old",
+      name: "旧主角",
+      versionNumber: 1,
+    };
+    const newCharacter = {
+      characterVersionId: "cv-new",
+      name: "新主角",
+      versionNumber: 2,
+    };
+    saveReplicaPreference(
+      value.user.id,
+      "short-character",
+      oldCharacter.characterVersionId,
+    );
+    saveReplicaPreference(value.user.id, "guide-v1", "1");
+    let resolveInitial!: (result: {
+      characters: (typeof oldCharacter)[];
+    }) => void;
+    listReplicaPipelineCharacters
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitial = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ characters: [newCharacter] });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    try {
+      render(<AdaptiveReplicaControl video={video} presentation="detail" />);
+      const start = screen.getByRole("button", { name: "一键自动复刻" });
+      await waitFor(() => expect(start).toBeEnabled());
+      fireEvent.click(start);
+      const dialog = await screen.findByRole("dialog", {
+        name: "设置 AI 视频默认人物",
+      });
+      fireEvent.change(within(dialog).getByLabelText("人物版本"), {
+        target: { value: newCharacter.characterVersionId },
+      });
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "保存默认人物并继续" }),
+      );
+      expect(screen.getByRole("group", { name: "默认人物" })).toHaveTextContent(
+        "新主角 · 版本 2",
+      );
+      await act(async () => {
+        resolveInitial({ characters: [oldCharacter] });
+      });
+      expect(screen.getByRole("group", { name: "默认人物" })).toHaveTextContent(
+        "新主角 · 版本 2",
+      );
+      expect(
+        within(screen.getByRole("group", { name: "默认人物" })).queryByText(
+          "旧主角 · 版本 1",
+        ),
+      ).toBeNull();
+      expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it("口播摘要展示已保存的真实素材，取消更换后下次仍使用原默认", async () => {
+    const { value, video } = oralReplicaFixture("detail-oral-cancel");
+    value.data.people[0].portrait = "/real-person.jpg";
+    value.data.people[0].voices.push({
+      id: "v-2",
+      name: "新声音",
+      confirmed: true,
+      status: "READY",
+    });
+    const props = {
+      video,
+      presentation: "detail" as const,
+      onRequest: vi.fn(),
+      onHandled: vi.fn(),
+      importVideo: createViralImportTask,
+    };
+    const view = render(<OralReplicaControl {...props} requested={false} />);
+    const summary = screen.getByRole("group", { name: "默认分身和声音" });
+    expect(summary).toHaveTextContent("默认分身 · 默认声音");
+    expect(summary.querySelector("img")).toHaveAttribute(
+      "src",
+      "/real-person.jpg",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "更换默认分身和声音" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "设置数字人口播默认素材",
+    });
+    fireEvent.change(within(dialog).getByLabelText("口播声音"), {
+      target: { value: "v-2" },
+    });
+    expect(summary).toHaveTextContent("默认分身 · 默认声音");
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    expect(summary).toHaveTextContent("默认分身 · 默认声音");
+
+    view.rerender(<OralReplicaControl {...props} requested />);
+    const preparation = await screen.findByRole("dialog", {
+      name: "用数字人口播复刻",
+    });
+    expect(preparation).toHaveTextContent("默认声音");
+    expect(preparation).not.toHaveTextContent("新声音");
+    expect(createOralTask).not.toHaveBeenCalled();
+  });
+
+  it("口播默认声音失效与账号切换时不沿用旧名称", () => {
+    const { value, video } = oralReplicaFixture("detail-oral-invalid");
+    value.data.people[0].voices[0].confirmed = false;
+    const props = {
+      video,
+      presentation: "detail" as const,
+      onRequest: vi.fn(),
+      onHandled: vi.fn(),
+      importVideo: createViralImportTask,
+      requested: false,
+    };
+    const view = render(<OralReplicaControl key={value.user.id} {...props} />);
+    expect(
+      screen.getByRole("group", { name: "默认分身和声音" }),
+    ).toHaveTextContent("默认素材暂不可用");
+    expect(
+      screen.getByRole("button", { name: "选择分身和声音" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("默认分身 · 默认声音")).toBeNull();
+
+    const nextUser = { ...value.user, id: "detail-oral-no-default" };
+    useStudio.mockReturnValue({ ...value, user: nextUser });
+    view.rerender(<OralReplicaControl key={nextUser.id} {...props} />);
+    expect(
+      screen.getByRole("group", { name: "默认分身和声音" }),
+    ).toHaveTextContent("尚未设置");
+    expect(screen.queryByText("默认分身 · 默认声音")).toBeNull();
   });
 });
