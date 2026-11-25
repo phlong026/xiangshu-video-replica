@@ -32,7 +32,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from fastapi import HTTPException
-from pg_test_kit import require_pg_or_explicit_skip
+from pg_test_kit import require_pg_or_explicit_skip, signup_license_payload
 from test_customer_registration import (
     client as registration_client,  # noqa: F401
 )
@@ -70,7 +70,7 @@ QUOTA_DB = "t_sub_account_quota"
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、
 # 20260926T0000 爆款首页策展排行与 20260925T1400 计费触发器追加修复，
 # 故链尾为该值。
-_HEAD_REVISION = "20261124T1000_recharge_minimum_step"
+_HEAD_REVISION = "20261125T1000_software_licenses"
 # _PRIOR_REVISION 是本迁移自身的 down_revision，用于降级断言。
 # 合并 main 后 1200 重挂到 20260922T1200_recharge_packages（手册 §3）；Phase 3b
 # permissions 与其后的 analysis 三迁移（failure_diagnostic / request_id /
@@ -293,7 +293,7 @@ def _login(client, username: str, password: str):
 def _master_session(client, username: str):
     """Register a master and log it in; returns (headers, login body)."""
     registered = client.post(
-        "/api/customer/register", json={"username": username, "password": MASTER_PASSWORD}
+        "/api/customer/register", json=signup_license_payload(username, MASTER_PASSWORD)
     )
     assert registered.status_code == 201, registered.text
     login = _login(client, username, MASTER_PASSWORD)

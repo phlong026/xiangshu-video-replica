@@ -22,6 +22,7 @@ import { GlobalSearch } from "./admin/GlobalSearch";
 import { OverviewPage } from "./admin/OverviewPage";
 import { PublishStatsPage } from "./admin/PublishStatsPage";
 import { ReportsPage } from "./admin/ReportsPage";
+import { SoftwareLicensesPage } from "./admin/SoftwareLicensesPage";
 import { SupportTicketsPage } from "./admin/SupportTicketsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { TeamManagementSection } from "./admin/TeamManagementSection";
@@ -65,6 +66,7 @@ import radarIcon from "./assets/icons/radar.svg";
 import scrollIcon from "./assets/icons/scroll-text.svg";
 import serverCogIcon from "./assets/icons/server-cog.svg";
 import settingsIcon from "./assets/icons/settings.svg";
+import shieldCheckIcon from "./assets/icons/shield-check.svg";
 import shieldUserIcon from "./assets/icons/shield-user.svg";
 import smartphoneIcon from "./assets/icons/smartphone.svg";
 import alertIcon from "./assets/icons/triangle-alert.svg";
@@ -99,6 +101,7 @@ export type AdminTab =
   | "reports"
   | "funds"
   | "customersMgmt"
+  | "softwareLicenses"
   | "customerLifecycle"
   | "announcements"
   | "trainingMaterials"
@@ -150,6 +153,11 @@ const tabGroups: Array<{
         id: "customersMgmt",
         label: "客户列表",
         helper: "客户账户、权益与操作记录",
+      },
+      {
+        id: "softwareLicenses",
+        label: "软件授权",
+        helper: "线下收款发码、激活期限和年度续费",
       },
       {
         id: "customerLifecycle",
@@ -259,6 +267,7 @@ const tabPageTitles: Record<AdminTab, string> = {
   reports: "报表中心",
   funds: "资金中心",
   customersMgmt: "客户列表",
+  softwareLicenses: "软件授权",
   customerLifecycle: "客户运营",
   announcements: "公告与消息",
   trainingMaterials: "培训素材库",
@@ -284,6 +293,7 @@ const tabReadPoints: Partial<Record<AdminTab, string>> = {
   reports: "business.read",
   funds: "funds.read",
   customersMgmt: "customer.read",
+  softwareLicenses: "customer.read",
   customerLifecycle: "customer.read",
   announcements: "customer.read",
   trainingMaterials: "content.read",
@@ -311,6 +321,7 @@ const navigationIcons: Record<AdminTab, string> = {
   reports: fileSpreadsheetIcon,
   funds: walletIcon,
   customersMgmt: usersIcon,
+  softwareLicenses: shieldCheckIcon,
   customerLifecycle: userCogIcon,
   announcements: megaphoneIcon,
   trainingMaterials: trainingIcon,
@@ -1443,6 +1454,9 @@ export function AdminApp() {
             ) : null}
             {/* 任务书 C：恢复在线会话挂载。多设备并存下按设备强制下线是管理刚需，
               readOnly 由会话页自身收敛（auditor 不渲染强制下线与调账入口）。 */}
+            {viewTab === "softwareLicenses" ? (
+              <SoftwareLicensesPage readOnly={readOnlyFor("customer.write")} />
+            ) : null}
             {viewTab === "customerLifecycle" ? (
               <CustomerLifecyclePage readOnly={readOnlyFor("customer.write")} />
             ) : null}

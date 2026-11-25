@@ -710,6 +710,83 @@ export type ActivationCodeRevealResult = {
   request_id: string;
 };
 
+export type SoftwareLicense = {
+  id: string;
+  masked_code: string;
+  activation_expires_at: string | null;
+  authorization_years: number;
+  username: string | null;
+  authorized_until: string | null;
+  expired: boolean;
+  can_reveal: boolean;
+};
+
+export function getSoftwareLicenses(
+  search: string,
+  limit: number,
+  offset: number,
+) {
+  const query = new URLSearchParams({
+    search,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return adminRead<{
+    items: SoftwareLicense[];
+    total: number;
+    auto_extend: boolean;
+  }>(`/api/control/software-licenses?${query}`, "读取软件授权失败");
+}
+
+export function issueSoftwareLicense(
+  fields: { authorization_years: number; activation_expires_at: string },
+  reason: string,
+  key: string,
+) {
+  return adminWrite<{ id: string }>(
+    "/api/control/software-licenses",
+    fields,
+    reason,
+    "生成激活码失败",
+    key,
+  );
+}
+
+export function updateSoftwareActivationPolicy(
+  enabled: boolean,
+  reason: string,
+  key: string,
+) {
+  return adminWrite<{ auto_extend: boolean }>(
+    "/api/control/software-licenses/activation-policy",
+    { auto_extend: enabled },
+    reason,
+    "保存自动延期设置失败",
+    key,
+    "PATCH",
+  );
+}
+
+export function revealSoftwareLicense(id: string, reason: string, key: string) {
+  return adminWrite<{ activation_code: string }>(
+    `/api/control/software-licenses/${encodeURIComponent(id)}/reveal`,
+    {},
+    reason,
+    "读取激活码失败",
+    key,
+  );
+}
+
+export function renewSoftwareLicense(id: string, reason: string, key: string) {
+  return adminWrite<{ authorized_until: string }>(
+    `/api/control/software-licenses/${encodeURIComponent(id)}/renew`,
+    {},
+    reason,
+    "续费失败",
+    key,
+  );
+}
+
 export async function createActivationCodeBatch(
   input: {
     name: string;

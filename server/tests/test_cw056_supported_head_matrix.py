@@ -118,7 +118,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 发布域三表平台 CHECK 的快手值，计数不变，digest 随约束定义重算。
 # 20261120T1000_account_diagnosis（账号诊断 P0）再追加两张表并种子价目行，
 # counts/表名集/digest 均按上方 HEAD_SCHEMA_COUNTS 注释重算。
-HEAD_REVISION = "20261124T1000_recharge_minimum_step"
+HEAD_REVISION = "20261125T1000_software_licenses"
 
 
 @pytest.mark.pg

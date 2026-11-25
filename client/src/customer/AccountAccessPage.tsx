@@ -8,6 +8,7 @@ export type AccountAccessInput = {
   mode: "login" | "register";
   username: string;
   password: string;
+  activationCode?: string;
   /** 用户是否勾选「记住密码」；持久化由调用方决定，本页不碰存储。 */
   remember: boolean;
 };
@@ -34,6 +35,7 @@ export function AccountAccessPage({
   const [password, setPassword] = useState(remembered?.password ?? "");
   const [remember, setRemember] = useState(remembered !== null);
   const [confirmation, setConfirmation] = useState("");
+  const [activationCode, setActivationCode] = useState("");
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -57,6 +59,9 @@ export function AccountAccessPage({
         mode,
         username: username.trim(),
         password,
+        ...(mode === "register"
+          ? { activationCode: activationCode.trim() }
+          : {}),
         // 注册模式不提供这个选项：口令刚由用户亲手设定，没有免输价值。
         remember: mode === "login" && remember,
       });
@@ -122,7 +127,7 @@ export function AccountAccessPage({
         <p className="account-access-subtitle">
           {mode === "login"
             ? "登录后，即可开始创作。"
-            : "简单注册，开启你的创作之旅。"}
+            : "请填写付款后由服务人员发放的软件激活码。"}
         </p>
         <form onSubmit={handleSubmit}>
           <label htmlFor="account-username">用户名</label>
@@ -194,6 +199,22 @@ export function AccountAccessPage({
                   onChange={(e) => setConfirmation(e.target.value)}
                 />
               </div>
+              <label htmlFor="account-activation-code">软件激活码</label>
+              <div className="account-field">
+                <Icon name="shield" />
+                <input
+                  id="account-activation-code"
+                  autoComplete="off"
+                  autoCapitalize="characters"
+                  spellCheck={false}
+                  required
+                  maxLength={64}
+                  placeholder="请输入软件激活码"
+                  disabled={busy}
+                  value={activationCode}
+                  onChange={(e) => setActivationCode(e.target.value)}
+                />
+              </div>
             </>
           )}
           {mode === "login" && (
@@ -243,6 +264,7 @@ export function AccountAccessPage({
               onModeChange?.(nextMode);
               setError("");
               setConfirmation("");
+              setActivationCode("");
               setPassword("");
               setVisible(false);
             }}

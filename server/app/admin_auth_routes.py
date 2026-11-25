@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from app.admin_permissions import (
     CONTENT_WRITE,
+    CUSTOMER_READ,
     CUSTOMER_WRITE,
     EFFECTIVE_TEMPLATE_SQL,
     EXPORT,
@@ -951,6 +952,12 @@ def get_settings_writer(
     return _require_point(actor, SETTINGS_WRITE)
 
 
+def get_customer_reader(
+    actor: Annotated[AdminActor, Depends(get_admin_actor)],
+) -> AdminActor:
+    return _require_point(actor, CUSTOMER_READ)
+
+
 def get_customer_writer(
     actor: Annotated[AdminActor, Depends(get_admin_writer)],
 ) -> AdminActor:
@@ -969,6 +976,7 @@ AdminWriter = Annotated[AdminActor, Depends(get_admin_writer)]
 FundsWriter = Annotated[AdminActor, Depends(get_funds_writer)]
 SettingsWriter = Annotated[AdminActor, Depends(get_settings_writer)]
 CustomerWriter = Annotated[AdminActor, Depends(get_customer_writer)]
+CustomerReader = Annotated[AdminActor, Depends(get_customer_reader)]
 ContentWriter = Annotated[AdminActor, Depends(get_content_writer)]
 SuperAdminReader = Annotated[AdminActor, Depends(get_super_admin_actor)]
 SuperAdminWriter = Annotated[AdminActor, Depends(get_super_admin_writer)]

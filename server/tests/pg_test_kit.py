@@ -84,6 +84,7 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
     {
         "t13_customer_activation_test",
         "customer_v3_test",
+        "cw076_registration_test",
         # 场景造型删除守卫矩阵（test_scene_look_delete_pg.py）：persona 级
         # 删除守卫与资产/存储清理的真库验证。
         "scene_look_delete_test",
@@ -349,6 +350,39 @@ def resolve_test_dsn() -> str:
 
 def database_name_of(dsn: str) -> str:
     return dsn.rsplit("/", 1)[-1].split("?", 1)[0]
+
+
+def signup_license_payload(username: str, password: str, **extra: str) -> dict[str, str]:
+    """Issue a fresh test license for register callers outside the issuance suite."""
+    from secrets import token_bytes
+    from uuid import uuid4
+
+    from app.activation_code_service import (
+        activation_code_hmac_key,
+        compute_code_digest,
+        encrypt_code_package,
+        generate_activation_code,
+        highest_code_hmac_key_version,
+        mask_activation_code,
+    )
+    from app.db_pg import DATABASE_URL_ENV
+
+    dsn = os.environ[DATABASE_URL_ENV]
+    assert_safe_test_database(database_name_of(dsn))
+    code = generate_activation_code()
+    license_id = str(uuid4())
+    version = highest_code_hmac_key_version()
+    digest = compute_code_digest(code, key=activation_code_hmac_key(version))
+    ciphertext, _ = encrypt_code_package([code], key=token_bytes(32), batch_id=license_id)
+    with psycopg.connect(dsn) as conn:
+        conn.execute(
+            "INSERT INTO software_licenses "
+            "(id, masked_code, code_digest, ciphertext, export_key_version, "
+            "activation_expires_at, authorization_years) "
+            "VALUES (%s, %s, %s, %s, 1, now() + interval '7 days', 1)",
+            (license_id, mask_activation_code(code), digest, ciphertext),
+        )
+    return {"username": username, "password": password, "activation_code": code, **extra}
 
 
 def admin_dsn_of(dsn: str) -> str:

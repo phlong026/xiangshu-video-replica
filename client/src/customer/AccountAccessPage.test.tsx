@@ -21,12 +21,16 @@ describe("account gate", () => {
     fireEvent.change(screen.getByLabelText("确认密码"), {
       target: { value: "abc123" },
     });
+    const activationCode = screen.getByLabelText("软件激活码");
+    expect(activationCode).toBeRequired();
+    fireEvent.change(activationCode, { target: { value: "  sample-code  " } });
     fireEvent.click(screen.getByRole("button", { name: "注册并登录" }));
     await waitFor(() =>
       expect(submit).toHaveBeenCalledWith({
         mode: "register",
         username: "alice",
         password: "abc123",
+        activationCode: "sample-code",
         // 注册不提供记住密码，提交里恒为 false
         remember: false,
       }),
@@ -92,6 +96,9 @@ describe("account gate", () => {
     });
     fireEvent.change(screen.getByLabelText("确认密码"), {
       target: { value: "abc456" },
+    });
+    fireEvent.change(screen.getByLabelText("软件激活码"), {
+      target: { value: "sample-code" },
     });
     fireEvent.click(screen.getByRole("button", { name: "注册并登录" }));
     expect(screen.getByRole("alert")).toHaveTextContent("两次输入的密码不一致");

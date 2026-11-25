@@ -1,10 +1,10 @@
-"""CW-076 — customer self-service registration.
+"""Customer self-service registration with a prepaid software activation code.
 
 ``POST /api/customer/register`` creates a customer identity from a username
-and password with NO email/phone verification (design doc Phase 4 · CW-071).
+and password after validating a one-use prepaid activation code.
 The user row (``role='customer'``, a salted scrypt password hash, and
-``registration_source='self_register'``) and its wallet are created atomically
-in ONE PostgreSQL transaction, so registration can never yield a
+``registration_source='self_register'``) and its wallet are created, and the code is redeemed,
+all in one PostgreSQL transaction, so registration can never yield a
 password-less or wallet-less half-account.
 
 Security boundaries:
@@ -45,6 +45,12 @@ from app.bootstrap import customer_public_origin
 from app.db_pg import get_pg_pool, is_customer_production, pg_transaction
 from app.password_hashing import PasswordPolicyError, hash_password, verify_password
 from app.registration_bonus_routes import grant_registration_bonus
+from app.software_licenses import (
+    LICENSE_EXPIRED,
+    LICENSE_EXPIRED_MESSAGE,
+    bind_signup_license,
+    software_license_expired,
+)
 from app.sub_account_auth import password_login_account_ok
 
 logger = logging.getLogger(__name__)
@@ -80,6 +86,10 @@ class CustomerRegistrationRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class CustomerSignupRequest(CustomerRegistrationRequest):
+    activation_code: str = Field(default="", max_length=64)
+
+
 class CustomerRegistrationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -108,9 +118,9 @@ def _normalize_username(raw: str) -> str:
 
 @router.post("/register", response_model=CustomerRegistrationResponse, status_code=201)
 def register_customer(
-    body: CustomerRegistrationRequest, request: Request
+    body: CustomerSignupRequest, request: Request
 ) -> CustomerRegistrationResponse:
-    """Create one customer account (users + wallets) from username + password."""
+    """Create a customer account and redeem its software license atomically."""
     username = _normalize_username(body.username)
 
     # Fail closed before doing any work when the PG runtime is unavailable: the
@@ -130,6 +140,8 @@ def register_customer(
     # effective pool under load.
     try:
         _registration_budget(request)
+        if not body.activation_code.strip():
+            raise _http(400, "SOFTWARE_ACTIVATION_REQUIRED", "请输入软件激活码。")
         password_hash = hash_password(body.password)
     except PasswordPolicyError as exc:
         raise _http(400, "WEAK_PASSWORD", str(exc)) from exc
@@ -156,6 +168,7 @@ def register_customer(
             # whole — a customer without a wallet row cannot reserve or spend,
             # so a partial commit would be a broken account.
             conn.execute("INSERT INTO wallets (user_id) VALUES (%s)", (user_id,))
+            bind_signup_license(conn, raw_code=body.activation_code, user_id=user_id)
             # 注册赠送（管理端可配置，默认 0 = 关闭）：同一事务内发放，失败则
             # 整个注册回滚——不产出「注册成功但没积分」的半态。注册端点只创建
             # 主账号，子账号路径不经过这里，发放范围天然仅限主账号。
@@ -483,6 +496,8 @@ def password_login(
             )
         ):
             raise _http(401, "INVALID_CREDENTIALS", "用户名或密码错误，或账号暂不可用。")
+        if software_license_expired(conn, user_id):
+            raise _http(403, LICENSE_EXPIRED, LICENSE_EXPIRED_MESSAGE)
         now_row = conn.execute("SELECT clock_timestamp()").fetchone()
         assert now_row is not None
         now = now_row[0]

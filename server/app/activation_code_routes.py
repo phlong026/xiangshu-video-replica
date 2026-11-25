@@ -102,6 +102,7 @@ from app.security_rate_limit import (
     rate_limit_window_seconds,
     record_auth_failure,
 )
+from app.software_licenses import bind_legacy_device_license, software_license_expired
 
 logger = logging.getLogger(__name__)
 
@@ -426,6 +427,8 @@ def _recover_or_bind_active_device(
 
     if not bound_user_id:
         raise _unavailable()
+    if software_license_expired(conn, bound_user_id):
+        raise _unavailable()
     row = conn.execute(
         "SELECT d.id, d.user_id, u.username, d.slot_no, d.status "
         "FROM customer_devices d "
@@ -629,6 +632,7 @@ def _run_activation(
         raise _unavailable()
 
     user_id, username = _insert_customer_user(conn)
+    bind_legacy_device_license(conn, user_id=user_id, code_id=code_id, now=server_now)
 
     conn.execute(
         "INSERT INTO wallets (user_id, available_credits, reserved_credits) VALUES (%s, %s, 0)",
