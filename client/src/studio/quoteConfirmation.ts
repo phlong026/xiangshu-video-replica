@@ -48,9 +48,17 @@ export function watchQuoteExpiry(
   if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) {
     return () => {};
   }
-  const timer = window.setTimeout(
-    onExpire,
-    Math.max(0, expiresAt * 1000 - Date.now()),
-  );
+  // 浏览器和 Node 都使用有符号 32 位延迟。远期报价不能被溢出成 1 毫秒。
+  const maxDelayMs = 2_147_483_647;
+  const expiryMs = expiresAt * 1000;
+  let timer: number;
+  const schedule = () => {
+    const remaining = expiryMs - Date.now();
+    timer = window.setTimeout(
+      remaining > maxDelayMs ? schedule : onExpire,
+      Math.max(0, Math.min(remaining, maxDelayMs)),
+    );
+  };
+  schedule();
   return () => window.clearTimeout(timer);
 }

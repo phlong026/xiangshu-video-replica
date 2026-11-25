@@ -2352,6 +2352,7 @@ def _single_shot_work(fingerprint: str, *, main_character_version_id: str = "cha
     appearance = SimpleNamespace(
         fingerprint=fingerprint,
         source_timestamp_seconds=0,
+        shot_card_version_id=None,
         appearance_source="SCENE_LOOK",
         as_payload=lambda: {"fingerprint": fingerprint},
     )

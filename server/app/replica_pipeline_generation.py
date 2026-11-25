@@ -76,7 +76,7 @@ def _has_uncertain(conn: BusinessConnection, row: BusinessRow) -> bool:
     return found is not None
 
 
-def _deliverable_count(conn: BusinessConnection, row: BusinessRow) -> int:
+def deliverable_count(conn: BusinessConnection, row: BusinessRow) -> int:
     """有效交付名额数（评审 A-r1#6）：关联批次中满足可交付谓词、且未被替代.
 
     ``superseded_by_task_id`` 语义（评审 A-r2#4 修正方向）：**原任务**的该列
@@ -143,7 +143,7 @@ def observe_generation(
         _save(conn, lease.id, detail)
     if _open_tasks(conn, row) > 0:
         return WAITING
-    deliverable = _deliverable_count(conn, row)
+    deliverable = deliverable_count(conn, row)
     expected = _expected_quantity(row)
     # 合并而非覆盖（评审 A-r2#5）：batchHistory/regenNo 是重生成受理的
     # 不可丢状态——整体赋值会把历史批次与轮次清空，导致下一轮重生成回放旧批次。
@@ -179,7 +179,7 @@ def observe_needs_review(
         return _failed("GENERATION_BATCH_MISSING", "生成批次引用缺失。")
     if _open_tasks(conn, row) > 0:
         return WAITING
-    deliverable = _deliverable_count(conn, row)
+    deliverable = deliverable_count(conn, row)
     expected = _expected_quantity(row)
     if deliverable >= expected:
         _advance(conn, lease, rp.STATUS_DELIVERED, rp.STAGE_DELIVER)
@@ -196,7 +196,7 @@ def observe_settled_recovery(
     仅观察，不触发重生成（重生成必须走显式授权入口）。无进展时保持等待，
     由用户动作或 72h 窗口另行处理。
     """
-    deliverable = _deliverable_count(conn, row)
+    deliverable = deliverable_count(conn, row)
     expected = _expected_quantity(row)
     if deliverable >= expected:
         _advance(conn, lease, rp.STATUS_DELIVERED, rp.STAGE_DELIVER)
@@ -220,7 +220,7 @@ def accept_partial(
         )
     if _open_tasks(conn, row) > 0:
         raise rp.ReplicaPipelineError(409, "REPLICA_PIPELINE_NOT_SETTLED", "仍有未收口任务。")
-    deliverable = _deliverable_count(conn, row)
+    deliverable = deliverable_count(conn, row)
     if deliverable <= 0:
         raise rp.ReplicaPipelineError(
             409, "REPLICA_PIPELINE_NOTHING_DELIVERABLE", "没有可交付成果。"

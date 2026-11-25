@@ -752,6 +752,157 @@ def test_primary_subject_replacement_contract_versions_both_appearance_fingerpri
     assert scene_appearance.fingerprint == expected_scene_fingerprint
 
 
+def test_automatic_first_frame_uses_the_confirmed_storyboard(monkeypatch):
+    import json
+
+    from fastapi import HTTPException
+
+    from app import first_frames
+
+    versions = {
+        "analysis": {
+            "id": "analysis-1",
+            "payload_json": json.dumps({"analysis": {"shots": [{"scene": "修改前"}]}}),
+        },
+        "shot_card": {
+            "id": "shots-2",
+            "payload_json": json.dumps(
+                {
+                    "source_analysis_version_id": "analysis-1",
+                    "shots": [
+                        {
+                            "start_time": 0,
+                            "end_time": 2,
+                            "subject": "讲解人",
+                            "scene": "修正后的别墅庭院",
+                        }
+                    ],
+                }
+            ),
+        },
+    }
+    monkeypatch.setattr(first_frames, "latest_version", lambda _, _project, kind: versions[kind])
+    appearance = first_frames.resolve_project_appearance_spec(
+        object(), project_id="p", source_timestamp_seconds=0, shot_card_version_id="shots-2"
+    )
+    assert appearance.scene == "修正后的别墅庭院"
+    assert appearance.as_payload()["shot_card_version_id"] == "shots-2"
+    with pytest.raises(HTTPException) as error:
+        first_frames.resolve_project_appearance_spec(
+            object(), project_id="p", source_timestamp_seconds=0, shot_card_version_id="shots-1"
+        )
+    assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("opening_count", "timestamp", "detected_count", "error"),
+    [
+        (0, 0, None, "FIRST_FRAME_NO_OPENING_PERSON"),
+        (None, 0, None, "FIRST_FRAME_OPENING_UNVERIFIED"),
+        (1, 0.5, 1, "FIRST_FRAME_ALIGNMENT_REQUIRED"),
+        (1, 0, 0, "FIRST_FRAME_ALIGNMENT_REQUIRED"),
+        (1, 0.25, 1, ""),
+    ],
+)
+def test_replica_opening_preflight_runs_before_first_frame_charge(
+    monkeypatch, opening_count, timestamp, detected_count, error
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from app import replica_pipeline_stages as stages
+
+    versions = {
+        "source-frames": {
+            "candidates": [
+                {
+                    "asset_id": "source-image",
+                    "timestamp_seconds": timestamp,
+                    "semantic_assessment": {"person_count": detected_count},
+                }
+            ]
+        },
+        "shots": {
+            "shots": [
+                {
+                    "start_time": 0,
+                    "end_time": 4,
+                    "person_count": opening_count,
+                    "subject": "讲解人",
+                }
+            ]
+        },
+    }
+    if opening_count == 0:
+        versions["shots"]["shots"].append({"start_time": 4, "end_time": 5, "person_count": 1})
+    enqueue = Mock(return_value=stages.WAITING)
+    monkeypatch.setattr(stages, "_pipeline_actor", Mock())
+    monkeypatch.setattr(
+        stages,
+        "_sub_task_status",
+        Mock(return_value=("SUCCEEDED", {"result_version_id": "source-frames"})),
+    )
+    monkeypatch.setattr(stages, "_version_payload", lambda _, version: versions[version])
+    monkeypatch.setattr(stages, "confirm_source_frame", Mock(return_value={"id": "selected"}))
+    monkeypatch.setattr(stages, "_save_stage_detail", Mock())
+    monkeypatch.setattr(stages, "_first_frame_candidates", enqueue)
+    first_frame = {"sourceFrameTaskId": "extract"}
+    result = stages._first_frame_source_frames(
+        object(),
+        SimpleNamespace(id="pipeline", owner_user_id="owner", project_id="project"),
+        {},
+        {"sourceAssetId": "input-video", "shotCardVersionId": "shots"},
+        first_frame,
+    )
+    assert result.failure_code == error
+    if error:
+        enqueue.assert_not_called()
+    else:
+        enqueue.assert_called_once()
+        assert first_frame["sourceFrameTimeSeconds"] == 0.25
+
+
+def test_person_free_replica_keeps_source_opening_without_creating_image_task(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from app import replica_pipeline_stages as stages
+
+    versions = {
+        "source-frames": {"candidates": [{"asset_id": "original-frame", "timestamp_seconds": 0}]},
+        "shots": {"shots": [{"start_time": 0, "end_time": 4, "person_count": 0}]},
+    }
+    created = Mock(side_effect=[{"id": "candidate-version"}, {"id": "selection-version"}])
+    image_task = Mock()
+    monkeypatch.setattr(stages, "_pipeline_actor", Mock(return_value=SimpleNamespace(id="owner")))
+    monkeypatch.setattr(
+        stages,
+        "_sub_task_status",
+        Mock(return_value=("SUCCEEDED", {"result_version_id": "source-frames"})),
+    )
+    monkeypatch.setattr(stages, "_version_payload", lambda _, version: versions[version])
+    monkeypatch.setattr(
+        stages, "confirm_source_frame", Mock(return_value={"id": "source-selection"})
+    )
+    monkeypatch.setattr(stages, "_save_stage_detail", Mock())
+    monkeypatch.setattr(stages, "_first_frame_candidates", image_task)
+    monkeypatch.setattr(stages, "insert_version", created)
+    monkeypatch.setattr(stages.rp, "advance_status", Mock())
+    first_frame = {"sourceFrameTaskId": "extract"}
+    result = stages._first_frame_source_frames(
+        object(),
+        SimpleNamespace(id="pipeline", owner_user_id="owner", project_id="project"),
+        {},
+        {"sourceAssetId": "input-video", "shotCardVersionId": "shots"},
+        first_frame,
+    )
+    assert result.kind == "advanced"
+    assert first_frame["firstFrameAssetId"] == "original-frame"
+    assert first_frame["preservedOpening"] is True
+    assert created.call_count == 2
+    image_task.assert_not_called()
+
+
 def test_scene_prompt_uses_images_even_without_scene_text():
     from app.first_frames import (
         _apply_scene_look_snapshot,

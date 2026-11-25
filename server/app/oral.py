@@ -20,14 +20,15 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, get_args
+from typing import Any, Literal, cast, get_args
 from uuid import uuid4
 
 from fastapi import HTTPException
 
 from app import content_store
 from app.auth import CurrentUser
-from app.db_portable import BusinessConnection
+from app.customer_idempotency import insert_envelope, load_envelope
+from app.db_portable import BusinessConnection, BusinessRow
 from app.hifly import (
     HiflyClient,
     HiflyError,
@@ -728,6 +729,51 @@ class OralTaskCreated:
     replayed: bool
 
 
+ORAL_RELEASE_OPERATION = "oral.task.release"
+
+
+def _lock_oral_submission(conn: BusinessConnection, owner_user_id: str, key: str) -> None:
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+        ("oral-task:" + owner_user_id, key),
+    )
+
+
+def _read_oral_submission(
+    conn: BusinessConnection, owner_user_id: str, key: str
+) -> BusinessRow | None:
+    row = conn.execute(
+        """
+        SELECT id, status, submission_state, estimated_cost_fen, request_hash
+        FROM oral_tasks
+        WHERE owner_user_id = %s AND idempotency_key = %s
+        """,
+        (owner_user_id, key),
+    ).fetchone()
+    return cast(BusinessRow | None, row)
+
+
+def resolve_uncertain_oral_submission(
+    conn: BusinessConnection, *, actor: CurrentUser, idempotency_key: str
+) -> dict[str, str] | None:
+    require_not_auditor(
+        conn, actor=actor, action="oral.task.resolve", entity_type="oral_task", entity_id=actor.id
+    )
+    _lock_oral_submission(conn, actor.id, idempotency_key)
+    existing = _read_oral_submission(conn, actor.id, idempotency_key)
+    if existing is not None:
+        return {"id": str(existing["id"]), "status": str(existing["status"])}
+    # 先阻断同键的迟到请求，再允许客户端用新键编辑提交。
+    insert_envelope(
+        conn.raw,
+        operation=ORAL_RELEASE_OPERATION,
+        scope=actor.id,
+        key_digest=hashlib.sha256(idempotency_key.encode()).hexdigest(),
+        request_hash="released",
+    )
+    return None
+
+
 def create_oral_task(
     conn: BusinessConnection,
     *,
@@ -774,14 +820,18 @@ def create_oral_task(
             "subtitle": subtitle,
         }
     )
-    existing = conn.execute(
-        """
-        SELECT id, status, submission_state, estimated_cost_fen, request_hash
-        FROM oral_tasks
-        WHERE owner_user_id = %s AND idempotency_key = %s
-        """,
-        (actor.id, idempotency_key),
-    ).fetchone()
+    existing = _read_oral_submission(conn, actor.id, idempotency_key)
+    if existing is None:
+        _lock_oral_submission(conn, actor.id, idempotency_key)
+        released = load_envelope(
+            conn.raw,
+            operation=ORAL_RELEASE_OPERATION,
+            scope=actor.id,
+            key_digest=hashlib.sha256(idempotency_key.encode()).hexdigest(),
+        )
+        if released is not None:
+            raise OralConflictError("原提交已解除，请保存修改后创建新任务")
+        existing = _read_oral_submission(conn, actor.id, idempotency_key)
     if existing is not None:
         if str(existing["request_hash"] or "") != request_hash:
             raise OralConflictError("幂等键已用于其他口播请求")

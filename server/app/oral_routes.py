@@ -64,6 +64,7 @@ from app.oral import (
     rename_avatar_clone,
     rename_voice_clone,
     repair_avatar_video_compatibility,
+    resolve_uncertain_oral_submission,
     start_avatar_clone,
     start_voice_clone,
 )
@@ -659,6 +660,21 @@ def create_oral_generation_task(
         "replayed": result.replayed,
         "submission_state": result.submission_state,
     }
+
+
+class OralSubmissionResolutionRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/tasks/resolve-submission")
+def resolve_oral_submission(
+    request: OralSubmissionResolutionRequest, db: BusinessDbDep
+) -> dict[str, dict[str, str] | None]:
+    with db.write() as (conn, actor):
+        task = resolve_uncertain_oral_submission(
+            conn, actor=actor, idempotency_key=request.idempotency_key
+        )
+    return {"task": task}
 
 
 @router.get("/tasks", response_model=OralTaskPageResponse)

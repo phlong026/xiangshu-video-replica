@@ -282,7 +282,7 @@ def _current_fingerprint(
 def cancel_pipeline(
     conn: BusinessConnection, *, pipeline_id: str, owner_user_id: str
 ) -> dict[str, object]:
-    """放弃：AWAIT_CONFIRM → CANCELLED（同一把行锁与数据库时钟裁决竞争）.
+    """确认候选首帧或成片费用前放弃，保留已有产物。
 
     已结算/未收口的费用按既有结算规则处理；分镜/文案/提示词全部保留，
     可随时转手动链路接管（方案 §4.3/§5.3）。
@@ -300,9 +300,22 @@ def cancel_pipeline(
             updated_at = now(), next_poll_at = now(),
             stage_detail = COALESCE(stage_detail, '{}'::jsonb)
                 || jsonb_build_object('revokedReason', 'user_cancelled')
-        WHERE id = %s AND owner_user_id = %s AND status = %s
+        WHERE id = %s AND owner_user_id = %s AND (
+            status = %s OR (
+                status = %s AND jsonb_typeof(stage_detail #> '{firstFrame,review}') = 'object'
+            ) OR (
+                status = %s AND jsonb_typeof(stage_detail->'storyboardReview') = 'object'
+            )
+        )
         """,
-        (rp.STATUS_CANCELLED, pipeline_id, owner_user_id, rp.STATUS_AWAIT_CONFIRM),
+        (
+            rp.STATUS_CANCELLED,
+            pipeline_id,
+            owner_user_id,
+            rp.STATUS_AWAIT_CONFIRM,
+            rp.STATUS_FIRST_FRAMING,
+            rp.STATUS_ANALYZING,
+        ),
     ).rowcount
     if moved != 1:
         raise _confirm_error("REPLICA_PIPELINE_NOT_AWAITING", "该任务当前不在待确认状态。")

@@ -5,9 +5,11 @@ import {
   customerVisibleErrorMessage,
   getLatestScriptFromAudioTask,
   getOralPrice,
+  getReplicaPreflight,
   listOralAvatars,
   listOralVoices,
   type OralPrice,
+  resolveOralSubmission,
   type ViralImportTask,
 } from "../api";
 import { isInsufficientCredits } from "../insufficientCredits";
@@ -192,6 +194,31 @@ export function OralReplicaControl({
   const [choice, setChoice] = useState(() => readDefaults(user.id));
   const [script, setScript] = useState("");
   const [quote, setQuote] = useState<OralPrice | null>(null);
+  const [transcribeCredits, setTranscribeCredits] = useState<number>();
+  const [transcribePriceError, setTranscribePriceError] = useState(false);
+  const [transcribePriceAttempt, setTranscribePriceAttempt] = useState(0);
+  const durationMs = video.durationMs;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 重新核对入口刷新报价。
+  useEffect(() => {
+    if (stage !== "prepare" || typeof durationMs !== "number") return;
+    let current = true;
+    setTranscribeCredits(undefined);
+    setTranscribePriceError(false);
+    void getReplicaPreflight("oral", durationMs).then(
+      ({ transcribeCredits: credits }) => {
+        if (current) {
+          setTranscribeCredits(credits);
+          setTranscribePriceError(credits === undefined);
+        }
+      },
+      () => {
+        if (current) setTranscribePriceError(true);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [stage, durationMs, transcribePriceAttempt]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [preparing, setPreparing] = useState(false);
@@ -473,6 +500,24 @@ export function OralReplicaControl({
       navigate("tasks");
     });
 
+  const resolvePending = () =>
+    void run(async () => {
+      const pending = readAttempt(user.id, video);
+      if (!pending || pending.receipt) return;
+      const { task } = await resolveOralSubmission(pending.idempotencyKey);
+      const current = readAttempt(user.id, video);
+      if (current?.idempotencyKey !== pending.idempotencyKey || current.receipt)
+        return;
+      const resolved = task ? { ...pending, receipt: task } : null;
+      if (!saveAttempt(user.id, video, resolved)) {
+        throw new Error("口播提交已核对，但本地草稿状态暂未保存，请重试。");
+      }
+      if (!mounted.current) return;
+      setQuote(null);
+      if (resolved) restoreAttempt(resolved);
+      else setAttempt(null);
+    });
+
   const close = () => {
     if (presentation === "detail" && stage === "settings" && editDefaultsOnly) {
       setChoice(readDefaults(user.id));
@@ -605,8 +650,24 @@ export function OralReplicaControl({
             」。系统会转写参考视频中的口播，不会复制原作者的声音或画面。
           </p>
           <p>
-            转写可能消耗积分，成片之前还会另行报价。请确保你有权使用参考内容。
+            {transcribeCredits === undefined
+              ? "正在核对转写费用。"
+              : `转写预估 ${transcribeCredits} 积分，按实际时长结算，成片费用另行确认。`}
+            请确保你有权使用参考内容。
           </p>
+          {transcribePriceError && (
+            <p role="alert">
+              暂时无法读取转写费用。
+              <Button
+                variant="quiet"
+                onClick={() =>
+                  setTranscribePriceAttempt((attempt) => attempt + 1)
+                }
+              >
+                重新核价
+              </Button>
+            </p>
+          )}
           {(error || importError) && <p role="alert">{error || importError}</p>}
           {preparing && (
             <p role="status">正在导入并转写，离开后可回到同一视频继续。</p>
@@ -621,7 +682,7 @@ export function OralReplicaControl({
             </Button>
             <Button
               variant="primary"
-              disabled={busy || !valid}
+              disabled={busy || !valid || transcribeCredits === undefined}
               onClick={prepare}
             >
               确认并提取口播
@@ -657,6 +718,11 @@ export function OralReplicaControl({
             <p role="alert">口播文案超过 1 万字，请精简后再报价。</p>
           )}
           {error && <p role="alert">{error}</p>}
+          {pendingAttempt && (
+            <Button variant="outline" disabled={busy} onClick={resolvePending}>
+              核对旧提交并恢复编辑
+            </Button>
+          )}
           {!pendingAttempt && (
             <Button
               variant="outline"

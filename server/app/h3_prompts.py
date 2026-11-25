@@ -365,6 +365,10 @@ def _motion_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
 
 
+def opening_frame_requires_alignment(source_frame_time: float) -> bool:
+    return not 0 <= source_frame_time <= 0.25
+
+
 def compile_replica_final_text(
     *,
     shot_payload: dict[str, Any],
@@ -375,6 +379,7 @@ def compile_replica_final_text(
     source_frame_time: float,
     opening_action: str = "",
     replace_scene: bool = False,
+    source_opening: bool = False,
 ) -> str:
     """Deterministic final composition, after confirmed inputs; no paid model call."""
 
@@ -386,7 +391,7 @@ def compile_replica_final_text(
             "TIMELINE_CONFIRMATION_REQUIRED",
             "源时间轴超过目标时长，请调整时长或明确确认压缩动作节奏。",
         )
-    if (source_frame_time < 0 or source_frame_time > 0.25) and not opening_action.strip():
+    if opening_frame_requires_alignment(source_frame_time) and not opening_action.strip():
         conflict(
             "FIRST_FRAME_ALIGNMENT_REQUIRED",
             "首帧来自视频中段或缺少开场时间记录，请选择开场帧或填写动作衔接方案。",
@@ -422,11 +427,25 @@ def compile_replica_final_text(
         "按分镜保留人数、位置、动作和互动，面部与服装彼此不同；不得复制主讲人的脸、"
         "服装或身份，不得互换主配角。",
     ]
+    if source_opening:
+        if any(shot.get("person_count") != 0 for shot in shot_payload["shots"]):
+            conflict("FIRST_FRAME_ALIGNMENT_REQUIRED", "无人开场路线需要整条分镜确认无人出镜。")
+        lines = lines[:3] + [
+            "以 <Picture 1> 为无人开场的构图、建筑和画面依据。"
+            "按分镜还原建筑、空间和镜头运动，全片不添加人物。"
+        ]
+    speaker = (
+        "The off-screen narrator says:"
+        if source_opening
+        else "The on-screen person shown in <Picture 1> (S1) says:"
+    )
     # 无口播时这两条会和下方的「无口播，不添加台词或人声旁白。」自相矛盾，
     # 只有存在确认文案时才下发；背景人声由 overall_soundscape 一条统一约束。
     if script_text.strip():
         lines.append(
-            "配音一致性：全部清晰口播只属于 <Picture 1> 主讲人；声线的性别呈现、年龄感须与"
+            "配音一致性：整片仅使用同一位画外旁白，保持同一音色。"
+            if source_opening
+            else "配音一致性：全部清晰口播只属于 <Picture 1> 主讲人；声线的性别呈现、年龄感须与"
             "首帧人物一致，全片保持同一说话者和同一音色。主讲人未出镜时使用同一人的画外音；"
             "背景配角只保留无明确语义的环境人声，不得朗读主讲人台词，不得出现异性声线替换、"
             "多人同时口播或中途变声。"
@@ -539,7 +558,7 @@ def compile_replica_final_text(
             )
             spoken = source_spoken_texts[index]
             narration = (
-                f"The on-screen person shown in <Picture 1> (S1) says: <d>[Chinese] {spoken}</d>"
+                f"{speaker} <d>[Chinese] {spoken}</d>"
                 if spoken.strip()
                 else "本段无口播，保留动作与环境音，不添加台词。"
             )
@@ -555,9 +574,7 @@ def compile_replica_final_text(
             ", ".join(legacy_without_motion),
         )
     if script_text and not preserve_source_speech_timing:
-        lines.append(
-            f"The on-screen person shown in <Picture 1> (S1) says: <d>[Chinese] {script_text}</d>"
-        )
+        lines.append(f"{speaker} <d>[Chinese] {script_text}</d>")
     elif not script_text:
         lines.append("无口播，不添加台词或人声旁白。")
     soundscape = (
