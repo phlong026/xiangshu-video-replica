@@ -274,6 +274,7 @@ ADMIN_WRITE_AUTHORITIES = {
 }
 ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {
     "get_admin_actor",
+    "get_customer_reader",
     # 方案 P2-4：团队信息只对超管可见，读侧门槛是 get_admin_actor 的加强版。
     "get_super_admin_actor",
     # 整改 T19（决策 D2）：整表 CSV 导出对审计员开放，因此导出路由的身份依赖

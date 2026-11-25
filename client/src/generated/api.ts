@@ -5695,7 +5695,7 @@ export interface paths {
     put?: never;
     /**
      * Register Customer
-     * @description Create one customer account (users + wallets) from username + password.
+     * @description Create a customer account and redeem its software license atomically.
      */
     post: operations["register_customer_api_customer_register_post"];
     delete?: never;
@@ -6560,6 +6560,75 @@ export interface paths {
     get: operations["list_activation_codes_api_control_activation_codes_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/software-licenses": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Software Licenses */
+    get: operations["list_software_licenses_api_control_software_licenses_get"];
+    put?: never;
+    /** Issue Software License */
+    post: operations["issue_software_license_api_control_software_licenses_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/software-licenses/activation-policy": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Activation Policy */
+    patch: operations["update_activation_policy_api_control_software_licenses_activation_policy_patch"];
+    trace?: never;
+  };
+  "/api/control/software-licenses/{license_id}/reveal": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Reveal Software License */
+    post: operations["reveal_software_license_api_control_software_licenses__license_id__reveal_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/software-licenses/{license_id}/renew": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Renew Software License */
+    post: operations["renew_software_license_api_control_software_licenses__license_id__renew_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -11523,6 +11592,18 @@ export interface components {
       /** Display Name */
       display_name: string;
     };
+    /** CustomerSignupRequest */
+    CustomerSignupRequest: {
+      /** Username */
+      username: string;
+      /** Password */
+      password: string;
+      /**
+       * Activation Code
+       * @default
+       */
+      activation_code: string;
+    };
     /** CustomerTaskReference */
     CustomerTaskReference: {
       /** Short Ref */
@@ -12717,6 +12798,29 @@ export interface components {
        * @enum {string}
        */
       provider: "fake_h3" | "metaso";
+    };
+    /** IssueSoftwareLicense */
+    IssueSoftwareLicense: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Authorization Years
+       * @default 1
+       */
+      authorization_years: number;
+      /**
+       * Activation Expires At
+       * Format: date-time
+       */
+      activation_expires_at: string;
     };
     /** KeywordBatch */
     KeywordBatch: {
@@ -15870,6 +15974,21 @@ export interface components {
       threshold_minutes: number;
       /** Max Reopens */
       max_reopens: number;
+    };
+    /** UpdateActivationPolicy */
+    UpdateActivationPolicy: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Auto Extend */
+      auto_extend: boolean;
     };
     /** UpdateCustomerProfileRequest */
     UpdateCustomerProfileRequest: {
@@ -28865,7 +28984,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["CustomerRegistrationRequest"];
+        "application/json": components["schemas"]["CustomerSignupRequest"];
       };
     };
     responses: {
@@ -30221,6 +30340,185 @@ export interface operations {
       cookie?: never;
     };
     requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_software_licenses_api_control_software_licenses_get: {
+    parameters: {
+      query?: {
+        search?: string;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  issue_software_license_api_control_software_licenses_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["IssueSoftwareLicense"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_activation_policy_api_control_software_licenses_activation_policy_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["UpdateActivationPolicy"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  reveal_software_license_api_control_software_licenses__license_id__reveal_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        license_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: string;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  renew_software_license_api_control_software_licenses__license_id__renew_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        license_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {

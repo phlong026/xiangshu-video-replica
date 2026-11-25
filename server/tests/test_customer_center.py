@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from pg_test_kit import signup_license_payload
 from test_customer_registration import (
     client as registration_client,  # noqa: F401
 )
@@ -27,7 +28,7 @@ def client(registration_client, monkeypatch):
 
 
 def account(client, name="center_user"):
-    response = client.post("/api/customer/register", json={"username": name, "password": "test-6"})
+    response = client.post("/api/customer/register", json=signup_license_payload(name, "test-6"))
     assert response.status_code == 201
     response = client.post(
         "/api/customer/login",

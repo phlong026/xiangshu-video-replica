@@ -24,7 +24,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 import requests
-from pg_test_kit import require_pg_or_explicit_skip
+from pg_test_kit import require_pg_or_explicit_skip, signup_license_payload
 from test_customer_registration import (
     client as registration_client,  # noqa: F401
 )
@@ -112,7 +112,7 @@ def _login(client, username: str, password: str):
 
 def _master(client, username: str) -> dict[str, str]:
     registered = client.post(
-        "/api/customer/register", json={"username": username, "password": PASSWORD}
+        "/api/customer/register", json=signup_license_payload(username, PASSWORD)
     )
     assert registered.status_code == 201, registered.text
     login = _login(client, username, PASSWORD)

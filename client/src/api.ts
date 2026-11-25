@@ -7051,6 +7051,9 @@ const CUSTOMER_ACCOUNT_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   // 流程（ActivationPage / useCustomerSession）；配对页虽已下线（2026-10-31），
   // 服务端仍会返回这些码，客户端文案保持兜底。
   ACTIVATION_UNAVAILABLE: "该激活码当前无法使用，请确认激活码仍在有效期内。",
+  SOFTWARE_ACTIVATION_REQUIRED: "请输入软件激活码。",
+  SOFTWARE_ACTIVATION_UNAVAILABLE: "激活码无效、已使用或已过期。",
+  SOFTWARE_LICENSE_EXPIRED: "软件授权已到期，请联系服务人员续费。",
   PAIRING_UNAVAILABLE: "该激活码当前无法用于设备配对，请联系服务人员处理。",
   SESSION_CONFLICT: "另一台设备当前正在使用此账号，请稍后重新打开应用。",
   SESSION_EXPIRED: "登录已过期，请重新登录。",
@@ -7686,6 +7689,7 @@ function customerErrorKind(
   code: string | undefined,
 ): CustomerApiErrorKind {
   switch (code) {
+    case "SOFTWARE_LICENSE_EXPIRED":
     case "SESSION_EXPIRED":
       return "session-expired";
     case "SESSION_REPLACED":
@@ -8002,10 +8006,11 @@ export type CustomerPasswordSession =
 export async function customerRegister(
   username: string,
   password: string,
+  activationCode: string,
 ): Promise<void> {
   await customerJson("/api/customer/register", {
     method: "POST",
-    body: { username, password },
+    body: { username, password, activation_code: activationCode },
   });
 }
 

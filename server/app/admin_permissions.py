@@ -15,12 +15,14 @@ from __future__ import annotations
 
 FUNDS_WRITE = "funds.write"
 SETTINGS_WRITE = "settings.write"
+CUSTOMER_READ = "customer.read"
 CUSTOMER_WRITE = "customer.write"
 CONTENT_WRITE = "content.write"
 EXPORT = "export"
 
 # 写点 → 面向操作者的中文名（403 文案用）。
 POINT_LABELS = {
+    CUSTOMER_READ: "客户数据查看",
     FUNDS_WRITE: "资金操作",
     SETTINGS_WRITE: "系统设置修改",
     CUSTOMER_WRITE: "客户管理操作",

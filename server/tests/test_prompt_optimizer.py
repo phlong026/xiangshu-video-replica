@@ -17,6 +17,7 @@ from pg_test_kit import (
     drop_test_database,
     require_pg_or_explicit_skip,
     resolve_test_dsn,
+    signup_license_payload,
     upgrade_test_database_to_head,
 )
 
@@ -97,9 +98,7 @@ def client(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[TestCl
 def _customer(
     client: TestClient, dsn: str, *, credits: int = 0, username: str = "alice"
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    user = client.post(
-        REGISTER_PATH, json={"username": username, "password": VALID_PASSWORD}
-    ).json()
+    user = client.post(REGISTER_PATH, json=signup_license_payload(username, VALID_PASSWORD)).json()
     session = client.post(
         "/api/customer/login",
         headers={"Idempotency-Key": str(uuid.uuid4())},

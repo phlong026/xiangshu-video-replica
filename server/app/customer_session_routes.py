@@ -109,6 +109,7 @@ from app.customer_session_service import (
 )
 from app.db_pg import get_pg_pool, pg_transaction
 from app.ops_metrics import get_or_create_request_id
+from app.software_licenses import LICENSE_EXPIRED, LICENSE_EXPIRED_MESSAGE, software_license_expired
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +568,8 @@ def _establish_session_route(
                 raise _http(401, "DEVICE_REVOKED", "This device credential has been revoked.")
             raise _http(401, "DEVICE_CREDENTIAL_INVALID", "The device credential is invalid.")
         device = lookup.device
+        if software_license_expired(conn, device.user_id):
+            raise _http(403, LICENSE_EXPIRED, LICENSE_EXPIRED_MESSAGE)
 
         # T20 / SES-03: the code-status gate — a suspended or revoked code
         # never establishes (or re-establishes) a session. Inside the

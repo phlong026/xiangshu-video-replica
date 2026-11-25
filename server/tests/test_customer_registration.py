@@ -17,10 +17,8 @@ Fail-first tests for the frozen files ``server/app/password_hashing.py`` and
   unknown source, and the downgrade refuses (then symmetrically succeeds) per
   the 026/044/083 data-loss-guard precedent.
 
-The route fixture database is self-managed with raw admin DROP/CREATE (the
-``test_customer_devices`` precedent), so no name is added to
-``pg_test_kit.RECORDED_TEST_DATABASES`` — that allowlist only guards the kit's
-own ``create_test_database`` helper.
+The route fixture database is self-managed with raw admin DROP/CREATE. It is
+also registered in the test allowlist for the shared signup and admin helpers.
 """
 
 from __future__ import annotations
@@ -28,6 +26,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +34,10 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pg_test_kit import require_pg_or_explicit_skip
+from pg_test_kit import password_admin_session, require_pg_or_explicit_skip, signup_license_payload
 from psycopg.errors import CheckViolation
 
+from app.admin_auth_routes import ADMIN_CSRF_HEADER
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 from app.password_hashing import (
     MAX_PASSWORD_LENGTH,
@@ -61,7 +61,7 @@ REGISTER_PATH = "/api/customer/register"
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、20260926T0000
 # 爆款首页策展排行与 20260925T1400 计费触发器追加修复（api_metadata 的 PENDING 期写入）。
-HEAD_REVISION = "20261124T1000_recharge_minimum_step"
+HEAD_REVISION = "20261125T1000_software_licenses"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.
@@ -231,6 +231,7 @@ def route_state(registration_dsn: str) -> Iterator[str]:
 
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[TestClient]:
+    from app.admin_software_licenses import router as software_licenses_router
     from app.customer_auth_routes import CustomerBrowserTransport
     from app.customer_auth_routes import router as customer_auth_router
     from app.customer_session_routes import router as session_router
@@ -243,6 +244,7 @@ def client(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[TestCl
     app.include_router(session_router)
     app.include_router(recharge_router)
     app.include_router(viral_import_router)
+    app.include_router(software_licenses_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     import base64
     import secrets
@@ -257,11 +259,126 @@ def client(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[TestCl
         "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY",
         base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("="),
     )
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY",
+        base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("="),
+    )
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP", "1000")
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "1000")
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     with TestClient(app) as test_client:
         yield test_client
+
+
+def test_software_license_calendar_and_rolling_window() -> None:
+    from app.software_licenses import add_authorization_years, effective_activation_expiry
+
+    deadline = datetime(2028, 2, 29, 10, tzinfo=UTC)
+    assert add_authorization_years(deadline, 1) == datetime(2029, 2, 28, 10, tzinfo=UTC)
+    assert effective_activation_expiry(deadline, deadline - timedelta(seconds=1), True) == deadline
+    assert effective_activation_expiry(deadline, deadline, True) == deadline + timedelta(days=7)
+    assert effective_activation_expiry(
+        deadline, deadline + timedelta(days=7), True
+    ) == deadline + timedelta(days=14)
+    assert effective_activation_expiry(deadline, deadline + timedelta(days=8), False) == deadline
+
+
+def test_software_license_issuance_registration_and_paid_renewal(
+    client: TestClient, route_state: str
+) -> None:
+    admin_path = "/api/control/software-licenses"
+    actor_id = str(uuid.uuid4())
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role, is_super_admin) "
+            "VALUES (%s, 'operator', 'Operator', 'admin', 1)",
+            (actor_id,),
+        )
+    session = password_admin_session(client, actor_id)
+    assert session.status_code == 201, session.text
+    csrf = {ADMIN_CSRF_HEADER: session.json()["csrf_token"]}
+    reason = {"confirm": True, "reason": "Offline payment confirmed"}
+
+    def headers(key: str) -> dict[str, str]:
+        return {**csrf, "Idempotency-Key": key}
+
+    credentials = {"username": "alice", "password": VALID_PASSWORD}
+    missing = client.post(REGISTER_PATH, json=credentials)
+    assert missing.status_code == 400
+    assert missing.json()["detail"]["code"] == "SOFTWARE_ACTIVATION_REQUIRED"
+    issue_request = {
+        **reason,
+        "authorization_years": 2,
+        "activation_expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+    }
+    issued = client.post(admin_path, headers=headers("issue"), json=issue_request)
+    assert issued.status_code == 201, issued.text
+    issue_retry = client.post(admin_path, headers=headers("issue"), json=issue_request)
+    assert issue_retry.json() == issued.json()
+    license_id = issued.json()["id"]
+    revealed = client.post(
+        f"{admin_path}/{license_id}/reveal", headers=headers("reveal"), json=reason
+    )
+    assert revealed.status_code == 200, revealed.text
+    code = revealed.json()["activation_code"]
+    assert code not in issued.text
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE software_licenses SET activation_expires_at = now() - interval '1 second' "
+            "WHERE id = %s",
+            (license_id,),
+        )
+    signup = {**credentials, "activation_code": code}
+    rejected = client.post(REGISTER_PATH, json=signup)
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"]["code"] == "SOFTWARE_ACTIVATION_UNAVAILABLE"
+
+    enabled = client.patch(
+        f"{admin_path}/activation-policy",
+        headers=headers("enable"),
+        json={**reason, "auto_extend": True},
+    )
+    assert enabled.status_code == 200, enabled.text
+    listing = client.get(admin_path).json()
+    assert listing["auto_extend"] is True
+    assert listing["items"][0]["expired"] is False
+    registered = client.post(REGISTER_PATH, json=signup)
+    assert registered.status_code == 201, registered.text
+    reused = client.post(REGISTER_PATH, json={**signup, "username": "bobby"})
+    assert reused.status_code == 400
+
+    user_id = registered.json()["user_id"]
+    with psycopg.connect(route_state) as conn:
+        row = conn.execute(
+            "SELECT authorized_until = bound_at + interval '2 years' FROM software_licenses "
+            "WHERE id = %s AND user_id = %s",
+            (license_id, user_id),
+        ).fetchone()
+        assert row == (True,)
+    logged_in = _password_login(client)
+    assert logged_in.status_code == 200, logged_in.text
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE software_licenses SET authorized_until = now() - interval '1 second' "
+            "WHERE id = %s",
+            (license_id,),
+        )
+    expired = _password_login(client)
+    assert expired.status_code == 403
+    assert expired.json()["detail"]["code"] == "SOFTWARE_LICENSE_EXPIRED"
+    heartbeat = client.post(
+        "/api/customer/sessions/heartbeat",
+        headers={"Authorization": f"Bearer {logged_in.json()['session_token']}"},
+    )
+    assert heartbeat.status_code == 401, heartbeat.text
+    assert heartbeat.json()["detail"]["code"] == "SOFTWARE_LICENSE_EXPIRED"
+    renewed = client.post(f"{admin_path}/{license_id}/renew", headers=headers("renew"), json=reason)
+    assert renewed.status_code == 200, renewed.text
+    renewal_retry = client.post(
+        f"{admin_path}/{license_id}/renew", headers=headers("renew"), json=reason
+    )
+    assert renewal_retry.json() == renewed.json()
+    assert _password_login(client).status_code == 200
 
 
 def _password_login(client: TestClient, **overrides: Any) -> Any:
@@ -278,7 +395,7 @@ def _password_login(client: TestClient, **overrides: Any) -> Any:
 
 
 def test_browser_cookie_refresh_csrf_logout_and_bearer_isolation(client: TestClient) -> None:
-    client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD})
+    client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD))
     web = {"X-Customer-Web": "1", "Origin": "http://127.0.0.1"}
     login = client.post(
         "/api/customer/login",
@@ -386,7 +503,7 @@ def test_browser_cookie_refresh_csrf_logout_and_bearer_isolation(client: TestCli
 def test_existing_browser_session_upgrades_without_password_or_new_device(
     client: TestClient,
 ) -> None:
-    client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD})
+    client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD))
     original = _password_login(client).json()
     upgrade = client.post(
         "/api/customer/sessions/login",
@@ -417,7 +534,7 @@ def test_browser_production_cookie_flags_and_account_revocation(
     monkeypatch.setattr(routes, "is_customer_production", lambda: True)
     monkeypatch.setattr(routes, "customer_public_origin", lambda: "https://customer.example")
     client.base_url = "https://customer.example"
-    client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD})
+    client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD))
     web = {"X-Customer-Web": "1", "Origin": "https://customer.example"}
     login = client.post(
         "/api/customer/login",
@@ -445,10 +562,7 @@ def test_password_login_profile_heartbeat_logout_and_no_device_bypass(client: Te
     assert (
         client.post(
             REGISTER_PATH,
-            json={
-                "username": "alice",
-                "password": VALID_PASSWORD,
-            },
+            json=signup_license_payload("alice", VALID_PASSWORD),
         ).status_code
         == 201
     )
@@ -500,10 +614,7 @@ def test_password_login_unlimited_devices_and_retains_identity_on_key_rotation(
 
     user_id = client.post(
         REGISTER_PATH,
-        json={
-            "username": "alice",
-            "password": VALID_PASSWORD,
-        },
+        json=signup_license_payload("alice", VALID_PASSWORD),
     ).json()["user_id"]
     with psycopg.connect(route_state) as conn:
         conn.execute("UPDATE users SET max_devices = 1 WHERE id = %s", (user_id,))
@@ -554,10 +665,7 @@ def test_password_login_expired_session_can_be_replaced_without_activation(
 ) -> None:
     user = client.post(
         REGISTER_PATH,
-        json={
-            "username": "alice",
-            "password": VALID_PASSWORD,
-        },
+        json=signup_license_payload("alice", VALID_PASSWORD),
     ).json()
     assert _password_login(client).status_code == 200
     with psycopg.connect(route_state) as conn:
@@ -573,7 +681,7 @@ def test_password_login_expired_session_can_be_replaced_without_activation(
 
 
 def test_register_creates_user_and_wallet_atomically(client: TestClient) -> None:
-    response = client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD})
+    response = client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD))
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["username"] == "alice"
@@ -604,9 +712,9 @@ def test_register_creates_user_and_wallet_atomically(client: TestClient) -> None
 
 
 def test_register_duplicate_username_is_409(client: TestClient) -> None:
-    first = client.post(REGISTER_PATH, json={"username": "bob", "password": VALID_PASSWORD})
+    first = client.post(REGISTER_PATH, json=signup_license_payload("bob", VALID_PASSWORD))
     assert first.status_code == 201, first.text
-    second = client.post(REGISTER_PATH, json={"username": "bob", "password": VALID_PASSWORD})
+    second = client.post(REGISTER_PATH, json=signup_license_payload("bob", VALID_PASSWORD))
     assert second.status_code == 409, second.text
     assert second.json()["detail"]["code"] == "USERNAME_TAKEN"
     with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
@@ -615,9 +723,7 @@ def test_register_duplicate_username_is_409(client: TestClient) -> None:
 
 
 def test_register_trims_surrounding_whitespace(client: TestClient) -> None:
-    response = client.post(
-        REGISTER_PATH, json={"username": "  carol  ", "password": VALID_PASSWORD}
-    )
+    response = client.post(REGISTER_PATH, json=signup_license_payload("  carol  ", VALID_PASSWORD))
     assert response.status_code == 201, response.text
     assert response.json()["username"] == "carol"
 
@@ -627,19 +733,19 @@ def test_register_trims_surrounding_whitespace(client: TestClient) -> None:
     ["ab", "a" * 33, "has space", "bad@char", "semi;colon", "tab\tchar"],
 )
 def test_register_invalid_username_is_400(client: TestClient, username: str) -> None:
-    response = client.post(REGISTER_PATH, json={"username": username, "password": VALID_PASSWORD})
+    response = client.post(REGISTER_PATH, json=signup_license_payload(username, VALID_PASSWORD))
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["code"] == "INVALID_USERNAME"
 
 
 def test_register_whitespace_only_username_is_400(client: TestClient) -> None:
-    response = client.post(REGISTER_PATH, json={"username": "   ", "password": VALID_PASSWORD})
+    response = client.post(REGISTER_PATH, json=signup_license_payload("   ", VALID_PASSWORD))
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["code"] == "INVALID_USERNAME"
 
 
 def test_register_weak_password_is_400_and_creates_nothing(client: TestClient) -> None:
-    response = client.post(REGISTER_PATH, json={"username": "dave", "password": "short"})
+    response = client.post(REGISTER_PATH, json=signup_license_payload("dave", "short"))
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["code"] == "WEAK_PASSWORD"
     with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
@@ -650,7 +756,7 @@ def test_register_weak_password_is_400_and_creates_nothing(client: TestClient) -
 def test_register_rejects_unknown_body_fields(client: TestClient) -> None:
     response = client.post(
         REGISTER_PATH,
-        json={"username": "erin", "password": VALID_PASSWORD, "email": "erin@example.com"},
+        json=signup_license_payload("erin", VALID_PASSWORD, email="erin@example.com"),
     )
     assert response.status_code == 422, response.text
 
@@ -674,9 +780,7 @@ def test_register_with_default_bonus_off_keeps_zero_credit_wallet(
     client: TestClient,
 ) -> None:
     """种子默认 0 = 关闭：注册后既无赠送流水也无 0 元订单（既有口径回归）。"""
-    response = client.post(
-        REGISTER_PATH, json={"username": "bonus-off", "password": VALID_PASSWORD}
-    )
+    response = client.post(REGISTER_PATH, json=signup_license_payload("bonus-off", VALID_PASSWORD))
     assert response.status_code == 201, response.text
     user_id = response.json()["user_id"]
     with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
@@ -699,7 +803,7 @@ def test_register_grants_configured_bonus_with_paid_zero_fen_order(
 ) -> None:
     """配置 30 分：钱包 +30，落一张 PAID 0 元 admin_adjustment 单 + 一条 CHARGE。"""
     _set_registration_bonus(30)
-    response = client.post(REGISTER_PATH, json={"username": "bonus-on", "password": VALID_PASSWORD})
+    response = client.post(REGISTER_PATH, json=signup_license_payload("bonus-on", VALID_PASSWORD))
     assert response.status_code == 201, response.text
     user_id = response.json()["user_id"]
     with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
@@ -733,7 +837,7 @@ def test_register_after_bonus_reset_to_zero_creates_no_ledger_rows(
     """改回 0 后再注册：不产生订单与流水——关闭是彻底关闭，不是发放 0 条。"""
     _set_registration_bonus(0)
     response = client.post(
-        REGISTER_PATH, json={"username": "bonus-reset", "password": VALID_PASSWORD}
+        REGISTER_PATH, json=signup_license_payload("bonus-reset", VALID_PASSWORD)
     )
     assert response.status_code == 201, response.text
     user_id = response.json()["user_id"]
@@ -757,9 +861,9 @@ def test_duplicate_register_conflict_leaves_exactly_one_bonus_ledger(
 ) -> None:
     """用户名冲突的第二次注册 409 且不落任何赠送痕迹——发放只随成功事务发生。"""
     _set_registration_bonus(40)
-    first = client.post(REGISTER_PATH, json={"username": "bonus-dup", "password": VALID_PASSWORD})
+    first = client.post(REGISTER_PATH, json=signup_license_payload("bonus-dup", VALID_PASSWORD))
     assert first.status_code == 201, first.text
-    second = client.post(REGISTER_PATH, json={"username": "bonus-dup", "password": VALID_PASSWORD})
+    second = client.post(REGISTER_PATH, json=signup_license_payload("bonus-dup", VALID_PASSWORD))
     assert second.status_code == 409, second.text
     assert second.json()["detail"]["code"] == "USERNAME_TAKEN"
     user_id = first.json()["user_id"]
@@ -929,7 +1033,7 @@ def test_password_login_rejects_invalid_credentials_without_session(
     username: str,
     password: str,
 ) -> None:
-    client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD})
+    client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD))
     response = _password_login(client, username=username, password=password)
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "INVALID_CREDENTIALS"
@@ -942,7 +1046,7 @@ def test_disabled_password_account_cannot_login_heartbeat_or_read_profile(
     client: TestClient,
     route_state: str,
 ) -> None:
-    user = client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}).json()
+    user = client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD)).json()
     sessions = [
         _password_login(client, device_fingerprint=f"account-device-{i:04}").json()
         for i in range(2)
@@ -963,7 +1067,7 @@ def test_password_response_replay_retains_identity_during_key_rotation(
 ) -> None:
     import secrets
 
-    client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD})
+    client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD))
     headers = {"Idempotency-Key": "password-retry-stable"}
     body = {
         "username": "alice",
@@ -1011,12 +1115,10 @@ def test_registration_and_failed_login_limits_persist_after_rejection(
     # 错误密码后的正确登录由账号预算拦截。
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT", "1")
     assert (
-        client.post(
-            REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}
-        ).status_code
+        client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD)).status_code
         == 201
     )
-    limited = client.post(REGISTER_PATH, json={"username": "bobby", "password": VALID_PASSWORD})
+    limited = client.post(REGISTER_PATH, json=signup_license_payload("bobby", VALID_PASSWORD))
     assert limited.status_code == 429
     assert int(limited.headers["Retry-After"]) > 0
     assert _password_login(client, password="wrong-6").status_code == 401
@@ -1034,7 +1136,7 @@ def test_concurrent_password_retries_create_one_device_and_one_session(
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
-    client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD})
+    client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD))
     barrier = Barrier(4)
 
     def submit(_: int) -> Any:
@@ -1132,7 +1234,7 @@ def test_password_customer_xiaohongshu_resolution_import_and_replay_on_postgres(
             "INSERT INTO viral_runtime_controls (id, collection_enabled, import_enabled) "
             "VALUES (1, 1, 1) ON CONFLICT (id) DO UPDATE SET import_enabled = 1"
         )
-    user = client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}).json()
+    user = client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD)).json()
     session = _password_login(client).json()
     with psycopg.connect(route_state) as conn:
         conn.execute(
@@ -1206,7 +1308,7 @@ def test_link_media_failure_finishes_receipt_and_refunds(client, route_state, mo
     from app.viral_media_preparation import ViralMediaLeaseLost
     from app.viral_tikhub import ViralSourceError
 
-    user = client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}).json()
+    user = client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD)).json()
     session = _password_login(client).json()
     with psycopg.connect(route_state) as conn:
         conn.execute("DELETE FROM billing_tariffs WHERE service='link_resolution'")
@@ -1294,7 +1396,7 @@ def test_password_device_admin_revocation_and_signed_grants_are_isolated(
     from app.db_portable import BusinessConnection
     from app.media_routes import signed_asset_session_epoch, validate_signed_asset_grant
 
-    user = client.post(REGISTER_PATH, json={"username": "alice", "password": VALID_PASSWORD}).json()
+    user = client.post(REGISTER_PATH, json=signup_license_payload("alice", VALID_PASSWORD)).json()
     first = _password_login(client).json()
     second = _password_login(client, device_fingerprint="password-device-two").json()
     with psycopg.connect(route_state) as raw:

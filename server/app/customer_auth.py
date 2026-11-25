@@ -51,6 +51,7 @@ from datetime import UTC, datetime
 import psycopg
 
 from app.customer_device_service import _token_digests
+from app.software_licenses import LICENSE_EXPIRED, LICENSE_EXPIRED_MESSAGE, software_license_expired
 from app.sub_account_auth import password_login_account_ok
 
 # Stable fencing error codes (dev doc §13.2).
@@ -222,6 +223,8 @@ def verify_session_context(
         raise _replaced("The device behind this session has been released.")
     if activation_code_id is None and (str(device_row[1]) != user_id or device_row[2] is not None):
         raise _replaced("The device does not belong to this registered customer.")
+    if software_license_expired(conn, user_id):
+        raise SessionFencingError(LICENSE_EXPIRED, LICENSE_EXPIRED_MESSAGE)
 
     # 会话续期（7 天滑动有效期的续命点）：全部校验通过后才滑动 lease_until，
     # 失败路径绝不留下续期写。函数内导入与 customer_device_service 引

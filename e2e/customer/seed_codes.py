@@ -40,6 +40,7 @@ from app.activation_code_service import (  # noqa: E402
     compute_code_digest,
     mask_activation_code,
 )
+from app.admin_auth_routes import hash_admin_password  # noqa: E402
 
 E2E_CODES = [
     "XS04-ABCDEFG-HJKLMNP-QRSTVWX-YZ23456",
@@ -77,6 +78,12 @@ def main() -> None:
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin_e2e', 'admin_e2e', 'Admin E2E', 'admin') "
             "ON CONFLICT (id) DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO admin_password_credentials "
+            "(user_id, password_hash, credential_version, password_changed_at) "
+            "VALUES ('admin_e2e', %s, 1, clock_timestamp())",
+            (hash_admin_password(os.environ["CUSTOMER_E2E_ADMIN_PASSWORD"]),),
         )
         for i, code in enumerate(E2E_CODES, start=1):
             code_id = f"e2e-code-{i}"

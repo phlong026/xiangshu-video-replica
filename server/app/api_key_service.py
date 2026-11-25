@@ -33,6 +33,8 @@ from datetime import UTC, datetime
 
 import psycopg
 
+from app.software_licenses import software_license_expired
+
 # 独立的 API-Key HMAC key 域（不与设备指纹域共用 env）。
 API_KEY_HMAC_KEY_ENV = "VIDEO_REPLICA_API_KEY_HMAC_KEY"
 MIN_HMAC_KEY_BYTES = 32
@@ -393,6 +395,8 @@ def authenticate_api_key(conn: psycopg.Connection, plaintext: str) -> Authentica
         hmac.compare_digest(stored_digest, candidate) for candidate in api_key_digests(plaintext)
     )
     if not matched:
+        return None
+    if software_license_expired(conn, str(row[1])):
         return None
     return AuthenticatedApiKey(
         key_id=str(row[0]),

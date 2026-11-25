@@ -544,7 +544,11 @@ export function useCustomerSession(store: CustomerCredentialStore): {
           input.mode === "register" &&
           registeredUsernameRef.current !== input.username
         ) {
-          await customerRegister(input.username, input.password);
+          await customerRegister(
+            input.username,
+            input.password,
+            input.activationCode ?? "",
+          );
           registeredUsernameRef.current = input.username;
         }
         const body = {

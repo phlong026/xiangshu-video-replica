@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from pg_test_kit import signup_license_payload
 from test_customer_registration import (
     client as registration_client,  # noqa: F401
 )
@@ -68,7 +69,7 @@ def _login(client, username: str, password: str):
 def master_session(client, username: str):
     """Register a master and log it in; returns (headers, login body)."""
     registered = client.post(
-        "/api/customer/register", json={"username": username, "password": MASTER_PASSWORD}
+        "/api/customer/register", json=signup_license_payload(username, MASTER_PASSWORD)
     )
     assert registered.status_code == 201, registered.text
     login = _login(client, username, MASTER_PASSWORD)

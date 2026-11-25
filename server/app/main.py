@@ -36,6 +36,7 @@ from app.admin_refund_routes import router as admin_refund_router
 from app.admin_runtime_routes import router as admin_runtime_router
 from app.admin_search_routes import router as admin_search_router
 from app.admin_session_routes import router as admin_session_router
+from app.admin_software_licenses import router as admin_software_licenses_router
 from app.admin_support_ticket_routes import router as support_ticket_router
 from app.admin_team_routes import router as admin_team_router
 from app.admin_uncertain_auto_reopen_routes import router as uncertain_auto_reopen_router
@@ -452,6 +453,7 @@ app.include_router(customer_security_router)
 app.include_router(customer_email_router)
 app.include_router(api_key_router)
 app.include_router(admin_activation_router)
+app.include_router(admin_software_licenses_router)
 app.include_router(admin_device_router)
 app.include_router(recharge_router)
 app.include_router(recharge_package_router)

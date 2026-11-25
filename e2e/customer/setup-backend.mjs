@@ -40,6 +40,8 @@ const SEED_CODES = [
 function testKeys() {
   return {
     ACTIVATION: randomBytes(36).toString("base64url"),
+    ACTIVATION_EXPORT: randomBytes(32).toString("base64url"),
+    ADMIN_PASSWORD: `E2e!${randomBytes(24).toString("base64url")}`,
     FINGERPRINT: randomBytes(36).toString("base64url"),
     ADMIN_SESSION: randomBytes(36).toString("base64url"),
     API_KEY: randomBytes(36).toString("base64url"),
@@ -122,6 +124,7 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
   // decrypt it — mirrors test_customer_recharge.recharge_config_fixture).
   const seedOutput = runSync(python, [path.join(__dirname, "seed_codes.py")], {
     CUSTOMER_E2E_DATABASE_URL: dsn,
+    CUSTOMER_E2E_ADMIN_PASSWORD: keys.ADMIN_PASSWORD,
     VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY: keys.ACTIVATION,
     PYTHONPATH: serverDir,
   });
@@ -141,6 +144,7 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
     CUSTOMER_E2E_DATABASE_URL: dsn,
     PYTHONPATH: serverDir,
     VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY: keys.ACTIVATION,
+    VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY: keys.ACTIVATION_EXPORT,
     VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY: keys.FINGERPRINT,
     VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY: keys.ADMIN_SESSION,
     VIDEO_REPLICA_API_KEY_HMAC_KEY: keys.API_KEY,
@@ -221,6 +225,7 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
         codes: SEED_CODES,
         dsn,
         fingerprintKey: keys.FINGERPRINT,
+        adminPassword: keys.ADMIN_PASSWORD,
         python,
       },
       null,
