@@ -1,4 +1,46 @@
-import { expect } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { expect, request } from "@playwright/test";
+
+async function issueRegistrationCode() {
+  const runDir =
+    process.env.CUSTOMER_E2E_RUN_DIR ??
+    fileURLToPath(new URL("./run", import.meta.url));
+  const state = JSON.parse(readFileSync(path.join(runDir, "run.json"), "utf8"));
+  const operator = await request.newContext({ baseURL: state.apiUrl });
+  try {
+    const login = await operator.post("/api/control/admin/session/password", {
+      data: { username: "admin_e2e", password: state.adminPassword },
+    });
+    expect(login.status()).toBe(201);
+    const csrfToken = (await login.json()).csrf_token;
+    const contract = { confirm: true, reason: "Dedicated E2E signup" };
+    const writeHeaders = () => ({
+      "X-Admin-CSRF": csrfToken,
+      "Idempotency-Key": randomUUID(),
+    });
+    const issued = await operator.post("/api/control/software-licenses", {
+      headers: writeHeaders(),
+      data: {
+        ...contract,
+        authorization_years: 1,
+        activation_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+    });
+    expect(issued.status()).toBe(201);
+    const { id } = await issued.json();
+    const revealed = await operator.post(
+      `/api/control/software-licenses/${id}/reveal`,
+      { headers: writeHeaders(), data: contract },
+    );
+    expect(revealed.status()).toBe(200);
+    return (await revealed.json()).activation_code;
+  } finally {
+    await operator.dispose();
+  }
+}
 
 export async function waitForCustomerWorkspace(page) {
   const profileEntry = page.getByRole("button", {
@@ -48,8 +90,12 @@ export async function enterCustomerAccount(page, username, register = true) {
   await page.goto(register ? "/register" : "/login");
   await page.getByLabel("用户名", { exact: true }).fill(username);
   await page.getByLabel("密码", { exact: true }).fill("test-6");
-  if (register)
+  if (register) {
     await page.getByLabel("确认密码", { exact: true }).fill("test-6");
+    await page
+      .getByLabel("软件激活码", { exact: true })
+      .fill(await issueRegistrationCode());
+  }
   await page
     .getByRole("button", {
       name: register ? "注册并登录" : "登录",
