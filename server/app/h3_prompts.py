@@ -365,6 +365,10 @@ def _motion_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
 
 
+def opening_frame_requires_alignment(source_frame_time: float) -> bool:
+    return not 0 <= source_frame_time <= 0.25
+
+
 def compile_replica_final_text(
     *,
     shot_payload: dict[str, Any],
@@ -386,7 +390,7 @@ def compile_replica_final_text(
             "TIMELINE_CONFIRMATION_REQUIRED",
             "源时间轴超过目标时长，请调整时长或明确确认压缩动作节奏。",
         )
-    if (source_frame_time < 0 or source_frame_time > 0.25) and not opening_action.strip():
+    if opening_frame_requires_alignment(source_frame_time) and not opening_action.strip():
         conflict(
             "FIRST_FRAME_ALIGNMENT_REQUIRED",
             "首帧来自视频中段或缺少开场时间记录，请选择开场帧或填写动作衔接方案。",

@@ -10147,6 +10147,15 @@ export interface ReplicaPipelineCharacter {
   versionNumber: number;
 }
 
+export async function markReplicaGuideSeen(
+  previouslySeen: boolean,
+): Promise<{ show: boolean }> {
+  return requestApiJson("/api/viral/replica-guide/seen", "记录复刻教程失败", {
+    method: "POST",
+    body: JSON.stringify({ previously_seen: previouslySeen }),
+  });
+}
+
 export interface ReplicaPipelineQuote {
   quoteToken: string;
   maxCredits: number;

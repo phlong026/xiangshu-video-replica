@@ -323,6 +323,7 @@ def enqueue_first_frame_task(
     idempotency_key: str,
     aspect_ratio: str | None = None,
     replace_scene: bool = False,
+    shot_card_version_id: str | None = None,
 ) -> BusinessRow:
     # Authorization must precede the idempotent replay lookup. Otherwise an
     # unrelated user who guesses a project/key pair can observe another
@@ -351,6 +352,8 @@ def enqueue_first_frame_task(
         request_parameters["replace_scene"] = True
     if aspect_ratio is not None:
         request_parameters["aspect_ratio"] = aspect_ratio
+    if shot_card_version_id is not None:
+        request_parameters["shot_card_version_id"] = shot_card_version_id
     replay = conn.execute(
         "SELECT * FROM first_frame_tasks WHERE project_id = %s AND idempotency_key = %s",
         (project_id, idempotency_key),
@@ -387,6 +390,7 @@ def enqueue_first_frame_task(
         character_reference_selection_id=character_reference_selection_id,
         aspect_ratio=aspect_ratio,
         replace_scene=replace_scene,
+        shot_card_version_id=shot_card_version_id,
     )
     request_payload = {
         **request_parameters,
@@ -968,6 +972,7 @@ def prepare_first_frame_task(
             character_reference_selection_id=cast(
                 str | None, payload.get("character_reference_selection_id")
             ),
+            shot_card_version_id=cast(str | None, payload.get("shot_card_version_id")),
         )
     except HTTPException as exc:
         if exc.status_code == 409:
@@ -993,6 +998,8 @@ def prepare_first_frame_task(
         current_payload["replace_scene"] = True
     if payload.get("aspect_ratio") is not None:
         current_payload["aspect_ratio"] = payload["aspect_ratio"]
+    if payload.get("shot_card_version_id") is not None:
+        current_payload["shot_card_version_id"] = payload["shot_card_version_id"]
     if canonical_request_hash(current_payload) != str(row["request_hash"]):
         raise _task_error(
             409,

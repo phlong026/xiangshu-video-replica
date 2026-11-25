@@ -68,6 +68,7 @@ def test_routes_registered_on_main_app() -> None:
     from app.main import app
 
     paths = app.openapi()["paths"]
+    assert "post" in paths["/api/viral/replica-guide/seen"]
     assert "post" in paths["/api/viral/replica-pipelines"]
     assert "post" in paths["/api/viral/replica-pipelines/upload"]
     assert "get" in paths["/api/viral/replica-pipelines/active"]
@@ -75,6 +76,45 @@ def test_routes_registered_on_main_app() -> None:
     for suffix in ("confirm", "cancel", "regenerate", "accept-partial"):
         entry = paths[f"/api/viral/replica-pipelines/{{pipeline_id}}/{suffix}"]
         assert "post" in entry
+
+
+def test_replica_guide_is_claimed_once_per_account_and_preserves_preferences(
+    biz: BusinessConnection,
+) -> None:
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from app.replica_pipeline_routes import ReplicaGuideSeenRequest, mark_replica_guide_seen
+
+    _seed_user(biz, "guide-new")
+    _seed_user(biz, "guide-legacy")
+    biz.execute(
+        "INSERT INTO studio_notification_preferences (user_id, prefs_json) VALUES (%s, %s)",
+        ("guide-new", json.dumps({"enabled": False, "receipts": {"task": "saved"}})),
+    )
+
+    @contextmanager
+    def write(user_id: str):
+        yield biz, SimpleNamespace(id=user_id)
+
+    new = SimpleNamespace(write=lambda: write("guide-new"))
+    legacy = SimpleNamespace(write=lambda: write("guide-legacy"))
+    assert mark_replica_guide_seen(ReplicaGuideSeenRequest(), new) == {"show": True}
+    assert mark_replica_guide_seen(ReplicaGuideSeenRequest(), new) == {"show": False}
+    assert mark_replica_guide_seen(ReplicaGuideSeenRequest(previously_seen=True), legacy) == {
+        "show": False
+    }
+    assert mark_replica_guide_seen(ReplicaGuideSeenRequest(), legacy) == {"show": False}
+    prefs = biz.execute(
+        "SELECT prefs_json FROM studio_notification_preferences WHERE user_id = %s",
+        ("guide-new",),
+    ).fetchone()
+    assert prefs is not None
+    assert json.loads(str(prefs["prefs_json"])) == {
+        "enabled": False,
+        "receipts": {"task": "saved"},
+        "replica_guide_seen": True,
+    }
 
 
 def test_switch_defaults_off_and_gates_new_initiation(biz: BusinessConnection) -> None:

@@ -17,6 +17,7 @@ import type {
 } from "../api";
 import {
   cancelReplicaPipeline,
+  confirmFirstFrame,
   confirmReplicaPipeline,
   createMaterialUploadIntent,
   createPublishRecord,
@@ -55,10 +56,12 @@ import { openWalletIfInsufficientCredits } from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
 import {
   AdaptiveReplicaGuide,
+  openReplicaGuideManually,
   ReplicaDefaultSummary,
   ReplicaDetailActions,
   replicaPreference,
   saveReplicaPreference,
+  shouldShowReplicaGuide,
 } from "./AdaptiveReplicaSetup";
 import { useStudio } from "./context";
 import { studioAssetFromMaterial, studioVideoFromViral } from "./live";
@@ -581,6 +584,66 @@ export const REPLICA_STAGE_LABELS: Record<string, string> = {
  * 用户确认后才建批次扣费（资金闸门在前端只做展示与确认，校验在服务端）。
  * 复用本账号默认人物，但每次启动前重新读取可用版本；失效时要求重选。
  */
+function ReplicaFramePreview({
+  assetId,
+  alt,
+  choice,
+}: {
+  assetId: string;
+  alt: string;
+  choice?: { label: string; disabled: boolean; onClick: () => void };
+}) {
+  const [url, setUrl] = useState<string>();
+  const [loadedUrl, setLoadedUrl] = useState<string>();
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let current = true;
+    setUrl(undefined);
+    setLoadedUrl(undefined);
+    setFailed(false);
+    void getAssetDownloadUrl(assetId, { fresh: attempt > 0 }).then(
+      (result) => {
+        if (current) setUrl(result.url);
+      },
+      () => {
+        if (current) setFailed(true);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [assetId, attempt]);
+  if (failed)
+    return (
+      <Button variant="quiet" onClick={() => setAttempt((value) => value + 1)}>
+        重试加载{alt}
+      </Button>
+    );
+  return url ? (
+    <div className="replica-opening-preview">
+      <img
+        className="replica-opening-frame"
+        src={url}
+        alt={alt}
+        onLoad={() => setLoadedUrl(url)}
+        onError={() => setFailed(true)}
+      />
+      {choice && (
+        <Button
+          variant="outline"
+          disabled={choice.disabled || loadedUrl !== url}
+          onClick={choice.onClick}
+        >
+          {choice.label}
+        </Button>
+      )}
+    </div>
+  ) : (
+    <p role="status">正在读取{alt}…</p>
+  );
+}
+
 function ReplicaPipelineControl({
   video,
   uploadedSource,
@@ -604,6 +667,7 @@ function ReplicaPipelineControl({
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [status, setStatus] = useState<ReplicaPipelineStatus | null>(null);
   const [quote, setQuote] = useState<ReplicaPipelineQuote | null>(null);
+  const [reviewedVersion, setReviewedVersion] = useState<string>();
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteAgeMs, setQuoteAgeMs] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -989,6 +1053,79 @@ function ReplicaPipelineControl({
       </>
     );
   }
+  const rawFirstFrame = status?.stageDetail?.firstFrame;
+  const firstFrame =
+    rawFirstFrame && typeof rawFirstFrame === "object"
+      ? (rawFirstFrame as Record<string, unknown>)
+      : null;
+  const rawFrameReview = firstFrame?.review;
+  const frameReview =
+    status?.status === "FIRST_FRAMING" &&
+    rawFrameReview &&
+    typeof rawFrameReview === "object"
+      ? (rawFrameReview as Record<string, unknown>)
+      : null;
+  const candidatesVersionId =
+    typeof frameReview?.candidatesVersionId === "string"
+      ? frameReview.candidatesVersionId
+      : undefined;
+  const frameCandidates = Array.isArray(frameReview?.assetIds)
+    ? frameReview.assetIds.filter((id): id is string => typeof id === "string")
+    : [];
+  const sourceFrameAssetId =
+    typeof firstFrame?.sourceFrameAssetId === "string"
+      ? firstFrame.sourceFrameAssetId
+      : undefined;
+  const rawOpeningShot = firstFrame?.openingShot;
+  const openingShot =
+    rawOpeningShot && typeof rawOpeningShot === "object"
+      ? Object.values(rawOpeningShot)
+          .filter((value): value is string => typeof value === "string")
+          .join(" · ")
+      : "";
+  const sourceFrameTime =
+    typeof firstFrame?.sourceFrameTimeSeconds === "number"
+      ? firstFrame.sourceFrameTimeSeconds.toFixed(2)
+      : undefined;
+  const openOriginalProject = (forStoryboard = false) => {
+    if (!status) return;
+    const importedAssetId =
+      uploadedSource?.assetId ??
+      (typeof status.stageDetail?.sourceAssetId === "string"
+        ? status.stageDetail.sourceAssetId
+        : undefined);
+    refresh();
+    navigate("replica", {
+      ...(forStoryboard ? { storyboardReviewProjectId: status.projectId } : {}),
+      draft:
+        state.draft.projectId === status.projectId
+          ? state.draft
+          : {
+              ...createDraft(),
+              projectId: status.projectId,
+              sourceId: importedAssetId ?? video.id,
+              sourceAssetId: importedAssetId,
+            },
+    });
+  };
+  const selectFrame = async (assetId: string) => {
+    if (!status || !candidatesVersionId || startRef.current) return;
+    startRef.current = true;
+    setBusy(true);
+    try {
+      await confirmFirstFrame(status.projectId, assetId, {
+        candidatesVersionId,
+        allowUnverified: true,
+      });
+      if (mounted.current) setReviewedVersion(candidatesVersionId);
+    } catch (cause) {
+      if (mounted.current)
+        notify(customerVisibleErrorMessage(cause, "首帧确认失败，请重试。"));
+    } finally {
+      startRef.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  };
   const reviewDetail = status?.stageDetail?.storyboardReview;
   const storyboardIssues = readShotConsistencyIssues(
     reviewDetail && typeof reviewDetail === "object" && "issues" in reviewDetail
@@ -999,9 +1136,11 @@ function ReplicaPipelineControl({
     status?.status === "ANALYZING" && storyboardIssues.length > 0;
   const label = waitingForStoryboard
     ? `拆解已完成，${storyboardIssues.length} 处待确认`
-    : status
-      ? (REPLICA_STAGE_LABELS[status.status] ?? status.status)
-      : "启动中…";
+    : candidatesVersionId
+      ? "候选首帧待确认"
+      : status
+        ? (REPLICA_STAGE_LABELS[status.status] ?? status.status)
+        : "启动中…";
   const quoteStale = quoteAgeMs > 300_000;
   const fees = status?.feeSummary;
   return (
@@ -1020,27 +1159,52 @@ function ReplicaPipelineControl({
           <Button
             variant="primary"
             disabled={busy}
-            onClick={() => {
-              refresh();
-              navigate("replica", {
-                storyboardReviewProjectId: status.projectId,
-                draft:
-                  state.draft.projectId === status.projectId
-                    ? state.draft
-                    : {
-                        ...createDraft(),
-                        projectId: status.projectId,
-                        sourceId: uploadedSource?.assetId ?? video.id,
-                        sourceAssetId: uploadedSource?.assetId,
-                      },
-              });
-            }}
+            onClick={() => openOriginalProject(true)}
           >
             确认分镜后继续
           </Button>
           <p className="admin-hint">修正并保存后会自动继续，无需重新拆解。</p>
         </div>
       ) : null}
+      {candidatesVersionId && (
+        <div className="replica-pipeline-review">
+          {openingShot && <p>第一镜头 · {openingShot}</p>}
+          {sourceFrameAssetId && (
+            <ReplicaFramePreview
+              assetId={sourceFrameAssetId}
+              alt={sourceFrameTime ? `原片 ${sourceFrameTime} 秒` : "原片画面"}
+            />
+          )}
+          <p>选一张与第一镜头衔接的首帧，再核对成片费用。</p>
+          <div className="replica-opening-candidates">
+            {frameCandidates.map((assetId, index) => (
+              <ReplicaFramePreview
+                key={assetId}
+                assetId={assetId}
+                alt={`候选首帧 ${index + 1}`}
+                choice={{
+                  label:
+                    reviewedVersion === candidatesVersionId
+                      ? "已提交确认"
+                      : `使用候选 ${index + 1}`,
+                  disabled: busy || reviewedVersion === candidatesVersionId,
+                  onClick: () => void selectFrame(assetId),
+                }}
+              />
+            ))}
+          </div>
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => openOriginalProject()}
+          >
+            打开原项目
+          </Button>
+          <Button variant="quiet" disabled={busy} onClick={abandon}>
+            放弃
+          </Button>
+        </div>
+      )}
       {status?.status === "AWAIT_CONFIRM" ? (
         <div className="replica-pipeline-review">
           {status.promptText ? (
@@ -1056,7 +1220,25 @@ function ReplicaPipelineControl({
             </details>
           ) : null}
           {status.firstFrameAssetId ? (
-            <p className="admin-hint">首帧已选定（可在复刻页预览）</p>
+            <>
+              {openingShot && <p>第一镜头 · {openingShot}</p>}
+              <div className="replica-opening-candidates">
+                {sourceFrameAssetId && (
+                  <ReplicaFramePreview
+                    assetId={sourceFrameAssetId}
+                    alt={
+                      sourceFrameTime
+                        ? `原片 ${sourceFrameTime} 秒`
+                        : "原片画面"
+                    }
+                  />
+                )}
+                <ReplicaFramePreview
+                  assetId={status.firstFrameAssetId}
+                  alt="已确认首帧"
+                />
+              </div>
+            </>
           ) : null}
           {quote ? (
             <p className="admin-hint">
@@ -1094,7 +1276,18 @@ function ReplicaPipelineControl({
       ) : null}
       {status && ["FAILED", "CANCELLED", "EXPIRED"].includes(status.status) ? (
         <div className="replica-pipeline-actions">
-          <p className="admin-hint">任务已结束，可在项目里转手动继续处理</p>
+          <p className="admin-hint">
+            {typeof status.stageDetail?.failureMessage === "string"
+              ? status.stageDetail.failureMessage
+              : "任务已结束，可在项目里转手动继续处理。"}
+          </p>
+          <Button
+            variant="primary"
+            disabled={busy}
+            onClick={() => openOriginalProject()}
+          >
+            打开原项目继续
+          </Button>
           <Button
             disabled={busy}
             variant="outline"
@@ -1115,9 +1308,12 @@ function ReplicaPipelineControl({
       {status && ["DELIVERED", "DELIVERED_PARTIAL"].includes(status.status) ? (
         <p className="admin-hint">成片已生成，可在任务中心查看与下载</p>
       ) : null}
-      {presentation === "detail" && secondaryAction && (
-        <div className="replica-detail-actions">{secondaryAction}</div>
-      )}
+      {presentation === "detail" &&
+        secondaryAction &&
+        !candidatesVersionId &&
+        status?.status !== "FAILED" && (
+          <div className="replica-detail-actions">{secondaryAction}</div>
+        )}
     </div>
   );
 }
@@ -2351,19 +2547,39 @@ export function AdaptiveReplicaControl({
   const canStart =
     supported &&
     Boolean(uploadedSource || (video.platformKey && video.nativeId));
+  const guideRequest = useRef<{ accountId: string; videoId: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    const accountId = user.id;
+    const videoId = video.id;
+    return () => {
+      const pending = guideRequest.current;
+      if (
+        pending &&
+        pending.accountId === accountId &&
+        pending.videoId === videoId
+      ) {
+        guideRequest.current = null;
+      }
+    };
+  }, [user.id, video.id]);
 
   const onRequest = useCallback(() => {
     if (!canStart) {
       notify("视频时长未知、不足 4 秒或缺少来源信息；可手动提取文案。");
       return;
     }
-    if (!replicaPreference(user.id, "guide-v1")) {
-      saveReplicaPreference(user.id, "guide-v1", "1");
-      setGuide("first");
-    } else {
-      setRequested(true);
-    }
-  }, [canStart, notify, user.id]);
+    if (guideRequest.current) return;
+    const request = { accountId: user.id, videoId: video.id };
+    guideRequest.current = request;
+    void shouldShowReplicaGuide(user.id).then((show) => {
+      if (guideRequest.current !== request) return;
+      guideRequest.current = null;
+      if (show) setGuide("first");
+      else setRequested(true);
+    });
+  }, [canStart, notify, user.id, video.id]);
 
   const consumedIntent = useRef(false);
   useEffect(() => {
@@ -2421,7 +2637,7 @@ export function AdaptiveReplicaControl({
         <Button
           variant="quiet"
           onClick={() => {
-            saveReplicaPreference(user.id, "guide-v1", "1");
+            openReplicaGuideManually(user.id);
             setGuide("manual");
           }}
         >
@@ -2684,7 +2900,7 @@ export function ViralDetailPage() {
         <Button
           variant="quiet"
           onClick={() => {
-            saveReplicaPreference(user.id, "guide-v1", "1");
+            openReplicaGuideManually(user.id);
             setGuideOpen(true);
           }}
         >

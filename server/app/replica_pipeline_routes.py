@@ -68,6 +68,30 @@ class ReplicaPipelineAcceptPartialRequest(BaseModel):
     pass
 
 
+class ReplicaGuideSeenRequest(BaseModel):
+    previously_seen: bool = False
+
+
+@router.post("/replica-guide/seen")
+def mark_replica_guide_seen(request: ReplicaGuideSeenRequest, db: BusinessDbDep) -> dict[str, bool]:
+    """同账号共用一次引导回执，兼容已在旧客户端看过的用户。"""
+    with db.write() as (conn, actor):
+        claimed = conn.execute(
+            """
+            INSERT INTO studio_notification_preferences (user_id, prefs_json)
+            VALUES (%s, '{"replica_guide_seen": true}')
+            ON CONFLICT (user_id) DO UPDATE
+            SET prefs_json = (studio_notification_preferences.prefs_json::jsonb
+                || excluded.prefs_json::jsonb)::text, updated_at = CURRENT_TIMESTAMP
+            WHERE (studio_notification_preferences.prefs_json::jsonb
+                -> 'replica_guide_seen') IS DISTINCT FROM 'true'::jsonb
+            RETURNING user_id
+            """,
+            (actor.id,),
+        ).fetchone()
+    return {"show": claimed is not None and not request.previously_seen}
+
+
 @router.post("/replica-pipelines", status_code=202)
 def initiate_replica_pipeline(
     request: ReplicaPipelineInitiateRequest,
@@ -376,16 +400,25 @@ def find_active_replica_pipeline(
     conn: ReadDatabase,
     actor: ShortAuthUser,
 ) -> dict[str, object]:
-    """从服务端恢复当前账号、当前视频的未完成任务，不信任本地缓存。"""
+    """恢复当前视频的未完成任务或上一次可从原项目接手的首帧失败。"""
     row = conn.execute(
-        """SELECT id FROM replica_pipeline_tasks
-           WHERE owner_user_id = %s AND platform = %s AND video_id = %s
-             AND status = ANY(%s) ORDER BY created_at DESC LIMIT 1""",
+        """WITH source_attempts AS (
+               SELECT id, status, stage, created_at FROM replica_pipeline_tasks
+               WHERE owner_user_id = %s AND platform = %s AND video_id = %s
+           )
+           SELECT id FROM source_attempts
+           WHERE status = ANY(%s) OR (status = %s AND stage = %s AND id = (
+               SELECT id FROM source_attempts ORDER BY created_at DESC, id DESC LIMIT 1
+           ))
+           ORDER BY (status = %s), created_at DESC, id DESC LIMIT 1""",
         (
             actor.id,
             platform,
             video_id,
             sorted(rp.ACTIVE_STATUSES | {rp.STATUS_NEEDS_REVIEW_SETTLED}),
+            rp.STATUS_FAILED,
+            f"{rp.STAGE_FIRST_FRAME}:failed",
+            rp.STATUS_FAILED,
         ),
     ).fetchone()
     return {"pipelineId": str(row["id"]) if row else None}

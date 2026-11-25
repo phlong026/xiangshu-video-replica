@@ -64,6 +64,8 @@ const {
   fetchReplicaPipeline,
   findActiveReplicaPipeline,
   listReplicaPipelineCharacters,
+  markReplicaGuideSeen,
+  confirmFirstFrame,
   getMaterialBatchPreviews,
   getMaterialCachedPreview,
   getMaterialCacheUsage,
@@ -100,6 +102,10 @@ const {
     pipelineId: null as string | null,
   })),
   listReplicaPipelineCharacters: vi.fn(),
+  markReplicaGuideSeen: vi.fn(async (previouslySeen: boolean) => ({
+    show: !previouslySeen,
+  })),
+  confirmFirstFrame: vi.fn(async () => ({})),
   // 默认空报价表：卡片「查看详情」不显示积分（需要报价的用例自行打桩）。
   getWorkspacePricing: vi.fn(async () => ({
     version: 1,
@@ -221,6 +227,8 @@ vi.mock("../api", async (importOriginal) => ({
   fetchReplicaPipeline,
   findActiveReplicaPipeline,
   listReplicaPipelineCharacters,
+  markReplicaGuideSeen,
+  confirmFirstFrame,
   confirmReplicaPipeline: vi.fn(),
   cancelReplicaPipeline: vi.fn(),
   quoteReplicaPipeline: vi.fn(),
@@ -5681,6 +5689,7 @@ describe("全自动复刻入口（M8 v1）", () => {
       ).not.toBeInTheDocument();
       fireEvent.click(entry);
       expect(initiateReplicaPipeline).not.toHaveBeenCalled();
+      await screen.findByRole("dialog", { name: "一键复刻使用教程" });
       finishAdaptiveGuide();
       const setup = await screen.findByRole("dialog", {
         name: "设置 AI 视频默认人物",
@@ -5924,9 +5933,10 @@ describe("全自动复刻入口（M8 v1）", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
     );
-    fireEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
-    );
+    const guide = await screen.findByRole("dialog", {
+      name: "一键复刻使用教程",
+    });
+    fireEvent.click(within(guide).getByRole("button", { name: "关闭" }));
     expect(createViralImportTask).not.toHaveBeenCalled();
     view.unmount();
     render(<ViralDetailPage />);
@@ -5946,6 +5956,96 @@ describe("全自动复刻入口（M8 v1）", () => {
     expect(
       screen.getByRole("dialog", { name: "一键复刻使用教程" }),
     ).toBeInTheDocument();
+  });
+
+  it("已在另一客户端看过的账号跳过自动教程", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: "guide-seen-on-another-device" },
+      state: { ...base.state, selectedVideoId: "dy-1" },
+    });
+    useStudio.mockReturnValue(value);
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(viralItem(1, { durationMs: 30_001 })),
+    );
+    markReplicaGuideSeen.mockResolvedValueOnce({ show: false });
+    render(<ViralDetailPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "一键复刻 · 数字人口播" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "设置数字人口播默认素材" }),
+    ).toBeInTheDocument();
+    expect(markReplicaGuideSeen).toHaveBeenLastCalledWith(false);
+    expect(
+      screen.queryByRole("dialog", { name: "一键复刻使用教程" }),
+    ).toBeNull();
+  });
+
+  it("首帧候选可见后提交原批次确认，打开的是已拆解项目", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: "replica-frame-review" },
+      state: { ...base.state, selectedVideoId: "dy-1" },
+    });
+    useStudio.mockReturnValue(value);
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(viralItem(1, { durationMs: 19_000 })),
+    );
+    findActiveReplicaPipeline.mockResolvedValueOnce({
+      pipelineId: "pending-frame",
+    });
+    fetchReplicaPipeline.mockResolvedValueOnce({
+      id: "pending-frame",
+      projectId: "original-project",
+      status: "FIRST_FRAMING",
+      stageDetail: {
+        sourceAssetId: "imported-video",
+        firstFrame: {
+          sourceFrameAssetId: "source-frame",
+          sourceFrameTimeSeconds: 0,
+          openingShot: { scene: "乡墅前庭" },
+          review: {
+            candidatesVersionId: "frame-pool",
+            assetIds: ["candidate-image"],
+          },
+        },
+      },
+    });
+    getAssetDownloadUrl
+      .mockResolvedValueOnce({ url: "https://signed/source-frame" })
+      .mockResolvedValueOnce({ url: "https://signed/candidate-image" });
+    render(<ViralDetailPage />);
+    expect(
+      await screen.findByRole("img", { name: "原片 0.00 秒" }),
+    ).toBeInTheDocument();
+    const image = await screen.findByRole("img", { name: "候选首帧 1" });
+    const choose = screen.getByRole("button", { name: "使用候选 1" });
+    expect(choose).toBeDisabled();
+    fireEvent.load(image);
+    fireEvent.click(choose);
+    await screen.findByRole("button", { name: "已提交确认" });
+    expect(confirmFirstFrame).toHaveBeenCalledWith(
+      "original-project",
+      "candidate-image",
+      {
+        candidatesVersionId: "frame-pool",
+        allowUnverified: true,
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "打开原项目" }));
+    expect(value.navigate).toHaveBeenCalledWith(
+      "replica",
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          projectId: "original-project",
+          sourceAssetId: "imported-video",
+        }),
+      }),
+    );
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
   });
 
   it("培训素材超过1000条时继续读取全部分页并能检索末尾记录", async () => {

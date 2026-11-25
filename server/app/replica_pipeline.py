@@ -412,7 +412,9 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     STATUS_IMPORTING: frozenset({STATUS_ANALYZING, STATUS_DRAINING, STATUS_FAILED}),
     STATUS_ANALYZING: frozenset({STATUS_SCRIPT_VERSIONING, STATUS_DRAINING, STATUS_FAILED}),
     STATUS_SCRIPT_VERSIONING: frozenset({STATUS_FIRST_FRAMING, STATUS_DRAINING, STATUS_FAILED}),
-    STATUS_FIRST_FRAMING: frozenset({STATUS_COMPOSING, STATUS_DRAINING, STATUS_FAILED}),
+    STATUS_FIRST_FRAMING: frozenset(
+        {STATUS_COMPOSING, STATUS_DRAINING, STATUS_FAILED, STATUS_CANCELLED}
+    ),
     STATUS_COMPOSING: frozenset({STATUS_AWAIT_CONFIRM, STATUS_DRAINING, STATUS_FAILED}),
     STATUS_AWAIT_CONFIRM: frozenset(
         {STATUS_GENERATING, STATUS_CANCELLED, STATUS_EXPIRED, STATUS_DRAINING}
@@ -591,7 +593,7 @@ def settle_failure(
         """
         UPDATE replica_pipeline_tasks SET status = %s,
             stage = CASE WHEN %s = %s THEN stage || ':failed' ELSE stage END,
-            stage_detail = %s,
+            stage_detail = COALESCE(stage_detail, '{}'::jsonb) || %s::jsonb,
             locked_by = NULL, locked_until = NULL,
             finished_at = CASE WHEN %s IN (%s, %s) THEN now() ELSE finished_at END,
             updated_at = now(), next_poll_at = now()

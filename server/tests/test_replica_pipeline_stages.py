@@ -843,12 +843,16 @@ def _seed_first_framing_done_stages(
         )
     }
     _stub_domains["version_payload"] = {
+        "shot-1": {
+            "duration_seconds": _stub_domains.get("duration_ms", 8000) / 1000,
+            "shots": [{"start_time": 0, "end_time": 8, "person_count": 1, "subject": "讲解人"}],
+        },
         "sfc-1": {
             "candidates": [
                 {"asset_id": "sfb", "timestamp_seconds": 2.0},
-                {"asset_id": "sfa", "timestamp_seconds": 0.5},
+                {"asset_id": "sfa", "timestamp_seconds": 0.0},
             ]
-        }
+        },
     }
     return pipeline_id
 
@@ -869,6 +873,7 @@ def test_first_framing_source_stage_picks_opening_frame(
     kwargs = _stub_domains["source_confirm_kwargs"]
     assert kwargs["source_frame_asset_id"] == "sfa"
     assert _stub_domains["first_frame_enqueue_kwargs"]["quantity"] == 3
+    assert _stub_domains["first_frame_enqueue_kwargs"]["shot_card_version_id"] == "shot-1"
     row = biz.execute(
         "SELECT stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
     ).fetchone()
@@ -907,7 +912,7 @@ def test_first_framing_auto_confirms_quality_passed_candidate(
     assert kwargs["first_frame_asset_id"] == "good"
     assert kwargs["review_mode"] == "AUTO_PIPELINE"
     # 有质检通过证据：不得使用 override（评审 A-r2#2）。
-    assert kwargs["quality_override"] is False
+    assert not kwargs.get("quality_override")
     row = biz.execute(
         "SELECT status FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
     ).fetchone()
@@ -937,11 +942,10 @@ def test_first_framing_all_quality_rejected_fails(
     assert result.kind == "failed" and result.failure_code == "FIRST_FRAME_QUALITY_REJECTED"
 
 
-def test_first_framing_without_quality_takes_first_candidate(
-    biz: BusinessConnection, _stub_domains: dict[str, Any]
+def test_first_framing_without_quality_requires_human_selection(
+    biz: BusinessConnection, _stub_domains: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """质检不可用（真实链路 quality 恒 None）：确定性取首位并如实记录
-    qualityAvailable=false（评审 A-r1#3）."""
+    """没有质检证据时，须由用户确认已生成的同一批候选。"""
     biz.execute("DELETE FROM replica_pipeline_tasks")
     pipeline_id = _seed_first_framing_done_stages(biz, _stub_domains, slot="ff4")
     lease = _acquire(biz, slot="ff4")
@@ -958,11 +962,8 @@ def test_first_framing_without_quality_takes_first_candidate(
         "candidates": [{"asset_id": "first"}, {"asset_id": "second"}]
     }
     lease = _acquire(biz, slot="ff4")
-    assert stages.run_pipeline_stage(biz, lease).kind == "advanced"
-    kwargs = _stub_domains["first_frame_confirm_kwargs"]
-    assert kwargs["first_frame_asset_id"] == "first"
-    # 无质检证据：显式 quality_override（生成域既有授权语义）。
-    assert kwargs["quality_override"] is True
+    assert stages.run_pipeline_stage(biz, lease).kind == "waiting"
+    assert "first_frame_confirm_kwargs" not in _stub_domains
     row = biz.execute(
         "SELECT stage_detail FROM replica_pipeline_tasks WHERE id = %s", (pipeline_id,)
     ).fetchone()
@@ -970,6 +971,27 @@ def test_first_framing_without_quality_takes_first_candidate(
     detail = row["stage_detail"] if isinstance(row["stage_detail"], dict) else {}
     first_frame = detail.get("firstFrame", {})
     assert first_frame.get("qualityAvailable") is False
+    assert first_frame["review"] == {
+        "candidatesVersionId": "ffc-1",
+        "assetIds": ["first", "second"],
+    }
+    monkeypatch.setattr(
+        stages,
+        "latest_version",
+        lambda *_args: {
+            "id": "selected-by-user",
+            "payload_json": json.dumps(
+                {
+                    "review_mode": "HUMAN_CONFIRMATION",
+                    "first_frame_candidates_version_id": "ffc-1",
+                    "first_frame_asset_id": "second",
+                }
+            ),
+        },
+    )
+    _release_for_next_round(biz, pipeline_id)
+    assert stages.run_pipeline_stage(biz, _acquire(biz, slot="ff4")).kind == "advanced"
+    assert "first_frame_confirm_kwargs" not in _stub_domains
 
 
 @pytest.mark.parametrize("seconds", [4, 8, 15, 16, 30])
@@ -1132,6 +1154,7 @@ def test_fractional_timeline_compiles_quotes_and_queues_same_duration(
                     "firstFrame": {
                         "substage": "candidates",
                         "sourceFrameSelectionVersionId": source["id"],
+                        "sourceFrameTimeSeconds": 0,
                     }
                     if uploaded
                     else {"firstFrameAssetId": frame_id},
@@ -1395,6 +1418,7 @@ def test_character_selection_http_error_lands_failed(
             "firstFrame": {
                 "substage": "candidates",
                 "sourceFrameSelectionVersionId": "sfs-1",
+                "sourceFrameTimeSeconds": 0,
             },
         },
     )

@@ -1324,6 +1324,7 @@ def confirmed_first_frame_sources(
             "Confirm a first-frame candidate before compiling or submitting H3 generation.",
         )
     candidate_payload = json.loads(str(candidates["payload_json"]))
+    appearance = candidate_payload.get("project_appearance")
     return {
         "first_frame_candidates_version_id": str(candidates["id"]),
         "first_frame_selection_version_id": str(selection["id"]),
@@ -1338,6 +1339,9 @@ def confirmed_first_frame_sources(
         "first_frame_reconstruction_mode": candidate_payload.get("reconstruction_mode"),
         "first_frame_replace_scene": candidate_payload.get("replace_scene") is True,
         "character_contract": candidate_payload.get("character_contract"),
+        "first_frame_shot_card_version_id": (
+            appearance.get("shot_card_version_id") if isinstance(appearance, dict) else None
+        ),
         "project_character_appearance_version_id": candidate_payload.get(
             "project_character_appearance_version_id"
         ),
@@ -1523,6 +1527,16 @@ def compile_prompt_version(
             project_id=project_id,
             first_frame_asset_id=request.first_frame_asset_id,
         )
+        first_frame_shot_card = first_frame_sources.get("first_frame_shot_card_version_id")
+        if (
+            isinstance(first_frame_shot_card, str)
+            and first_frame_shot_card != request.shot_card_version_id
+        ):
+            raise generation_error(
+                409,
+                "FIRST_FRAME_SHOT_CARD_MISMATCH",
+                "首帧对应的分镜已变化，请核对后重新准备首帧。",
+            )
 
         shot_payload = normalize_consistent_storyboard(json.loads(str(shot_card["payload_json"])))
         source_duration_seconds = shot_timeline_duration(shot_payload)
