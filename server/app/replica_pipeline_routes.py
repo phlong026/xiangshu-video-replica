@@ -393,6 +393,56 @@ def quote_replica_pipeline(pipeline_id: str, db: BusinessDbDep) -> dict[str, obj
     return quote_response
 
 
+class ReplicaPreflightRequest(BaseModel):
+    mode: Literal["video", "oral"]
+    duration_ms: int = Field(ge=1, le=86_400_000)
+
+
+@router.post("/replica-preflight")
+def estimate_replica_preprocessing(
+    request: ReplicaPreflightRequest, db: BusinessDbDep
+) -> dict[str, object]:
+    from app.billing_catalog import read_tariff, retail_snapshot
+    from app.usage_billing import resolve_wallet_owner
+
+    with db.write() as (conn, actor):
+        wallet_owner = resolve_wallet_owner(conn, actor.id)
+        if request.mode == "oral":
+            return {
+                "transcribeCredits": int(
+                    str(
+                        retail_snapshot(
+                            conn, "asr", request.duration_ms / 1000, user_id=wallet_owner
+                        )["credits"]
+                    )
+                ),
+            }
+        try:
+            rp.require_pipeline_enabled(conn)
+            duration = rp.require_output_duration(request.duration_ms)
+        except rp.ReplicaPipelineError as exc:
+            return {"unavailableReason": exc.message}
+        if duration > 15:
+            tariff = read_tariff(conn, "video_768p_long")
+            if tariff is None or not tariff.enabled or not tariff.unit_credits:
+                return {"unavailableReason": "16–30 秒生成档暂未开放，可改用手动复刻。"}
+        from app.replica_pipeline_stages import FIRST_FRAME_QUANTITY
+
+        return {
+            "analysisCredits": int(
+                str(retail_snapshot(conn, "analysis", 1, user_id=wallet_owner)["credits"])
+            ),
+            "firstFrameCredits": int(
+                str(
+                    retail_snapshot(
+                        conn, "first_frame", FIRST_FRAME_QUANTITY, user_id=wallet_owner
+                    )["credits"]
+                )
+            ),
+            "firstFrameQuantity": FIRST_FRAME_QUANTITY,
+        }
+
+
 @router.get("/replica-pipelines/active")
 def find_active_replica_pipeline(
     platform: Literal["douyin", "xiaohongshu", "wechat_channels", "upload"],
@@ -406,7 +456,7 @@ def find_active_replica_pipeline(
                SELECT id, status, stage, created_at FROM replica_pipeline_tasks
                WHERE owner_user_id = %s AND platform = %s AND video_id = %s
            )
-           SELECT id FROM source_attempts
+           SELECT id, status FROM source_attempts
            WHERE status = ANY(%s) OR (status = %s AND stage = %s AND id = (
                SELECT id FROM source_attempts ORDER BY created_at DESC, id DESC LIMIT 1
            ))
@@ -421,7 +471,17 @@ def find_active_replica_pipeline(
             rp.STATUS_FAILED,
         ),
     ).fetchone()
-    return {"pipelineId": str(row["id"]) if row else None}
+    result: dict[str, object] = {"pipelineId": str(row["id"]) if row is not None else None}
+    if row is not None and row["status"] in rp.ACTIVE_STATUSES:
+        return result
+    blocking = conn.execute(
+        """SELECT id FROM replica_pipeline_tasks
+           WHERE owner_user_id = %s AND status = ANY(%s) LIMIT 1""",
+        (actor.id, sorted(rp.ACTIVE_STATUSES)),
+    ).fetchone()
+    if blocking is not None:
+        result["blockingPipelineId"] = str(blocking["id"])
+    return result
 
 
 @router.get("/replica-pipelines/{pipeline_id}")
@@ -461,6 +521,8 @@ def read_replica_pipeline(
     payload.update(confirm.confirm_quote_payload(row))
     if row["batch_id"]:
         payload["batchId"] = str(row["batch_id"])
+    if row["status"] == rp.STATUS_NEEDS_REVIEW_SETTLED:
+        payload["deliverableCount"] = generation.deliverable_count(conn, row)
     # 确认卡核对内容（评审 M8-r1#2）：提示词/文案正文 + 三栏费用。
     _attach_review_material(conn, row, detail, payload)
     return payload

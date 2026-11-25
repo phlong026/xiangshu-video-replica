@@ -20,14 +20,14 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from app import replica_pipeline as rp
-from app.analysis import enqueue_analysis_task
+from app.analysis import enqueue_analysis_task, insert_version
 from app.auth import CurrentUser, Role
 from app.character_reference_matching import (
     create_character_reference_selection,
     current_character_reference_selection_for_generation,
 )
 from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
-from app.first_frames import confirm_first_frame
+from app.first_frames import SOURCE_OPENING_RECONSTRUCTION_MODE, confirm_first_frame
 from app.generation import (
     PromptCompileRequest,
     ScriptRequest,
@@ -44,7 +44,7 @@ from app.viral_import import ViralImportError, ViralImportRequest, enqueue_viral
 from app.viral_store import apply_customer_resolution, get_viral_video
 
 # 首帧候选数量：与前端 GenerateFirstFramesRequest 默认一致（1–3 上界）。
-_FIRST_FRAME_QUANTITY = 3
+FIRST_FRAME_QUANTITY = 3
 # 首帧模型：与前端默认一致（first_frame_routes.GenerateFirstFramesRequest）。
 _FIRST_FRAME_MODEL = "gpt-image-2"
 
@@ -625,12 +625,20 @@ def _first_frame_source_frames(
     shots = shot_payload.get("shots") if shot_payload else None
     opening = shots[0] if isinstance(shots, list) and shots and isinstance(shots[0], dict) else {}
     count = opening.get("person_count")
-    if count == 0:
+    source_only = (
+        isinstance(shots, list)
+        and bool(shots)
+        and all(isinstance(shot, dict) and shot.get("person_count") == 0 for shot in shots)
+    )
+    if count == 0 and not source_only:
         return _failed(
-            "FIRST_FRAME_NO_OPENING_PERSON", "第一镜头无人出镜，已保留拆解，请在原项目继续处理。"
+            "FIRST_FRAME_NO_OPENING_PERSON",
+            "开场无人，后续镜头有人或人数未确认。请在原项目核对开场与人物出场。",
         )
     subject = opening.get("subject")
-    if type(count) is not int or count < 1 or not isinstance(subject, str) or not subject.strip():
+    if not source_only and (
+        type(count) is not int or count < 1 or not isinstance(subject, str) or not subject.strip()
+    ):
         return _failed(
             "FIRST_FRAME_OPENING_UNVERIFIED", "第一镜头的人物尚未确认，请在原项目核对分镜与源画面。"
         )
@@ -678,6 +686,51 @@ def _first_frame_source_frames(
     first_frame["openingShot"] = {
         key: opening[key] for key in ("scene", "subject", "action") if key in opening
     }
+    if source_only:
+        candidates_version = insert_version(
+            conn,
+            project_id=lease.project_id,
+            asset_id=opening_asset_id,
+            kind="first_frame_candidates",
+            created_by_user_id=actor.id,
+            commit=False,
+            payload={
+                "reconstruction_mode": SOURCE_OPENING_RECONSTRUCTION_MODE,
+                "source_frame_selection_version_id": str(selection["id"]),
+                "source_frame_asset_id": opening_asset_id,
+                "project_appearance": {"shot_card_version_id": shot_version},
+                "candidates": [{"asset_id": opening_asset_id}],
+            },
+        )
+        reused = insert_version(
+            conn,
+            project_id=lease.project_id,
+            asset_id=opening_asset_id,
+            kind="first_frame_selection",
+            created_by_user_id=actor.id,
+            commit=False,
+            payload={
+                "first_frame_candidates_version_id": str(candidates_version["id"]),
+                "first_frame_asset_id": opening_asset_id,
+                "review_mode": "SOURCE_OPENING",
+            },
+        )
+        first_frame.update(
+            {
+                "firstFrameSelectionVersionId": str(reused["id"]),
+                "firstFrameAssetId": opening_asset_id,
+                "preservedOpening": True,
+            }
+        )
+        _save_stage_detail(conn, lease.id, detail)
+        rp.advance_status(
+            conn,
+            lease,
+            decision=rp.AdvanceDecision(
+                kind="completed", next_status=rp.STATUS_COMPOSING, next_stage=rp.STAGE_COMPOSE
+            ),
+        )
+        return ADVANCED
     first_frame["substage"] = "candidates"
     _save_stage_detail(conn, lease.id, detail)
     # 同一轮继续入队候选（省一次领取往返）。
@@ -733,7 +786,7 @@ def _first_frame_candidates(
                 project_id=lease.project_id,
                 model=_FIRST_FRAME_MODEL,
                 prompt=None,
-                quantity=_FIRST_FRAME_QUANTITY,
+                quantity=FIRST_FRAME_QUANTITY,
                 character_version_id=character_version_id,
                 character_reference_selection_id=reference_selection_id,
                 idempotency_key=key,

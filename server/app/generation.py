@@ -1560,6 +1560,12 @@ def compile_prompt_version(
             if request.output_duration_seconds != source_duration_seconds
             else 1.0
         )
+        from app.first_frames import SOURCE_OPENING_RECONSTRUCTION_MODE
+
+        source_opening = (
+            first_frame_sources.get("first_frame_reconstruction_mode")
+            == SOURCE_OPENING_RECONSTRUCTION_MODE
+        )
         prompt_text = compile_replica_final_text(
             shot_payload=shot_payload,
             script_text=str(script_payload["full_text"]),
@@ -1569,6 +1575,7 @@ def compile_prompt_version(
             source_frame_time=source_frame_time,
             opening_action=request.opening_action,
             replace_scene=first_frame_sources["first_frame_replace_scene"],
+            source_opening=source_opening,
         )
         if len(prompt_text) > MAX_GENERATION_PROMPT_CHARS:
             raise generation_error(
@@ -3597,6 +3604,41 @@ def require_confirmed_first_frame(
             "FIRST_FRAME_CONFIRMATION_REQUIRED",
             "Confirm a first-frame candidate from the latest candidate set before H3 generation.",
         )
+    if selection_payload.get("review_mode") == "SOURCE_OPENING":
+        from app.first_frames import SOURCE_OPENING_RECONSTRUCTION_MODE
+
+        source_version = (
+            candidate_payload.get("source_frame_selection_version_id")
+            if isinstance(candidate_payload, dict)
+            else None
+        )
+        if (
+            not isinstance(candidate_payload, dict)
+            or candidate_payload.get("reconstruction_mode") != SOURCE_OPENING_RECONSTRUCTION_MODE
+            or candidate_payload.get("source_frame_asset_id") != first_frame_asset_id
+            or not isinstance(source_version, str)
+        ):
+            raise generation_error(
+                409, "FIRST_FRAME_CONFIRMATION_REQUIRED", "原片开场帧记录不完整。"
+            )
+        original = require_version(
+            conn, version_id=source_version, project_id=project_id, kind="source_frame_selection"
+        )
+        source_payload = json.loads(str(original["payload_json"]))
+        from app.h3_prompts import opening_frame_requires_alignment
+
+        timestamp = (
+            source_payload.get("timestamp_seconds") if isinstance(source_payload, dict) else None
+        )
+        if (
+            not isinstance(source_payload, dict)
+            or source_payload.get("source_frame_asset_id") != first_frame_asset_id
+            or not isinstance(timestamp, int | float)
+            or isinstance(timestamp, bool)
+            or opening_frame_requires_alignment(timestamp)
+        ):
+            raise generation_error(409, "FIRST_FRAME_ALIGNMENT_REQUIRED", "原片开场帧已失效。")
+        return
     is_current_confirmation = confirmed_candidates is not None and str(
         latest_candidates["id"]
     ) == str(confirmed_candidates["id"])

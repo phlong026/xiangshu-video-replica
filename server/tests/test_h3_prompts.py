@@ -1944,3 +1944,32 @@ def test_compilers_reject_corrupt_shot_rows_with_a_recoverable_error(compiler: s
         _compile_confirmed_facts([None, _confirmed_facts_shot()], compiler)
     assert exc.value.status_code == 409
     assert exc.value.detail["code"] == "STORYBOARD_CONSISTENCY_REQUIRED"
+
+
+def test_source_opening_uses_offscreen_voice_without_a_person_anchor() -> None:
+    from app.h3_prompts import compile_replica_final_text
+
+    text = compile_replica_final_text(
+        shot_payload={
+            "shots": [
+                {
+                    "start_time": 0,
+                    "end_time": 4,
+                    "person_count": 0,
+                    "subject": "建筑立面",
+                    "scene": "乡村庭院",
+                    "action": "镜头平稳推进",
+                    "spoken_text": "看看这栋房子。",
+                }
+            ],
+        },
+        script_text="看看这栋房子。",
+        duration=4,
+        source_duration=4,
+        timeline_policy="preserve",
+        source_frame_time=0,
+        source_opening=True,
+    )
+    assert "全片不添加人物" in text
+    assert "The off-screen narrator says:" in text
+    assert "主讲人绑定" not in text

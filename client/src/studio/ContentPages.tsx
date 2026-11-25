@@ -16,6 +16,7 @@ import type {
   ViralVideoItem,
 } from "../api";
 import {
+  acceptPartialReplicaPipeline,
   cancelReplicaPipeline,
   confirmFirstFrame,
   confirmReplicaPipeline,
@@ -31,6 +32,8 @@ import {
   findActiveReplicaPipeline,
   generateCoverFromTemplate,
   getAssetDownloadUrl,
+  getRegenerationQuote,
+  getReplicaPreflight,
   getStudioDraft,
   getViralImportTask,
   initiateReplicaPipeline,
@@ -45,7 +48,9 @@ import {
   type ReplicaPipelineCharacter,
   type ReplicaPipelineQuote,
   type ReplicaPipelineStatus,
+  type ReplicaPreflight,
   readShotConsistencyIssues,
+  regenerateReplicaPipeline,
   removeViralFavorite,
   resolveMaterials,
   saveStudioDraft,
@@ -727,7 +732,35 @@ function ReplicaPipelineControl({
   }, []);
   const [recovering, setRecovering] = useState(true);
   const [recoveryError, setRecoveryError] = useState(false);
+  const [blockingPipelineId, setBlockingPipelineId] = useState<string>();
+  const [followingBlocking, setFollowingBlocking] = useState(false);
   const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+  const [preflight, setPreflight] = useState<ReplicaPreflight>();
+  const durationMs = video.durationMs;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 用户点击重试时重新核对档位和费用。
+  useEffect(() => {
+    if (typeof durationMs !== "number") return;
+    let current = true;
+    setPreflight(undefined);
+    void getReplicaPreflight("video", durationMs).then(
+      (result) => {
+        if (current) setPreflight(result);
+      },
+      () => {
+        if (current)
+          setPreflight({ unavailableReason: "暂时无法读取复刻档位和费用。" });
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [durationMs, recoveryAttempt, user.id]);
+  const feeEstimate =
+    preflight?.analysisCredits !== undefined &&
+    preflight.firstFrameCredits !== undefined
+      ? `拆解预估 ${preflight.analysisCredits} 积分，首帧 ${preflight.firstFrameQuantity ?? 0} 张预估 ${preflight.firstFrameCredits} 积分。`
+      : null;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 用户点击重试时重新执行恢复查询。
   useEffect(() => {
@@ -740,7 +773,11 @@ function ReplicaPipelineControl({
     }
     void findActiveReplicaPipeline(sourcePlatform, sourceId)
       .then((result) => {
-        if (!cancelled) setPipelineId(result.pipelineId);
+        if (!cancelled) {
+          setPipelineId(result.pipelineId);
+          setBlockingPipelineId(result.blockingPipelineId);
+          setFollowingBlocking(false);
+        }
       })
       .catch(() => {
         if (!cancelled) setRecoveryError(true);
@@ -804,9 +841,16 @@ function ReplicaPipelineControl({
   }, [quote]);
 
   const submitPreparation = async (characterVersionId: string) => {
-    if (!sourcePlatform || !sourceId || startRef.current) return;
+    if (
+      !sourcePlatform ||
+      !sourceId ||
+      startRef.current ||
+      !feeEstimate ||
+      preflight?.unavailableReason
+    )
+      return;
     const acknowledged = window.confirm(
-      "系统将自动导入、拆解并生成首帧。拆解与首帧按现有规则计费，失败可能重试；成片生成前会另行报价并请你确认。是否继续？",
+      `${feeEstimate}按实际执行结算，重试可能产生额外费用；成片费用另行确认。是否继续？`,
     );
     if (!acknowledged) return;
     setCharacters(null);
@@ -834,8 +878,17 @@ function ReplicaPipelineControl({
       setPipelineId(created.id);
       notify("AI 视频复刻已启动，准备完成后会请你确认成片费用。");
     } catch (cause) {
-      if (mounted.current)
-        notify(cause instanceof Error ? cause.message : "全自动复刻发起失败");
+      if (mounted.current) {
+        notify(customerVisibleErrorMessage(cause, "全自动复刻发起失败"));
+        if (
+          cause &&
+          typeof cause === "object" &&
+          "code" in cause &&
+          cause.code === "REPLICA_PIPELINE_RACE_LOST"
+        ) {
+          setRecoveryAttempt((attempt) => attempt + 1);
+        }
+      }
     } finally {
       startRef.current = false;
       if (mounted.current) setBusy(false);
@@ -880,12 +933,19 @@ function ReplicaPipelineControl({
   const startWhenReady = useRef(() => {});
   startWhenReady.current = () => {
     onHandled();
-    if (!pipelineId && !recoveryError && !characters)
+    if (
+      !pipelineId &&
+      !blockingPipelineId &&
+      !recoveryError &&
+      !characters &&
+      feeEstimate &&
+      !preflight?.unavailableReason
+    )
       void loadCharacters(false);
   };
   useEffect(() => {
-    if (requested && !recovering) startWhenReady.current();
-  }, [requested, recovering]);
+    if (requested && !recovering && preflight) startWhenReady.current();
+  }, [requested, recovering, preflight]);
 
   const confirmGeneration = async () => {
     if (!pipelineId || !quote) return;
@@ -930,6 +990,7 @@ function ReplicaPipelineControl({
       setStatus(null);
       setQuote(null);
       setQuoteError(null);
+      setRecoveryAttempt((attempt) => attempt + 1);
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "放弃失败");
     } finally {
@@ -938,6 +999,23 @@ function ReplicaPipelineControl({
   };
 
   if (!pipelineId) {
+    if (blockingPipelineId) {
+      return (
+        <div className="replica-pipeline-review">
+          <p>另一个视频的自动复刻正在进行。可以继续处理该任务。</p>
+          <Button
+            variant="primary"
+            onClick={() => {
+              setFollowingBlocking(true);
+              setPipelineId(blockingPipelineId);
+            }}
+          >
+            继续已有复刻
+          </Button>
+          {presentation === "detail" && secondaryAction}
+        </div>
+      );
+    }
     if (recoveryError) {
       return (
         <div role="alert">
@@ -954,7 +1032,12 @@ function ReplicaPipelineControl({
     }
     const primaryAction = (
       <Button
-        disabled={busy || recovering}
+        disabled={
+          busy ||
+          recovering ||
+          !feeEstimate ||
+          Boolean(preflight?.unavailableReason)
+        }
         variant="primary"
         onClick={onRequest}
       >
@@ -967,6 +1050,17 @@ function ReplicaPipelineControl({
     );
     return (
       <>
+        {preflight?.unavailableReason && (
+          <p role="alert">
+            {preflight.unavailableReason}
+            <Button
+              variant="quiet"
+              onClick={() => setRecoveryAttempt((attempt) => attempt + 1)}
+            >
+              重新检查档位和费用
+            </Button>
+          </p>
+        )}
         {presentation === "detail" ? (
           <ReplicaDetailActions
             settings={
@@ -984,7 +1078,11 @@ function ReplicaPipelineControl({
               />
             }
             secondaryAction={secondaryAction}
-            feeNote="拆解与首帧按规则计费，生成前确认成片费用。"
+            feeNote={
+              feeEstimate
+                ? `${feeEstimate}成片费用另行确认。`
+                : "正在核对复刻档位和费用。"
+            }
           >
             {primaryAction}
           </ReplicaDetailActions>
@@ -1090,7 +1188,7 @@ function ReplicaPipelineControl({
   const openOriginalProject = (forStoryboard = false) => {
     if (!status) return;
     const importedAssetId =
-      uploadedSource?.assetId ??
+      (followingBlocking ? undefined : uploadedSource?.assetId) ??
       (typeof status.stageDetail?.sourceAssetId === "string"
         ? status.stageDetail.sourceAssetId
         : undefined);
@@ -1103,7 +1201,8 @@ function ReplicaPipelineControl({
           : {
               ...createDraft(),
               projectId: status.projectId,
-              sourceId: importedAssetId ?? video.id,
+              sourceId:
+                importedAssetId ?? (followingBlocking ? undefined : video.id),
               sourceAssetId: importedAssetId,
             },
     });
@@ -1121,6 +1220,37 @@ function ReplicaPipelineControl({
     } catch (cause) {
       if (mounted.current)
         notify(customerVisibleErrorMessage(cause, "首帧确认失败，请重试。"));
+    } finally {
+      startRef.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  };
+  const recoverGeneration = async (action: "regenerate" | "accept") => {
+    if (!pipelineId || !status?.batchId || startRef.current) return;
+    startRef.current = true;
+    setBusy(true);
+    try {
+      if (action === "regenerate") {
+        const price = await getRegenerationQuote("batch", status.batchId);
+        if (
+          !mounted.current ||
+          !window.confirm(
+            `本次重新生成预估 ${price.estimated_credits} 积分，是否继续？`,
+          )
+        )
+          return;
+        await regenerateReplicaPipeline(pipelineId, price);
+      } else {
+        await acceptPartialReplicaPipeline(pipelineId);
+      }
+      const next = await fetchReplicaPipeline(pipelineId);
+      if (mounted.current) {
+        setStatus(next);
+        refresh();
+      }
+    } catch (cause) {
+      if (mounted.current)
+        notify(customerVisibleErrorMessage(cause, "恢复复刻失败，请重试。"));
     } finally {
       startRef.current = false;
       if (mounted.current) setBusy(false);
@@ -1145,6 +1275,24 @@ function ReplicaPipelineControl({
   const fees = status?.feeSummary;
   return (
     <div className="replica-pipeline-panel">
+      {followingBlocking && (
+        <div className="replica-pipeline-actions">
+          <p>正在查看另一个视频的复刻任务。</p>
+          <Button
+            variant="quiet"
+            disabled={busy}
+            onClick={() => {
+              setPipelineId(null);
+              setStatus(null);
+              setQuote(null);
+              setQuoteError(null);
+              setRecoveryAttempt((attempt) => attempt + 1);
+            }}
+          >
+            返回当前视频
+          </Button>
+        </div>
+      )}
       <p role="status">全自动复刻：{label}</p>
       {waitingForStoryboard && status ? (
         <div className="replica-pipeline-review">
@@ -1162,6 +1310,9 @@ function ReplicaPipelineControl({
             onClick={() => openOriginalProject(true)}
           >
             确认分镜后继续
+          </Button>
+          <Button variant="quiet" disabled={busy} onClick={abandon}>
+            放弃
           </Button>
           <p className="admin-hint">修正并保存后会自动继续，无需重新拆解。</p>
         </div>
@@ -1222,6 +1373,9 @@ function ReplicaPipelineControl({
           {status.firstFrameAssetId ? (
             <>
               {openingShot && <p>第一镜头 · {openingShot}</p>}
+              {firstFrame?.preservedOpening === true && (
+                <p>直接保留原片开场，本次无需生图。</p>
+              )}
               <div className="replica-opening-candidates">
                 {sourceFrameAssetId && (
                   <ReplicaFramePreview
@@ -1233,10 +1387,12 @@ function ReplicaPipelineControl({
                     }
                   />
                 )}
-                <ReplicaFramePreview
-                  assetId={status.firstFrameAssetId}
-                  alt="已确认首帧"
-                />
+                {firstFrame?.preservedOpening !== true && (
+                  <ReplicaFramePreview
+                    assetId={status.firstFrameAssetId}
+                    alt="已确认首帧"
+                  />
+                )}
               </div>
             </>
           ) : null}
@@ -1305,6 +1461,38 @@ function ReplicaPipelineControl({
           </Button>
         </div>
       ) : null}
+      {status?.status === "NEEDS_REVIEW_SETTLED" && (
+        <div className="replica-pipeline-review">
+          <p>本次生成未交付全部成果。可打开原项目，或核对价格后重新生成。</p>
+          <div className="replica-pipeline-actions">
+            {Boolean(status.deliverableCount) && (
+              <Button
+                variant="primary"
+                disabled={busy}
+                onClick={() => void recoverGeneration("accept")}
+              >
+                接受已有成果
+              </Button>
+            )}
+            {status.batchId && (
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={() => void recoverGeneration("regenerate")}
+              >
+                重新生成
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => openOriginalProject()}
+            >
+              打开原项目
+            </Button>
+          </div>
+        </div>
+      )}
       {status && ["DELIVERED", "DELIVERED_PARTIAL"].includes(status.status) ? (
         <p className="admin-hint">成片已生成，可在任务中心查看与下载</p>
       ) : null}

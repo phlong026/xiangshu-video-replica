@@ -163,6 +163,12 @@ vi.mock("./viralCache", () => ({
 }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  getReplicaPreflight: vi.fn(async () => ({
+    analysisCredits: 8,
+    firstFrameCredits: 12,
+    firstFrameQuantity: 3,
+    transcribeCredits: 10,
+  })),
   findActiveReplicaPipeline,
   initiateUploadedReplicaPipeline,
   listReplicaPipelineCharacters,

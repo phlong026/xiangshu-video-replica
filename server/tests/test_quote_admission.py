@@ -365,11 +365,12 @@ class AdmissionConnection:
         self.rows = rows or {}
         self.statements: list[str] = []
         self.rollbacks = 0
+        self.raw = self
 
     def execute(self, sql: str, params: Any = None) -> Any:
         statement = " ".join(sql.split())
         self.statements.append(statement)
-        if statement == "BEGIN IMMEDIATE":
+        if statement == "BEGIN IMMEDIATE" or statement.startswith("SELECT pg_advisory_xact_lock"):
             return SimpleNamespace()
         for table, row in self.rows.items():
             if statement.startswith("SELECT ") and f"FROM {table} " in statement:
@@ -386,6 +387,61 @@ class AdmissionConnection:
         self.rollback()
 
 
+def test_oral_submission_release_fences_late_same_key_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import oral
+
+    class Connection:
+        raw = object()
+
+    conn = Connection()
+    actor = SimpleNamespace(id="customer")
+    envelopes: dict[tuple[str, str, str], str] = {}
+    existing = {"receipt": None}
+    locks: list[tuple[str, str]] = []
+    monkeypatch.setattr(oral, "require_not_auditor", lambda *a, **k: None)
+    monkeypatch.setattr(oral, "_require_own_identity", lambda *a, **k: None)
+    monkeypatch.setattr(oral, "_read_oral_submission", lambda *a: existing["receipt"])
+    monkeypatch.setattr(
+        oral, "_lock_oral_submission", lambda _, owner, key: locks.append((owner, key))
+    )
+    monkeypatch.setattr(
+        oral,
+        "insert_envelope",
+        lambda _, operation, scope, key_digest, request_hash: envelopes.setdefault(
+            (operation, scope, key_digest), request_hash
+        ),
+    )
+    monkeypatch.setattr(
+        oral,
+        "load_envelope",
+        lambda _, operation, scope, key_digest: envelopes.get((operation, scope, key_digest)),
+    )
+    key = "unanswered-request"
+    assert oral.resolve_uncertain_oral_submission(conn, actor=actor, idempotency_key=key) is None
+    with pytest.raises(oral.OralConflictError, match="原提交已解除"):
+        oral.create_oral_task(
+            conn,
+            actor=actor,
+            identity_id="identity",
+            avatar_id="avatar",
+            voice_id="voice",
+            mode="TTS",
+            title="标题",
+            script_text="文案",
+            audio_asset_id=None,
+            subtitle=None,
+            idempotency_key=key,
+        )
+    assert locks == [(actor.id, key), (actor.id, key)]
+    existing["receipt"] = {"id": "already-accepted", "status": "QUEUED"}
+    assert oral.resolve_uncertain_oral_submission(
+        conn, actor=actor, idempotency_key="accepted-request"
+    ) == {"id": "already-accepted", "status": "QUEUED"}
+    assert len(envelopes) == 1
+
+
 @pytest.mark.parametrize("kind", ["replica", "independent", "oral"])
 def test_new_paid_entrypoints_reject_legacy_request_before_task_or_wallet_write(
     kind: str, pricing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -400,6 +456,7 @@ def test_new_paid_entrypoints_reject_legacy_request_before_task_or_wallet_write(
         pricing.update(service="oral")
         conn.rows = {
             "oral_tasks": None,
+            "customer_idempotency_envelopes": None,
             "oral_avatars": {
                 "id": "avatar",
                 "status": "READY",

@@ -303,6 +303,8 @@ def cancel_pipeline(
         WHERE id = %s AND owner_user_id = %s AND (
             status = %s OR (
                 status = %s AND jsonb_typeof(stage_detail #> '{firstFrame,review}') = 'object'
+            ) OR (
+                status = %s AND jsonb_typeof(stage_detail->'storyboardReview') = 'object'
             )
         )
         """,
@@ -312,6 +314,7 @@ def cancel_pipeline(
             owner_user_id,
             rp.STATUS_AWAIT_CONFIRM,
             rp.STATUS_FIRST_FRAMING,
+            rp.STATUS_ANALYZING,
         ),
     ).rowcount
     if moved != 1:

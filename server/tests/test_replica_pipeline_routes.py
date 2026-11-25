@@ -280,8 +280,11 @@ def test_active_lookup_is_owner_and_video_scoped(biz: BusinessConnection) -> Non
     )
     found = find_active_replica_pipeline("douyin", "v1", biz, actor)
     assert found["pipelineId"] == "lookup-lookup-owner"
-    assert find_active_replica_pipeline("xiaohongshu", "v1", biz, actor) == {"pipelineId": None}
-    assert find_active_replica_pipeline("douyin", "v2", biz, actor) == {"pipelineId": None}
+    for platform, video_id in (("xiaohongshu", "v1"), ("douyin", "v2")):
+        assert find_active_replica_pipeline(platform, video_id, biz, actor) == {
+            "pipelineId": None,
+            "blockingPipelineId": found["pipelineId"],
+        }
     biz.execute(
         "UPDATE replica_pipeline_tasks SET status = 'FAILED' WHERE owner_user_id = %s", (actor.id,)
     )

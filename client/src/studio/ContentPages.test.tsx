@@ -98,9 +98,14 @@ const {
   openViralVideoDetail: vi.fn(),
   initiateReplicaPipeline: vi.fn(),
   fetchReplicaPipeline: vi.fn(),
-  findActiveReplicaPipeline: vi.fn(async () => ({
-    pipelineId: null as string | null,
-  })),
+  findActiveReplicaPipeline: vi.fn(
+    async (): Promise<{
+      pipelineId: string | null;
+      blockingPipelineId?: string;
+    }> => ({
+      pipelineId: null,
+    }),
+  ),
   listReplicaPipelineCharacters: vi.fn(),
   markReplicaGuideSeen: vi.fn(async (previouslySeen: boolean) => ({
     show: !previouslySeen,
@@ -209,6 +214,12 @@ const {
 }));
 vi.mock("./context", () => ({ useStudio }));
 vi.mock("../api", async (importOriginal) => ({
+  getReplicaPreflight: vi.fn(async () => ({
+    analysisCredits: 8,
+    firstFrameCredits: 12,
+    firstFrameQuantity: 3,
+    transcribeCredits: 10,
+  })),
   readShotConsistencyIssues: (await importOriginal<typeof import("../api")>())
     .readShotConsistencyIssues,
   createOralTask,
@@ -5863,7 +5874,9 @@ describe("全自动复刻入口（M8 v1）", () => {
       within(setup).getByRole("button", { name: "保存默认素材并继续" }),
     );
     expect(createViralImportTask).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "确认并提取口播" }));
+    const prepare = screen.getByRole("button", { name: "确认并提取口播" });
+    await waitFor(() => expect(prepare).toBeEnabled());
+    fireEvent.click(prepare);
     const generate = await screen.findByRole("button", {
       name: "确认并生成口播",
     });
@@ -5981,6 +5994,39 @@ describe("全自动复刻入口（M8 v1）", () => {
     expect(
       screen.queryByRole("dialog", { name: "一键复刻使用教程" }),
     ).toBeNull();
+  });
+
+  it("从另一视频的详情页恢复当前账号的在途复刻", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      user: { ...base.user, id: "replica-account-resume" },
+      state: { ...base.state, selectedVideoId: "dy-1" },
+    });
+    useStudio.mockReturnValue(value);
+    openViralVideoDetail.mockResolvedValue(
+      viralDetailView(viralItem(1, { durationMs: 12_000 })),
+    );
+    findActiveReplicaPipeline.mockResolvedValueOnce({
+      pipelineId: null,
+      blockingPipelineId: "other-video-pipeline",
+    });
+    fetchReplicaPipeline.mockResolvedValueOnce({
+      id: "other-video-pipeline",
+      projectId: "other-project",
+      status: "ANALYZING",
+    });
+    render(<ViralDetailPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "继续已有复刻" }),
+    );
+    await waitFor(() =>
+      expect(fetchReplicaPipeline).toHaveBeenCalledWith("other-video-pipeline"),
+    );
+    expect(
+      screen.getByRole("button", { name: "返回当前视频" }),
+    ).toBeInTheDocument();
+    expect(initiateReplicaPipeline).not.toHaveBeenCalled();
   });
 
   it("首帧候选可见后提交原批次确认，打开的是已拆解项目", async () => {

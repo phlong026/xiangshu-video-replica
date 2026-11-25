@@ -64,6 +64,7 @@ PROJECT_CHARACTER_APPEARANCE_KIND = "project_character_appearance"
 PROJECT_CHARACTER_APPEARANCE_SCHEMA_VERSION = "wp1.project-character-appearance.v2"
 FIRST_FRAME_REPLACEMENT_CONTRACT_VERSION = 3
 FIRST_FRAME_RECONSTRUCTION_MODE = "full_person_replace.v1"
+SOURCE_OPENING_RECONSTRUCTION_MODE = "source_opening.v1"
 FIRST_FRAME_MODELS = ("gpt-image-2", "nano-banana-pro-2k")
 FIRST_FRAME_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_FIRST_FRAME_CANDIDATES = 3
