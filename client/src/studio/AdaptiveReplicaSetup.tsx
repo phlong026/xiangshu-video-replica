@@ -1,4 +1,5 @@
 import { type ReactNode, useState } from "react";
+import { markReplicaGuideSeen } from "../api";
 import { Button, Icon, StudioDialog } from "./ui";
 
 const preferences = new Map<string, string>();
@@ -27,6 +28,32 @@ export function saveReplicaPreference(
   }
   preferences.set(key, value);
   return persisted;
+}
+
+const guideSyncedAccounts = new Set<string>();
+
+export async function shouldShowReplicaGuide(
+  accountId: string,
+): Promise<boolean> {
+  const previouslySeen = Boolean(replicaPreference(accountId, "guide-v1"));
+  if (guideSyncedAccounts.has(accountId)) return false;
+  try {
+    const { show } = await markReplicaGuideSeen(previouslySeen);
+    guideSyncedAccounts.add(accountId);
+    saveReplicaPreference(accountId, "guide-v1", "1");
+    return show && !previouslySeen;
+  } catch {
+    // 兼容旧服务和暂时离线，仍维持当前客户端的一次性引导。
+    if (previouslySeen || replicaPreference(accountId, "guide-v1"))
+      return false;
+    saveReplicaPreference(accountId, "guide-v1", "1");
+    return true;
+  }
+}
+
+export function openReplicaGuideManually(accountId: string) {
+  saveReplicaPreference(accountId, "guide-v1", "1");
+  void shouldShowReplicaGuide(accountId);
 }
 
 export function ReplicaDefaultSummary({
@@ -116,7 +143,7 @@ const guide = [
   ],
   [
     "确认费用并查看进度",
-    "拆解、首帧或转写可能产生积分。成片前会单独展示报价，确认后才生成。口播文案可在报价前编辑，生成后到任务中心查看。",
+    "拆解、首帧或转写可能产生积分。有待核对的首帧时先选图，成片前另行确认报价。口播文案可在报价前编辑，生成后到任务中心查看。",
   ],
 ] as const;
 

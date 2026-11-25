@@ -75,6 +75,18 @@ describe("报价过期提示", () => {
     expect(expire).not.toHaveBeenCalled();
   });
 
+  it("超出浏览器定时器上限的报价仍会在真实到期时失效", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const expire = vi.fn();
+    const expiresAt = 2_147_484_000;
+    watchQuoteExpiry({ ...quote, quote_expires_at: expiresAt / 1000 }, expire);
+    vi.advanceTimersByTime(expiresAt - 1);
+    expect(expire).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(expire).toHaveBeenCalledOnce();
+  });
+
   it("缺少报价时不留下定时器", () => {
     vi.useFakeTimers();
     const expire = vi.fn();

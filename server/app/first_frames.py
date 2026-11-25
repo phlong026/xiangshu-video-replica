@@ -28,6 +28,7 @@ from app.character_reference_matching import (
 from app.characters import character_is_available, get_project_main_character, read_character
 from app.db_portable import BusinessConnection, BusinessRow
 from app.external_calls import CallTimer, endpoint_from_url, record_external_call, recorded_urlopen
+from app.h3_prompts import opening_frame_requires_alignment
 from app.image_dimensions import scan_jpeg_dimensions
 from app.net_safety import FAKE_IP_NETWORK
 from app.permissions import (
@@ -63,6 +64,7 @@ PROJECT_CHARACTER_APPEARANCE_KIND = "project_character_appearance"
 PROJECT_CHARACTER_APPEARANCE_SCHEMA_VERSION = "wp1.project-character-appearance.v2"
 FIRST_FRAME_REPLACEMENT_CONTRACT_VERSION = 3
 FIRST_FRAME_RECONSTRUCTION_MODE = "full_person_replace.v1"
+SOURCE_OPENING_RECONSTRUCTION_MODE = "source_opening.v1"
 FIRST_FRAME_MODELS = ("gpt-image-2", "nano-banana-pro-2k")
 FIRST_FRAME_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_FIRST_FRAME_CANDIDATES = 3
@@ -254,6 +256,7 @@ class ProjectAppearanceSpec:
     scene_look_name: str | None = None
     scene_look_description: str | None = None
     scene_look_version_id: str | None = None
+    shot_card_version_id: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -270,6 +273,11 @@ class ProjectAppearanceSpec:
             "scene_look_name": self.scene_look_name,
             "scene_look_description": self.scene_look_description,
             "scene_look_version_id": self.scene_look_version_id,
+            **(
+                {"shot_card_version_id": self.shot_card_version_id}
+                if self.shot_card_version_id
+                else {}
+            ),
         }
 
 
@@ -1410,6 +1418,7 @@ def derive_project_appearance_spec(
     analysis_payload: Mapping[str, Any],
     source_analysis_version_id: str | None,
     source_timestamp_seconds: float | None,
+    shot_card_version_id: str | None = None,
 ) -> ProjectAppearanceSpec:
     """Derive one deterministic project/scene appearance without another paid call.
 
@@ -1478,6 +1487,8 @@ def derive_project_appearance_spec(
         "subject": subject,
         "outfit_description": outfit_description,
     }
+    if shot_card_version_id is not None:
+        fingerprint_source["shot_card_version_id"] = shot_card_version_id
     fingerprint = hashlib.sha256(
         json.dumps(
             fingerprint_source,
@@ -1495,6 +1506,7 @@ def derive_project_appearance_spec(
         outfit_description=outfit_description,
         selection_reason=selection_reason,
         fingerprint=fingerprint,
+        shot_card_version_id=shot_card_version_id,
     )
 
 
@@ -1542,6 +1554,8 @@ def _apply_scene_look_snapshot(
         "scene_look_version_id": character_version_id,
         "outfit_description": costume_description,
     }
+    if appearance.shot_card_version_id is not None:
+        fingerprint_source["shot_card_version_id"] = appearance.shot_card_version_id
     fingerprint = hashlib.sha256(
         json.dumps(
             fingerprint_source,
@@ -1571,8 +1585,44 @@ def resolve_project_appearance_spec(
     *,
     project_id: str,
     source_timestamp_seconds: float | None,
+    shot_card_version_id: str | None = None,
 ) -> ProjectAppearanceSpec:
     analysis_version = latest_version(conn, project_id, "analysis")
+    if shot_card_version_id is not None:
+        shot_card = latest_version(conn, project_id, "shot_card")
+        if shot_card is None or str(shot_card["id"]) != shot_card_version_id:
+            raise stale_first_frame_inputs()
+        shot_payload = json.loads(str(shot_card["payload_json"]))
+        if (
+            not isinstance(shot_payload, dict)
+            or analysis_version is None
+            or shot_payload.get("source_analysis_version_id") != str(analysis_version["id"])
+        ):
+            raise stale_first_frame_inputs()
+        shots = shot_payload.get("shots")
+        opening = (
+            shots[0] if isinstance(shots, list) and shots and isinstance(shots[0], dict) else {}
+        )
+        start, end = (
+            _appearance_number(opening.get("start_time")),
+            _appearance_number(opening.get("end_time")),
+        )
+        if (
+            source_timestamp_seconds is None
+            or opening_frame_requires_alignment(source_timestamp_seconds)
+            or start is None
+            or end is None
+            or not start <= source_timestamp_seconds < end
+        ):
+            raise first_frame_error(
+                409, "FIRST_FRAME_ALIGNMENT_REQUIRED", "所选源画面不在第一镜头的开场，请重新选帧。"
+            )
+        return derive_project_appearance_spec(
+            analysis_payload=shot_payload,
+            source_analysis_version_id=str(analysis_version["id"]),
+            source_timestamp_seconds=source_timestamp_seconds,
+            shot_card_version_id=shot_card_version_id,
+        )
     analysis_payload: Mapping[str, Any] = {}
     analysis_version_id: str | None = None
     if analysis_version is not None:
@@ -1787,6 +1837,7 @@ def prepare_first_frame_generation(
     character_reference_selection_id: str | None = None,
     aspect_ratio: str | None = None,
     replace_scene: bool = False,
+    shot_card_version_id: str | None = None,
 ) -> FirstFrameGenerationPlan:
     require_not_auditor(
         conn,
@@ -1842,6 +1893,7 @@ def prepare_first_frame_generation(
             conn,
             project_id=project_id,
             source_timestamp_seconds=source_timestamp_seconds,
+            shot_card_version_id=shot_card_version_id,
         ),
         character_inputs=character_inputs,
     )
@@ -2158,6 +2210,7 @@ def complete_first_frame_generation(
             conn,
             project_id=work.project_id,
             source_timestamp_seconds=work.project_appearance.source_timestamp_seconds,
+            shot_card_version_id=work.project_appearance.shot_card_version_id,
         ),
         character_inputs=work.character_inputs,
     )
@@ -2607,10 +2660,12 @@ def current_first_frame_candidates(conn: BusinessConnection, *, project_id: str)
             if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool)
             else None
         )
+        shot_version = project_appearance.get("shot_card_version_id")
         current_appearance = resolve_project_appearance_spec(
             conn,
             project_id=project_id,
             source_timestamp_seconds=source_timestamp_seconds,
+            shot_card_version_id=shot_version if isinstance(shot_version, str) else None,
         )
         character_snapshot = payload.get("character_snapshot")
         if isinstance(character_snapshot, Mapping):

@@ -10147,6 +10147,15 @@ export interface ReplicaPipelineCharacter {
   versionNumber: number;
 }
 
+export async function markReplicaGuideSeen(
+  previouslySeen: boolean,
+): Promise<{ show: boolean }> {
+  return requestApiJson("/api/viral/replica-guide/seen", "记录复刻教程失败", {
+    method: "POST",
+    body: JSON.stringify({ previously_seen: previouslySeen }),
+  });
+}
+
 export interface ReplicaPipelineQuote {
   quoteToken: string;
   maxCredits: number;
@@ -10169,6 +10178,7 @@ export interface ReplicaPipelineStatus {
   promptVersionId?: string;
   firstFrameAssetId?: string;
   batchId?: string;
+  deliverableCount?: number;
   quoteReady?: boolean;
   maxCredits?: number;
   estimatedCredits?: number;
@@ -10228,7 +10238,7 @@ export function initiateReplicaPipeline(input: {
 export function findActiveReplicaPipeline(
   platform: string,
   videoId: string,
-): Promise<{ pipelineId: string | null }> {
+): Promise<{ pipelineId: string | null; blockingPipelineId?: string }> {
   const query = new URLSearchParams({ platform, video_id: videoId });
   return requestApiJson(
     `/api/viral/replica-pipelines/active?${query}`,
@@ -10297,6 +10307,66 @@ export function confirmReplicaPipeline(
         max_credits: quote.maxCredits,
         fingerprint: quote.fingerprint,
       }),
+    },
+  );
+}
+
+export type ReplicaPreflight = {
+  unavailableReason?: string;
+  analysisCredits?: number;
+  firstFrameCredits?: number;
+  firstFrameQuantity?: number;
+  transcribeCredits?: number;
+};
+
+export async function getReplicaPreflight(
+  mode: "video" | "oral",
+  durationMs: number,
+): Promise<ReplicaPreflight> {
+  return requestApiJson("/api/viral/replica-preflight", "读取复刻费用失败", {
+    method: "POST",
+    body: JSON.stringify({ mode, duration_ms: Math.round(durationMs) }),
+  });
+}
+
+export function regenerateReplicaPipeline(
+  pipelineId: string,
+  quote: GenerationPriceQuote,
+) {
+  return requestApiJson<{
+    pipelineId: string;
+    batchId: string;
+    status: string;
+  }>(
+    `/api/viral/replica-pipelines/${encodeURIComponent(pipelineId)}/regenerate`,
+    "复刻重生成失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        quote_token: quote.quote_token,
+        max_credits: quote.max_credits,
+      }),
+    },
+  );
+}
+
+export function acceptPartialReplicaPipeline(pipelineId: string) {
+  return requestApiJson<{ pipelineId: string; status: string }>(
+    `/api/viral/replica-pipelines/${encodeURIComponent(pipelineId)}/accept-partial`,
+    "接受部分成果失败",
+    { method: "POST" },
+  );
+}
+
+export function resolveOralSubmission(
+  idempotencyKey: string,
+): Promise<{ task: { id: string; status: string } | null }> {
+  return requestApiJson(
+    "/api/oral/tasks/resolve-submission",
+    "核对口播提交失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
     },
   );
 }

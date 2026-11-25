@@ -20,14 +20,14 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from app import replica_pipeline as rp
-from app.analysis import enqueue_analysis_task
+from app.analysis import enqueue_analysis_task, insert_version
 from app.auth import CurrentUser, Role
 from app.character_reference_matching import (
     create_character_reference_selection,
     current_character_reference_selection_for_generation,
 )
 from app.db_portable import BusinessConnection, BusinessRow, IntegrityConstraintError
-from app.first_frames import confirm_first_frame
+from app.first_frames import SOURCE_OPENING_RECONSTRUCTION_MODE, confirm_first_frame
 from app.generation import (
     PromptCompileRequest,
     ScriptRequest,
@@ -35,15 +35,16 @@ from app.generation import (
     create_script_version,
     shot_timeline_duration,
 )
+from app.h3_prompts import opening_frame_requires_alignment
 from app.image_tasks import enqueue_first_frame_task
 from app.project_character_selection import choose_project_character_version
-from app.source_frames import confirm_source_frame, enqueue_source_frame_task
+from app.source_frames import confirm_source_frame, enqueue_source_frame_task, latest_version
 from app.storyboard_consistency import storyboard_consistency_issues
 from app.viral_import import ViralImportError, ViralImportRequest, enqueue_viral_import_task
 from app.viral_store import apply_customer_resolution, get_viral_video
 
 # 首帧候选数量：与前端 GenerateFirstFramesRequest 默认一致（1–3 上界）。
-_FIRST_FRAME_QUANTITY = 3
+FIRST_FRAME_QUANTITY = 3
 # 首帧模型：与前端默认一致（first_frame_routes.GenerateFirstFramesRequest）。
 _FIRST_FRAME_MODEL = "gpt-image-2"
 
@@ -579,7 +580,7 @@ def _first_frame_source_frames(
     detail: dict[str, object],
     first_frame: dict[str, object],
 ) -> StageResult:
-    """源帧抽取（自动全部候选时间点）→ 自动选定开场帧（首张资产）."""
+    """只在已确认的第一段分镜内选取可衔接的开场帧。"""
 
     actor = _pipeline_actor(conn, lease.owner_user_id)
     source_asset_id = detail.get("sourceAssetId")
@@ -619,18 +620,60 @@ def _first_frame_source_frames(
     payload = _version_payload(conn, str(candidates_version_id))
     if payload is None:
         return _failed("SOURCE_FRAME_NO_RESULT", "源帧候选版本不存在。")
-    candidates = payload.get("candidates")
-    opening_asset_id: str | None = None
-    if isinstance(candidates, list):
-        # 固定策略：开场帧 = 候选按时间戳排序的首张（方案 §3.4「固定取开场帧」）。
-        ordered = sorted(
-            (value for value in candidates if isinstance(value, dict)),
-            key=lambda value: float(value.get("timestamp_seconds") or 0),
+    shot_version = detail.get("shotCardVersionId")
+    shot_payload = _version_payload(conn, shot_version) if isinstance(shot_version, str) else None
+    shots = shot_payload.get("shots") if shot_payload else None
+    opening = shots[0] if isinstance(shots, list) and shots and isinstance(shots[0], dict) else {}
+    count = opening.get("person_count")
+    source_only = (
+        isinstance(shots, list)
+        and bool(shots)
+        and all(isinstance(shot, dict) and shot.get("person_count") == 0 for shot in shots)
+    )
+    if count == 0 and not source_only:
+        return _failed(
+            "FIRST_FRAME_NO_OPENING_PERSON",
+            "开场无人，后续镜头有人或人数未确认。请在原项目核对开场与人物出场。",
         )
-        if ordered and isinstance(ordered[0].get("asset_id"), str):
-            opening_asset_id = cast(str, ordered[0]["asset_id"])
-    if opening_asset_id is None:
-        return _failed("SOURCE_FRAME_NO_RESULT", "源帧候选为空，无法选定开场帧。")
+    subject = opening.get("subject")
+    if not source_only and (
+        type(count) is not int or count < 1 or not isinstance(subject, str) or not subject.strip()
+    ):
+        return _failed(
+            "FIRST_FRAME_OPENING_UNVERIFIED", "第一镜头的人物尚未确认，请在原项目核对分镜与源画面。"
+        )
+    start, end = opening.get("start_time"), opening.get("end_time")
+    candidates = payload.get("candidates")
+    valid = []
+    if (
+        isinstance(candidates, list)
+        and isinstance(start, int | float)
+        and isinstance(end, int | float)
+    ):
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("asset_id"), str):
+                continue
+            timestamp = candidate.get("timestamp_seconds")
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, int | float)
+                or not start <= timestamp < end
+            ):
+                continue
+            if opening_frame_requires_alignment(timestamp):
+                continue
+            assessment = candidate.get("semantic_assessment")
+            if isinstance(assessment, dict) and (
+                assessment.get("person_count") != count or assessment.get("motion_blur_detected")
+            ):
+                continue
+            valid.append(candidate)
+    if not valid:
+        return _failed(
+            "FIRST_FRAME_ALIGNMENT_REQUIRED", "没有与第一镜头一致的开场帧，请在原项目重选源画面。"
+        )
+    selected = min(valid, key=lambda candidate: candidate["timestamp_seconds"])
+    opening_asset_id = str(selected["asset_id"])
     selection = confirm_source_frame(
         conn,
         project_id=lease.project_id,
@@ -638,6 +681,56 @@ def _first_frame_source_frames(
         actor=actor,
     )
     first_frame["sourceFrameSelectionVersionId"] = str(selection["id"])
+    first_frame["sourceFrameAssetId"] = opening_asset_id
+    first_frame["sourceFrameTimeSeconds"] = selected["timestamp_seconds"]
+    first_frame["openingShot"] = {
+        key: opening[key] for key in ("scene", "subject", "action") if key in opening
+    }
+    if source_only:
+        candidates_version = insert_version(
+            conn,
+            project_id=lease.project_id,
+            asset_id=opening_asset_id,
+            kind="first_frame_candidates",
+            created_by_user_id=actor.id,
+            commit=False,
+            payload={
+                "reconstruction_mode": SOURCE_OPENING_RECONSTRUCTION_MODE,
+                "source_frame_selection_version_id": str(selection["id"]),
+                "source_frame_asset_id": opening_asset_id,
+                "project_appearance": {"shot_card_version_id": shot_version},
+                "candidates": [{"asset_id": opening_asset_id}],
+            },
+        )
+        reused = insert_version(
+            conn,
+            project_id=lease.project_id,
+            asset_id=opening_asset_id,
+            kind="first_frame_selection",
+            created_by_user_id=actor.id,
+            commit=False,
+            payload={
+                "first_frame_candidates_version_id": str(candidates_version["id"]),
+                "first_frame_asset_id": opening_asset_id,
+                "review_mode": "SOURCE_OPENING",
+            },
+        )
+        first_frame.update(
+            {
+                "firstFrameSelectionVersionId": str(reused["id"]),
+                "firstFrameAssetId": opening_asset_id,
+                "preservedOpening": True,
+            }
+        )
+        _save_stage_detail(conn, lease.id, detail)
+        rp.advance_status(
+            conn,
+            lease,
+            decision=rp.AdvanceDecision(
+                kind="completed", next_status=rp.STATUS_COMPOSING, next_stage=rp.STAGE_COMPOSE
+            ),
+        )
+        return ADVANCED
     first_frame["substage"] = "candidates"
     _save_stage_detail(conn, lease.id, detail)
     # 同一轮继续入队候选（省一次领取往返）。
@@ -651,7 +744,7 @@ def _first_frame_candidates(
     detail: dict[str, object],
     first_frame: dict[str, object],
 ) -> StageResult:
-    """首帧候选生成 → 质检通过首位自动确认（AUTO_PIPELINE，r2#2）→ COMPOSING."""
+    """生图完成后按质检证据选图，或等待用户确认同一批候选。"""
     actor = _pipeline_actor(conn, lease.owner_user_id)
     selection_id = first_frame.get("sourceFrameSelectionVersionId")
     if not isinstance(selection_id, str) or not selection_id:
@@ -661,6 +754,9 @@ def _first_frame_candidates(
         from fastapi import HTTPException
 
         try:
+            shot_version = detail.get("shotCardVersionId")
+            if not isinstance(shot_version, str):
+                return _failed("FIRST_FRAME_OPENING_UNVERIFIED", "缺少已确认分镜，请在原项目继续。")
             # 拆解会用实际媒体时长校正目录估算；新付费首帧前复查，
             # 已有在途候选只观察，不因价目变化重复提交或丢弃产物。
             duration_seconds = _shot_output_duration(conn, detail)
@@ -674,8 +770,27 @@ def _first_frame_candidates(
                     quantity=1,
                     user_id=lease.owner_user_id,
                 )
+            if "sourceFrameTimeSeconds" not in first_frame:
+                return _failed(
+                    "FIRST_FRAME_ALIGNMENT_REQUIRED", "原开场帧未通过对齐检查，请在原项目继续。"
+                )
             character_version_id, reference_selection_id = _resolve_character_binding(
                 conn, lease, selection_id, actor=actor
+            )
+            key = rp.stage_operation_key(
+                lease.id, f"{rp.STAGE_FIRST_FRAME}:candidates", lease.stage_retry_no
+            )
+            task = enqueue_first_frame_task(
+                conn,
+                actor=actor,
+                project_id=lease.project_id,
+                model=_FIRST_FRAME_MODEL,
+                prompt=None,
+                quantity=FIRST_FRAME_QUANTITY,
+                character_version_id=character_version_id,
+                character_reference_selection_id=reference_selection_id,
+                idempotency_key=key,
+                shot_card_version_id=shot_version,
             )
         except rp.ReplicaPipelineError as exc:
             # 确定性业务失败转失败出口（不重试、转手动），而不是让异常穿透
@@ -692,20 +807,6 @@ def _first_frame_candidates(
             if code == "LONG_DURATION_TIER_DISABLED":
                 message = "当前未开放 16–30 秒生成，请转手动处理。"
             return _failed(code, message, retryable=False)
-        key = rp.stage_operation_key(
-            lease.id, f"{rp.STAGE_FIRST_FRAME}:candidates", lease.stage_retry_no
-        )
-        task = enqueue_first_frame_task(
-            conn,
-            actor=actor,
-            project_id=lease.project_id,
-            model=_FIRST_FRAME_MODEL,
-            prompt=None,
-            quantity=_FIRST_FRAME_QUANTITY,
-            character_version_id=character_version_id,
-            character_reference_selection_id=reference_selection_id,
-            idempotency_key=key,
-        )
         first_frame["candidateTaskId"] = str(task["id"])
         first_frame["characterVersionId"] = character_version_id
         first_frame["characterReferenceSelectionId"] = reference_selection_id
@@ -750,31 +851,51 @@ def _first_frame_candidates(
                 if passed and isinstance(value.get("asset_id"), str):
                     chosen_asset_id = cast(str, value["asset_id"])
                     break
-        if not quality_available:
-            # 真实首帧链路不执行质检（生成路径强制 quality=None，评审
-            # A-r1#3）：确定性取生成顺序首位，stage_detail 如实记录
-            # qualityAvailable=false，供前端/审计区分「无质检」与「质检通过」。
-            for value in ordered:
-                if isinstance(value.get("asset_id"), str):
-                    chosen_asset_id = cast(str, value["asset_id"])
-                    break
     first_frame["qualityAvailable"] = quality_available
-    if chosen_asset_id is None:
-        return _failed(
-            "FIRST_FRAME_QUALITY_REJECTED",
-            "首帧候选全部未通过质检，请转手动挑选。",
+    if quality_available and chosen_asset_id is None:
+        return _failed("FIRST_FRAME_QUALITY_REJECTED", "首帧候选未通过质检，请在原项目查看。")
+    selection: BusinessRow | None
+    if chosen_asset_id is not None:
+        selection = confirm_first_frame(
+            conn,
+            project_id=lease.project_id,
+            first_frame_asset_id=chosen_asset_id,
+            actor=actor,
+            first_frame_candidates_version_id=str(candidates_version_id),
+            review_mode="AUTO_PIPELINE",
         )
-    selection = confirm_first_frame(
-        conn,
-        project_id=lease.project_id,
-        first_frame_asset_id=chosen_asset_id,
-        actor=actor,
-        first_frame_candidates_version_id=str(candidates_version_id),
-        review_mode="AUTO_PIPELINE",
-        # 无质检证据时显式授权（生成域既有 quality_override 语义）；
-        # review_mode=AUTO_PIPELINE 不构成人工确认，不能冒充（评审 A-r2#2）。
-        quality_override=not quality_available,
-    )
+    else:
+        asset_ids = (
+            [
+                candidate["asset_id"]
+                for candidate in candidates
+                if isinstance(candidate, dict) and isinstance(candidate.get("asset_id"), str)
+            ]
+            if isinstance(candidates, list)
+            else []
+        )
+        if not asset_ids:
+            return _failed("FIRST_FRAME_NO_RESULT", "首帧候选为空，请在原项目查看。")
+        user_selection = latest_version(conn, lease.project_id, "first_frame_selection")
+        selected = (
+            json.loads(str(user_selection["payload_json"])) if user_selection is not None else {}
+        )
+        if (
+            user_selection is None
+            or not isinstance(selected, dict)
+            or selected.get("review_mode") != "HUMAN_CONFIRMATION"
+            or selected.get("first_frame_candidates_version_id") != str(candidates_version_id)
+            or selected.get("first_frame_asset_id") not in asset_ids
+        ):
+            review = {"candidatesVersionId": str(candidates_version_id), "assetIds": asset_ids}
+            if first_frame.get("review") != review:
+                first_frame["review"] = review
+                first_frame.setdefault("sourceFrameAssetId", payload.get("source_frame_asset_id"))
+                _save_stage_detail(conn, lease.id, detail)
+            return WAITING
+        selection = user_selection
+        chosen_asset_id = str(selected["first_frame_asset_id"])
+    first_frame.pop("review", None)
     first_frame["firstFrameSelectionVersionId"] = str(selection["id"])
     first_frame["firstFrameAssetId"] = chosen_asset_id
     _save_stage_detail(conn, lease.id, detail)
@@ -1047,7 +1168,7 @@ def drive_pipeline_once(conn: BusinessConnection, lease: rp.ReplicaPipelineLease
             detail_expr = (
                 f"jsonb_set({inner}, '{{firstFrame}}', "
                 "(COALESCE(stage_detail, '{}'::jsonb) #> '{firstFrame}') "
-                "- 'candidateTaskId' - 'sourceFrameTaskId', true)"
+                "- 'candidateTaskId' - 'sourceFrameTaskId' - 'review', true)"
             )
         for column in clear_columns:
             sets.append(f"{column} = NULL")

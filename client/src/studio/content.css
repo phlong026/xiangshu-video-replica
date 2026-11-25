@@ -2833,3 +2833,22 @@
   object-fit: contain;
   width: 100%;
 }
+
+.replica-opening-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.replica-opening-preview {
+  display: grid;
+  gap: 0.375rem;
+}
+
+.replica-opening-frame {
+  display: block;
+  width: min(100%, 10rem);
+  max-height: 16rem;
+  object-fit: contain;
+}
