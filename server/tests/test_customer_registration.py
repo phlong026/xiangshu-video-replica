@@ -367,7 +367,7 @@ def test_software_license_issuance_registration_and_paid_renewal(
     assert expired.status_code == 403
     assert expired.json()["detail"]["code"] == "SOFTWARE_LICENSE_EXPIRED"
     heartbeat = client.post(
-        "/api/customer/session/heartbeat",
+        "/api/customer/sessions/heartbeat",
         headers={"Authorization": f"Bearer {logged_in.json()['session_token']}"},
     )
     assert heartbeat.status_code == 401, heartbeat.text

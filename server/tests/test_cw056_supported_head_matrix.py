@@ -468,18 +468,18 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 校验在 API 层 Literal 收口，本迁移不加 CHECK），故 columns +1，其余计数与
 # 表名集不变；digest 在空库→新 head 的 PG16 探针库重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 409,
-    "columns": 1613,
-    "foreign_keys": 224,
+    "check_constraints": 412,
+    "columns": 1626,
+    "foreign_keys": 226,
     "identity_columns": 0,
     "jsonb_columns": 16,
     "partial_indexes": 52,
-    "primary_keys": 142,
+    "primary_keys": 143,
     "sequences": 8,
-    "tables": 142,
-    "timestamptz_columns": 134,
+    "tables": 143,
+    "timestamptz_columns": 138,
     "triggers": 61,
-    "unique_constraints": 45,
+    "unique_constraints": 47,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -604,6 +604,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "script_rewrite_tasks",
     "security_auth_failures",
     "security_rate_limit_counters",
+    "software_licenses",
     "source_frame_tasks",
     "studio_drafts",
     "studio_material_preferences",
@@ -753,7 +754,8 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 重算；表名集与计数完全相同，仅三条平台 CHECK 的定义变化。
 # 2026-11-24 充值最低额与步长列默认值调整后，在隔离 PG16 空库升级至 head 实测。
 # 表名及计数均保持一致，仅 column_default 进入摘要后产生变化。
-HEAD_SCHEMA_DIGEST = "d34673bd11c4ee5ce56bc6495b297337b1fec6332b7a6f0ec4bc76665e20bfaf"
+# 2026-11-25: Recomputed on PostgreSQL 16 after the annual-license migration.
+HEAD_SCHEMA_DIGEST = "dfb4409e740e27d0c6f172fd855727d193e5fd6f30ae936407101010517bf46d"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
