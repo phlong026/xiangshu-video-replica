@@ -108,6 +108,7 @@ import {
   DEFAULT_MAX_REFERENCE_AUDIOS,
   DEFAULT_MAX_REFERENCE_IMAGES,
   DEFAULT_MAX_REFERENCE_VIDEOS,
+  draftCopyAnchor,
   hasCopyResult,
   isReferenceAsset,
   MAX_REFERENCE_MEDIA_SECONDS,
@@ -798,8 +799,19 @@ export function StudioWorkspace({
         if (!current() || lastDraftRevisionRef.current !== previousRevision)
           return;
         lastDraftRevisionRef.current = restore ? restore.revision : undefined;
-        if (restore && !draftTouchedRef.current && shouldPromptRestore(restore))
+        if (!restore || draftTouchedRef.current) return;
+        const route = studioRouteFromHash(window.location.hash);
+        if (
+          route.copyAnchor &&
+          route.copyAnchor === draftCopyAnchor(restore.draft)
+        ) {
+          const draft = normalizeOralDraft(restore.draft);
+          latestDraftRef.current = draft;
+          setState((previous) => ({ ...previous, draft }));
+          void restoreDraftAssets(draft);
+        } else if (shouldPromptRestore(restore)) {
           setPendingRestore({ ...restore, accountId: currentUser.id });
+        }
       })
       .catch(() => {
         if (current()) setDraftReadErrorAccount(currentUser.id);
@@ -814,7 +826,13 @@ export function StudioWorkspace({
       active = false;
       referenceAssetsRequestRef.current += 1;
     };
-  }, [review, currentUser.id, currentUser.role, draftReadRevision]);
+  }, [
+    review,
+    currentUser.id,
+    currentUser.role,
+    draftReadRevision,
+    restoreDraftAssets,
+  ]);
 
   // 「上次未完成的工作」提醒：每天只展示一次、5 秒后自动收起。展示即记账
   // （localStorage 存当天日期），手动「恢复/放弃」与自动收起都算已提醒；
@@ -1736,6 +1754,9 @@ export function StudioWorkspace({
   const extractionProjectId = state.draft.projectId;
   const deliveredExtractionTasksRef = useRef(new Set<string>());
   const extractionAssetId = state.draft.sourceAssetId;
+  const restoringTaskId = state.draft.copyExtractionReceipt?.pending
+    ? state.draft.copyExtractionReceipt.taskId
+    : undefined;
   useEffect(() => {
     if (
       review ||
@@ -1766,8 +1787,17 @@ export function StudioWorkspace({
     let restoreAttempts = 0;
     const restore = async () => {
       try {
-        const task = await loadLatestScriptFromUpload(extractionProjectId);
-        if (!restorationStillCurrent() || !task) return;
+        const task = await loadLatestScriptFromUpload(
+          extractionProjectId,
+          extractionAssetId,
+          restoringTaskId,
+        );
+        if (
+          !restorationStillCurrent() ||
+          !task ||
+          (extractingRef.current && !reportedRunning)
+        )
+          return;
         const current = latestDraftRef.current;
         if (
           current.id !== extractionDraftId ||
@@ -1779,6 +1809,7 @@ export function StudioWorkspace({
         }
         if (task.status === "PENDING" || task.status === "RUNNING") {
           extractingRef.current = true;
+          beginCopyExtractionProgress("正在恢复上次文案提取任务…");
           if (!reportedRunning) {
             reportedRunning = true;
             notify("已恢复上次文案提取任务，正在后台继续处理…");
@@ -1786,6 +1817,7 @@ export function StudioWorkspace({
           restoreAttempts += 1;
           if (restoreAttempts >= maxRestoreAttempts) {
             extractingRef.current = false;
+            endCopyExtractionProgress();
             notify(
               "上次文案提取任务长时间未完成，已停止自动等待，可稍后点击「提取文案」重试。",
             );
@@ -1796,6 +1828,7 @@ export function StudioWorkspace({
         }
         if (task.status === "SUCCEEDED") {
           extractingRef.current = false;
+          endCopyExtractionProgress();
           const deliveryKey = JSON.stringify([saveAccountRef.current, task.id]);
           if (deliveredExtractionTasksRef.current.has(deliveryKey)) return;
           // 正文随本人任务直出（2026-11-11 共享文案缓存退役）：任务成功即含
@@ -1806,6 +1839,15 @@ export function StudioWorkspace({
               sourceId: extractionAssetId,
               projectId: extractionProjectId,
               sourceAssetId: extractionAssetId,
+              copyExtractionError: undefined,
+              copyExtractionReceipt:
+                current.copyExtractionReceipt?.taskId === task.id &&
+                !current.copyExtractionReceipt.pending
+                  ? current.copyExtractionReceipt
+                  : {
+                      taskId: task.id,
+                      chargedCredits: task.chargedCredits,
+                    },
               script: {
                 ...current.script,
                 original: text,
@@ -1833,11 +1875,13 @@ export function StudioWorkspace({
           task.status === "SUBMISSION_UNCERTAIN"
         ) {
           extractingRef.current = false;
+          endCopyExtractionProgress();
           notify(task.errorMessage || "上次文案提取失败，可点击提取文案重试。");
         }
       } catch (cause: unknown) {
         extractingRef.current = false;
         if (active) {
+          if (reportedRunning) endCopyExtractionProgress();
           notify(
             customerVisibleErrorMessage(
               cause,
@@ -1851,13 +1895,17 @@ export function StudioWorkspace({
     return () => {
       active = false;
       window.clearTimeout(timer);
-      extractingRef.current = false;
+      if (reportedRunning) {
+        endCopyExtractionProgress();
+        extractingRef.current = false;
+      }
     };
   }, [
     review,
     extractionDraftId,
     extractionProjectId,
     extractionAssetId,
+    restoringTaskId,
     notify,
   ]);
   const openLive: StudioContextValue["openLive"] = (panel, character) => {
@@ -2167,6 +2215,7 @@ export function StudioWorkspace({
     importedProjectId?: string,
     importedAssetId?: string,
     preparedTaskId?: string,
+    options?: Parameters<StudioContextValue["extractScriptFromUpload"]>[3],
   ) => {
     if (review) {
       notify("审核示例不调用真实接口。");
@@ -2177,8 +2226,22 @@ export function StudioWorkspace({
       return;
     }
     if (extractingRef.current) {
-      // 上线审查 P1-2：恢复/在制任务占用期间点击提取不能静默吞掉，
-      // 用户需要知道按钮为什么没反应。
+      const draft = latestDraftRef.current;
+      if (
+        options?.task &&
+        (options.task.status === "PENDING" ||
+          options.task.status === "RUNNING") &&
+        extractionProjectId === options.task.project_id &&
+        extractionAssetId === options.task.source_asset_id
+      ) {
+        navigate("copy", {
+          returnTo: draft.copyExtractionSource?.viral
+            ? "viral-detail"
+            : "workbench",
+          copyAnchor: draftCopyAnchor(draft),
+        });
+        return;
+      }
       notify("文案提取任务进行中，请等待当前任务完成。");
       return;
     }
@@ -2213,7 +2276,7 @@ export function StudioWorkspace({
       openLive("projects");
       return;
     }
-    const extractionScope = JSON.stringify([
+    let extractionScope = JSON.stringify([
       latestDraftRef.current.id,
       latestDraftRef.current.projectId,
       latestDraftRef.current.sourceId,
@@ -2242,74 +2305,142 @@ export function StudioWorkspace({
     };
     extractingRef.current = true;
     const permissionGeneration = permissionGenerationRef.current;
-    notify("正在提取音频并转写文案，预计一到两分钟，请勿关闭页面…");
-    // 提交即带用户到文案工坊：进度横幅在结果产出前持续可见，替代一闪而过的 toast。
-    beginCopyExtractionProgress("正在提交转写任务…");
-    navigate("copy", { returnTo: "workbench" });
+    const copySource = latestDraftRef.current.copyExtractionSource;
+    patchDraft({ copyExtractionError: undefined });
+    beginCopyExtractionProgress(
+      options?.task ? "正在读取提取任务…" : "正在提交转写任务…",
+    );
+    navigate("copy", {
+      returnTo: copySource?.viral ? "viral-detail" : "workbench",
+      copyAnchor: draftCopyAnchor(latestDraftRef.current),
+    });
+    const rememberAccepted: NonNullable<
+      Parameters<typeof extractScriptFromUploadLive>[3]
+    > = (task) => {
+      if (!scopeStillCurrent()) return;
+      const acceptedProject = task.project_id;
+      const acceptedAsset = task.source_asset_id;
+      const nextDraft = latestDraftRef.current;
+      patchDraft(
+        {
+          projectId: acceptedProject,
+          sourceId: acceptedAsset,
+          sourceAssetId: acceptedAsset,
+          copyExtractionSource: copySource,
+          copyExtractionReceipt: { taskId: task.id, pending: true },
+          script: nextDraft.script,
+          scriptEdited: nextDraft.scriptEdited,
+        },
+        { persistNow: true },
+      );
+      extractionScope = JSON.stringify([
+        nextDraft.id,
+        acceptedProject,
+        acceptedAsset,
+        acceptedAsset,
+      ]);
+      const nextAnchor = draftCopyAnchor(latestDraftRef.current);
+      setState((previous) => {
+        if (previous.page !== "copy" || previous.copyAnchor === nextAnchor)
+          return previous;
+        const next = { ...previous, copyAnchor: nextAnchor };
+        window.history.replaceState(null, "", studioHashForState(next));
+        return next;
+      });
+    };
+    if (
+      options?.task?.status === "PENDING" ||
+      options?.task?.status === "RUNNING"
+    )
+      rememberAccepted(options.task);
     // 爆款链路已经由服务端建好任务（音轨是客户端本地抽的），此时只能轮询那一条，
     // 再提交一次会撞上「一个项目至多一条在制任务」而 409。
     void (
-      preparedTaskId
-        ? awaitScriptFromAudioTask(preparedTaskId)
-        : extractScriptFromUploadLive(projectId, assetId)
+      options?.task
+        ? awaitScriptFromAudioTask(options.task.id, options.task)
+        : preparedTaskId
+          ? awaitScriptFromAudioTask(preparedTaskId)
+          : extractScriptFromUploadLive(
+              projectId,
+              assetId,
+              Boolean(options?.restart),
+              rememberAccepted,
+            )
     )
-      .then(({ text: taskText, taskId }) => {
-        extractingRef.current = false;
-        endCopyExtractionProgress();
-        if (!scopeStillCurrent()) {
-          // FIX-11：任务已被服务端受理、转写费已产生，用户此时切走不能静默丢弃结果。
-          // 共享文案缓存退役后正文随本人任务直出，重试必成功——提示用户回原视频
-          // 重新提取即可（新任务按本人计一次转写费，不再依赖免费 claim 取回）。
-          // M3：登出/切换账号同样不能静默——费已花在原账号上，提示回原账号取回。
-          setWalletRevision((value) => value + 1);
-          if (saveAccountRef.current === extractionAccount) {
-            notify(
-              "文案已提取完成，但你已切换到其他来源，未写入当前草稿；回到原视频再点「提取文案」即可取回。",
-            );
-          } else {
-            notify(
-              "转写任务已完成，但你已退出登录或切换了账号；重新登录原账号后回到原视频，再点「提取文案」即可取回。",
-            );
+      .then(
+        ({
+          text: taskText,
+          taskId,
+          chargedCredits,
+          reused,
+          projectId: taskProjectId,
+          sourceAssetId: taskAssetId,
+        }) => {
+          extractingRef.current = false;
+          endCopyExtractionProgress();
+          if (!scopeStillCurrent()) {
+            // FIX-11：任务已被服务端受理、转写费已产生，用户此时切走不能静默丢弃结果。
+            // 共享文案缓存退役后正文随本人任务直出，重试必成功——提示用户回原视频
+            // 重新提取即可（新任务按本人计一次转写费，不再依赖免费 claim 取回）。
+            // M3：登出/切换账号同样不能静默——费已花在原账号上，提示回原账号取回。
+            setWalletRevision((value) => value + 1);
+            if (saveAccountRef.current === extractionAccount) {
+              notify(
+                "文案已提取完成。已切换来源，请回到原视频或原项目查看结果。",
+              );
+            } else {
+              notify(
+                "转写任务已完成。请登录原账号后回到原视频或原项目查看结果。",
+              );
+            }
+            return;
           }
-          return;
-        }
-        const currentDraft = latestDraftRef.current;
-        if (!taskText.trim()) {
-          // 正文为空说明这次转写没有产出有效文本（如视频无语音），不能把空文案
-          // 写进草稿假装交付完成。
-          navigate("copy", { returnTo: "workbench" });
-          notify(
-            "文案提取完成，但转写结果为空；请确认视频包含有效语音后重新提取。",
+          const currentDraft = latestDraftRef.current;
+          if (!taskText.trim()) {
+            // 正文为空说明这次转写没有产出有效文本（如视频无语音），不能把空文案
+            // 写进草稿假装交付完成。
+            const message =
+              "未识别到有效口播，请确认视频包含清晰的人声后再试。";
+            patchDraft({ copyExtractionError: message });
+            notify(message);
+            return;
+          }
+          const text = taskText;
+          const sameSource =
+            currentDraft.projectId === (taskProjectId ?? projectId) &&
+            (currentDraft.sourceAssetId ?? currentDraft.sourceId) ===
+              (taskAssetId ?? assetId);
+          const currentScript = sameSource
+            ? currentDraft.script
+            : createDraft().script;
+          deliveredExtractionTasksRef.current.add(
+            JSON.stringify([extractionAccount, taskId]),
           );
-          return;
-        }
-        const text = taskText;
-        const sameSource =
-          currentDraft.projectId === projectId &&
-          (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId;
-        const currentScript = sameSource
-          ? currentDraft.script
-          : createDraft().script;
-        deliveredExtractionTasksRef.current.add(
-          JSON.stringify([extractionAccount, taskId]),
-        );
-        patchDraft({
-          projectId,
-          sourceId: assetId,
-          sourceAssetId: assetId,
-          scriptEdited: true,
-          script: {
-            ...currentScript,
-            original: text,
-            text: hasCopyResult(currentScript) ? currentScript.text : "",
-            resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
-            confirmed: false,
-          },
-        });
-        navigate("copy", { returnTo: "workbench" });
-        setWalletRevision((value) => value + 1);
-        notify("文案已提取，请核对原文并选择二创方式。");
-      })
+          patchDraft(
+            {
+              projectId: taskProjectId ?? projectId,
+              sourceId: taskAssetId ?? assetId,
+              sourceAssetId: taskAssetId ?? assetId,
+              copyExtractionSource: copySource,
+              copyExtractionReceipt: { taskId, chargedCredits, reused },
+              copyExtractionError: undefined,
+              scriptEdited: true,
+              script: {
+                ...currentScript,
+                original: text,
+                text: hasCopyResult(currentScript) ? currentScript.text : "",
+                resultKind: hasCopyResult(currentScript)
+                  ? "manual"
+                  : "extracted",
+                confirmed: false,
+              },
+            },
+            { persistNow: true },
+          );
+          setWalletRevision((value) => value + 1);
+          notify("文案已提取，请核对原文并选择二创方式。");
+        },
+      )
       .catch((cause: unknown) => {
         extractingRef.current = false;
         endCopyExtractionProgress();
@@ -2318,15 +2449,18 @@ export function StudioWorkspace({
           // 落进本分支——费已花在原账号，同样不能静默，给出回原账号取回的指引。
           if (saveAccountRef.current !== extractionAccount) {
             notify(
-              "转写任务未确认完成，但你已退出登录或切换了账号；重新登录原账号后回到原视频，再点「提取文案」即可取回。",
+              "转写任务未确认完成。请登录原账号后回到原视频或原项目查询。",
             );
           }
           return;
         }
         setWalletRevision((value) => value + 1);
-        notify(
-          customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
+        const message = customerVisibleErrorMessage(
+          cause,
+          "文案提取失败，请稍后重试。",
         );
+        patchDraft({ copyExtractionError: message });
+        notify(message);
       });
   };
   const patchState = useCallback<StudioContextValue["patchState"]>(
@@ -2506,7 +2640,7 @@ export function StudioWorkspace({
             >
               <input
                 aria-label="搜索工作区"
-                placeholder="搜索乡墅视频、文案、人物、素材"
+                placeholder="搜索文案、人物、素材"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />

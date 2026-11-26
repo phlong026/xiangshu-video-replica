@@ -209,6 +209,7 @@ def _enqueue(
     project_id: str,
     asset_id: str,
     key: str,
+    reuse_completed: bool = False,
 ) -> object:
     from app.script_from_audio import enqueue_script_from_audio_task
 
@@ -219,6 +220,7 @@ def _enqueue(
             project_id=project_id,
             source_asset_id=asset_id,
             idempotency_key=key,
+            reuse_completed=reuse_completed,
         )
 
 
@@ -365,6 +367,104 @@ def test_viral_task_delivers_text_and_bills_each_account_once(
         claim_viral_video_copy()
     assert retired.value.status_code == 410
     assert retired.value.detail["code"] == "VIRAL_COPY_CLAIM_RETIRED"
+
+
+def test_viral_copy_reopens_paid_result_without_a_new_charge(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.script_from_audio import (
+        latest_viral_script_from_audio_task,
+        script_from_audio_task_response,
+    )
+
+    calls = _audio_fixture(pg_state, monkeypatch, ("copy-reuse-a", "copy-reuse-b"))
+    video = "copy-reuse-video"
+    _seed_viral_video(pg_state, video)
+    for index in (1, 2):
+        _seed_shared_import(
+            pg_state,
+            "copy-reuse-a",
+            project_id=f"copy-reuse-project-{index}",
+            asset_id=f"copy-reuse-asset-{index}",
+            video_id=video,
+        )
+    first = _enqueue(
+        pg_state,
+        "copy-reuse-a",
+        project_id="copy-reuse-project-1",
+        asset_id="copy-reuse-asset-1",
+        key="first",
+    )
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "UPDATE assets SET sha256=%s WHERE id='copy-reuse-asset-2'",
+            (hashlib.sha256(b"different-archive").hexdigest(),),
+        )
+    resumed = _enqueue(
+        pg_state,
+        "copy-reuse-a",
+        project_id="copy-reuse-project-2",
+        asset_id="copy-reuse-asset-2",
+        key="resume-existing",
+    )
+    assert resumed["id"] == first["id"]
+    _run_worker(pg_state)
+    retry = _enqueue(
+        pg_state,
+        "copy-reuse-a",
+        project_id="copy-reuse-project-2",
+        asset_id="copy-reuse-asset-2",
+        key="resume-existing",
+    )
+    assert retry["id"] == first["id"]
+    assert retry["status"] == "SUCCEEDED"
+    with _pg(pg_state) as pg:
+        pg.execute(
+            "UPDATE assets SET sha256=%s WHERE id='copy-reuse-asset-2'",
+            (hashlib.sha256(b"video").hexdigest(),),
+        )
+    with psycopg.connect(pg_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        prior = latest_viral_script_from_audio_task(
+            conn,
+            owner_id="copy-reuse-a",
+            platform="douyin",
+            video_id=video,
+        )
+        assert prior is not None
+        response = script_from_audio_task_response(prior, conn=conn)
+        assert response.id == first["id"]
+        assert response.charged_credits == 24
+        assert (
+            latest_viral_script_from_audio_task(
+                conn,
+                owner_id="copy-reuse-b",
+                platform="douyin",
+                video_id=video,
+            )
+            is None
+        )
+    reopened = _enqueue(
+        pg_state,
+        "copy-reuse-a",
+        project_id="copy-reuse-project-2",
+        asset_id="copy-reuse-asset-2",
+        key="open",
+        reuse_completed=True,
+    )
+    assert reopened["id"] == first["id"]
+    assert len(calls) == 1
+    assert _wallet(pg_state, "copy-reuse-a") == (976, 0)
+    restarted = _enqueue(
+        pg_state,
+        "copy-reuse-a",
+        project_id="copy-reuse-project-2",
+        asset_id="copy-reuse-asset-2",
+        key="restart",
+    )
+    assert restarted["id"] != first["id"]
+    _run_worker(pg_state)
+    assert _wallet(pg_state, "copy-reuse-a") == (952, 0)
 
 
 def test_uncertain_auto_reopen_reopens_twice_then_exhausts(

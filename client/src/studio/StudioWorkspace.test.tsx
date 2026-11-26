@@ -1707,6 +1707,74 @@ describe("V1.4 workspace integration", () => {
       );
     }
 
+    it.each([true, false])(
+      "刷新文案提取页时恢复来源和账单（任务进行中：%s）",
+      async (pending) => {
+        live.loadStudioData.mockResolvedValue(emptyStudioData);
+        const draft = restoredDraft();
+        draft.projectId = "copy-project";
+        draft.sourceAssetId = "copy-source";
+        draft.sourceId = "copy-source";
+        draft.copyExtractionSource = {
+          title: "截图中的视频",
+          viral: {
+            platform: "douyin",
+            label: "抖音",
+            videoId: "copy-video-1",
+            studioId: "douyin-copy-video-1",
+            returnTo: "viral",
+          },
+        };
+        draft.script.original = pending ? "" : "原文已经保存";
+        draft.copyExtractionReceipt = {
+          taskId: "paid-copy-task",
+          chargedCredits: pending ? undefined : 18,
+          pending,
+        };
+        if (pending) {
+          live.loadLatestScriptFromUpload.mockResolvedValue({
+            id: "paid-copy-task",
+            status: "SUCCEEDED",
+            sourceAssetId: "copy-source",
+            chargedCredits: 18,
+            result: { text: "原文已经保存" },
+          });
+        }
+        live.loadCloudDraft.mockResolvedValue({
+          draft,
+          updatedAt: freshUpdatedAt(),
+          revision: 1,
+        });
+        window.history.replaceState(
+          null,
+          "",
+          "/#studio/copy?returnTo=viral-detail&copySource=viral%3Adouyin%3Acopy-video-1",
+        );
+        render(<StudioWorkspace currentUser={reviewUser} />);
+        expect(
+          await screen.findByText(/抖音 · 截图中的视频/),
+        ).toBeInTheDocument();
+        expect(
+          await screen.findByText("本次转写实扣 18 积分"),
+        ).toBeInTheDocument();
+        if (pending)
+          expect(live.loadLatestScriptFromUpload).toHaveBeenCalledWith(
+            "copy-project",
+            "copy-source",
+            "paid-copy-task",
+          );
+        expect(screen.getByLabelText("来源原文")).toHaveValue("原文已经保存");
+        expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole("button", { name: "返回原视频" }));
+        expect(window.location.hash).toContain(
+          "studio/viral-detail?video=douyin-copy-video-1",
+        );
+        expect(
+          new URLSearchParams(window.location.search).get("viralVideoId"),
+        ).toBe("copy-video-1");
+      },
+    );
+
     it("云草稿读取失败后显示可重试状态；重试只提供恢复提示", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft
@@ -3077,6 +3145,8 @@ describe("V1.4 workspace integration", () => {
         expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
           "project-1",
           "asset-1",
+          false,
+          expect.any(Function),
         ),
       );
       await waitFor(() =>
@@ -3181,6 +3251,8 @@ describe("V1.4 workspace integration", () => {
         expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
           "project-1",
           "asset-1",
+          false,
+          expect.any(Function),
         ),
       );
       view.rerender(
@@ -3224,6 +3296,8 @@ describe("V1.4 workspace integration", () => {
         expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
           "project-1",
           "asset-1",
+          false,
+          expect.any(Function),
         ),
       );
       view.rerender(
@@ -3351,7 +3425,7 @@ describe("V1.4 workspace integration", () => {
       );
       // 正文随本人任务直出：切走不丢结果，提示用户回原视频重新提取取回。
       expect(
-        await screen.findByText(/回到原视频再点「提取文案」即可取回/),
+        await screen.findByText(/请回到原视频或原项目查看结果/),
       ).toBeInTheDocument();
     });
 
@@ -3395,7 +3469,7 @@ describe("V1.4 workspace integration", () => {
         "账号A的原文",
       );
       expect(
-        await screen.findByText(/重新登录原账号后回到原视频/),
+        await screen.findByText(/请登录原账号后回到原视频或原项目查看结果/),
       ).toBeInTheDocument();
     });
 
@@ -3472,6 +3546,8 @@ describe("V1.4 workspace integration", () => {
         expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
           "project-1",
           "asset-1",
+          false,
+          expect.any(Function),
         ),
       );
     });

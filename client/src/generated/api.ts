@@ -1330,6 +1330,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/viral-copy/latest": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Latest Viral Script From Audio Task */
+    get: operations["read_latest_viral_script_from_audio_task_api_viral_copy_latest_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/replica-prompt-tasks": {
     parameters: {
       query?: never;
@@ -14785,6 +14802,11 @@ export interface components {
       source_asset_id: string;
       /** Idempotency Key */
       idempotency_key?: string | null;
+      /**
+       * Reuse Completed
+       * @default false
+       */
+      reuse_completed: boolean;
     };
     /** ScriptFromAudioResult */
     ScriptFromAudioResult: {
@@ -14822,6 +14844,8 @@ export interface components {
       started_at: string | null;
       /** Completed At */
       completed_at: string | null;
+      /** Charged Credits */
+      charged_credits?: number | null;
     };
     /** ScriptRequest */
     ScriptRequest: {
@@ -20223,7 +20247,9 @@ export interface operations {
   };
   read_latest_script_from_audio_task_api_projects__project_id__script_from_audio_tasks_latest_get: {
     parameters: {
-      query?: never;
+      query?: {
+        source_asset_id?: string | null;
+      };
       header?: {
         "X-Dev-User-Id"?: string | null;
         Authorization?: string | null;
@@ -20231,6 +20257,43 @@ export interface operations {
       path: {
         project_id: string;
       };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json":
+            | components["schemas"]["ScriptFromAudioTaskResponse"]
+            | null;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_latest_viral_script_from_audio_task_api_viral_copy_latest_get: {
+    parameters: {
+      query: {
+        platform: "douyin" | "wechat_channels" | "xiaohongshu";
+        video_id: string;
+      };
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
       cookie?: never;
     };
     requestBody?: never;
@@ -32700,6 +32763,7 @@ export interface operations {
         limit?: number;
         cursor?: string | null;
         featured_only?: boolean;
+        keyword?: string;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;

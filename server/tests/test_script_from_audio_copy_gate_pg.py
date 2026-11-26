@@ -128,6 +128,52 @@ def test_homepage_http_returns_server_clock_and_next_window_boundary(gate_client
     assert server_time < boundary
 
 
+def test_public_video_search_respects_publication_and_scopes_cursor(gate_client, route_state):
+    headers, uid = account(gate_client, "gate_published_search")
+    videos = (
+        ("search-1", "青瓦乡墅", True),
+        ("search-2", "青瓦庭院", True),
+        ("search-private", "青瓦私人素材", False),
+        ("search-other", "白墙乡墅", True),
+    )
+    with psycopg.connect(route_state) as raw:
+        for video_id, title, published in videos:
+            _seed_viral_video(raw, uid, video_id=video_id)
+            raw.execute(
+                "UPDATE viral_videos SET title=%s,collection_published=%s,"
+                "pushed_at=CASE WHEN %s THEN now() ELSE NULL END WHERE video_id=%s",
+                (title, int(published), published, video_id),
+            )
+            raw.execute(
+                "INSERT INTO viral_media_preparations "
+                "(id,platform,video_id,media_kind,status,storage_uri) "
+                "VALUES(%s,'douyin',%s,'video','SUCCEEDED','fake://search.mp4')",
+                (video_id, video_id),
+            )
+    params = {"keyword": "青瓦", "limit": 1}
+    first = gate_client.get("/api/viral/videos", params=params, headers=headers)
+    assert first.status_code == 200, first.text
+    page = first.json()
+    assert page["total"] == 2 and page["hasMore"]
+    cursor = page["nextCursor"]
+    second = gate_client.get(
+        "/api/viral/videos",
+        params={**params, "cursor": cursor},
+        headers=headers,
+    )
+    assert second.status_code == 200, second.text
+    assert {page["items"][0]["videoId"], second.json()["items"][0]["videoId"]} == {
+        "search-1",
+        "search-2",
+    }
+    wrong = gate_client.get(
+        "/api/viral/videos",
+        params={"keyword": "白墙", "cursor": cursor},
+        headers=headers,
+    )
+    assert wrong.status_code == 400
+
+
 def test_plain_task_still_returns_text(gate_client, route_state) -> None:
     """普通上传任务不属于爆款零售链路：正文照常随任务接口下发.
 

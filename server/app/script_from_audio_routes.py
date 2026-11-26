@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
@@ -14,6 +15,7 @@ from app.script_from_audio import (
     ScriptFromAudioTaskResponse,
     enqueue_script_from_audio_task,
     latest_script_from_audio_task,
+    latest_viral_script_from_audio_task,
     load_script_from_audio_task,
     script_from_audio_task_response,
 )
@@ -38,6 +40,7 @@ def extract_script_from_audio(
             project_id=project_id,
             source_asset_id=request.source_asset_id,
             idempotency_key=request.idempotency_key or str(uuid4()),
+            reuse_completed=request.reuse_completed,
         )
         return script_from_audio_task_response(row, conn=conn)
 
@@ -69,6 +72,7 @@ def read_latest_script_from_audio_task(
     project_id: str,
     conn: ReadDatabase,
     actor: ShortAuthUser,
+    source_asset_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
 ) -> ScriptFromAudioTaskResponse | None:
     require_project_access(
         conn,
@@ -76,5 +80,23 @@ def read_latest_script_from_audio_task(
         project_id=project_id,
         action="project.script_from_audio_read",
     )
-    row = latest_script_from_audio_task(conn, project_id=project_id)
+    row = latest_script_from_audio_task(
+        conn,
+        project_id=project_id,
+        source_asset_id=source_asset_id,
+        owner_id=actor.id,
+    )
+    return None if row is None else script_from_audio_task_response(row, conn=conn)
+
+
+@router.get("/viral-copy/latest", response_model=ScriptFromAudioTaskResponse | None)
+def read_latest_viral_script_from_audio_task(
+    conn: ReadDatabase,
+    actor: ShortAuthUser,
+    platform: Literal["douyin", "wechat_channels", "xiaohongshu"],
+    video_id: Annotated[str, Query(min_length=1, max_length=256)],
+) -> ScriptFromAudioTaskResponse | None:
+    row = latest_viral_script_from_audio_task(
+        conn, owner_id=actor.id, platform=platform, video_id=video_id
+    )
     return None if row is None else script_from_audio_task_response(row, conn=conn)

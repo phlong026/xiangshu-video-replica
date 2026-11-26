@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import type {
+  ScriptFromAudioTask,
   TrainingMaterialPublicItem,
   ViralImportPurpose,
   ViralImportTask,
@@ -68,6 +69,14 @@ import {
   saveReplicaPreference,
   shouldShowReplicaGuide,
 } from "./AdaptiveReplicaSetup";
+import {
+  CopyExtractionAction,
+  copyQuoteText,
+  persistViralDetailUrl,
+  useCopyExtractionTask,
+  useCopyQuote,
+  viralCopySource,
+} from "./CopyExtractionControls";
 import { useStudio } from "./context";
 import { studioAssetFromMaterial, studioVideoFromViral } from "./live";
 import {
@@ -199,14 +208,6 @@ function viralDetailParams():
     return { platform, videoId };
   }
   return undefined;
-}
-
-export function persistViralDetailUrl(video: StudioVideo) {
-  if (!video.platformKey || !video.nativeId) return;
-  const url = new URL(window.location.href);
-  url.searchParams.set("viralPlatform", video.platformKey);
-  url.searchParams.set("viralVideoId", video.nativeId);
-  window.history.replaceState(null, "", url);
 }
 
 function viralLikesLabel(video: StudioVideo) {
@@ -1838,7 +1839,7 @@ export function ViralCard({
               onClick={() => {
                 navigate("viral-detail", {
                   selectedVideoId: video.id,
-                  returnTo: "viral",
+                  returnTo: detailReturnTo ?? "viral",
                   viralExtractIntent: true,
                 });
                 persistViralDetailUrl(video);
@@ -1877,6 +1878,13 @@ export function ViralPage() {
   );
   const [sort, setSort] = useState<"热门优先" | "最新">("热门优先");
   const [scope, setScope] = useState<"all" | "favorites">("all");
+  const [searchInput, setSearchInput] = useState("");
+  const [submittedSearch, setSubmittedSearch] = useState("");
+  const keyword = scope === "all" ? submittedSearch : "";
+  const [searchResults, setSearchResults] = useState<{
+    key: string;
+    ids: Set<string>;
+  }>();
   const [visibleCount, setVisibleCount] = useState(viralInitialCount);
   const [activeVideoId, setActiveVideoId] = useState<string>();
   const [listError, setListError] = useState<string>();
@@ -1909,7 +1917,13 @@ export function ViralPage() {
         ? "xiaohongshu"
         : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
-  const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}`;
+  const paginationContextKey = JSON.stringify([
+    accountId,
+    scope,
+    platformKey,
+    sortKey,
+    keyword,
+  ]);
   const paginationContextKeyRef = useRef(paginationContextKey);
   const paginationOperationRef = useRef(0);
   const activePaginationContextRef = useRef({
@@ -1992,7 +2006,14 @@ export function ViralPage() {
       .filter(
         (item) =>
           item.platform === platform &&
-          (scope !== "favorites" || favoriteKeys.has(viralIdentity(item))),
+          (scope !== "favorites" || favoriteKeys.has(viralIdentity(item))) &&
+          (!keyword ||
+            (review
+              ? [item.title, item.author, item.description].some((value) =>
+                  value?.toLowerCase().includes(keyword.toLowerCase()),
+                )
+              : searchResults?.key === paginationContextKey &&
+                searchResults.ids.has(item.id))),
       )
       .sort((left, right) => {
         // API已按完整首页顺序分页；再次按点赞排序会把管理员移到首位的内容挤走。
@@ -2009,12 +2030,22 @@ export function ViralPage() {
         }
         return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
       });
-  }, [curated, favoriteKeys, platform, scope, sort, review]);
+  }, [
+    curated,
+    favoriteKeys,
+    keyword,
+    paginationContextKey,
+    platform,
+    scope,
+    searchResults,
+    sort,
+    review,
+  ]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/排序变化时重置滚动加载计数。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 更换列表条件后重置滚动加载计数。
   useEffect(() => {
     setVisibleCount(viralInitialCount);
-  }, [platform, scope, sort]);
+  }, [platform, scope, sort, keyword]);
 
   const current = review ? shown.slice(0, visibleCount) : shown;
 
@@ -2106,6 +2137,7 @@ export function ViralPage() {
     setHasMore(false);
     void listViralVideos(platformKey, sortKey, {
       limit: viralPageSize,
+      ...(keyword ? { keyword } : {}),
     })
       .then((result) => {
         if (
@@ -2117,6 +2149,11 @@ export function ViralPage() {
         )
           return;
         const incoming = result.items.map(studioVideoFromViral);
+        if (keyword)
+          setSearchResults({
+            key: paginationContextKey,
+            ids: new Set(incoming.map((video) => video.id)),
+          });
         const serverTime = result.serverTime
           ? Date.parse(result.serverTime)
           : NaN;
@@ -2159,11 +2196,14 @@ export function ViralPage() {
             ]),
           ),
         );
+        const incomingIds = new Set(incoming.map((video) => video.id));
         updateData((currentData) => ({
           ...currentData,
           videos: [
-            ...currentData.videos.filter(
-              (video) => video.platformKey !== platformKey,
+            ...currentData.videos.filter((video) =>
+              keyword
+                ? !incomingIds.has(video.id)
+                : video.platformKey !== platformKey,
             ),
             ...incoming,
           ],
@@ -2171,17 +2211,18 @@ export function ViralPage() {
         // 删除与下架只有服务端看得见（条目只是不再出现在下发结果里），所以每次
         // 列表刷新后把本地多余的缓存交给服务端判定再回收（D5）。保留集 = 本次仍
         // 可用的条目 + 收藏 + 已知的非首页条目；下架的条目已经播不了，不保留。
-        void reclaimViralCache(platformKey, [
-          ...result.items
-            .filter(
-              (item) => item.availability === "available" || item.isFavorite,
-            )
-            .map((item) => ({
-              platform: item.platform,
-              videoId: item.videoId,
-            })),
-          ...(knownCacheKeysRef.current.get(platformKey) ?? []),
-        ]);
+        if (!keyword)
+          void reclaimViralCache(platformKey, [
+            ...result.items
+              .filter(
+                (item) => item.availability === "available" || item.isFavorite,
+              )
+              .map((item) => ({
+                platform: item.platform,
+                videoId: item.videoId,
+              })),
+            ...(knownCacheKeysRef.current.get(platformKey) ?? []),
+          ]);
       })
       .catch(() => {
         if (
@@ -2209,6 +2250,7 @@ export function ViralPage() {
       cancelled = true;
     };
   }, [
+    keyword,
     listReloadRevision,
     paginationContextKey,
     platformKey,
@@ -2358,9 +2400,18 @@ export function ViralPage() {
           : await listViralVideos(platformKey, sortKey, {
               limit: viralPageSize,
               cursor: nextCursor,
+              ...(keyword ? { keyword } : {}),
             });
       if (!isCurrent()) return;
       const incoming = result.items.map(studioVideoFromViral);
+      if (keyword)
+        setSearchResults((current) => ({
+          key: paginationContextKey,
+          ids: new Set([
+            ...(current?.key === paginationContextKey ? current.ids : []),
+            ...incoming.map((video) => video.id),
+          ]),
+        }));
       setHomepageNow(Date.now() - homepageClockOffsetRef.current);
       const confirmedNextCursor = result.nextCursor ?? undefined;
       const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
@@ -2422,6 +2473,7 @@ export function ViralPage() {
     }
   }, [
     hasMore,
+    keyword,
     nextCursor,
     paginationContextKey,
     platformKey,
@@ -2523,6 +2575,30 @@ export function ViralPage() {
             <option value="最新">最新</option>
           </select>
         </label>
+        {scope === "all" && (
+          <form
+            className="viral-published-search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setSubmittedSearch(searchInput.trim());
+            }}
+          >
+            <input
+              type="search"
+              aria-label="搜索已上架视频"
+              placeholder="搜索已上架视频"
+              maxLength={100}
+              value={searchInput}
+              onChange={(event) => {
+                setSearchInput(event.target.value);
+                if (!event.target.value.trim()) setSubmittedSearch("");
+              }}
+            />
+            <Button type="submit" variant="outline" aria-label="搜索已上架视频">
+              搜索
+            </Button>
+          </form>
+        )}
       </div>
       {!review && <ViralCacheUsage revision={cachedOnPage} />}
       {listError && (
@@ -2566,16 +2642,26 @@ export function ViralPage() {
           ))}
         </section>
       ) : (
-        <Empty
-          title={scope === "favorites" ? "暂无收藏视频" : "暂无爆款视频"}
-          description={
-            scope === "favorites"
-              ? "收藏爆款视频后，可以在这里统一查看。"
-              : refreshStatus
-                ? refreshStatus
-                : "暂无已发布且可用的爆款视频，发布后自动展示。"
-          }
-        />
+        (!keyword || !listLoading) && (
+          <Empty
+            title={
+              keyword
+                ? "没有匹配的已上架视频"
+                : scope === "favorites"
+                  ? "暂无收藏视频"
+                  : "暂无爆款视频"
+            }
+            description={
+              keyword
+                ? "试试其他标题、作者或话题关键词。"
+                : scope === "favorites"
+                  ? "收藏爆款视频后，可以在这里统一查看。"
+                  : refreshStatus
+                    ? refreshStatus
+                    : "暂无已发布且可用的爆款视频，发布后自动展示。"
+            }
+          />
+        )
       )}
       {canLoadMore && (
         <button
@@ -2890,6 +2976,19 @@ export function ViralDetailPage() {
   const targetVideoId = selectedVideo?.nativeId ?? detailParams?.videoId;
   const video = remoteVideo ?? selectedVideo;
   const { importState, start } = useViralImport(video?.id, accountId);
+  const latestCopy = useCopyExtractionTask(
+    accountId,
+    !review && targetPlatform && targetVideoId
+      ? { platform: targetPlatform, videoId: targetVideoId }
+      : undefined,
+  );
+  const copyPrice = useCopyQuote(
+    accountId,
+    "asr",
+    !review && video?.durationMs && video.durationMs > 0
+      ? video.durationMs / 1000
+      : undefined,
+  );
 
   useEffect(() => {
     setRemoteDetail(undefined);
@@ -2943,9 +3042,8 @@ export function ViralDetailPage() {
 
   // 互动数据随免费详情响应下发，客户页面不触发源站补采。
   const { playback, play, retry, markFailed } = useViralPlayback(video);
-  const requestExtractRef = useRef<() => void>(() => {});
-  // 卡片「提取文案」直达：与复刻意图同款即焚消费，复用下方 requestExtract
-  // 的服务端导入 → 转写链路。
+  const transcriptSection = useRef<HTMLElement>(null);
+  // 卡片只定位到提取区，用户能在提交前看到本次费用或已有结果。
   useEffect(() => {
     if (
       !state.viralExtractIntent ||
@@ -2955,15 +3053,10 @@ export function ViralDetailPage() {
     )
       return;
     patchState({ viralExtractIntent: false });
-    if (!video.platformKey || !video.nativeId) {
-      notify("该视频缺少平台标识，无法提取文案");
-      return;
-    }
-    requestExtractRef.current();
+    transcriptSection.current?.focus();
   }, [
     state.viralExtractIntent,
     video,
-    notify,
     patchState,
     detailStatus,
     detailAvailability,
@@ -3001,31 +3094,46 @@ export function ViralDetailPage() {
     (video.publishedAt
       ? new Date(video.publishedAt * 1000).toLocaleDateString("zh-CN")
       : "—");
-  const goExtract = (task: ViralImportTask) => {
-    if (!task.canTranscribe || !task.projectId || !task.sourceAssetId) {
-      notify("该来源暂不支持提取文案");
+  const openCopy = (projectId: string, assetId: string) => {
+    patchDraft(
+      {
+        projectId,
+        sourceId: assetId,
+        sourceAssetId: assetId,
+        copyExtractionSource: viralCopySource(
+          video,
+          state.returnTo === "workbench" ? "workbench" : "viral",
+        ),
+      },
+      { persistNow: true },
+    );
+  };
+  const requestExtract = (restart = false, existing?: ScriptFromAudioTask) => {
+    if (existing) {
+      openCopy(existing.project_id, existing.source_asset_id);
+      extractScriptFromUpload(
+        existing.project_id,
+        existing.source_asset_id,
+        undefined,
+        { task: existing },
+      );
       return;
     }
-    patchDraft({
-      projectId: task.projectId,
-      sourceId: task.sourceAssetId,
-      sourceAssetId: task.sourceAssetId,
-    });
-    // 服务端导入链路：正文随本人转写任务直出（共享文案缓存已退役），
-    // 不再需要携带视频身份回「获取文案」取正文。
-    extractScriptFromUpload(task.projectId, task.sourceAssetId);
-    navigate("copy", {
-      selectedVideoId: video.id,
-      returnTo: "viral-detail",
+    void start(video, "copy", (task) => {
+      if (!task.canTranscribe || !task.projectId || !task.sourceAssetId) {
+        notify("该来源暂不支持提取文案");
+        return;
+      }
+      openCopy(task.projectId, task.sourceAssetId);
+      if (restart) {
+        extractScriptFromUpload(task.projectId, task.sourceAssetId, undefined, {
+          restart,
+        });
+      } else {
+        extractScriptFromUpload(task.projectId, task.sourceAssetId);
+      }
     });
   };
-  // 提取文案统一走服务端导入 → 转写：每个用户各自转写各自计费，
-  // 不再先查共享文案缓存分流。
-  const requestExtract = () => {
-    void start(video, "copy", goExtract);
-  };
-  // 卡片「提取文案」意图的晚绑定入口（定义在 early return 之后，ref 保序）。
-  requestExtractRef.current = requestExtract;
   // 复刻方向只适用于 4–30s 的爆款；与服务端参考视频校验保持一致。
   // 时长未知或超限时隐藏入口，视频仍可走「提取文案→口播数字人」方向。
   const canReplicate =
@@ -3190,18 +3298,33 @@ export function ViralDetailPage() {
           <section
             className="viral-detail-transcript"
             aria-label="视频口播文案"
+            tabIndex={-1}
+            ref={transcriptSection}
           >
-            <h2>视频口播文案</h2>
-            <Button
-              disabled={
-                importState.status === "loading" ||
-                detailAvailability !== "available"
-              }
-              variant="outline"
-              onClick={requestExtract}
-            >
-              提取文案
-            </Button>
+            <div>
+              <h2>视频口播文案</h2>
+              <p className="copy-extraction-cost">
+                {latestCopy?.status === "SUCCEEDED"
+                  ? "已有提取文案，查看无需再次扣费。"
+                  : copyQuoteText(copyPrice?.credits)}
+              </p>
+            </div>
+            <div className="copy-extraction-actions">
+              <CopyExtractionAction
+                disabled={
+                  importState.status === "loading" ||
+                  (detailAvailability !== "available" &&
+                    (!latestCopy || latestCopy.status === "FAILED"))
+                }
+                restartDisabled={
+                  importState.status === "loading" ||
+                  detailAvailability !== "available"
+                }
+                task={latestCopy}
+                quote={copyPrice?.credits}
+                onSelect={requestExtract}
+              />
+            </div>
           </section>
           <section className="viral-detail-create" aria-label="开始复刻">
             <h2>开始复刻</h2>

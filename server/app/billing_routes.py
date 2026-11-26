@@ -37,6 +37,7 @@ from app.customer_pricing import read_pricing
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.ops_metrics import get_or_create_request_id
+from app.usage_billing import resolve_wallet_owner
 
 router = APIRouter(tags=["itemized-billing"])
 
@@ -268,8 +269,11 @@ def customer_quote(
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        with customer_read_transaction(request) as (raw, _):
-            return retail_snapshot(BusinessConnection.postgres(raw), service, units)
+        with customer_read_transaction(request) as (raw, user_id):
+            conn = BusinessConnection.postgres(raw)
+            return retail_snapshot(
+                conn, service, units, user_id=resolve_wallet_owner(conn, user_id)
+            )
     except ValueError as exc:
         raise HTTPException(422, detail=str(exc)) from exc
 
