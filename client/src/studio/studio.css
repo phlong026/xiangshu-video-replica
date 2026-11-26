@@ -700,7 +700,10 @@ html:has(.studio-shell) {
   width: min(1180px, 100%);
   min-width: 0;
   margin: 0 auto 18px;
-  align-items: start;
+}
+.studio-home-works {
+  display: flex;
+  flex-direction: column;
 }
 .studio-home-split > .studio-home-works,
 .studio-home-split > .studio-home-recommendations {
@@ -849,16 +852,20 @@ html:has(.studio-shell) {
   width: 11px;
   height: 11px;
 }
-/* 我的成片：左封面、右信息的横向列表卡，条目少时也不会留大片空白。 */
+/* 我的成片：左封面、右信息的横向列表卡。 */
 .studio-works-summary {
   margin: 0 0 10px;
   color: #85897e;
   font-size: var(--font-label);
 }
 .studio-works-grid {
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: 10px;
+}
+/* 三条预览铺满面板，少量记录保留紧凑的卡片高度。 */
+.studio-works-grid:has(> :nth-child(3)) {
+  flex: 1;
+  grid-auto-rows: 1fr;
 }
 .studio-work-card {
   display: flex;
@@ -878,8 +885,9 @@ html:has(.studio-shell) {
 .studio-work-cover {
   position: relative;
   display: block;
+  align-self: center;
   flex: none;
-  width: 104px;
+  width: clamp(72px, 22%, 96px);
   aspect-ratio: 9 / 16;
   padding: 0;
   border: 0;

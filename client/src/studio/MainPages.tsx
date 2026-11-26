@@ -143,8 +143,7 @@ function WorkbenchWorks() {
       (left, right) =>
         (Date.parse(right.submitted) || 0) - (Date.parse(left.submitted) || 0),
     )
-    // 工作台是概览：右列与左列两张爆款卡高度相当，更多成片走「查看全部任务」。
-    .slice(0, 4);
+    .slice(0, 3);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
   );
@@ -221,7 +220,7 @@ function WorkbenchWorks() {
 
   return (
     <section
-      className="studio-home-works"
+      className="studio-panel studio-home-works"
       aria-labelledby="studio-home-works-title"
     >
       <div className="studio-home-section-heading">

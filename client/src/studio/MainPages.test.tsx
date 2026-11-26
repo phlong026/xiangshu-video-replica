@@ -1497,7 +1497,7 @@ describe("V1.4 工作台首页爆款精选", () => {
 });
 
 describe("工作台我的成片", () => {
-  it("按时间展示已完成和可交付的部分成片，封面缺失时也可查看", () => {
+  it("首页只展示最近三条可交付成片，封面缺失时也可查看", () => {
     const older: StudioTask = {
       ...taskA,
       status: "partial",
@@ -1509,18 +1509,39 @@ describe("工作台我的成片", () => {
       submitted: "2026-09-07T12:00:00Z",
       poster: "/b.jpg",
     };
+    const middle: StudioTask = {
+      ...taskA,
+      id: "task-middle",
+      title: "建房进度回顾",
+      submitted: "2026-09-06T12:00:00Z",
+    };
+    const oldest: StudioTask = {
+      ...taskA,
+      id: "task-oldest",
+      title: "项目开工记录",
+      submitted: "2026-09-04T12:00:00Z",
+    };
     const value = studio(undefined, {
       state: createState("workbench"),
-      data: data([older, runningTask, recent]),
+      data: data([older, oldest, runningTask, recent, middle]),
     });
     useStudio.mockReturnValue(value);
     render(<WorkbenchPage />);
     const section = screen.getByRole("region", { name: "我的成片" });
+    expect(within(section).getByText(/最近 3 条成片记录/)).toBeInTheDocument();
     expect(
       within(section)
         .getAllByRole("button", { name: /^查看成片：/ })
         .map((button) => button.getAttribute("aria-label")),
-    ).toEqual([`查看成片：${recent.title}`, `查看成片：${older.title}`]);
+    ).toEqual([
+      `查看成片：${recent.title}`,
+      `查看成片：${middle.title}`,
+      `查看成片：${older.title}`,
+    ]);
+    fireEvent.click(
+      within(section).getByRole("button", { name: "查看全部成片" }),
+    );
+    expect(value.navigate).toHaveBeenCalledWith("works");
     fireEvent.click(
       within(section).getByRole("button", { name: `查看成片：${older.title}` }),
     );
