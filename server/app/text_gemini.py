@@ -12,7 +12,9 @@ from app.settings import SettingsRepository, SettingsUnavailableError
 GEMINI_TEXT_MODEL = "gemini-4-carbon"
 
 
-def load_gemini_text_provider(conn: BusinessConnection) -> ApilioGemini | None:
+def load_gemini_text_provider(
+    conn: BusinessConnection, *, timeout_seconds: float = 30
+) -> ApilioGemini | None:
     try:
         config = SettingsRepository(conn).load_provider_config("apilio")
     except SettingsUnavailableError:
@@ -24,7 +26,7 @@ def load_gemini_text_provider(conn: BusinessConnection) -> ApilioGemini | None:
         api_key=key,
         model=GEMINI_TEXT_MODEL,
         fallback_models=(),
-        transport=UrllibApilioChatTransport(timeout_seconds=30),
+        transport=UrllibApilioChatTransport(timeout_seconds=timeout_seconds),
     )
 
 

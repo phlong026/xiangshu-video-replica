@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from app.analysis import APILIO_GEMINI_MODEL, ApilioGemini, UrllibApilioChatTransport
+from app.analysis import ApilioGemini, UrllibApilioChatTransport
 from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
@@ -37,8 +37,8 @@ def get_prompt_optimizer_provider(conn: BusinessConnection) -> ApilioGemini:
     return ApilioGemini(
         api_key=key,
         model=PROMPT_OPTIMIZER_MODEL,
-        fallback_models=(APILIO_GEMINI_MODEL,),
-        transport=UrllibApilioChatTransport(timeout_seconds=45),
+        fallback_models=("gemini-3.8-flash",),
+        transport=UrllibApilioChatTransport(timeout_seconds=120),
     )
 
 

@@ -455,9 +455,9 @@ def load_script_rewrite_configuration(
 
 
 def load_script_text_route(
-    conn: BusinessConnection,
+    conn: BusinessConnection, *, gemini_timeout_seconds: float = 30
 ) -> tuple[ApilioGemini | None, tuple[str, str, str]]:
-    primary = load_gemini_text_provider(conn)
+    primary = load_gemini_text_provider(conn, timeout_seconds=gemini_timeout_seconds)
     try:
         base_url, api_key, _ = load_script_rewrite_configuration(conn)
         fallback = (base_url, api_key, DEEPSEEK_DEFAULT_MODEL)
@@ -749,7 +749,8 @@ def prepare_script_rewrite_task(
         request = validated_script_rewrite_request(row)
     except ValueError as exc:
         raise RuntimeError("script rewrite task request is unavailable") from exc
-    primary, (base_url, api_key, model) = load_script_text_route(conn)
+    # 长口播稿需要给主模型更长的生成窗口，发布短文案仍走短请求。
+    primary, (base_url, api_key, model) = load_script_text_route(conn, gemini_timeout_seconds=120)
     return PreparedScriptRewrite(
         lease=lease,
         source_text=request.source_text,
@@ -793,14 +794,16 @@ def switch_script_rewrite_to_fallback(
 ) -> None:
     from app.usage_billing import begin_source_attempt, complete_source_attempt
 
-    now = _time_text(datetime.now(UTC))
+    current_time = datetime.now(UTC)
+    now = _time_text(current_time)
+    deadline = _time_text(current_time + timedelta(minutes=SCRIPT_REWRITE_TASK_LEASE_MINUTES))
     updated = conn.execute(
         """
-        UPDATE script_rewrite_tasks SET updated_at = %s
+        UPDATE script_rewrite_tasks SET updated_at = %s, locked_until = %s
         WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
           AND provider_started_at IS NOT NULL AND locked_until > %s
         """,
-        (now, lease.id, lease.worker_id, lease.attempt, now),
+        (now, deadline, lease.id, lease.worker_id, lease.attempt, now),
     )
     if updated.rowcount != 1:
         raise RuntimeError("script rewrite task lease was lost")
@@ -1111,7 +1114,7 @@ def request_script_gemini(
 
 
 def _script_gemini_failure(cause: AnalysisProviderFailed) -> HTTPException:
-    if cause.failure_phase == NETWORK_FAILURE_PHASE:
+    if cause.failure_phase == NETWORK_FAILURE_PHASE or cause.http_status == 504:
         return HTTPException(
             status_code=504,
             detail={"message": "文本 AI 请求未能确认完成，请先核对任务状态。"},

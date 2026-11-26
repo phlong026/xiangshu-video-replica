@@ -1442,7 +1442,7 @@ def test_script_rewrite_worker_settles_on_pg(
     assert "这是改写后的口播稿。" in str(row["result_json"])
 
 
-@pytest.mark.parametrize("primary_outcome", ["success", "rate_limit", "timeout"])
+@pytest.mark.parametrize("primary_outcome", ["success", "rate_limit", "timeout", "gateway_timeout"])
 def test_rewrite_gemini_and_deepseek_track_only_one_customer_charge(
     pg_state, monkeypatch, primary_outcome
 ):
@@ -1483,10 +1483,14 @@ def test_rewrite_gemini_and_deepseek_track_only_one_customer_charge(
         primary._complete.side_effect = AnalysisProviderFailed(
             "timeout", failure_phase=NETWORK_FAILURE_PHASE
         )
+    elif primary_outcome == "gateway_timeout":
+        primary._complete.side_effect = AnalysisProviderFailed(
+            "gateway timeout", http_status=504, failure_phase=HTTP_FAILURE_PHASE
+        )
     else:
         primary._complete.return_value = ("改写好的文案。", {})
     fallback = Mock(return_value="备选模型改写的文案。")
-    monkeypatch.setattr(script_rewrite, "load_gemini_text_provider", lambda _conn: primary)
+    monkeypatch.setattr(script_rewrite, "load_gemini_text_provider", lambda _conn, **_kw: primary)
     monkeypatch.setattr(script_rewrite, "_request_deepseek", fallback)
 
     assert _run_worker("rewrite-primary-and-fallback") == 1
@@ -1497,7 +1501,7 @@ def test_rewrite_gemini_and_deepseek_track_only_one_customer_charge(
         for row in _rows(pg_state, "SELECT service, provider, usage FROM billing_attempts")
     }
     charged = _one(pg_state, "SELECT charged_credits FROM billing_operations")
-    if primary_outcome == "timeout":
+    if primary_outcome in {"timeout", "gateway_timeout"}:
         assert status == "SUBMISSION_UNCERTAIN"
         assert usage == {"rewrite_gemini": ("apilio", None)}
         assert charged == 0

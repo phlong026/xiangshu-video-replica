@@ -8797,7 +8797,7 @@ const VIRAL_STATISTICS_TIMEOUT_MS = 150_000;
 // 比纯读列表慢一个量级；给足余量，避免在归档中途被客户端超时中断。
 const VIRAL_SEARCH_TIMEOUT_MS = 240_000;
 // 账号诊断在请求内同步完成 2~3 次上游调用；比普通读接口慢，但远快于视频拆解。
-const ACCOUNT_DIAGNOSIS_TIMEOUT_MS = 120_000;
+const ACCOUNT_DIAGNOSIS_TIMEOUT_MS = 180_000;
 
 export type AccountDiagnosisAvailability = {
   enabled: boolean;
@@ -10097,7 +10097,8 @@ export async function optimizePublishCopy(
     "/api/studio/publish/copy/optimize",
     "AI 优化失败",
     { method: "POST", body: JSON.stringify(input), signal },
-    35_000,
+    // 主备模型各有独立的请求超时，浏览器等到后端返回最终结果。
+    65_000,
   );
 }
 

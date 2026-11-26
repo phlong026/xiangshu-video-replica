@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.customer_fence import BusinessDbDep
 from app.permissions import require_not_auditor
 from app.publish_records import MAX_DESCRIPTION_LENGTH, MAX_TITLE_LENGTH
-from app.script_rewrite import load_script_rewrite_configuration, request_deepseek_text
+from app.script_rewrite import load_script_text_route, request_script_text
 from app.security_rate_limit import DIMENSION_PUBLISH_COPY_ACCOUNT, consume_rate_limit
 
 
@@ -45,7 +45,7 @@ def optimize_publish_copy(request: PublishCopyRequest, db: BusinessDbDep) -> Pub
                 detail={"code": "PUBLISH_COPY_EMPTY", "message": "请先填写发布标题或描述。"},
             )
         try:
-            base_url, api_key, model = load_script_rewrite_configuration(conn)
+            primary, fallback = load_script_text_route(conn)
         except HTTPException as exc:
             raise HTTPException(
                 503,
@@ -70,17 +70,17 @@ def optimize_publish_copy(request: PublishCopyRequest, db: BusinessDbDep) -> Pub
 
     is_title = request.field == "title"
     try:
-        text = request_deepseek_text(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
+        result = request_script_text(
+            primary,
+            fallback,
             purpose="publish_title" if is_title else "publish_description",
             source_text=json.dumps(
                 {"发布标题": request.title, "发布描述": request.description}, ensure_ascii=False
             ),
             instructions=f"目标发布平台为{request.platform}。另一字段仅供理解内容。本次仅返回"
             + ("标题。" if is_title else "描述。"),
-        ).strip()
+        )
+        text = result.rewritten_text.strip()
     except HTTPException as exc:
         raise HTTPException(
             exc.status_code,
