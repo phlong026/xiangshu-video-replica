@@ -85,6 +85,7 @@ import {
   PlatformLogo,
   publishPlatformNames,
 } from "./PlatformLogo";
+import { PublishCopyField } from "./PublishCopyField";
 import {
   KUAISHOU_VERIFICATION_MESSAGE,
   PublishRecordsPanel,
@@ -3742,8 +3743,13 @@ export function MaterialsPage() {
   );
 }
 
-const PUBLISH_PLATFORM_LABELS = ["抖音", "视频号", "小红书", "快手"] as const;
+const PUBLISH_PLATFORM_LABELS = ["抖音", "视频号", "快手", "小红书"] as const;
 const KUAISHOU_TAG_LIMIT = 3;
+const PUBLISH_TABS = [
+  ["editor", "编辑发布"],
+  ["drafts", "草稿"],
+  ["records", "发布记录"],
+] as const;
 const COVER_TITLE_LIMIT = 500;
 
 type GeneratedCoverPreview = {
@@ -4104,7 +4110,18 @@ export function PublishPage() {
     () => savedDraftForAsset ?? newPublishDraft(selectedAsset, review),
   );
   const [tagInput, setTagInput] = useState("");
+  const [tagError, setTagError] = useState("");
+  const [publishTab, setPublishTab] =
+    useState<(typeof PUBLISH_TABS)[number][0]>("editor");
+  const [coverExpanded, setCoverExpanded] = useState(false);
+  const [toolsExpanded, setToolsExpanded] = useState(false);
   const [saveNotice, setSaveNotice] = useState(false);
+  useEffect(() => {
+    void coverContextKey;
+    setTagInput("");
+    setTagError("");
+    setSaveNotice(false);
+  }, [coverContextKey]);
   const selectedTemplate = form.coverTemplateId ?? "";
   const coverTitle = form.coverTitleOverride ?? form.title;
   const effectiveCoverTitle = coverTitle.trim();
@@ -4188,7 +4205,6 @@ export function PublishPage() {
     setForm(next);
     setScheduleMode(scheduledAt ? "later" : "now");
     setScheduleInput(localDateTimeInputFromIso(scheduledAt));
-    setSaveNotice(false);
   }, [review, savedDraftForAsset, selectedAsset]);
 
   const updateForm = (patch: Partial<StudioPublishDraft>) => {
@@ -4196,20 +4212,41 @@ export function PublishPage() {
     setForm((current) => ({ ...current, ...patch }));
   };
 
-  const addTag = () => {
-    const tag = tagInput.trim();
-    if (
-      !tag ||
-      tag.length > 50 ||
-      form.tags.length >= tagLimit ||
-      form.tags.includes(tag)
-    ) {
-      setTagInput("");
+  const normalizedTag = tagInput
+    .trim()
+    .replace(/^[#＃]+/u, "")
+    .trim();
+  const editorDisabled = actionBusy || cloudRevision === null;
+  const tagInputDisabled = editorDisabled || form.tags.length >= tagLimit;
+  const coverPoster =
+    selectedCover?.kind === "image" ? selectedCover.url : selectedCover?.poster;
+  const copyContextKey = JSON.stringify([
+    coverContextKey,
+    form.id,
+    form.platform,
+  ]);
+  const scheduledIso = isScheduled
+    ? isoFromLocalDateTimeInput(scheduleInput)
+    : null;
+  const publishReady =
+    !publishBlocked &&
+    (!isScheduled ||
+      Boolean(scheduledIso && !validatePublishSchedule(scheduledIso)));
+
+  function addTag() {
+    if (tagInputDisabled || !normalizedTag) return;
+    if (Array.from(normalizedTag).length > 40) {
+      setTagError("单个话题标签最多 40 个字。");
       return;
     }
-    updateForm({ tags: [...form.tags, tag] });
+    if (form.tags.includes(normalizedTag)) {
+      setTagError("这个话题标签已添加。");
+      return;
+    }
+    updateForm({ tags: [...form.tags, normalizedTag] });
     setTagInput("");
-  };
+    setTagError("");
+  }
 
   const savePublishDraft = async () => {
     if (
@@ -4543,65 +4580,33 @@ export function PublishPage() {
   return (
     <section className="content-page content-publish">
       <header className="content-title">
-        <div>
-          <h1>发布管理</h1>
-          <p>选择成片与账号发布，或前往快手创作者中心手动发布</p>
-        </div>
+        <h1>发布管理</h1>
       </header>
-      <section
-        aria-labelledby="kuaishou-manual-publish-title"
-        className="studio-panel content-publish-manual"
-      >
-        <div>
-          <h2 id="kuaishou-manual-publish-title">快手手动发布</h2>
-          <p>
-            下载所选成片、复制发布草稿的文案，再到快手创作者中心登录、手动上传并确认发布，结果以快手官方页面为准。
-          </p>
-          <span>
-            {selectedAsset ? `已选择：${selectedAsset.name}` : "尚未选择成片"}
-          </span>
-        </div>
-        <div className="content-publish-manual-actions">
-          <Button onClick={() => navigate("tasks")}>
-            {selectedAsset ? "更换发布成片" : "选择发布成片"}
-          </Button>
+      <nav aria-label="发布管理视图" className="content-publish-navigation">
+        {PUBLISH_TABS.map(([tab, label]) => (
           <Button
-            disabled={!selectedAsset || review || actionBusy}
-            onClick={() => void downloadSelectedVideo()}
+            aria-current={publishTab === tab ? "page" : undefined}
+            key={tab}
+            onClick={() => setPublishTab(tab)}
+            variant="quiet"
           >
-            下载所选成片
+            {label}
           </Button>
-          <Button
-            disabled={!form.title.trim() || review || actionBusy}
-            onClick={() => void copyPublishText()}
-          >
-            复制快手发布文案
-          </Button>
-          <a
-            className="studio-button studio-button--primary"
-            href="https://cp.kuaishou.com/article/publish/video"
-            rel="noopener noreferrer"
-            target="_blank"
-            onClick={(event) => {
-              if (!isTauri()) return;
-              event.preventDefault();
-              setActionError("");
-              void invoke<void>("open_kuaishou_creator").catch((cause) => {
-                setActionError(
-                  cause instanceof Error
-                    ? cause.message
-                    : typeof cause === "string"
-                      ? cause
-                      : "无法打开快手创作者中心，请重试。",
-                );
-              });
-            }}
-          >
-            前往快手手动发布
-          </a>
-        </div>
-      </section>
-      <section className="content-publish-layout">
+        ))}
+        <Button
+          aria-expanded={publishTab === "editor" && toolsExpanded}
+          aria-controls="publish-tools"
+          className="content-publish-tool-toggle"
+          onClick={() => {
+            setPublishTab("editor");
+            setToolsExpanded(publishTab !== "editor" || !toolsExpanded);
+          }}
+          variant="quiet"
+        >
+          发布工具
+        </Button>
+      </nav>
+      <section hidden={publishTab !== "drafts"} aria-label="发布草稿">
         <Panel className="content-publish-drafts">
           <div className="content-publish-draft-tabs">
             <strong>
@@ -4623,6 +4628,15 @@ export function PublishPage() {
                   onClick={() => {
                     setForm(draft);
                     setSaveNotice(false);
+                    setScheduleMode(
+                      draft.scheduledAt && draft.platform !== "快手"
+                        ? "later"
+                        : "now",
+                    );
+                    setScheduleInput(
+                      localDateTimeInputFromIso(draft.scheduledAt),
+                    );
+                    setPublishTab("editor");
                     patchState({ selectedAssetId: draft.assetId });
                   }}
                   type="button"
@@ -4657,492 +4671,7 @@ export function PublishPage() {
               }
             />
           )}
-          {!review && (
-            <div className="content-publish-records-section">
-              <div className="content-publish-draft-tabs">
-                <strong>发布记录</strong>
-                <span>排队 / 发布中会自动刷新</span>
-              </div>
-              <PublishRecordsPanel
-                refreshToken={recordsToken}
-                disabled={actionBusy || user.role === "auditor"}
-              />
-            </div>
-          )}
-        </Panel>
-        <Panel className="content-publish-editor">
-          <header className="content-publish-editor-heading">
-            <h2>编辑发布草稿</h2>
-            <Hint>发布文案独立于口播终稿；点击发布后由服务端投递到平台。</Hint>
-          </header>
-          <div className="content-publish-media-grid">
-            <section className="content-publish-preview">
-              <h3>视频预览</h3>
-              {selectedAsset ? (
-                <Media
-                  asset={selectedAsset}
-                  alt={`${selectedAsset.name} 视频预览`}
-                />
-              ) : (
-                <Empty
-                  action={
-                    <Button variant="primary" onClick={() => navigate("tasks")}>
-                      去任务中心选择成片
-                    </Button>
-                  }
-                  title="暂无可发布成片"
-                  description="选择一条已完成的视频即可开始编辑发布。"
-                />
-              )}
-            </section>
-            <section className="content-publish-cover">
-              <h3>封面选择</h3>
-              <Hint>使用成片预览图、上传图片，或选择模板生成封面。</Hint>
-              <div
-                aria-label="封面来源"
-                className="content-cover-source"
-                role="tablist"
-              >
-                <button
-                  aria-selected={coverSource === "frames"}
-                  role="tab"
-                  type="button"
-                  onClick={() => setCoverSource("frames")}
-                >
-                  成片帧
-                </button>
-                <button
-                  aria-selected={coverSource === "templates"}
-                  role="tab"
-                  type="button"
-                  onClick={() => {
-                    setCoverSource("templates");
-                    if (coverStyles.length === 0 && !coverStylesLoading) {
-                      const contextKey = coverContextKey;
-                      setCoverStylesLoading(true);
-                      setCoverStylesError("");
-                      void fetchCoverStyles()
-                        .then((items) => {
-                          if (coverContextRef.current !== contextKey) return;
-                          setCoverStyles(items);
-                          if (items.length === 0)
-                            setCoverStylesError("暂无可用模板。");
-                        })
-                        .catch((cause: unknown) => {
-                          if (coverContextRef.current !== contextKey) return;
-                          setCoverStylesError(
-                            cause instanceof Error
-                              ? cause.message
-                              : "读取封面模板失败",
-                          );
-                        })
-                        .finally(() => {
-                          if (coverContextRef.current === contextKey)
-                            setCoverStylesLoading(false);
-                        });
-                    }
-                  }}
-                >
-                  模板封面
-                </button>
-              </div>
-              {coverSource === "templates" ? (
-                <div className="content-cover-templates">
-                  {coverStylesLoading ? (
-                    <p className="admin-hint">正在读取模板…</p>
-                  ) : null}
-                  {coverStylesError ? (
-                    <p className="admin-hint">{coverStylesError}</p>
-                  ) : null}
-                  <div className="content-cover-options">
-                    {coverStyles.map((style) => (
-                      <button
-                        aria-label={`选择模板 ${style.title}`}
-                        className={
-                          selectedTemplate === style.id ? "is-selected" : ""
-                        }
-                        key={style.id}
-                        disabled={coverEditingBlocked}
-                        onClick={() =>
-                          updateForm({ coverTemplateId: style.id })
-                        }
-                        type="button"
-                      >
-                        <img alt={style.title} loading="lazy" src={style.url} />
-                        <small>{style.title}</small>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="content-cover-generate">
-                    <Field label="封面标题">
-                      <textarea
-                        aria-label="封面标题"
-                        disabled={coverEditingBlocked}
-                        onChange={(event) =>
-                          updateForm({ coverTitleOverride: event.target.value })
-                        }
-                        rows={2}
-                        value={coverTitle}
-                      />
-                    </Field>
-                    <Button
-                      disabled={
-                        coverEditingBlocked ||
-                        form.coverTitleOverride === undefined
-                      }
-                      onClick={() =>
-                        updateForm({ coverTitleOverride: undefined })
-                      }
-                    >
-                      使用发布标题
-                    </Button>
-                    <Hint>
-                      {form.coverTitleOverride === undefined
-                        ? "跟随发布标题；可单独修改封面标题。"
-                        : "封面标题独立保存，不修改发布标题。"}
-                    </Hint>
-                    {coverTitleError ? (
-                      <p className="admin-hint">{coverTitleError}</p>
-                    ) : null}
-                    <Button
-                      disabled={
-                        coverEditingBlocked ||
-                        generatingCover ||
-                        !selectedTemplate ||
-                        Boolean(coverTitleError)
-                      }
-                      variant="primary"
-                      onClick={() => void generateCover()}
-                    >
-                      {generatingCover ? "生成中…约需 1 分钟" : "生成封面"}
-                    </Button>
-                    {generatingCover ? (
-                      <Hint>正在生成封面，完成后确认使用。</Hint>
-                    ) : null}
-                    {coverPreview && !generatingCover ? (
-                      <div>
-                        <img
-                          alt="生成的封面预览"
-                          className="content-cover-generated"
-                          src={`data:image/jpeg;base64,${coverPreview.imageBase64}`}
-                        />
-                        <p>封面标题：{coverPreview.title}</p>
-                        <p>模板：{coverPreview.templateTitle}</p>
-                        <p>对应成片：{coverPreview.videoName}</p>
-                        {previewStale ? (
-                          <p role="status">
-                            封面标题或模板已变化，请重新生成。
-                          </p>
-                        ) : null}
-                        <Button
-                          disabled={
-                            coverEditingBlocked ||
-                            previewStale ||
-                            coverPreview.appliedAssetId === selectedCover?.id
-                          }
-                          variant="primary"
-                          onClick={() => void applyGeneratedCover()}
-                        >
-                          {coverPreview.appliedAssetId === selectedCover?.id
-                            ? "已使用此封面"
-                            : "使用此封面"}
-                        </Button>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ) : null}
-              {appliedCoverStale ? (
-                <p role="alert">
-                  当前封面的标题或模板已变化，请重新生成并使用封面，或选择成片预览图、上传图片后再发布。
-                </p>
-              ) : null}
-              {coverCandidates.length ? (
-                <div className="content-cover-options">
-                  {coverCandidates.map((asset, index) => (
-                    <button
-                      disabled={
-                        actionBusy || generatingCover || cloudRevision === null
-                      }
-                      aria-label={`选择封面 ${asset.name}`}
-                      className={
-                        selectedCover?.id === asset.id ? "is-selected" : ""
-                      }
-                      key={asset.id}
-                      onClick={() => updateForm({ coverId: asset.id })}
-                      type="button"
-                    >
-                      <Media
-                        asset={asset}
-                        alt={`封面 ${index + 1}`}
-                        presentation="video"
-                      />
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="content-cover-empty">
-                  <Icon name="image" />
-                  <span>暂无可选封面</span>
-                </div>
-              )}
-              <input
-                hidden
-                ref={coverInput}
-                type="file"
-                accept="image/*"
-                aria-label="上传发布封面"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.target.value = "";
-                  if (file) void uploadCover(file);
-                }}
-              />
-              <Button
-                disabled={coverEditingBlocked || generatingCover}
-                variant="outline"
-                onClick={() => coverInput.current?.click()}
-              >
-                上传自定义封面
-              </Button>
-            </section>
-          </div>
-          <div className="content-publish-fields">
-            <Field label="发布平台">
-              <div className="content-platform-options">
-                {PUBLISH_PLATFORM_LABELS.map((platform) => (
-                  <Button
-                    disabled={actionBusy || cloudRevision === null}
-                    aria-pressed={form.platform === platform}
-                    key={platform}
-                    onClick={() => {
-                      // 小红书协议发布器尚未开发（自动发布暂缓）：选择时只提示进度，
-                      // 不切换平台，避免用户停留在无法提交发布的状态。
-                      if (platform === "小红书") {
-                        notifyRef.current(
-                          "小红书自动发布正在开发中，敬请期待。",
-                        );
-                        return;
-                      }
-                      if (platform === "快手") {
-                        setScheduleMode("now");
-                        setScheduleInput("");
-                      }
-                      updateForm({ platform, account: "" });
-                    }}
-                    variant={form.platform === platform ? "primary" : "outline"}
-                  >
-                    <PlatformLogo platform={platform} /> {platform}
-                  </Button>
-                ))}
-              </div>
-            </Field>
-            <Field label="发布账号">
-              {review ? (
-                <div className="content-publish-account">
-                  <Button
-                    aria-pressed={form.account === "张工说乡墅"}
-                    onClick={() => updateForm({ account: "张工说乡墅" })}
-                    variant="outline"
-                  >
-                    张工说乡墅
-                  </Button>
-                  <span>审核示例账号</span>
-                </div>
-              ) : platformAccounts.length ? (
-                <div className="content-publish-account">
-                  {/* A select cannot render pictures, so the chosen account's
-                      avatar sits beside it to confirm the target at a glance. */}
-                  {selectedAccount && (
-                    <AccountAvatar account={selectedAccount} size={28} />
-                  )}
-                  <select
-                    disabled={actionBusy || cloudRevision === null}
-                    aria-label="选择发布账号"
-                    value={selectedAccount?.id ?? ""}
-                    onChange={(event) =>
-                      updateForm({ account: event.target.value })
-                    }
-                  >
-                    <option value="">请选择发布账号</option>
-                    {platformAccounts.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {account.username} · {account.platform_user_id}
-                        {account.status === "invalid" ? "（登录态失效）" : ""}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <div className="content-publish-account-empty">
-                  <span>尚未连接该平台账号，请先扫码连接</span>
-                  <Button onClick={() => navigate("profile")} variant="quiet">
-                    前往用户档案管理账号
-                  </Button>
-                </div>
-              )}
-              {selectedAccount?.status === "invalid" && (
-                <p role="alert">
-                  该账号登录态已失效，请在用户档案中重新扫码后再发布。
-                </p>
-              )}
-              {!platformDeliverable && (
-                <p role="status">
-                  小红书自动发布正在开发中；现在可保存草稿、复制文案后前往官方页面发布。
-                </p>
-              )}
-            </Field>
-            {kuaishou ? (
-              <Hint>快手目前仅支持立即发布。</Hint>
-            ) : (
-              <Field label="发布时间">
-                <div className="content-publish-schedule">
-                  <Button
-                    disabled={actionBusy || cloudRevision === null}
-                    aria-pressed={!isScheduled}
-                    variant={isScheduled ? "outline" : "primary"}
-                    onClick={() => {
-                      setScheduleMode("now");
-                      setSaveNotice(false);
-                    }}
-                  >
-                    立即
-                  </Button>
-                  <Button
-                    disabled={actionBusy || cloudRevision === null}
-                    aria-pressed={isScheduled}
-                    variant={isScheduled ? "primary" : "outline"}
-                    onClick={() => {
-                      setScheduleMode("later");
-                      setSaveNotice(false);
-                    }}
-                  >
-                    定时
-                  </Button>
-                  {isScheduled && (
-                    <input
-                      type="datetime-local"
-                      aria-label="定时发布时间"
-                      disabled={actionBusy || cloudRevision === null}
-                      min={localDateTimeInputFromIso(
-                        new Date(
-                          Date.now() + PUBLISH_SCHEDULE_MIN_LEAD_MS,
-                        ).toISOString(),
-                      )}
-                      value={scheduleInput}
-                      onChange={(event) => {
-                        setScheduleInput(event.target.value);
-                        setSaveNotice(false);
-                      }}
-                    />
-                  )}
-                </div>
-              </Field>
-            )}
-            <Field label="发布标题">
-              <input
-                disabled={actionBusy || cloudRevision === null}
-                onChange={(event) => updateForm({ title: event.target.value })}
-                placeholder="填写发布标题"
-                value={form.title}
-                maxLength={300}
-                required={kuaishou}
-              />
-            </Field>
-            {kuaishou && !form.title.trim() && (
-              <Hint>请填写快手发布标题。</Hint>
-            )}
-            <Field label="发布描述">
-              <textarea
-                disabled={actionBusy || cloudRevision === null}
-                onChange={(event) =>
-                  updateForm({ description: event.target.value })
-                }
-                placeholder="填写发布说明"
-                value={form.description}
-                maxLength={5000}
-              />
-            </Field>
-            <Field label="标签">
-              <div className="content-publish-tags">
-                {form.tags.map((tag) => (
-                  <Button
-                    key={tag}
-                    disabled={actionBusy || cloudRevision === null}
-                    aria-label={`移除标签 ${tag}`}
-                    onClick={() =>
-                      updateForm({
-                        tags: form.tags.filter((value) => value !== tag),
-                      })
-                    }
-                  >
-                    # {tag} ×
-                  </Button>
-                ))}
-                <input
-                  disabled={
-                    actionBusy ||
-                    cloudRevision === null ||
-                    (kuaishou && form.tags.length >= tagLimit)
-                  }
-                  aria-label="添加标签"
-                  onChange={(event) => setTagInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter") return;
-                    event.preventDefault();
-                    addTag();
-                  }}
-                  placeholder="输入标签后按 Enter"
-                  value={tagInput}
-                />
-              </div>
-            </Field>
-            {kuaishou && (
-              <Hint>
-                快手最多支持 {KUAISHOU_TAG_LIMIT} 个标签。
-                {form.tags.length > KUAISHOU_TAG_LIMIT && "请先移除多余标签。"}
-              </Hint>
-            )}
-          </div>
-          {saveNotice && (
-            <p className="content-publish-save-notice">
-              {review
-                ? "已保存审核示例草稿，未同步到云端。"
-                : "已保存到云端，可在刷新后继续编辑。"}
-            </p>
-          )}
-          {cloudRevision === null && !cloudError && (
-            <p role="status">正在加载云端发布草稿…</p>
-          )}
-          {cloudError && <p role="alert">{cloudError}</p>}
-          {actionError && <p role="alert">{actionError}</p>}
-          {!review && (
-            <Button
-              disabled={actionBusy}
-              onClick={() => setReload((value) => value + 1)}
-            >
-              重新加载云端草稿与本机账号
-            </Button>
-          )}
-          <p>
-            {kuaishou
-              ? "确认后，服务端会用所选快手账号上传并发布这条成片。"
-              : "点击「立即发布」或「定时发布」后，服务端会用所选账号的登录态自动上传并创建作品；桌面端仍可打开官方页面手动发布。"}
-          </p>
-          <div className="content-publish-actions">
-            <Button
-              disabled={
-                !selectedAsset ||
-                actionBusy ||
-                generatingCover ||
-                cloudRevision === null ||
-                user.role === "auditor"
-              }
-              onClick={() => void savePublishDraft()}
-              variant="outline"
-            >
-              保存草稿
-            </Button>
+          <div className="content-publish-draft-actions">
             <Button
               disabled={
                 !savedDraftForAsset ||
@@ -5155,6 +4684,83 @@ export function PublishPage() {
             >
               移除当前草稿
             </Button>
+          </div>
+        </Panel>
+        {actionError && publishTab === "drafts" && (
+          <p role="alert">{actionError}</p>
+        )}
+      </section>
+      <section hidden={publishTab !== "records"} aria-label="历史发布记录">
+        <Panel className="content-publish-history">
+          <h2>发布记录</h2>
+          {review ? (
+            <Empty title="暂无发布记录" />
+          ) : (
+            <PublishRecordsPanel
+              refreshToken={recordsToken}
+              disabled={actionBusy || user.role === "auditor"}
+            />
+          )}
+        </Panel>
+      </section>
+      <section hidden={publishTab !== "editor"} aria-label="编辑发布">
+        <div hidden={!toolsExpanded} id="publish-tools">
+          <section
+            aria-labelledby="kuaishou-manual-publish-title"
+            className="studio-panel content-publish-manual"
+          >
+            <div>
+              <h2 id="kuaishou-manual-publish-title">快手手动发布</h2>
+              <p>
+                下载所选成片、复制发布草稿的文案，再到快手创作者中心登录、手动上传并确认发布，结果以快手官方页面为准。
+              </p>
+              <span>
+                {selectedAsset
+                  ? `已选择：${selectedAsset.name}`
+                  : "尚未选择成片"}
+              </span>
+            </div>
+            <div className="content-publish-manual-actions">
+              <Button onClick={() => navigate("tasks")}>
+                {selectedAsset ? "更换发布成片" : "选择发布成片"}
+              </Button>
+              <Button
+                disabled={!selectedAsset || review || actionBusy}
+                onClick={() => void downloadSelectedVideo()}
+              >
+                下载所选成片
+              </Button>
+              <Button
+                disabled={!form.title.trim() || review || actionBusy}
+                onClick={() => void copyPublishText()}
+              >
+                复制快手发布文案
+              </Button>
+              <a
+                className="studio-button studio-button--primary"
+                href="https://cp.kuaishou.com/article/publish/video"
+                rel="noopener noreferrer"
+                target="_blank"
+                onClick={(event) => {
+                  if (!isTauri()) return;
+                  event.preventDefault();
+                  setActionError("");
+                  void invoke<void>("open_kuaishou_creator").catch((cause) => {
+                    setActionError(
+                      cause instanceof Error
+                        ? cause.message
+                        : typeof cause === "string"
+                          ? cause
+                          : "无法打开快手创作者中心，请重试。",
+                    );
+                  });
+                }}
+              >
+                前往快手手动发布
+              </a>
+            </div>
+          </section>
+          <div className="content-publish-tools">
             <Button
               disabled={!selectedAsset || review || actionBusy}
               onClick={() => void downloadSelectedVideo()}
@@ -5183,13 +4789,6 @@ export function PublishPage() {
             >
               复制发布文案
             </Button>
-            <Button
-              disabled={publishBlocked}
-              variant="primary"
-              onClick={() => void submitPublish()}
-            >
-              {isScheduled ? "定时发布" : "立即发布"}
-            </Button>
             {!kuaishou && canUseLocalPublishAccounts() && (
               <Button
                 disabled={
@@ -5210,8 +4809,587 @@ export function PublishPage() {
                 前往官方发布
               </Button>
             )}
+            {!review && (
+              <Button
+                disabled={actionBusy}
+                onClick={() => setReload((value) => value + 1)}
+              >
+                重新加载云端草稿与本机账号
+              </Button>
+            )}
           </div>
-        </Panel>
+        </div>
+        <div className="content-publish-layout">
+          <Panel className="content-publish-editor">
+            <header className="content-publish-editor-heading">
+              <h2>发布内容</h2>
+            </header>
+            <div className="content-publish-source">
+              {selectedAsset?.poster ? (
+                <img alt="" src={selectedAsset.poster} />
+              ) : (
+                <Icon name="video" />
+              )}
+              <div>
+                <strong>{selectedAsset?.name ?? "暂无可发布成片"}</strong>
+                {selectedAsset && <small>来自任务中心</small>}
+              </div>
+              <Button onClick={() => navigate("tasks")} variant="quiet">
+                {selectedAsset ? "更换成片" : "选择成片"}
+              </Button>
+            </div>
+            <div className="content-publish-fields">
+              <PublishCopyField
+                aiDisabled={!selectedAsset || user.role === "auditor"}
+                disabled={editorDisabled}
+                draft={form}
+                field="title"
+                key={`${copyContextKey}-title`}
+                onChange={(title) => updateForm({ title })}
+                required={kuaishou}
+                review={review}
+              />
+              {kuaishou && !form.title.trim() && (
+                <Hint>请填写快手发布标题。</Hint>
+              )}
+              <PublishCopyField
+                aiDisabled={!selectedAsset || user.role === "auditor"}
+                disabled={editorDisabled}
+                draft={form}
+                field="description"
+                key={`${copyContextKey}-description`}
+                onChange={(description) => updateForm({ description })}
+                review={review}
+              />
+              <div className="studio-field content-publish-topic">
+                <label htmlFor="publish-topic">话题标签</label>
+                <div className="content-publish-tags">
+                  {form.tags.map((tag) => (
+                    <Button
+                      key={tag}
+                      disabled={editorDisabled}
+                      aria-label={`移除标签 ${tag}`}
+                      onClick={() => {
+                        updateForm({
+                          tags: form.tags.filter((value) => value !== tag),
+                        });
+                        setTagError("");
+                      }}
+                    >
+                      # {tag} ×
+                    </Button>
+                  ))}
+                  <div className="content-publish-tag-entry">
+                    <input
+                      aria-label="添加标签"
+                      id="publish-topic"
+                      disabled={tagInputDisabled}
+                      onChange={(event) => {
+                        setTagInput(event.target.value);
+                        setTagError("");
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key !== "Enter" ||
+                          event.nativeEvent.isComposing
+                        )
+                          return;
+                        event.preventDefault();
+                        addTag();
+                      }}
+                      placeholder="输入话题标签"
+                      value={tagInput}
+                    />
+                    <Button
+                      disabled={tagInputDisabled || !normalizedTag}
+                      onClick={addTag}
+                      aria-label="添加话题标签"
+                    >
+                      <Icon name="plus" size={14} /> 添加
+                    </Button>
+                  </div>
+                </div>
+                {tagError && <p role="alert">{tagError}</p>}
+                {form.tags.length >= tagLimit && (
+                  <small>
+                    当前平台最多支持 {tagLimit} 个话题标签。
+                    {form.tags.length > tagLimit && "请先移除多余标签。"}
+                  </small>
+                )}
+              </div>
+              <section className="content-publish-cover">
+                <div className="content-publish-cover-row">
+                  <h3>视频封面</h3>
+                  {coverPoster && <img alt="当前发布封面" src={coverPoster} />}
+                  <Button
+                    aria-controls="publish-cover-options"
+                    aria-expanded={coverExpanded}
+                    onClick={() => setCoverExpanded((open) => !open)}
+                    variant="quiet"
+                  >
+                    {coverExpanded ? "收起封面设置" : "更换封面"}
+                  </Button>
+                </div>
+                {appliedCoverStale ? (
+                  <p role="alert">
+                    当前封面的标题或模板已变化，请重新生成并使用封面，或选择成片预览图、上传图片后再发布。
+                  </p>
+                ) : null}
+                <div hidden={!coverExpanded} id="publish-cover-options">
+                  <div
+                    aria-label="封面来源"
+                    className="content-cover-source"
+                    role="tablist"
+                  >
+                    <button
+                      aria-selected={coverSource === "frames"}
+                      role="tab"
+                      type="button"
+                      onClick={() => setCoverSource("frames")}
+                    >
+                      成片帧
+                    </button>
+                    <button
+                      aria-selected={coverSource === "templates"}
+                      role="tab"
+                      type="button"
+                      onClick={() => {
+                        setCoverSource("templates");
+                        if (coverStyles.length === 0 && !coverStylesLoading) {
+                          const contextKey = coverContextKey;
+                          setCoverStylesLoading(true);
+                          setCoverStylesError("");
+                          void fetchCoverStyles()
+                            .then((items) => {
+                              if (coverContextRef.current !== contextKey)
+                                return;
+                              setCoverStyles(items);
+                              if (items.length === 0)
+                                setCoverStylesError("暂无可用模板。");
+                            })
+                            .catch((cause: unknown) => {
+                              if (coverContextRef.current !== contextKey)
+                                return;
+                              setCoverStylesError(
+                                cause instanceof Error
+                                  ? cause.message
+                                  : "读取封面模板失败",
+                              );
+                            })
+                            .finally(() => {
+                              if (coverContextRef.current === contextKey)
+                                setCoverStylesLoading(false);
+                            });
+                        }
+                      }}
+                    >
+                      模板封面
+                    </button>
+                  </div>
+                  {coverSource === "templates" ? (
+                    <div className="content-cover-templates">
+                      {coverStylesLoading ? (
+                        <p className="admin-hint">正在读取模板…</p>
+                      ) : null}
+                      {coverStylesError ? (
+                        <p className="admin-hint">{coverStylesError}</p>
+                      ) : null}
+                      <div className="content-cover-options">
+                        {coverStyles.map((style) => (
+                          <button
+                            aria-label={`选择模板 ${style.title}`}
+                            className={
+                              selectedTemplate === style.id ? "is-selected" : ""
+                            }
+                            key={style.id}
+                            disabled={coverEditingBlocked}
+                            onClick={() =>
+                              updateForm({ coverTemplateId: style.id })
+                            }
+                            type="button"
+                          >
+                            <img
+                              alt={style.title}
+                              loading="lazy"
+                              src={style.url}
+                            />
+                            <small>{style.title}</small>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="content-cover-generate">
+                        <Field label="封面标题">
+                          <textarea
+                            aria-label="封面标题"
+                            disabled={coverEditingBlocked}
+                            onChange={(event) =>
+                              updateForm({
+                                coverTitleOverride: event.target.value,
+                              })
+                            }
+                            rows={2}
+                            value={coverTitle}
+                          />
+                        </Field>
+                        <Button
+                          disabled={
+                            coverEditingBlocked ||
+                            form.coverTitleOverride === undefined
+                          }
+                          onClick={() =>
+                            updateForm({ coverTitleOverride: undefined })
+                          }
+                        >
+                          使用发布标题
+                        </Button>
+                        <Hint>
+                          {form.coverTitleOverride === undefined
+                            ? "跟随发布标题；可单独修改封面标题。"
+                            : "封面标题独立保存，不修改发布标题。"}
+                        </Hint>
+                        {coverTitleError ? (
+                          <p className="admin-hint">{coverTitleError}</p>
+                        ) : null}
+                        <Button
+                          disabled={
+                            coverEditingBlocked ||
+                            generatingCover ||
+                            !selectedTemplate ||
+                            Boolean(coverTitleError)
+                          }
+                          variant="primary"
+                          onClick={() => void generateCover()}
+                        >
+                          {generatingCover ? "生成中…约需 1 分钟" : "生成封面"}
+                        </Button>
+                        {generatingCover ? (
+                          <Hint>正在生成封面，完成后确认使用。</Hint>
+                        ) : null}
+                        {coverPreview && !generatingCover ? (
+                          <div>
+                            <img
+                              alt="生成的封面预览"
+                              className="content-cover-generated"
+                              src={`data:image/jpeg;base64,${coverPreview.imageBase64}`}
+                            />
+                            <p>封面标题：{coverPreview.title}</p>
+                            <p>模板：{coverPreview.templateTitle}</p>
+                            <p>对应成片：{coverPreview.videoName}</p>
+                            {previewStale ? (
+                              <p role="status">
+                                封面标题或模板已变化，请重新生成。
+                              </p>
+                            ) : null}
+                            <Button
+                              disabled={
+                                coverEditingBlocked ||
+                                previewStale ||
+                                coverPreview.appliedAssetId ===
+                                  selectedCover?.id
+                              }
+                              variant="primary"
+                              onClick={() => void applyGeneratedCover()}
+                            >
+                              {coverPreview.appliedAssetId === selectedCover?.id
+                                ? "已使用此封面"
+                                : "使用此封面"}
+                            </Button>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                  {coverCandidates.length ? (
+                    <div className="content-cover-options">
+                      {coverCandidates.map((asset, index) => (
+                        <button
+                          disabled={
+                            actionBusy ||
+                            generatingCover ||
+                            cloudRevision === null
+                          }
+                          aria-label={`选择封面 ${asset.name}`}
+                          className={
+                            selectedCover?.id === asset.id ? "is-selected" : ""
+                          }
+                          key={asset.id}
+                          onClick={() => updateForm({ coverId: asset.id })}
+                          type="button"
+                        >
+                          <Media
+                            asset={asset}
+                            alt={`封面 ${index + 1}`}
+                            presentation="video"
+                          />
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="content-cover-empty">
+                      <Icon name="image" />
+                      <span>暂无可选封面</span>
+                    </div>
+                  )}
+                  <input
+                    hidden
+                    ref={coverInput}
+                    type="file"
+                    accept="image/*"
+                    aria-label="上传发布封面"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) void uploadCover(file);
+                    }}
+                  />
+                  <Button
+                    disabled={coverEditingBlocked || generatingCover}
+                    variant="outline"
+                    onClick={() => coverInput.current?.click()}
+                  >
+                    上传自定义封面
+                  </Button>
+                </div>
+              </section>
+            </div>
+            <section className="content-publish-group">
+              <h3>发布账号</h3>
+              <div className="content-publish-fields">
+                <Field label="发布平台">
+                  <div className="content-platform-options">
+                    {PUBLISH_PLATFORM_LABELS.map((platform) => (
+                      <Button
+                        disabled={actionBusy || cloudRevision === null}
+                        aria-label={platform}
+                        aria-pressed={form.platform === platform}
+                        key={platform}
+                        onClick={() => {
+                          // 小红书协议发布器尚未开发（自动发布暂缓）：选择时只提示进度，
+                          // 不切换平台，避免用户停留在无法提交发布的状态。
+                          if (platform === "小红书") {
+                            notifyRef.current(
+                              "小红书自动发布正在开发中，敬请期待。",
+                            );
+                            return;
+                          }
+                          if (platform === "快手") {
+                            setScheduleMode("now");
+                            setScheduleInput("");
+                          }
+                          updateForm({ platform, account: "" });
+                        }}
+                        variant={
+                          form.platform === platform ? "primary" : "outline"
+                        }
+                      >
+                        <PlatformLogo platform={platform} /> {platform}
+                        {form.platform === platform && (
+                          <Icon name="check" size={14} />
+                        )}
+                      </Button>
+                    ))}
+                  </div>
+                </Field>
+                <Field label="发布账号">
+                  {review ? (
+                    <div className="content-publish-account">
+                      <Button
+                        aria-pressed={form.account === "张工说乡墅"}
+                        onClick={() => updateForm({ account: "张工说乡墅" })}
+                        variant="outline"
+                      >
+                        张工说乡墅
+                      </Button>
+                      <span className="content-publish-account-status">
+                        审核示例账号
+                      </span>
+                    </div>
+                  ) : platformAccounts.length ? (
+                    <div className="content-publish-account">
+                      {/* A select cannot render pictures, so the chosen account's
+                      avatar sits beside it to confirm the target at a glance. */}
+                      {selectedAccount && (
+                        <AccountAvatar account={selectedAccount} size={28} />
+                      )}
+                      <select
+                        disabled={actionBusy || cloudRevision === null}
+                        aria-label="选择发布账号"
+                        value={selectedAccount?.id ?? ""}
+                        onChange={(event) =>
+                          updateForm({ account: event.target.value })
+                        }
+                      >
+                        <option value="">请选择发布账号</option>
+                        {platformAccounts.map((account) => (
+                          <option key={account.id} value={account.id}>
+                            {account.username} · {account.platform_user_id}
+                            {account.status === "invalid"
+                              ? "（登录态失效）"
+                              : ""}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedAccount?.status === "connected" && (
+                        <span className="content-publish-account-status">
+                          已授权
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="content-publish-account-empty">
+                      <span>尚未连接该平台账号，请先扫码连接</span>
+                      <Button
+                        onClick={() => navigate("profile")}
+                        variant="quiet"
+                      >
+                        前往用户档案管理账号
+                      </Button>
+                    </div>
+                  )}
+                  {selectedAccount?.status === "invalid" && (
+                    <p role="alert">
+                      该账号登录态已失效，请在用户档案中重新扫码后再发布。
+                    </p>
+                  )}
+                  {!platformDeliverable && (
+                    <p role="status">
+                      小红书自动发布正在开发中；现在可保存草稿、复制文案后前往官方页面发布。
+                    </p>
+                  )}
+                </Field>
+              </div>
+            </section>
+            <section className="content-publish-group">
+              <h3>发布时间</h3>
+              {kuaishou ? (
+                <Hint>快手目前仅支持立即发布。</Hint>
+              ) : (
+                <fieldset
+                  aria-label="发布时间"
+                  className="content-publish-schedule"
+                >
+                  <label>
+                    <input
+                      type="radio"
+                      name="publish-schedule"
+                      checked={!isScheduled}
+                      disabled={editorDisabled}
+                      onChange={() => {
+                        setScheduleMode("now");
+                        setSaveNotice(false);
+                      }}
+                    />
+                    立即发布
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="publish-schedule"
+                      checked={isScheduled}
+                      disabled={editorDisabled}
+                      onChange={() => {
+                        setScheduleMode("later");
+                        setSaveNotice(false);
+                      }}
+                    />
+                    定时发布
+                  </label>
+                  {isScheduled && (
+                    <input
+                      type="datetime-local"
+                      aria-label="定时发布时间"
+                      disabled={actionBusy || cloudRevision === null}
+                      min={localDateTimeInputFromIso(
+                        new Date(
+                          Date.now() + PUBLISH_SCHEDULE_MIN_LEAD_MS,
+                        ).toISOString(),
+                      )}
+                      value={scheduleInput}
+                      onChange={(event) => {
+                        setScheduleInput(event.target.value);
+                        setSaveNotice(false);
+                      }}
+                    />
+                  )}
+                </fieldset>
+              )}
+            </section>
+          </Panel>
+          <Panel className="content-publish-preview">
+            <header className="content-publish-editor-heading">
+              <h2>作品预览</h2>
+              <span>
+                <PlatformLogo platform={form.platform} /> {form.platform}
+              </span>
+            </header>
+            {selectedAsset ? (
+              <Media
+                asset={selectedAsset}
+                alt={`${selectedAsset.name} 视频预览`}
+                aspectRatio="9:16"
+              />
+            ) : (
+              <Empty title="选择成片后可预览" />
+            )}
+            {selectedAsset && (
+              <p
+                className="content-publish-readiness"
+                data-ready={publishReady}
+              >
+                <Icon name={publishReady ? "check" : "info"} size={16} />
+                {publishReady
+                  ? "发布前检查通过"
+                  : review
+                    ? "审核预览"
+                    : "请确认发布账号与设置"}
+              </p>
+            )}
+          </Panel>
+        </div>
+        <div className="content-publish-messages">
+          {saveNotice && (
+            <p className="content-publish-save-notice" role="status">
+              {review
+                ? "已保存审核示例草稿，未同步到云端。"
+                : "已保存到云端，可在刷新后继续编辑。"}
+            </p>
+          )}
+          {cloudRevision === null && !cloudError && (
+            <p role="status">正在加载云端发布草稿…</p>
+          )}
+          {cloudError && <p role="alert">{cloudError}</p>}
+          {actionError && <p role="alert">{actionError}</p>}
+          {cloudError && !review && (
+            <Button
+              disabled={actionBusy}
+              onClick={() => setReload((value) => value + 1)}
+            >
+              重新加载草稿
+            </Button>
+          )}
+        </div>
+        <footer className="content-publish-actions studio-panel">
+          <Button
+            disabled={
+              !selectedAsset ||
+              actionBusy ||
+              generatingCover ||
+              cloudRevision === null ||
+              user.role === "auditor"
+            }
+            onClick={() => void savePublishDraft()}
+            variant="outline"
+          >
+            保存草稿
+          </Button>
+          <Button
+            disabled={publishBlocked}
+            variant="primary"
+            onClick={() => void submitPublish()}
+          >
+            {isScheduled ? "定时发布" : "立即发布"}
+          </Button>
+        </footer>
       </section>
     </section>
   );

@@ -947,7 +947,15 @@ def request_deepseek_text(
     source_text: str,
     ip_profile_snapshot: dict[str, object] | None = None,
     instructions: str = "",
-    purpose: Literal["rewrite", "analysis", "title", "prompt", "json_repair"] = "rewrite",
+    purpose: Literal[
+        "rewrite",
+        "analysis",
+        "title",
+        "prompt",
+        "json_repair",
+        "publish_title",
+        "publish_description",
+    ] = "rewrite",
 ) -> str:
     """Single DeepSeek transport for text AI; visual/audio providers stay separate."""
     from curl_cffi import requests as curl_requests
@@ -957,6 +965,10 @@ def request_deepseek_text(
         "rewrite": SCRIPT_REWRITE_SYSTEM_PROMPT,
         "analysis": "分析给定文案的主题、受众、结构、表达和待核实信息，给出具体改进建议。",
         "title": "根据给定正文生成三个简短标题，每行一个；不夸大、不添加正文没有的事实。",
+        "publish_title": "为短视频改写一个简洁、具体的发布标题，读者一眼能看懂看点。"
+        "只输出一个成品标题，单行，无引号、序号或话题标签。",
+        "publish_description": "为短视频改写发布描述，用自然简练的语言介绍作品内容。"
+        "只输出一段可直接使用的描述，无标题、解释、Markdown 或话题标签。",
         "prompt": "优化给定视频提示词，明确主体、场景、动作、镜头与约束；"
         "保留引用标记和时长，不虚构素材。只输出优化后的提示词。",
         "json_repair": "你是 JSON 结构修复器。依据校验错误修复给定的视频拆解 JSON。"
@@ -985,12 +997,13 @@ def request_deepseek_text(
         )
         messages.append({"role": "user", "content": f"{label}：\n{instructions}"})
     messages.append({"role": "user", "content": f"待处理原文：\n\n{source_text}"})
+    publish_copy = purpose in {"publish_title", "publish_description"}
     payload_object = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "temperature": 0 if purpose == "json_repair" else 1.3,
-        "max_tokens": DEEPSEEK_MAX_OUTPUT_TOKENS,
+        "temperature": 0 if purpose == "json_repair" else 0.7 if publish_copy else 1.3,
+        "max_tokens": 768 if publish_copy else DEEPSEEK_MAX_OUTPUT_TOKENS,
         **({"response_format": {"type": "json_object"}} if purpose == "json_repair" else {}),
     }
     payload = json.dumps(payload_object).encode("utf-8")
@@ -1028,7 +1041,7 @@ def request_deepseek_text(
             url,
             data=payload,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            timeout=DEEPSEEK_TIMEOUT_SECONDS,
+            timeout=30 if publish_copy else DEEPSEEK_TIMEOUT_SECONDS,
             stream=False,
             allow_redirects=False,
         )

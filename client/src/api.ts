@@ -10082,6 +10082,25 @@ export type PublishRecordCreateInput = {
 
 const PUBLISH_RECORDS_BASE = "/api/studio/publish/records";
 
+export type PublishCopyInput = {
+  field: "title" | "description";
+  platform: "抖音" | "视频号" | "快手" | "小红书";
+  title: string;
+  description: string;
+};
+
+export async function optimizePublishCopy(
+  input: PublishCopyInput,
+  signal: AbortSignal,
+): Promise<{ text: string }> {
+  return requestApiJson(
+    "/api/studio/publish/copy/optimize",
+    "AI 优化失败",
+    { method: "POST", body: JSON.stringify(input), signal },
+    35_000,
+  );
+}
+
 export async function listPublishRecords(
   filters: {
     status?: PublishRecordStatus;

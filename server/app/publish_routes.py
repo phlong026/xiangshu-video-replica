@@ -38,9 +38,13 @@ from app.publish import (
     list_accounts,
     request_account_verify,
 )
+from app.publish_copy import PublishCopySuggestion, optimize_publish_copy
 from app.settings import fernet_from_environment
 
 router = APIRouter(prefix="/api/studio/publish")
+router.add_api_route(
+    "/copy/optimize", optimize_publish_copy, methods=["POST"], response_model=PublishCopySuggestion
+)
 
 
 def _fernet() -> Fernet:

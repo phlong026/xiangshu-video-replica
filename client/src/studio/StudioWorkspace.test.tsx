@@ -1305,12 +1305,13 @@ describe("V1.4 workspace integration", () => {
     expect(window.location.hash).toBe("#studio/settings");
   });
   it.each([
-    { entry: "选择发布成片", hasSelection: false },
-    { entry: "更换发布成片", hasSelection: true },
-    { entry: "去任务中心选择成片", hasSelection: false },
+    { entry: "选择发布成片", hasSelection: false, inTools: true },
+    { entry: "更换发布成片", hasSelection: true, inTools: true },
+    { entry: "选择成片", hasSelection: false, inTools: false },
+    { entry: "更换成片", hasSelection: true, inTools: false },
   ])(
     "发布页 $entry 通过任务详情交接新成片并更新发布预览",
-    ({ entry, hasSelection }) => {
+    ({ entry, hasSelection, inTools }) => {
       const reviewData = createReviewData();
       reviewData.assets = [
         {
@@ -1365,14 +1366,17 @@ describe("V1.4 workspace integration", () => {
           initialState={initialState}
         />,
       );
-      const manual = within(
-        screen.getByRole("region", { name: "快手手动发布" }),
-      );
-      expect(
-        manual.getByText(
-          hasSelection ? "已选择：原发布成片.mp4" : "尚未选择成片",
-        ),
-      ).toBeInTheDocument();
+      if (inTools) {
+        fireEvent.click(screen.getByRole("button", { name: "发布工具" }));
+        const manual = within(
+          screen.getByRole("region", { name: "快手手动发布" }),
+        );
+        expect(
+          manual.getByText(
+            hasSelection ? "已选择：原发布成片.mp4" : "尚未选择成片",
+          ),
+        ).toBeInTheDocument();
+      }
 
       fireEvent.click(screen.getByRole("button", { name: entry }));
       expect(window.location.hash).toBe("#studio/tasks");
@@ -1397,11 +1401,6 @@ describe("V1.4 workspace integration", () => {
       expect(currentExtractionContext().state.selectedAssetId).toBe(
         "publish-new-result",
       );
-      expect(
-        within(screen.getByRole("region", { name: "快手手动发布" })).getByText(
-          "已选择：新选择成片.mp4",
-        ),
-      ).toBeInTheDocument();
       expect(
         screen.getByAltText("新选择成片.mp4 视频预览"),
       ).toBeInTheDocument();
