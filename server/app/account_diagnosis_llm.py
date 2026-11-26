@@ -19,7 +19,12 @@ from collections.abc import Callable
 from typing import Any
 
 from app.llm_json import parse_llm_json
-from app.settings import SettingsRepository
+from app.settings import (
+    DEEPSEEK_DEFAULT_BASE_URL,
+    SettingsRepository,
+    deepseek_completion_options,
+    resolve_deepseek_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +71,8 @@ def load_narrative_llm_config(conn: Any) -> tuple[str, str, str] | None:
     api_key = str(config.get("api_key") or "").strip()
     if not api_key:
         return None
-    base_url = str(config.get("base_url") or "https://api.deepseek.com").rstrip("/")
-    model = str(config.get("model") or "deepseek-chat")
+    base_url = (config.get("base_url") or DEEPSEEK_DEFAULT_BASE_URL).rstrip("/")
+    model = resolve_deepseek_model(config.get("model"))
     return base_url, api_key, model
 
 
@@ -176,6 +181,7 @@ def build_llm_narrative(
     }
     payload_object = {
         "model": model,
+        **deepseek_completion_options(model),
         "messages": [
             {"role": "system", "content": NARRATIVE_LLM_SYSTEM_PROMPT},
             {
@@ -279,6 +285,7 @@ def enrich_action_cards(
     ]
     payload_object = {
         "model": model,
+        **deepseek_completion_options(model),
         "messages": [
             {"role": "system", "content": ACTION_CARDS_LLM_SYSTEM_PROMPT},
             {

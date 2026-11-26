@@ -2664,7 +2664,7 @@ def test_text_ai_purposes_use_same_deepseek_transport(monkeypatch, purpose):
     result = rewrite.request_deepseek_text(
         base_url="https://api.deepseek.com",
         api_key="test-key",
-        model="deepseek-chat",
+        model="deepseek-flash",
         source_text="来源文本",
         instructions="简洁表达",
         purpose=purpose,
@@ -2672,7 +2672,8 @@ def test_text_ai_purposes_use_same_deepseek_transport(monkeypatch, purpose):
     assert result == "测试输出"
     assert requests[0][0] == "https://api.deepseek.com/chat/completions"
     body = json.loads(requests[0][1])
-    assert body["model"] == "deepseek-chat"
+    assert body["model"] == "deepseek-flash"
+    assert body["thinking"] == {"type": "disabled"}
     assert body["max_tokens"] == 8192
     assert "简洁表达" in body["messages"][-2]["content"]
     assert "来源文本" in body["messages"][-1]["content"]

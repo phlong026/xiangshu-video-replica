@@ -27,7 +27,13 @@ from app.db_portable import (
 )
 from app.external_calls import CallTimer, Outcome, record_external_call
 from app.permissions import require_not_auditor, require_project_access, write_audit
-from app.settings import SettingsRepository, SettingsUnavailableError
+from app.settings import (
+    DEEPSEEK_DEFAULT_BASE_URL,
+    SettingsRepository,
+    SettingsUnavailableError,
+    deepseek_completion_options,
+    resolve_deepseek_model,
+)
 from app.task_lease import TaskLease, claim_script_rewrite_task
 
 logger = logging.getLogger(__name__)
@@ -45,9 +51,6 @@ class ConfirmedRewriteResponseError(HTTPException):
     """
 
 
-# DeepSeek 官方 OpenAI 兼容端点；config.base_url 可覆盖（例如代理/私有网关）。
-DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 # Non-streaming libcurl enforces this wall-clock limit, including keep-alive data.
 # Submission refreshes the five-minute lease, leaving a minute for settlement.
 DEEPSEEK_TIMEOUT_SECONDS = 240
@@ -432,7 +435,7 @@ def load_script_rewrite_configuration(
     return (
         (config.get("base_url") or DEEPSEEK_DEFAULT_BASE_URL).rstrip("/"),
         api_key,
-        config.get("model") or DEEPSEEK_DEFAULT_MODEL,
+        resolve_deepseek_model(config.get("model")),
     )
 
 
@@ -1001,6 +1004,7 @@ def request_deepseek_text(
     payload_object = {
         "model": model,
         "messages": messages,
+        **deepseek_completion_options(model),
         "stream": False,
         "temperature": 0 if purpose == "json_repair" else 0.7 if publish_copy else 1.3,
         "max_tokens": 768 if publish_copy else DEEPSEEK_MAX_OUTPUT_TOKENS,
