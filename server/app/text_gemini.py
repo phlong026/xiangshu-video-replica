@@ -1,6 +1,7 @@
 """Gemini 的文本调用使用现有模型网关。"""
 
 from app.analysis import (
+    RESPONSE_FAILURE_PHASE,
     AnalysisProviderFailed,
     ApilioGemini,
     UrllibApilioChatTransport,
@@ -34,6 +35,13 @@ def gemini_can_fail_over(failure: AnalysisProviderFailed) -> bool:
     # 请求结果未知时禁止重发。只在上游明确拒绝或明确不可用时切换通道。
     return failure.http_status in (401, 402, 403, 503) or _should_try_fallback(
         failure, model=GEMINI_TEXT_MODEL
+    )
+
+
+def gemini_output_invalid(failure: AnalysisProviderFailed) -> bool:
+    return (
+        failure.failure_phase == RESPONSE_FAILURE_PHASE
+        and (failure.upstream_diagnostic or {}).get("reason") != "finish_reason_content_filter"
     )
 
 

@@ -24,7 +24,7 @@ from pg_test_kit import (
 from app.analysis import AnalysisProviderFailed
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 from app.db_portable import BusinessConnection
-from app.prompt_optimizer import run_prompt_task
+from app.prompt_optimizer import run_prompt_task, validate_result
 from app.storage import LocalStorageAdapter
 
 DB_NAME = "prompt_optimize_route_test"
@@ -130,22 +130,31 @@ GOOD_TEXT = (
 
 
 class Provider:
-    model = "fake"
-    calls = 0
-    failure: Exception | None = None
-    text = json.dumps({"prompt_text": GOOD_TEXT, "warnings": []})
-    # 依次返回的响应；用尽后回落到 text。payloads 记录每次请求，供断言纠正清单。
-    texts: list[str] = []
-    payloads: list[dict[str, Any]] = []
+    def __init__(self, model: str = "gemini-4-carbon") -> None:
+        self.model = model
+        self.calls = 0
+        self.failure: Exception | None = None
+        self.text = json.dumps({"prompt_text": GOOD_TEXT, "warnings": []})
+        self.payloads: list[dict[str, Any]] = []
 
     def _complete(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         self.calls += 1
         self.payloads.append(payload)
         if self.failure:
             raise self.failure
-        if self.texts:
-            return self.texts.pop(0), {}
         return self.text, {}
+
+    def failover_pause(self, _: float) -> None:
+        pass
+
+
+def bind_providers(monkeypatch: pytest.MonkeyPatch, primary: Provider) -> Provider:
+    fallback = Provider("gemini-3.8-flash")
+    monkeypatch.setattr(
+        "app.prompt_optimizer_routes.get_prompt_optimizer_providers",
+        lambda conn: (primary, fallback),
+    )
+    return fallback
 
 
 def run_one(dsn: str, tmp_path: Any) -> bool:
@@ -548,9 +557,7 @@ def test_async_request_replay_and_single_charge(
 ) -> None:
     user, headers = _customer(client, route_state, credits=10)
     provider = Provider()
-    monkeypatch.setattr(
-        "app.prompt_optimizer_routes.get_prompt_optimizer_provider", lambda conn: provider
-    )
+    fallback = bind_providers(monkeypatch, provider)
     body = request_body()
     first = client.post(OPTIMIZE_PATH, headers=headers, json=body)
     assert first.status_code == 202, first.text
@@ -571,6 +578,7 @@ def test_async_request_replay_and_single_charge(
     assert result["result"]["prompt_text"] == GOOD_TEXT
     assert not run_one(route_state, tmp_path)
     assert provider.calls == 1
+    assert fallback.calls == 0
     with psycopg.connect(route_state) as conn:
         assert conn.execute(
             "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s",
@@ -582,31 +590,38 @@ def test_async_request_replay_and_single_charge(
         ).fetchone() == ("ACTUAL", 1)
 
 
-@pytest.mark.parametrize("bad", ["network", "json", "structure"])
+@pytest.mark.parametrize("bad", ["network", "json", "structure", "fallback_network", "filtered"])
 def test_failure_preserves_cost_and_never_resubmits(
     client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, bad: str
 ) -> None:
     user, headers = _customer(client, route_state, credits=10)
     provider = Provider()
+    fallback = bind_providers(monkeypatch, provider)
     if bad == "network":
         provider.failure = AnalysisProviderFailed("network", failure_phase="network")
-    elif bad == "json":
+    elif bad == "filtered":
+        provider.failure = AnalysisProviderFailed(
+            "filtered", upstream_diagnostic={"reason": "finish_reason_content_filter"}
+        )
+    elif bad in ("json", "fallback_network"):
         provider.text = "broken"
+        fallback.text = "broken"
+        if bad == "fallback_network":
+            fallback.failure = AnalysisProviderFailed("network", failure_phase="network")
     else:
         provider.text = json.dumps(
             {"prompt_text": GOOD_TEXT.replace("[Shot 1]", "[Shot 2]"), "warnings": []}
         )
-    monkeypatch.setattr(
-        "app.prompt_optimizer_routes.get_prompt_optimizer_provider", lambda conn: provider
-    )
+        fallback.text = provider.text
     first = client.post(OPTIMIZE_PATH, headers=headers, json=request_body()).json()
     assert run_one(route_state, tmp_path)
     result = client.get(OPTIMIZE_PATH + "/" + first["task_id"], headers=headers).json()
-    assert result["status"] == ("SUBMISSION_UNCERTAIN" if bad == "network" else "FAILED"), result
+    expected = "SUBMISSION_UNCERTAIN" if bad in ("network", "fallback_network") else "FAILED"
+    assert result["status"] == expected, result
     client.post(OPTIMIZE_PATH, headers=headers, json=request_body())
     assert not run_one(route_state, tmp_path)
-    # 结构自检失败允许一次纠正重试（同一 attempt、同一次计费）；网络与解析失败不重试。
-    assert provider.calls == (2 if bad == "structure" else 1)
+    assert provider.calls == 1
+    assert fallback.calls == (0 if bad in ("network", "filtered") else 1)
     with psycopg.connect(route_state) as conn:
         assert conn.execute(
             "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s",
@@ -626,9 +641,7 @@ def test_assumptions_apply_without_blocking(
             "warnings": [{"code": "ASSUMED_SCENE", "message": "已按需求推断为室内客厅"}],
         }
     )
-    monkeypatch.setattr(
-        "app.prompt_optimizer_routes.get_prompt_optimizer_provider", lambda conn: provider
-    )
+    fallback = bind_providers(monkeypatch, provider)
     task = client.post(OPTIMIZE_PATH, headers=headers, json=request_body()).json()
     assert run_one(route_state, tmp_path)
     result = client.get(OPTIMIZE_PATH + "/" + task["task_id"], headers=headers).json()
@@ -640,6 +653,7 @@ def test_assumptions_apply_without_blocking(
     assert result["result"]["needs_confirmation"] == []
     assert result["result"]["reference_plan"] == []
     assert provider.calls == 1
+    assert fallback.calls == 0
     with psycopg.connect(route_state) as conn:
         assert (
             conn.execute(
@@ -649,29 +663,39 @@ def test_assumptions_apply_without_blocking(
         )
 
 
-def test_structural_failure_retries_once_with_correction_items(
-    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+@pytest.mark.parametrize("reason", ["timeline", "json", "rate_limit"])
+def test_invalid_primary_or_rate_limit_switches_to_fallback(
+    client: TestClient,
+    route_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    reason: str,
 ) -> None:
-    """结构自检失败先纠正重试一次：第二次带上失败项，成功照常落地计费。"""
+    """不同模型的请求仍归属于同一次优化和结算。"""
     user, headers = _customer(client, route_state, credits=10)
     provider = Provider()
-    provider.payloads = []
-    provider.texts = [
-        json.dumps({"prompt_text": GOOD_TEXT.replace("[Shot 1]", "[Shot 2]"), "warnings": []}),
-        json.dumps({"prompt_text": GOOD_TEXT, "warnings": []}),
-    ]
-    monkeypatch.setattr(
-        "app.prompt_optimizer_routes.get_prompt_optimizer_provider", lambda conn: provider
-    )
+    fallback = bind_providers(monkeypatch, provider)
+    if reason == "timeline":
+        provider.text = json.dumps(
+            {"prompt_text": GOOD_TEXT.replace("waves.", "waves. At 00:08, stops."), "warnings": []}
+        )
+    elif reason == "json":
+        provider.text = "broken"
+    else:
+        provider.failure = AnalysisProviderFailed(
+            "rate limit", http_status=429, failure_phase="http"
+        )
     task = client.post(OPTIMIZE_PATH, headers=headers, json=request_body()).json()
     assert run_one(route_state, tmp_path)
     result = client.get(OPTIMIZE_PATH + "/" + task["task_id"], headers=headers).json()
     assert result["status"] == "SUCCEEDED", result
     assert result["result"]["prompt_text"] == GOOD_TEXT
-    assert provider.calls == 2
-    correction = provider.payloads[1]["messages"][-1]
-    assert correction["role"] == "user"
-    assert "镜头编号应连续" in correction["content"][0]["text"]
+    assert provider.calls == fallback.calls == 1
+    assert provider.payloads[0]["model"] == "gemini-4-carbon"
+    assert fallback.payloads[0]["model"] == "gemini-3.8-flash"
+    if reason != "rate_limit":
+        correction = fallback.payloads[0]["messages"][-1]["content"][0]["text"]
+        assert ("镜头时间须递增" if reason == "timeline" else "返回合法 JSON") in correction
     with psycopg.connect(route_state) as conn:
         assert (
             conn.execute(
@@ -679,6 +703,24 @@ def test_structural_failure_retries_once_with_correction_items(
             ).fetchone()[0]
             == 7
         )
+        assert conn.execute(
+            "SELECT state,usage FROM billing_attempts WHERE service='prompt_optimize'"
+        ).fetchall() == [("ACTUAL", 1)]
+
+
+def test_zero_second_opening_is_normalized_and_interior_timestamp_is_preserved() -> None:
+    text = GOOD_TEXT.replace(
+        "[Shot 1] A person waves.", "[Shot 1] At 00:00, starts. At 00:03, waves."
+    )
+    result, state = validate_result(
+        json.dumps({"prompt_text": text, "warnings": []}),
+        snapshot={
+            "context": {"mode": "T2VA", "duration_seconds": 6, "generation_assets": []},
+            "prompt_text": "A person waves.",
+        },
+    )
+    assert state == "SUCCEEDED"
+    assert result["prompt_text"] == text.replace("At 00:00, ", "开场时，")
 
 
 def test_ownership_and_missing_assets(client: TestClient, route_state: str, tmp_path: Any) -> None:

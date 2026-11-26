@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.customer_fence import BusinessDbDep
 from app.permissions import require_not_auditor
 from app.publish_records import MAX_DESCRIPTION_LENGTH, MAX_TITLE_LENGTH
-from app.script_rewrite import load_script_text_route, request_script_text
+from app.script_rewrite import InvalidScriptTextOutput, load_script_text_route, request_script_text
 from app.security_rate_limit import DIMENSION_PUBLISH_COPY_ACCOUNT, consume_rate_limit
 
 
@@ -27,6 +27,17 @@ class PublishCopyRequest(BaseModel):
 
 class PublishCopySuggestion(BaseModel):
     text: str
+
+
+def _validated_title(text: str) -> str:
+    title = text.strip()
+    try:
+        length = len(title.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as exc:
+        raise InvalidScriptTextOutput("发布标题含无效字符") from exc
+    if not title or len(title.splitlines()) != 1 or length > MAX_TITLE_LENGTH:
+        raise InvalidScriptTextOutput("发布标题须为一行有效文本")
+    return title
 
 
 def optimize_publish_copy(request: PublishCopyRequest, db: BusinessDbDep) -> PublishCopySuggestion:
@@ -79,19 +90,17 @@ def optimize_publish_copy(request: PublishCopyRequest, db: BusinessDbDep) -> Pub
             ),
             instructions=f"目标发布平台为{request.platform}。另一字段仅供理解内容。本次仅返回"
             + ("标题。" if is_title else "描述。"),
+            validate_output=_validated_title if is_title else None,
         )
         text = result.rewritten_text.strip()
+    except InvalidScriptTextOutput:
+        text = ""
     except HTTPException as exc:
         raise HTTPException(
             exc.status_code,
             detail={"code": "PUBLISH_COPY_FAILED", "message": "AI 优化暂时失败，请稍后重试。"},
         ) from exc
-    limit = MAX_TITLE_LENGTH if is_title else MAX_DESCRIPTION_LENGTH
-    if (
-        not text
-        or len(text.encode("utf-16-le")) // 2 > limit
-        or (is_title and len(text.splitlines()) > 1)
-    ):
+    if not text or (not is_title and len(text.encode("utf-16-le")) // 2 > MAX_DESCRIPTION_LENGTH):
         raise HTTPException(
             502,
             detail={"code": "PUBLISH_COPY_INVALID", "message": "未生成可用文案，请重新优化。"},
