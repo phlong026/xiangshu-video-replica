@@ -333,6 +333,7 @@ def list_viral_videos(
     limit: Annotated[int, Query(ge=1, le=50)] = 12,
     cursor: Annotated[str | None, Query(max_length=2048)] = None,
     featured_only: bool = False,
+    keyword: Annotated[str, Query(max_length=100)] = "",
 ) -> ViralListResponse:
     # 恢复：列表只读库内「管理员上传/推送」内容，不依赖抓取客户端，故不再 410。
     # 列表本身是管理员推送的公开内容池，匿名访客（工作台未登录态）可读；
@@ -363,6 +364,7 @@ def list_viral_videos(
             limit=limit,
             cursor=cursor,
             featured_only=featured_only,
+            keyword=keyword,
         )
     except InvalidViralCursorError as exc:
         raise HTTPException(

@@ -27,6 +27,7 @@ const {
   createOralTask,
   createScriptFromAudioTask,
   getLatestScriptFromAudioTask,
+  getLatestViralScriptFromAudioTask,
   getOralPrice,
   listOralAvatars,
   listOralVoices,
@@ -90,6 +91,9 @@ const {
   createOralTask: vi.fn(),
   createScriptFromAudioTask: vi.fn(),
   getLatestScriptFromAudioTask: vi.fn(),
+  getLatestViralScriptFromAudioTask: vi.fn(
+    async (): Promise<import("../api").ScriptFromAudioTask | null> => null,
+  ),
   getOralPrice: vi.fn(),
   listOralAvatars: vi.fn(),
   listOralVoices: vi.fn(),
@@ -227,6 +231,11 @@ vi.mock("../api", async (importOriginal) => ({
   createOralTask,
   createScriptFromAudioTask,
   getLatestScriptFromAudioTask,
+  getLatestViralScriptFromAudioTask,
+  getCopyExtractionQuote: vi.fn(async () => ({
+    credits: 18,
+    unit_credits: "0.1",
+  })),
   getOralPrice,
   listOralAvatars,
   listOralVoices,
@@ -1360,9 +1369,13 @@ describe("V1.4 内容与运营页面", () => {
       "copy",
       expect.any(String),
     );
-    expect(value.navigate).toHaveBeenCalledWith(
-      "copy",
-      expect.objectContaining({ returnTo: "viral-detail" }),
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        copyExtractionSource: expect.objectContaining({
+          viral: expect.objectContaining({ videoId: "favorite-native-1" }),
+        }),
+      }),
+      { persistNow: true },
     );
   });
 
@@ -1394,21 +1407,74 @@ describe("V1.4 内容与运营页面", () => {
       expect.any(String),
     );
     await waitFor(() => {
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "project-1",
-        sourceId: "asset-1",
-        sourceAssetId: "asset-1",
-      });
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "project-1",
+          sourceId: "asset-1",
+          sourceAssetId: "asset-1",
+        }),
+        { persistNow: true },
+      );
       expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
         "project-1",
         "asset-1",
       );
     });
-    expect(value.navigate).toHaveBeenCalledWith("copy", {
-      selectedVideoId: "dy-1",
-      returnTo: "viral-detail",
-    });
     expect(screen.getByText("参考素材已导入")).toBeInTheDocument();
+  });
+
+  it("有本人已完成转写时直接打开结果，只有确认重新转写才新建", async () => {
+    const value = studio({
+      review: false,
+      state: {
+        ...studio().state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    const task: import("../api").ScriptFromAudioTask = {
+      id: "copy-reused",
+      project_id: "prior-project",
+      source_asset_id: "prior-audio",
+      status: "SUCCEEDED",
+      attempt: 1,
+      result: { text: "上一次的原文" },
+      error_code: null,
+      error_message: null,
+      retryable: false,
+      created_at: "",
+      updated_at: "",
+      started_at: null,
+      completed_at: null,
+      charged_credits: 18,
+    };
+    getLatestViralScriptFromAudioTask.mockResolvedValueOnce(task);
+    openViralVideoDetail.mockResolvedValue(viralDetailView(viralItem(1)));
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+    const view = await screen.findByRole("button", { name: "查看已提取文案" });
+    fireEvent.click(view);
+    expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
+      "prior-project",
+      "prior-audio",
+      undefined,
+      { task },
+    );
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重新转写" }));
+    expect(
+      await screen.findByRole("dialog", { name: "重新转写文案" }),
+    ).toBeInTheDocument();
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认重新转写" }));
+    await waitFor(() =>
+      expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
+        "project-1",
+        "asset-1",
+        undefined,
+        { restart: true },
+      ),
+    );
   });
 
   it("详情标题、描述与互动数据独立于播放器，话题与口播操作清晰分区", () => {
@@ -1657,10 +1723,6 @@ describe("V1.4 内容与运营页面", () => {
       "native-dy-1",
       "copy",
       expect.any(String),
-    );
-    expect(value.navigate).toHaveBeenCalledWith(
-      "copy",
-      expect.objectContaining({ returnTo: "viral-detail" }),
     );
   });
 
@@ -2072,11 +2134,14 @@ describe("V1.4 内容与运营页面", () => {
       });
 
       expect(getViralImportTask).toHaveBeenCalledWith("server-import-1");
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "project-1",
-        sourceId: "asset-1",
-        sourceAssetId: "asset-1",
-      });
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "project-1",
+          sourceId: "asset-1",
+          sourceAssetId: "asset-1",
+        }),
+        { persistNow: true },
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -2128,11 +2193,14 @@ describe("V1.4 内容与运营页面", () => {
 
       expect(getViralImportTask).toHaveBeenCalledTimes(120);
       expect(value.patchDraft).toHaveBeenCalledOnce();
-      expect(value.patchDraft).toHaveBeenCalledWith({
-        projectId: "boundary-project",
-        sourceId: "boundary-asset",
-        sourceAssetId: "boundary-asset",
-      });
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "boundary-project",
+          sourceId: "boundary-asset",
+          sourceAssetId: "boundary-asset",
+        }),
+        { persistNow: true },
+      );
       fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
       expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
     } finally {
@@ -3853,7 +3921,7 @@ describe("V1.4 内容与运营页面", () => {
   });
 
   it.each(["viralExtractIntent", "viralReplicateIntent"] as const)(
-    "服务端详情未决时不消费 %s，确认可用后才自动导入",
+    "服务端详情未决时不消费 %s，确认后显示引导或提取报价",
     async (intent) => {
       const base = studio();
       let resolveDetail!: (value: ViralDetailViewResponse) => void;
@@ -3910,6 +3978,12 @@ describe("V1.4 内容与运营页面", () => {
         ).toBeInTheDocument();
         expect(createViralImportTask).not.toHaveBeenCalled();
       } else {
+        const transcript = screen.getByRole("region", { name: "视频口播文案" });
+        expect(transcript).toHaveFocus();
+        expect(createViralImportTask).not.toHaveBeenCalled();
+        fireEvent.click(
+          within(transcript).getByRole("button", { name: "提取文案" }),
+        );
         await waitFor(() =>
           expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
             "douyin",
@@ -4054,6 +4128,8 @@ describe("V1.4 内容与运营页面", () => {
         ).toBeInTheDocument();
         expect(createViralImportTask).not.toHaveBeenCalled();
       } else {
+        expect(createViralImportTask).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
         await waitFor(() =>
           expect(createViralImportTask).toHaveBeenCalledExactlyOnceWith(
             "douyin",

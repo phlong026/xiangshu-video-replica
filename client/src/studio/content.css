@@ -118,13 +118,30 @@
   font-size: var(--font-label);
   gap: 8px;
 }
-.content-sort select {
+.content-sort select,
+.viral-published-search input {
   background: #101111;
   border: 1px solid #343530;
   border-radius: 6px;
   color: #deded8;
   font: inherit;
   padding: 6px 10px;
+}
+.viral-published-search,
+.copy-extraction-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.viral-published-search input {
+  min-width: 0;
+  max-width: 100%;
+}
+.copy-extraction-cost {
+  color: var(--text-muted, #a5a79f);
+  font-size: var(--font-label);
+  margin: 6px 0 0;
 }
 .content-video-grid {
   display: grid;
@@ -2678,7 +2695,7 @@
   font-size: 16px;
   margin: 0;
 }
-.viral-detail-transcript > .studio-button {
+.viral-detail-transcript .copy-extraction-actions > .studio-button {
   flex: none;
   min-height: 36px;
   border-color: #41443d;

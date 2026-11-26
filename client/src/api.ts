@@ -1017,6 +1017,7 @@ export async function createScriptFromAudioTask(
   projectId: string,
   sourceAssetId: string,
   idempotencyKey: string,
+  reuseCompleted = false,
 ): Promise<ScriptFromAudioTask> {
   return requestApiJson<ScriptFromAudioTask>(
     `/api/projects/${encodeURIComponent(projectId)}/script-from-audio`,
@@ -1026,6 +1027,7 @@ export async function createScriptFromAudioTask(
       body: JSON.stringify({
         source_asset_id: sourceAssetId,
         idempotency_key: idempotencyKey,
+        ...(reuseCompleted ? { reuse_completed: true } : {}),
       }),
     },
   );
@@ -1044,10 +1046,36 @@ export async function getScriptFromAudioTask(
 /** 读取项目最近的提取文案任务；尚无任务返回 null。 */
 export async function getLatestScriptFromAudioTask(
   projectId: string,
+  sourceAssetId?: string,
 ): Promise<ScriptFromAudioTask | null> {
+  const query = sourceAssetId
+    ? `?${new URLSearchParams({ source_asset_id: sourceAssetId })}`
+    : "";
   return requestApiJson<ScriptFromAudioTask | null>(
-    `/api/projects/${encodeURIComponent(projectId)}/script-from-audio-tasks/latest`,
+    `/api/projects/${encodeURIComponent(projectId)}/script-from-audio-tasks/latest${query}`,
     "读取文案提取任务失败",
+  );
+}
+
+export function getLatestViralScriptFromAudioTask(
+  platform: ViralPlatform,
+  videoId: string,
+): Promise<ScriptFromAudioTask | null> {
+  const query = new URLSearchParams({ platform, video_id: videoId });
+  return requestApiJson(
+    `/api/viral-copy/latest?${query}`,
+    "读取上次文案提取失败",
+  );
+}
+
+export function getCopyExtractionQuote(
+  service: "asr" | "link_resolution",
+  units: number,
+): Promise<{ credits: number; unit_credits: string }> {
+  const query = new URLSearchParams({ service, units: String(units) });
+  return requestApiJson(
+    `/api/customer/billing/quote?${query}`,
+    "读取文案提取费用失败",
   );
 }
 
@@ -9061,6 +9089,7 @@ export type ViralDetailViewResponse = {
 };
 
 export type ViralListOptions = {
+  keyword?: string;
   featuredOnly?: boolean;
   limit?: number;
   cursor?: string;
@@ -9108,6 +9137,7 @@ export function listViralVideos(
   if (options.limit !== undefined) query.set("limit", String(options.limit));
   if (options.cursor) query.set("cursor", options.cursor);
   if (options.featuredOnly) query.set("featured_only", "true");
+  if (options.keyword) query.set("keyword", options.keyword);
   // 页面仅读取数据库中的已归档媒体，不触发上游采集。
   return requestApiJson<ViralListResponse>(
     `/api/viral/videos?${query}`,

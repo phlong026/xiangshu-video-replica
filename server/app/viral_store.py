@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import binascii
+import hashlib
 import json
 import threading
 from base64 import urlsafe_b64decode, urlsafe_b64encode
@@ -430,6 +431,7 @@ def _list_homepage_snapshot(
     limit: int,
     cursor: str | None,
     featured_only: bool = True,
+    keyword: str = "",
 ) -> ViralVideoPage:
     # AuthReader已查询过数据库，不能中途切换隔离级别；版本、页和总数由同一SQL快照读取。
     ranked = featured_only and sort == "hot"
@@ -444,12 +446,16 @@ def _list_homepage_snapshot(
     boundary_sql, params = (
         _page_boundary_sql(sort, boundary, featured=ranked) if boundary else ("", ())
     )
+    term = keyword.strip().lower()
+    search_sql = (
+        "AND strpos(lower(concat_ws(' ', title, author, tags_json)), %s) > 0" if term else ""
+    )
     result = conn.execute(
         f"""WITH homepage_snapshot AS MATERIALIZED (
             SELECT * FROM viral_videos WHERE platform=%s AND pushed_at IS NOT NULL
                 AND (NOT %s OR homepage_featured=1) AND deleted_at IS NULL
         ), eligible AS MATERIALIZED (
-            SELECT * FROM homepage_snapshot AS viral_videos WHERE TRUE {_PUBLISHED_SQL}
+            SELECT * FROM homepage_snapshot AS viral_videos WHERE TRUE {_PUBLISHED_SQL} {search_sql}
         ), revision AS (
             SELECT md5(COALESCE(jsonb_agg(jsonb_build_array(video_id,homepage_rank,
                 homepage_starts_at,homepage_ends_at,likes,published_at,title,pushed_at,
@@ -464,9 +470,11 @@ def _list_homepage_snapshot(
             COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY {order})
                 FROM page),'[]'::jsonb) AS rows
         FROM revision""",
-        (platform, featured_only, platform, sort, *params, limit + 1),
+        (platform, featured_only, *((term,) if term else ()), platform, sort, *params, limit + 1),
     ).fetchone()
     version = f"{'home' if featured_only else 'public'}-snapshot:{result['data_version']}"
+    if term:
+        version += f":{hashlib.sha256(term.encode()).hexdigest()}"
     if cursor is not None and expected != version:
         raise InvalidViralCursorError("viral video cursor data version changed")
     collected = [_row_to_video(row) for row in result["rows"]]
@@ -493,6 +501,7 @@ def list_viral_video_page(
     limit: int,
     cursor: str | None = None,
     featured_only: bool = False,
+    keyword: str = "",
 ) -> ViralVideoPage:
     """公共列表与首页用同一快照计算页、总数和版本，上传推送后旧游标失效。"""
     return _list_homepage_snapshot(
@@ -502,6 +511,7 @@ def list_viral_video_page(
         limit=limit,
         cursor=cursor,
         featured_only=featured_only,
+        keyword=keyword,
     )
 
 

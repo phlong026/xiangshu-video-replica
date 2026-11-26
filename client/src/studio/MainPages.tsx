@@ -18,6 +18,13 @@ import {
 } from "../api";
 import { VideoPreview } from "../VideoPreview";
 import { AdaptiveReplicaControl } from "./ContentPages";
+import {
+  CopyExtractionAction,
+  copyQuoteText,
+  useCopyExtractionTask,
+  useCopyQuote,
+  viralCopySource,
+} from "./CopyExtractionControls";
 import { useStudio } from "./context";
 import { LocalPublishAccountsPanel as PublishAccountsPanel } from "./LocalPublishAccountsPanel";
 import {
@@ -37,6 +44,7 @@ import {
 import { createDraft, draftFromTask } from "./state";
 import { taskHasDeliverable } from "./taskResults";
 import type {
+  CopyExtractionOptions,
   ReplicaSource,
   StudioAsset,
   StudioData,
@@ -404,6 +412,45 @@ export function WorkbenchPage() {
   const uploadedProjectId = state.draft.projectId;
   const uploadedAssetId = state.draft.sourceAssetId;
   const uploadedDuration = state.draft.sourceDurationSeconds;
+  const [resolvedCopy, setResolvedCopy] = useState<{
+    accountContextKey: string;
+    link: string;
+    video: StudioVideo;
+    key: string;
+  }>();
+  const linkCopy =
+    resolvedCopy?.accountContextKey === accountContextKey &&
+    resolvedCopy.link === sourceLink.trim()
+      ? resolvedCopy
+      : undefined;
+  const linkVideo = linkCopy?.video;
+  const existingCopy = useCopyExtractionTask(
+    accountContextKey,
+    review || requireLogin || user.role === "auditor"
+      ? undefined
+      : linkVideo?.platformKey && linkVideo.nativeId
+        ? { platform: linkVideo.platformKey, videoId: linkVideo.nativeId }
+        : !sourceLink.trim() && uploadedProjectId && uploadedAssetId
+          ? { projectId: uploadedProjectId, assetId: uploadedAssetId }
+          : undefined,
+  );
+  const copyDuration = sourceLink.trim()
+    ? (linkVideo?.durationMs ?? 0) / 1000
+    : uploadedDuration;
+  const copyPrice = useCopyQuote(
+    accountContextKey,
+    "asr",
+    !review && !requireLogin && (sourceLink.trim() || uploadedAssetId)
+      ? copyDuration && copyDuration > 0
+        ? copyDuration
+        : 1
+      : undefined,
+  );
+  const linkPrice = useCopyQuote(
+    accountContextKey,
+    "link_resolution",
+    !review && !requireLogin && sourceLink.trim() ? 1 : undefined,
+  );
   const uploadedSource =
     !review &&
     user.role !== "auditor" &&
@@ -466,6 +513,7 @@ export function WorkbenchPage() {
     purpose: "copy" | "replica" = "replica",
     providedIdempotencyKey?: string,
     requestAccount = accountId,
+    options?: CopyExtractionOptions,
   ) => {
     if (review) {
       patchDraft({ sourceId: video.id });
@@ -479,26 +527,22 @@ export function WorkbenchPage() {
       notify("该视频缺少可导入的平台标识");
       return;
     }
-    // 工作台粘贴链接两端统一直接服务端导入（2026-11 爆款链路改造 WP3）：
-    // 新粘贴的链接尚无本人的成功导入行，claim 的 owner 旁路不成立、视频也未
-    // 上架发布，claim-first 只会 404 断链。共享缓存的秒回发生在导入完成后的
-    // 转写任务入队（script-from-audio），不在导入入队本身；交付计费走转写
-    // 完成后的 claim。公开爆款卡片的 claim-first 在 ContentPages 侧执行。
     await beginViralImport(
       video,
       purpose,
       providedIdempotencyKey,
       requestAccount,
+      options,
     );
   };
 
   // 爆款导入主体（服务端拉取素材 → 轮询任务 → 转写/复刻分流）。
-  // Web 端「提取文案」先经过 claim-first 分流，未命中才回到这里。
   const beginViralImport = async (
     video: StudioVideo,
     purpose: "copy" | "replica",
     providedIdempotencyKey?: string,
     requestAccount = accountId,
+    options?: CopyExtractionOptions,
   ) => {
     if (!video.platformKey || !video.nativeId) {
       notify("该视频缺少可导入的平台标识");
@@ -573,16 +617,32 @@ export function WorkbenchPage() {
         clearKey();
         throw new Error("该来源暂不支持提取文案");
       }
-      patchDraft({
+      const projectSource = {
         projectId: task.projectId,
         sourceId: task.sourceAssetId,
         sourceAssetId: task.sourceAssetId,
-      });
+      };
+      if (purpose === "copy") {
+        patchDraft(
+          {
+            ...projectSource,
+            copyExtractionSource: viralCopySource(video, "workbench"),
+          },
+          { persistNow: true },
+        );
+      } else {
+        patchDraft(projectSource);
+      }
       refresh();
       if (purpose === "copy") {
-        // 正文随本人转写任务直出（共享文案缓存已退役），与爆款列表入口
-        // （ContentPages goExtract）同口径，不再携带视频身份回「获取文案」。
-        extractScriptFromUpload(task.projectId, task.sourceAssetId);
+        if (options?.restart)
+          extractScriptFromUpload(
+            task.projectId,
+            task.sourceAssetId,
+            undefined,
+            options,
+          );
+        else extractScriptFromUpload(task.projectId, task.sourceAssetId);
       } else {
         navigate("replica", {
           selectedVideoId: video.id,
@@ -602,7 +662,11 @@ export function WorkbenchPage() {
   const pendingViralSource = !state.draft.projectId
     ? data.videos.find((video) => video.id === state.draft.sourceId)
     : undefined;
-  const begin = async (mode: "copy" | "replica", overrideLink?: string) => {
+  const begin = async (
+    mode: "copy" | "replica",
+    overrideLink?: string,
+    options?: CopyExtractionOptions,
+  ) => {
     if (requireLogin) {
       requireLogin();
       return;
@@ -614,6 +678,27 @@ export function WorkbenchPage() {
     // 直达意图（诊断报告「一键拆解」）带着链接进来：先回填输入框让用户看得见，
     // 再用 override 值发起解析——闭包里的 sourceLink 还是上一帧的旧值。
     const link = (overrideLink ?? sourceLink).trim();
+    const existing = options?.task;
+    if (mode === "copy" && existing) {
+      if (linkVideo) {
+        patchDraft(
+          {
+            projectId: existing.project_id,
+            sourceId: existing.source_asset_id,
+            sourceAssetId: existing.source_asset_id,
+            copyExtractionSource: viralCopySource(linkVideo, "workbench"),
+          },
+          { persistNow: true },
+        );
+      }
+      extractScriptFromUpload(
+        existing.project_id,
+        existing.source_asset_id,
+        undefined,
+        options,
+      );
+      return;
+    }
     if (overrideLink) {
       setSourceLinkState({ accountContextKey, value: overrideLink });
     }
@@ -621,6 +706,22 @@ export function WorkbenchPage() {
       if (linkState.status === "loading") return;
       const operation = ++linkOperationRef.current;
       const requestAccount = accountId;
+      if (mode === "copy" && linkCopy?.link === link) {
+        setLinkState({ accountContextKey, status: "loading", stage: "import" });
+        await beginViralCreation(
+          linkCopy.video,
+          "copy",
+          linkCopy.key,
+          requestAccount,
+          options,
+        );
+        if (
+          operation === linkOperationRef.current &&
+          requestAccount === activeAccountRef.current
+        )
+          setLinkState({ accountContextKey, status: "idle" });
+        return;
+      }
       const linkActionKey = `link:${link}:${mode}`;
       const resolutionKey = viralImportIdempotencyKey(
         requestAccount,
@@ -646,6 +747,16 @@ export function WorkbenchPage() {
             ...current.videos.filter((candidate) => candidate.id !== video.id),
           ],
         }));
+        if (mode === "copy") {
+          setResolvedCopy({
+            accountContextKey,
+            link,
+            video,
+            key: resolution.importIdempotencyKey,
+          });
+          setLinkState({ accountContextKey, status: "idle" });
+          return;
+        }
         setLinkState({ accountContextKey, status: "loading", stage: "import" });
         await beginViralCreation(
           video,
@@ -698,7 +809,9 @@ export function WorkbenchPage() {
         navigate("replica");
         return;
       }
-      extractScriptFromUpload();
+      if (options?.restart)
+        extractScriptFromUpload(undefined, undefined, undefined, options);
+      else extractScriptFromUpload();
       return;
     }
     openLive("projects");
@@ -813,6 +926,7 @@ export function WorkbenchPage() {
             projectId,
             sourceId: assetId,
             sourceAssetId: assetId,
+            copyExtractionSource: { title: file.name },
             sourceDurationSeconds: durationSeconds,
             analysisTaskId: uploaded.analysisTaskId,
             analysisTaskStatus: uploaded.analysisTaskStatus,
@@ -946,16 +1060,24 @@ export function WorkbenchPage() {
                 event.target.value = "";
               }}
             />
-            <Button
+            <CopyExtractionAction
               disabled={
                 linkState.status === "loading" ||
                 Boolean(upload && !upload.completed)
               }
-              onClick={() => void begin("copy")}
-            >
-              <Icon name="pen" />
-              提取文案
-            </Button>
+              task={existingCopy}
+              quote={
+                copyDuration && copyDuration > 0
+                  ? copyPrice?.credits
+                  : undefined
+              }
+              actionLabel={
+                sourceLink.trim() && !linkCopy ? "解析链接" : "提取文案"
+              }
+              onSelect={(restart, task) =>
+                void begin("copy", undefined, { restart, task })
+              }
+            />
             {!uploadedSource && (
               <Button
                 disabled={
@@ -970,6 +1092,29 @@ export function WorkbenchPage() {
               </Button>
             )}
           </div>
+          {(sourceLink.trim() || uploadedAssetId) &&
+            !review &&
+            !requireLogin && (
+              <p className="studio-start-helper copy-extraction-cost">
+                {sourceLink.trim() && (
+                  <>
+                    {linkCopy
+                      ? "链接已解析"
+                      : linkPrice?.credits === undefined
+                        ? "链接解析按次计费"
+                        : `链接解析 ${linkPrice.credits} 积分`}{" "}
+                    ·{" "}
+                  </>
+                )}
+                {existingCopy?.status === "SUCCEEDED"
+                  ? "已有提取文案，查看无需再次扣费"
+                  : copyDuration && copyDuration > 0
+                    ? copyQuoteText(copyPrice?.credits)
+                    : copyPrice?.unitCredits
+                      ? `转写 ${copyPrice.unitCredits} 积分/秒，按实际音频时长结算`
+                      : copyQuoteText()}
+              </p>
+            )}
           {uploadedSource && uploadedVideo && (
             <div className="studio-upload-replica">
               {uploadedVideo.durationMs != null &&
@@ -1005,7 +1150,7 @@ export function WorkbenchPage() {
             </p>
           )}
           <p className="studio-start-helper">
-            支持抖音、小红书的分享链接，其他平台请上传 MP4文件；
+            支持抖音、小红书和视频号的分享链接，也可上传 MP4 或 MOV 文件。
           </p>
           {accountLinkInInput ? (
             <p className="studio-start-helper">

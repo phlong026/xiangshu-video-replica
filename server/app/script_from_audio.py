@@ -65,6 +65,7 @@ class ScriptFromAudioRequest(BaseModel):
 
     source_asset_id: str = Field(min_length=1, max_length=128)
     idempotency_key: str | None = Field(default=None, max_length=128)
+    reuse_completed: bool = False
 
 
 class ScriptFromAudioResult(BaseModel):
@@ -93,6 +94,7 @@ class ScriptFromAudioTaskResponse(BaseModel):
     updated_at: str
     started_at: str | None
     completed_at: str | None
+    charged_credits: int | None = None
 
 
 # 归档指纹同样存在于真实生产任务，只能结合结算依据判定旧正文权益。
@@ -150,6 +152,16 @@ def script_from_audio_task_response(
             ),
             language=(None if payload.get("language") is None else str(payload["language"])),
         )
+    charge = (
+        conn.execute(
+            "SELECT charged_credits FROM billing_operations "
+            "WHERE service='asr' AND source_id=%s AND user_id=%s AND state='SUCCEEDED' "
+            "ORDER BY billing_round DESC LIMIT 1",
+            (row["id"], row["created_by_user_id"]),
+        ).fetchone()
+        if conn is not None and row["status"] == "SUCCEEDED"
+        else None
+    )
     return ScriptFromAudioTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
@@ -166,6 +178,7 @@ def script_from_audio_task_response(
         updated_at=str(row["updated_at"]),
         started_at=None if row["started_at"] is None else str(row["started_at"]),
         completed_at=(None if row["completed_at"] is None else str(row["completed_at"])),
+        charged_credits=int(charge[0]) if charge is not None else None,
     )
 
 
@@ -241,6 +254,7 @@ def enqueue_script_from_audio_task(
     project_id: str,
     source_asset_id: str,
     idempotency_key: str,
+    reuse_completed: bool = False,
 ) -> BusinessRow:
     require_not_auditor(
         conn,
@@ -275,6 +289,10 @@ def enqueue_script_from_audio_task(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"asr-request:{project_id}:{idempotency_key}",),
+    )
     replay = conn.execute(
         """
         SELECT * FROM script_from_audio_tasks
@@ -282,6 +300,26 @@ def enqueue_script_from_audio_task(
         """,
         (project_id, idempotency_key),
     ).fetchone()
+    if replay is None:
+        alias = conn.execute(
+            "SELECT request_hash,task_id FROM script_from_audio_request_aliases "
+            "WHERE project_id=%s AND idempotency_key=%s",
+            (project_id, idempotency_key),
+        ).fetchone()
+        if alias is not None:
+            if str(alias["request_hash"]) != request_hash:
+                raise script_from_audio_error(
+                    409, "SCRIPT_FROM_AUDIO_IDEMPOTENCY_CONFLICT", "提取内容已经变化，请重新提交。"
+                )
+            task = load_script_from_audio_task(conn, str(alias["task_id"]))
+            if str(task["project_id"]) != project_id:
+                require_project_access(
+                    conn,
+                    actor=actor,  # type: ignore[arg-type]
+                    project_id=str(task["project_id"]),
+                    action="project.script_from_audio_read",
+                )
+            return task
     if replay is not None:
         if str(replay["request_hash"]) != request_hash:
             raise script_from_audio_error(
@@ -290,6 +328,15 @@ def enqueue_script_from_audio_task(
                 "提取内容已经变化，请重新提交。",
             )
         return cast(BusinessRow, replay)
+
+    def bind_replay(task: BusinessRow) -> BusinessRow:
+        conn.execute(
+            "INSERT INTO script_from_audio_request_aliases "
+            "(project_id,idempotency_key,request_hash,task_id) VALUES (%s,%s,%s,%s)",
+            (project_id, idempotency_key, request_hash, task["id"]),
+        )
+        return task
+
     source_task = private_source_task(
         conn,
         owner_user_id=str(getattr(actor, "id")),
@@ -297,7 +344,7 @@ def enqueue_script_from_audio_task(
         size_bytes=int(asset["size_bytes"]),
     )
     if source_task is not None:
-        return source_task
+        return bind_replay(source_task)
     active = conn.execute(
         """
         SELECT * FROM script_from_audio_tasks
@@ -313,9 +360,8 @@ def enqueue_script_from_audio_task(
                 "SCRIPT_FROM_AUDIO_ALREADY_RUNNING",
                 "该项目已有文案提取任务在进行，请等待完成。",
             )
-        return cast(BusinessRow, active)
+        return bind_replay(cast(BusinessRow, active))
 
-    _configured_asr(conn)
     # 归因：内容经营报表按爆款身份聚合 ASR 收入/成本（viral_content_overview）。
     # 只作记录，不参与任何资格与计费判定；身份来自服务端导入任务关联，
     # 客户端自报的元数据不算数（2026-11-11 共享缓存退役后仅存的 viral_source）。
@@ -326,10 +372,33 @@ def enqueue_script_from_audio_task(
         (source_asset_id, project_id),
     ).fetchone()
     if attribution is not None:
-        request_payload["viral_source"] = [
-            str(attribution["platform"]),
-            str(attribution["video_id"]),
-        ]
+        platform, video_id = str(attribution["platform"]), str(attribution["video_id"])
+        request_payload["viral_source"] = [platform, video_id]
+        owner_id = str(getattr(actor, "id"))
+        # 同一视频可以由不同归档资产导入，按账号和视频串行保护这次核对。
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"viral-asr:{owner_id}:{platform}:{video_id}",),
+        )
+        prior = latest_viral_script_from_audio_task(
+            conn, owner_id=owner_id, platform=platform, video_id=video_id
+        )
+        if prior is not None and (
+            prior["status"] in {"PENDING", "RUNNING", "SUBMISSION_UNCERTAIN"}
+            or (reuse_completed and prior["status"] == "SUCCEEDED")
+        ):
+            return bind_replay(prior)
+    elif reuse_completed:
+        prior = latest_script_from_audio_task(
+            conn,
+            project_id=project_id,
+            source_asset_id=source_asset_id,
+            owner_id=str(getattr(actor, "id")),
+        )
+        if prior is not None and prior["status"] in {"SUCCEEDED", "SUBMISSION_UNCERTAIN"}:
+            return bind_replay(prior)
+
+    _configured_asr(conn)
 
     task_id = str(uuid4())
     conn.execute(
@@ -379,7 +448,7 @@ def enqueue_script_from_audio_task(
             409, "SCRIPT_FROM_AUDIO_ENQUEUE_CONFLICT", "该项目已有不同来源的提取任务，请等待完成。"
         )
     if str(row["id"]) != task_id:
-        return cast(BusinessRow, row)
+        return bind_replay(cast(BusinessRow, row))
     from app.permissions import write_audit
 
     # 每个用户为真实转写付自己的 ASR 按秒费（2026-11-11 极简化：无共享缓存，
@@ -844,15 +913,53 @@ def load_script_from_audio_task(conn: BusinessConnection, task_id: str) -> Busin
 
 
 def latest_script_from_audio_task(
-    conn: BusinessConnection, *, project_id: str
+    conn: BusinessConnection,
+    *,
+    project_id: str,
+    source_asset_id: str | None = None,
+    owner_id: str | None = None,
+) -> BusinessRow | None:
+    # 同一项目可以换来源；显式指定资产时优先保留已有结果和仍在处理的任务。
+    source_filter = ""
+    order = ""
+    params: tuple[str, ...] = (project_id,)
+    if source_asset_id is not None and owner_id is not None:
+        source_filter = (
+            f" AND t.source_asset_id=%s AND t.created_by_user_id=%s AND {_REUSABLE_SCRIPT_SQL}"
+        )
+        order = _REUSABLE_SCRIPT_ORDER
+        params = (project_id, source_asset_id, owner_id)
+    row = conn.execute(
+        f"SELECT t.* FROM script_from_audio_tasks t WHERE t.project_id=%s "
+        f"{source_filter} ORDER BY {order} t.created_at DESC,t.id DESC LIMIT 1",
+        params,
+    ).fetchone()
+    return None if row is None else cast(BusinessRow, row)
+
+
+_REUSABLE_SCRIPT_SQL = f"""(
+    t.status != 'SUCCEEDED'
+    OR (length(btrim(COALESCE(t.result_json::jsonb->>'text', ''))) > 0
+        AND {LEGACY_SCRIPT_TEXT_ACCESS_SQL})
+)"""
+_REUSABLE_SCRIPT_ORDER = (
+    "CASE WHEN t.status IN ('PENDING','RUNNING','SUBMISSION_UNCERTAIN') THEN 0 "
+    "WHEN t.status='SUCCEEDED' THEN 1 ELSE 2 END,"
+)
+
+
+def latest_viral_script_from_audio_task(
+    conn: BusinessConnection, *, owner_id: str, platform: str, video_id: str
 ) -> BusinessRow | None:
     row = conn.execute(
-        """
-        SELECT * FROM script_from_audio_tasks
-        WHERE project_id = %s
-        ORDER BY created_at DESC, id DESC LIMIT 1
-        """,
-        (project_id,),
+        "SELECT t.* FROM script_from_audio_tasks t "
+        "WHERE t.created_by_user_id=%s AND EXISTS ("
+        "SELECT 1 FROM viral_import_tasks i WHERE i.project_id=t.project_id "
+        "AND i.source_asset_id=t.source_asset_id AND i.status='SUCCEEDED' "
+        "AND i.platform=%s AND i.video_id=%s) "
+        f"AND {_REUSABLE_SCRIPT_SQL} "
+        f"ORDER BY {_REUSABLE_SCRIPT_ORDER} t.created_at DESC,t.id DESC LIMIT 1",
+        (owner_id, platform, video_id),
     ).fetchone()
     return None if row is None else cast(BusinessRow, row)
 

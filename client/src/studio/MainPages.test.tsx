@@ -163,6 +163,12 @@ vi.mock("./viralCache", () => ({
 }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  getCopyExtractionQuote: vi.fn(async () => ({
+    credits: 3,
+    unit_credits: "0.1",
+  })),
+  getLatestScriptFromAudioTask: vi.fn(async () => null),
+  getLatestViralScriptFromAudioTask: vi.fn(async () => null),
   getReplicaPreflight: vi.fn(async () => ({
     analysisCredits: 8,
     firstFrameCredits: 12,
@@ -1809,6 +1815,7 @@ describe("V1.4 工作台上传与创作入口", () => {
           sourceId: "asset-1",
           sourceAssetId: "asset-1",
           sourceDurationSeconds: 10,
+          copyExtractionSource: { title: "乡墅案例.mp4" },
         },
         { persistNow: true },
       ),
@@ -1895,6 +1902,7 @@ describe("V1.4 工作台上传与创作入口", () => {
           projectId: "project-b",
           sourceId: "asset-b",
           sourceAssetId: "asset-b",
+          copyExtractionSource: { title: "来源B.mp4" },
           sourceDurationSeconds: 10,
         },
         { persistNow: true },
@@ -2088,6 +2096,7 @@ describe("V1.4 工作台上传与创作入口", () => {
           projectId: "proj-1",
           sourceId: "asset-1",
           sourceAssetId: "asset-1",
+          copyExtractionSource: { title: "乡墅案例.mp4" },
           sourceDurationSeconds: 10,
         },
         { persistNow: true },
@@ -2563,10 +2572,10 @@ describe("V1.4 工作台上传与创作入口", () => {
         value: "https://www.douyin.com/jingxuan?modal_id=7672703482771972081",
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    fireEvent.click(screen.getByRole("button", { name: "解析链接" }));
     await screen.findByRole("alert");
     expect(resolveViralLink).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    fireEvent.click(screen.getByRole("button", { name: "解析链接" }));
     await waitFor(() => expect(resolveViralLink).toHaveBeenCalledTimes(2));
     expect(resolveViralLink.mock.calls[1]?.[2]).not.toBe(
       resolveViralLink.mock.calls[0]?.[2],
@@ -2601,12 +2610,14 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(value.navigate).not.toHaveBeenCalled();
   });
 
-  it("工作台展示简洁的抖音、小红书分享链接与 MP4 上传提示", () => {
+  it("工作台展示支持的分享链接与上传格式", () => {
     useStudio.mockReturnValue(workbench());
     render(<WorkbenchPage />);
 
     expect(
-      screen.getByText("支持抖音、小红书的分享链接，其他平台请上传 MP4文件；"),
+      screen.getByText(
+        "支持抖音、小红书和视频号的分享链接，也可上传 MP4 或 MOV 文件。",
+      ),
     ).toBeInTheDocument();
   });
 });

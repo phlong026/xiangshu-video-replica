@@ -69,6 +69,7 @@ const selectableStateKeys = [
   "selectedAssetId",
   "selectedPersonId",
   "returnTo",
+  "copyAnchor",
 ] as const;
 
 function decodeRouteId(value: string) {
@@ -131,6 +132,8 @@ export function studioRouteFromHash(hash: string): Pick<
   } else if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
     result.returnTo = returnTo as StudioPage;
   }
+  if (result.page === "copy")
+    result.copyAnchor = params.get("copySource") ?? undefined;
   return result;
 }
 
@@ -144,6 +147,8 @@ export function studioHashForState(state: StudioState): string {
     params.set("person", state.selectedPersonId);
   if (state.returnTo)
     params.set("returnTo", normalizeStudioPage(state.returnTo));
+  if (state.page === "copy" && state.copyAnchor)
+    params.set("copySource", state.copyAnchor);
   const path =
     state.page === "task-detail" &&
     state.selectedTaskKind &&
@@ -187,6 +192,7 @@ export function navigateStudioState(
     // 直达意图是单发的：不在 patch 里就清掉，避免残留旧意图在换页时误触发。
     replicateIntentLink: undefined,
     selectedVideoId: undefined,
+    copyAnchor: undefined,
     selectedTaskId: keepTaskContext ? state.selectedTaskId : undefined,
     selectedTaskKind: keepTaskContext ? state.selectedTaskKind : undefined,
     selectedTaskBackendId: keepTaskContext
@@ -201,6 +207,14 @@ export function navigateStudioState(
     ),
     page: nextPage,
   };
+}
+
+export function draftCopyAnchor(draft: StudioDraft): string | undefined {
+  const source = draft.copyExtractionSource;
+  if (!source || !draft.sourceAssetId) return undefined;
+  return source.viral
+    ? `viral:${source.viral.platform}:${source.viral.videoId}`
+    : `file:${draft.sourceAssetId}`;
 }
 
 export function createDraft(): StudioDraft {
@@ -381,6 +395,10 @@ export function patchStudioDraft(
   }
   if (projectChanged || sourceChanged) {
     const blank = createDraft();
+    if (!Object.hasOwn(patch, "copyExtractionSource"))
+      next.copyExtractionSource = undefined;
+    next.copyExtractionReceipt = patch.copyExtractionReceipt;
+    next.copyExtractionError = patch.copyExtractionError;
     if (!Object.hasOwn(patch, "replicaSourcePrompt"))
       next.replicaSourcePrompt = undefined;
     if (!Object.hasOwn(patch, "replicaPromptBasis"))

@@ -67,6 +67,7 @@ import {
 } from "../ShotCardEditor";
 import { SourceFrameSelection } from "../SourceFrameSelection";
 import { SourceReviewNotice } from "../SourceReviewNotice";
+import { persistViralDetailUrl } from "./CopyExtractionControls";
 import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import { useCopyExtractionProgress } from "./copyExtractionProgress";
@@ -301,13 +302,20 @@ function activePerson(
     : undefined;
 }
 
-function SourceStrip({ source }: { source?: StudioAsset }) {
+function SourceStrip({
+  source,
+  title,
+}: {
+  source?: StudioAsset;
+  title?: string;
+}) {
   return (
     <div className="creation-source-strip">
       <span className="creation-status-dot" />
       <span>
         来源：
-        {source ? `${source.name} · ${source.source}` : "尚未选择来源视频"}
+        {title ??
+          (source ? `${source.name} · ${source.source}` : "尚未选择来源视频")}
       </span>
     </div>
   );
@@ -977,6 +985,9 @@ export function CopyPage() {
     data.videos,
     state.draft.sourceId ?? state.selectedVideoId,
   );
+  const copyMedia = state.draft.copyExtractionSource;
+  const originalVideo = copyMedia?.viral;
+  const receipt = state.draft.copyExtractionReceipt;
   const person = activePerson(data.people, state.draft.ipId);
   const saved = state.savedScripts;
   const oralLengthExceeded =
@@ -988,7 +999,26 @@ export function CopyPage() {
       <header className="creation-heading">
         <h1>文案工坊</h1>
         <p>核对视频原文，设置二创要求，生成后编辑定稿</p>
-        {state.returnTo && state.returnTo !== "copy" ? (
+        {originalVideo &&
+        (!state.returnTo || state.returnTo === "viral-detail") ? (
+          <Button
+            variant="quiet"
+            onClick={() => {
+              persistViralDetailUrl({
+                platformKey: originalVideo.platform,
+                nativeId: originalVideo.videoId,
+              });
+              navigate("viral-detail", {
+                selectedVideoId: originalVideo.studioId,
+                returnTo: originalVideo.returnTo,
+              });
+            }}
+          >
+            返回原视频
+          </Button>
+        ) : state.returnTo &&
+          state.returnTo !== "copy" &&
+          state.returnTo !== "viral-detail" ? (
           <Button
             variant="quiet"
             onClick={() =>
@@ -999,6 +1029,15 @@ export function CopyPage() {
           </Button>
         ) : null}
       </header>
+      {copyMedia && (
+        <SourceStrip
+          title={
+            originalVideo
+              ? `${originalVideo.label} · ${copyMedia.title}`
+              : copyMedia.title
+          }
+        />
+      )}
       {extraction.active ? (
         <div className="creation-extraction-banner" role="status">
           <div className="creation-extraction-banner__copy">
@@ -1016,6 +1055,11 @@ export function CopyPage() {
           </div>
         </div>
       ) : null}
+      {!extraction.active && state.draft.copyExtractionError && (
+        <p className="viral-media-status is-error" role="alert">
+          {state.draft.copyExtractionError}
+        </p>
+      )}
       <Tabs
         items={[
           { id: "rewrite", label: "文案改写" },
@@ -1192,7 +1236,16 @@ export function CopyPage() {
         </Panel>
       ) : (
         <>
-          <SourceStrip source={source} />
+          {!copyMedia && <SourceStrip source={source} />}
+          {!extraction.active && receipt && !receipt.pending && (
+            <p className="copy-extraction-cost">
+              {receipt.reused
+                ? "已复用原文，本次未扣费"
+                : receipt.chargedCredits !== undefined
+                  ? `本次转写实扣 ${receipt.chargedCredits} 积分`
+                  : "转写已完成"}
+            </p>
+          )}
           <p id="copy-resize-hint" className="creation-resize-hint">
             拖动文本框右下角可调整高度
           </p>

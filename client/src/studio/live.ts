@@ -1898,33 +1898,61 @@ export async function loadPersonAssets(
 export type ScriptExtractionResult = {
   text: string;
   taskId: string;
+  chargedCredits?: number;
+  reused?: boolean;
+  projectId?: string;
+  sourceAssetId?: string;
 };
+
+function scriptExtractionResult(
+  task: Awaited<ReturnType<typeof getScriptFromAudioTask>>,
+  reused = false,
+): ScriptExtractionResult {
+  return {
+    text: task.result?.text ?? "",
+    taskId: task.id,
+    chargedCredits: task.charged_credits ?? undefined,
+    reused,
+    projectId: task.project_id,
+    sourceAssetId: task.source_asset_id,
+  };
+}
 
 export async function extractScriptFromUpload(
   projectId: string,
   assetId: string,
+  restart = false,
+  onAccepted?: (
+    task: Awaited<ReturnType<typeof getScriptFromAudioTask>>,
+  ) => void,
 ): Promise<ScriptExtractionResult> {
   const submitted = await createScriptFromAudioTask(
     projectId,
     assetId,
     crypto.randomUUID(),
+    !restart,
   );
+  if (submitted.status === "SUCCEEDED")
+    return scriptExtractionResult(submitted, !restart);
+  onAccepted?.(submitted);
   return awaitScriptFromAudioTask(submitted.id);
 }
 
 /** 轮询既有提取任务直到终态（2s × 150 = 5 分钟上限，长音频异步转写兜底）。 */
 export async function awaitScriptFromAudioTask(
   taskId: string,
+  initial?: Awaited<ReturnType<typeof getScriptFromAudioTask>>,
 ): Promise<ScriptExtractionResult> {
   const maxAttempts = 150;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    await new Promise((resolve) => window.setTimeout(resolve, 2000));
-    const task = await getScriptFromAudioTask(taskId);
+    const task =
+      attempt === 0 && initial
+        ? initial
+        : await new Promise<void>((resolve) =>
+            window.setTimeout(resolve, 2000),
+          ).then(() => getScriptFromAudioTask(taskId));
     if (task.status === "SUCCEEDED" && task.result) {
-      return {
-        text: task.result.text ?? "",
-        taskId: task.id,
-      };
+      return scriptExtractionResult(task, initial?.status === "SUCCEEDED");
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "文案提取失败，请稍后重试。");
@@ -1937,8 +1965,14 @@ export async function awaitScriptFromAudioTask(
   throw new Error("文案仍在后台提取，请返回文案工坊恢复本次任务。");
 }
 
-export async function loadLatestScriptFromUpload(projectId: string) {
-  const task = await getLatestScriptFromAudioTask(projectId);
+export async function loadLatestScriptFromUpload(
+  projectId: string,
+  assetId?: string,
+  taskId?: string,
+) {
+  const task = taskId
+    ? await getScriptFromAudioTask(taskId)
+    : await getLatestScriptFromAudioTask(projectId, assetId);
   return task
     ? {
         id: task.id,
@@ -1946,6 +1980,7 @@ export async function loadLatestScriptFromUpload(projectId: string) {
         result: task.result,
         errorMessage: task.error_message ?? undefined,
         sourceAssetId: task.source_asset_id ?? undefined,
+        chargedCredits: task.charged_credits ?? undefined,
       }
     : null;
 }

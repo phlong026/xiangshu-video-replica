@@ -5,6 +5,7 @@ import type {
   OralVoiceLanguage,
   Project,
   SavedPromptItem,
+  ScriptFromAudioTask,
 } from "../api";
 
 import type { WorkspaceShellProps } from "../workspace-shell";
@@ -273,6 +274,22 @@ export type StudioScript = {
   /** 云端保存记录的最后更新时间（ISO）；仅「我的文案」列表回填，供列表页展示。 */
   updatedAt?: string;
 };
+export type CopyExtractionSource = {
+  title: string;
+  viral?: {
+    platform: NonNullable<StudioVideo["platformKey"]>;
+    label: StudioVideo["platform"];
+    videoId: string;
+    studioId: string;
+    returnTo: "viral" | "workbench";
+  };
+};
+
+export type CopyExtractionOptions = {
+  task?: ScriptFromAudioTask;
+  restart?: boolean;
+};
+
 export type StudioDraft = {
   /** 兼容历史音频任务快照；进入创作工作区时统一使用文案驱动。 */
   driverMode?: "text" | "audio";
@@ -295,6 +312,14 @@ export type StudioDraft = {
   sourceId?: string;
   /** 上传来源视频的资产 id：提取文案（script-from-audio）管线输入。 */
   sourceAssetId?: string;
+  copyExtractionSource?: CopyExtractionSource;
+  copyExtractionReceipt?: {
+    taskId: string;
+    chargedCredits?: number;
+    reused?: boolean;
+    pending?: boolean;
+  };
+  copyExtractionError?: string;
   /** 来源时长随草稿保存，离开工作台后仍能按同一来源继续复刻。 */
   sourceDurationSeconds?: number;
   analysisTaskId?: string;
@@ -407,9 +432,10 @@ export type StudioState = {
   selectedTaskBackendId?: string;
   selectedAssetId?: string;
   returnTo?: StudioPage;
+  copyAnchor?: string;
   /** ADM-17：爆款卡片「去复刻」直达意图——进详情后自动发起一次复刻导入。 */
   viralReplicateIntent?: boolean;
-  /** 爆款卡片「提取文案」直达意图——进详情后按详情页双端分流发起提取。 */
+  /** 爆款卡片「提取文案」直达详情页费用和提取入口。 */
   viralExtractIntent?: boolean;
   /** 工作台识别到账号主页链接后带过来的原文；诊断页用它做初始输入。 */
   accountDiagnosisInput?: string;
@@ -473,6 +499,7 @@ export type StudioContextValue = {
     projectId?: string,
     assetId?: string,
     preparedTaskId?: string,
+    options?: CopyExtractionOptions,
   ) => void;
   refresh: () => void;
 };

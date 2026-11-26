@@ -1325,6 +1325,38 @@ def test_customer_catalog_never_exposes_supplier_costs(client, route_state):
     assert client.get("/api/control/billing/catalog", headers=headers).status_code in {401, 403}
 
 
+def test_customer_quote_uses_the_wallet_owners_discount(client, route_state, monkeypatch):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from app import discount_service
+    from app.billing_routes import router
+
+    client.app.include_router(router)
+    _, owner = account(client, "quote_wallet_owner")
+    headers, subordinate = account(client, "quote_wallet_sub")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE users SET account_type='SUB',parent_user_id=%s WHERE id=%s",
+            (owner, subordinate),
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) VALUES ('asr',true,1)"
+        )
+    monkeypatch.setattr(
+        discount_service,
+        "get_best_discount",
+        lambda conn, *, user_id, **kwargs: (
+            SimpleNamespace(discount_rate=Decimal("0.5"), source_recharge_order_id=None)
+            if user_id == owner
+            else None
+        ),
+    )
+    response = client.get("/api/customer/billing/quote?service=asr&units=10", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["credits"] == 5
+
+
 def test_platform_subjects_accept_supplier_cost_but_never_customer_charges(
     pricing_client, route_state
 ):

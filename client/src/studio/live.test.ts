@@ -2238,17 +2238,33 @@ describe("提取文案任务绑定", () => {
   it("按提交的任务 ID 轮询并返回任务标识，不读取其他 latest 任务", async () => {
     vi.useFakeTimers();
     try {
-      api.createScriptFromAudioTask.mockResolvedValue({ id: "audio-owned" });
+      const accepted = {
+        id: "audio-owned",
+        status: "RUNNING",
+        project_id: "original",
+        source_asset_id: "original-asset",
+      };
+      api.createScriptFromAudioTask.mockResolvedValue(accepted);
       api.getScriptFromAudioTask.mockResolvedValue({
         id: "audio-owned",
         status: "SUCCEEDED",
         result: { text: "本次转写" },
       });
-      const result = live.extractScriptFromUpload("project-a", "asset-a");
+      const onAccepted = vi.fn();
+      const result = live.extractScriptFromUpload(
+        "project-a",
+        "asset-a",
+        false,
+        onAccepted,
+      );
+      await Promise.resolve();
+      expect(onAccepted).toHaveBeenCalledExactlyOnceWith(accepted);
+      expect(api.getScriptFromAudioTask).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(2000);
       await expect(result).resolves.toEqual({
         text: "本次转写",
         taskId: "audio-owned",
+        reused: false,
       });
       expect(api.getScriptFromAudioTask).toHaveBeenCalledWith("audio-owned");
       expect(api.getLatestScriptFromAudioTask).not.toHaveBeenCalled();
@@ -2274,6 +2290,7 @@ describe("提取文案任务绑定", () => {
       await expect(result).resolves.toEqual({
         text: "爆款视频的转写正文",
         taskId: "audio-gated",
+        reused: false,
       });
     } finally {
       vi.useRealTimers();
