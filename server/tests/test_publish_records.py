@@ -37,7 +37,7 @@ from test_publish_accounts import (
     lane_env,
 )
 
-from app import publish_delivery
+from app import publish_copy, publish_delivery
 from app import publish_worker as worker_mod
 from app.auth import CurrentUser
 from app.db_pg import close_pg_pool, pg_transaction
@@ -353,6 +353,55 @@ def test_auditor_cannot_create_records(
     response = client.post(BASE, json=create_payload(account, video))
     assert response.status_code == 403
     assert pg.execute("SELECT count(*) FROM publish_records").fetchone()[0] == 0
+
+
+def test_publish_copy_optimizes_individual_fields_without_creating_a_record(
+    client: TestClient, pg: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        publish_copy,
+        "load_script_rewrite_configuration",
+        lambda _conn: ("http://example.test", "test", "text"),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def suggest(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return (
+            "庭院采光怎么做"
+            if kwargs["purpose"] == "publish_title"
+            else "从入口到客厅，看看庭院的采光设计。"
+        )
+
+    monkeypatch.setattr(publish_copy, "request_deepseek_text", suggest)
+    path = "/api/studio/publish/copy/optimize"
+    original = {"platform": "抖音", "title": "庭院设计", "description": "看看入户庭院"}
+    assert client.post(path, json={**original, "field": "title"}).json() == {
+        "text": "庭院采光怎么做"
+    }
+    assert client.post(path, json={**original, "field": "description"}).json() == {
+        "text": "从入口到客厅，看看庭院的采光设计。"
+    }
+    assert [call["purpose"] for call in calls] == ["publish_title", "publish_description"]
+    assert json.loads(calls[0]["source_text"]) == {
+        "发布标题": original["title"],
+        "发布描述": original["description"],
+    }
+    assert "抖音" in calls[0]["instructions"]
+    assert pg.execute("SELECT count(*) FROM publish_records").fetchone()[0] == 0
+
+
+def test_publish_copy_rejects_blank_input_and_read_only_users(
+    client: TestClient, pg: psycopg.Connection, holder: _PgBusinessDb
+) -> None:
+    path = "/api/studio/publish/copy/optimize"
+    base = {"platform": "抖音", "field": "title"}
+    empty = client.post(path, json={**base, "title": "  ", "description": " "})
+    assert empty.status_code == 422
+    assert empty.json()["detail"]["code"] == "PUBLISH_COPY_EMPTY"
+    holder.current_actor = actor("auditor_1", role="auditor")
+    forbidden = client.post(path, json={**base, "title": "庭院设计"})
+    assert forbidden.status_code == 403
 
 
 def test_list_get_and_isolation(

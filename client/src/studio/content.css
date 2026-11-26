@@ -151,8 +151,7 @@
 }
 .content-video-preview img,
 .content-player img,
-.content-asset img,
-.content-publish-preview img {
+.content-asset img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -1137,16 +1136,66 @@
 .content-publish-manual-actions a {
   text-decoration: none;
 }
+.studio-stage .content-publish > .content-title {
+  margin-bottom: 10px;
+}
+.studio-shell .content-publish .content-title h1 {
+  font-size: 29px;
+}
+.content-publish-navigation {
+  align-items: center;
+  border-bottom: 1px solid #343530;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  margin-bottom: 22px;
+}
+.content-publish-navigation .studio-button {
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: #b4b5af;
+  min-height: 40px;
+  padding-inline: 6px;
+}
+.content-publish-navigation .studio-button[aria-current="page"] {
+  border-bottom-color: #e5aa36;
+  color: #efb746;
+  font-weight: 600;
+}
+.content-publish-navigation .content-publish-tool-toggle {
+  color: #b4b5af;
+  margin-inline-start: auto;
+}
+.content-publish-tools,
+.content-publish-draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
 .content-publish-layout {
   display: grid;
-  gap: 18px;
-  grid-template-columns: minmax(300px, 34fr) minmax(580px, 66fr);
-  margin-top: 16px;
+  gap: 16px;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 3fr);
 }
 .content-publish-drafts,
-.content-publish-editor {
+.content-publish-history,
+.content-publish-editor,
+.content-publish-preview {
   min-width: 0;
-  padding: 12px;
+  padding: 16px;
+}
+.content-publish-drafts,
+.content-publish-history {
+  max-width: 960px;
+}
+.content-publish-history {
+  margin-inline: 0 auto;
+  text-align: start;
+}
+.content-publish-history .studio-empty {
+  align-items: flex-start;
+  text-align: start;
 }
 .content-publish-draft-tabs {
   align-items: center;
@@ -1244,51 +1293,87 @@
   align-items: center;
   border-bottom: 1px solid #343530;
   display: flex;
-  gap: 18px;
+  gap: 12px;
   justify-content: space-between;
-  margin: -12px -12px 14px;
-  padding: 10px 14px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
 }
-.content-publish-editor-heading h2 {
-  font-size: var(--font-section);
+.studio-shell .content-publish-editor-heading h2 {
+  font-size: 21px;
+  font-weight: 650;
   margin: 0;
 }
-.content-publish-editor-heading .studio-hint {
-  color: #e0b24d;
-  margin: 0;
+.content-publish-editor-heading span,
+.content-publish-readiness {
+  align-items: center;
+  display: flex;
+  gap: 8px;
 }
-.content-publish-media-grid {
+.content-publish-source,
+.content-publish-cover-row {
+  align-items: center;
   display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(260px, 1.08fr) minmax(200px, 0.92fr);
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
 }
-.content-publish-preview,
+.content-publish-source img,
+.content-publish-cover-row img {
+  border-radius: 6px;
+  height: 62px;
+  object-fit: cover;
+  width: 88px;
+}
+.content-publish-source > svg {
+  color: #a1a29a;
+  margin: 0 12px;
+}
+.content-publish-source strong,
+.content-publish-source small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.content-publish-source small {
+  margin-top: 4px;
+}
+.content-publish-source > .studio-button,
+.content-publish-cover-row > .studio-button {
+  color: #efb746;
+  white-space: nowrap;
+}
 .content-publish-cover {
   min-width: 0;
 }
-.content-publish-preview h3,
-.content-publish-cover h3 {
+.content-publish-cover-row {
+  grid-template-columns: 92px auto minmax(0, 1fr);
+  justify-items: start;
+}
+.content-publish-cover-row h3 {
   font-size: var(--font-body);
-  margin: 0 0 8px;
-}
-.content-publish-preview > .studio-media,
-.content-publish-preview > .studio-empty {
-  align-items: center;
-  background: #101111;
-  border: 1px solid #292a27;
-  border-radius: 9px;
-  display: flex;
-  height: 196px;
-  justify-content: center;
+  font-weight: 500;
   margin: 0;
-  overflow: hidden;
-  width: 100%;
 }
-.content-publish-preview > .studio-media img,
-.content-publish-preview > .studio-media video {
-  height: 100%;
-  object-fit: cover;
-  width: 100%;
+.content-publish-cover-row img {
+  height: 76px;
+  width: 84px;
+}
+#publish-cover-options {
+  border-top: 1px solid #292a27;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.content-publish-preview > .studio-media {
+  --image-preview-height: min(596px, 65vh);
+  margin-inline: auto;
+  max-width: min(100%, 328px, 45vh);
+  overflow: hidden;
+}
+.content-publish-preview .content-publish-readiness {
+  color: #b4b5af;
+  justify-content: center;
+  margin: 18px 0 0;
+}
+.content-publish-readiness[data-ready="true"] {
+  color: #7bd97e;
 }
 .content-cover-options {
   display: grid;
@@ -1333,31 +1418,112 @@
   gap: 8px;
   margin-bottom: 12px;
 }
-.content-publish-cover > .studio-button {
-  width: 100%;
-}
 .content-publish-fields {
   display: grid;
-  column-gap: 16px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-top: 14px;
-  row-gap: 10px;
+  gap: 10px;
+  margin-top: 12px;
 }
 .content-publish-fields .studio-field {
-  gap: 6px;
+  gap: 5px;
   margin-bottom: 0;
 }
-.content-publish-fields .studio-field:nth-child(n + 3) {
-  grid-column: 1 / -1;
-}
+.content-publish-fields input,
 .content-publish-fields textarea,
-.content-publish-tags {
-  border: 1px solid #292a27;
-  border-radius: 8px;
-  padding: 12px;
+.content-publish-fields select {
+  border: 1px solid #3a3b36;
+  border-radius: 7px;
+  min-width: 0;
+  padding: 7px 10px;
 }
 .content-publish-fields textarea {
-  min-height: 128px;
+  min-height: 58px;
+  resize: vertical;
+}
+.content-publish-field-heading {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+.content-publish-field-heading label > span {
+  color: #ef8e7d;
+}
+.content-publish-copy > :is(input, textarea, .content-publish-suggestion, p) {
+  margin-inline-start: 104px;
+}
+.studio-shell .content-publish-copy > :is(input, textarea) {
+  width: calc(100% - 104px);
+}
+.content-publish-field-heading .content-publish-optimize {
+  border-color: #a77a2c;
+  color: #efb746;
+  font-size: var(--font-label);
+  min-height: 30px;
+  padding: 4px 10px;
+}
+.content-publish-suggestion {
+  background: #171611;
+  border: 1px solid #5d4b2a;
+  border-radius: 7px;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+.content-publish-suggestion p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.content-publish-suggestion > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.content-publish-fields p[role="alert"],
+.content-publish-messages p[role="alert"] {
+  color: #ef8e7d;
+  margin: 4px 0;
+}
+.content-publish-group {
+  border-top: 1px solid #343530;
+  margin-top: 14px;
+  padding-top: 12px;
+}
+.content-publish-group h3 {
+  margin: 0 0 8px;
+}
+.content-publish-group .content-publish-fields {
+  margin-top: 0;
+}
+.content-publish-group .studio-field,
+.content-publish-fields .content-publish-topic {
+  align-items: start;
+  display: grid;
+  grid-template-columns: 98px minmax(0, 1fr);
+}
+.content-publish-group .studio-field > label,
+.content-publish-topic > label {
+  padding-top: 8px;
+}
+.content-publish-group .studio-field > p,
+.content-publish-topic > p,
+.content-publish-topic > small {
+  grid-column: 2;
+}
+.content-publish .content-platform-options {
+  gap: 6px;
+}
+.content-publish .content-platform-options .studio-button {
+  flex: 1 1 98px;
+  justify-content: center;
+  min-height: 34px;
+  padding: 4px 9px;
+}
+.content-publish .content-platform-options [aria-pressed="true"] {
+  background: #efb74614;
+  border-color: #efb746;
+  color: #efb746;
 }
 .content-publish-account,
 .content-publish-account-empty,
@@ -1365,7 +1531,16 @@
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
+}
+.content-publish-account select {
+  flex: 1 1 160px;
+}
+.content-publish-account span.content-publish-account-status {
+  background: #203721;
+  border-radius: 99px;
+  color: #99dd99;
+  padding: 3px 8px;
 }
 .content-publish-account span,
 .content-publish-account-empty span {
@@ -1384,9 +1559,13 @@
 /* PUBLISH-DELIVERY-20260917: schedule picker + delivery records */
 .content-publish-schedule {
   align-items: center;
+  border: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
 }
 .content-publish-schedule input[type="datetime-local"] {
   background: #111212;
@@ -1396,16 +1575,26 @@
   color-scheme: dark;
   padding: 8px 10px;
 }
-.content-publish-records-section {
-  border-top: 1px solid #292a27;
-  margin-top: 22px;
-  padding-top: 16px;
+.content-publish-schedule label {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 30px;
+}
+.content-publish-schedule input[type="radio"] {
+  accent-color: #efb746;
+  margin: 0;
+  width: auto;
+}
+.content-publish-schedule input[type="datetime-local"] {
+  width: auto;
 }
 .content-publish-records {
   display: flex;
   flex-direction: column;
   gap: 12px;
   margin-top: 14px;
+  text-align: start;
 }
 .content-publish-record {
   align-items: start;
@@ -1450,28 +1639,53 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  grid-column: 1 / -1;
-  justify-content: flex-end;
+  grid-column: 2 / -1;
+  justify-content: flex-start;
 }
-.content-publish-tags span {
-  background: #252520;
-  border-radius: 99px;
-  color: #d9d8d1;
-  font-size: var(--font-label);
-  padding: 5px 9px;
+.content-publish-tags > .studio-button {
+  background: #efb74614;
+  border-color: #6f552d;
+  color: #efe0b9;
+  min-height: 30px;
+  overflow-wrap: anywhere;
+  padding: 4px 8px;
 }
-.content-publish-tags input {
+.content-publish-tag-entry {
+  align-items: center;
+  display: flex;
+  flex: 1 1 195px;
+  gap: 6px;
+  min-width: 0;
+}
+.content-publish-tag-entry input {
   flex: 1;
-  min-width: 96px;
+}
+.content-publish-tag-entry button {
+  flex: none;
+  min-height: 32px;
+  padding: 4px 8px;
+}
+.content-publish-messages:empty {
+  display: none;
 }
 .content-publish-save-notice {
   color: #70cf6c;
   font-size: var(--font-label);
-  margin: 16px 0 0;
+  margin: 10px 0 0;
 }
 .content-publish-actions {
+  bottom: 0;
   justify-content: flex-end;
-  margin-top: 12px;
+  margin-top: 18px;
+  padding: 12px 16px;
+  position: sticky;
+  z-index: 2;
+}
+.content-publish-actions .studio-button {
+  min-width: min(144px, 40%);
+}
+.content-publish-actions .studio-button--primary {
+  min-width: min(166px, 44%);
 }
 .content-metrics {
   display: grid;
@@ -1538,9 +1752,6 @@
   z-index: 1;
 }
 @media (max-width: 1180px) {
-  .content-publish-layout {
-    grid-template-columns: 1fr;
-  }
   .content-material-layout {
     grid-template-columns: minmax(0, 1fr) 290px;
   }
@@ -1562,11 +1773,7 @@
   .content-detail-grid,
   .content-material-layout,
   .content-publish-layout,
-  .content-publish-media-grid,
   .content-chart-grid {
-    grid-template-columns: 1fr;
-  }
-  .content-publish-fields {
     grid-template-columns: 1fr;
   }
   .content-player {
@@ -1582,6 +1789,30 @@
 }
 
 @media (max-width: 620px) {
+  .content-publish-navigation {
+    column-gap: 6px;
+  }
+  .content-publish-group .studio-field,
+  .content-publish-fields .content-publish-topic {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .content-publish-group .studio-field > p,
+  .content-publish-topic > p,
+  .content-publish-topic > small {
+    grid-column: 1;
+  }
+  .content-publish-source img {
+    width: 56px;
+  }
+  .content-publish-copy > :is(input, textarea, .content-publish-suggestion, p) {
+    margin-inline-start: 0;
+  }
+  .studio-shell .content-publish-copy > :is(input, textarea) {
+    width: 100%;
+  }
+  .content-publish-actions {
+    padding-inline: 8px;
+  }
   .content-asset-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2646,14 +2877,6 @@
 .content-publish-draft-card-empty {
   width: 72px;
   height: 128px;
-}
-.content-publish-preview > .studio-media,
-.content-publish-preview > .studio-empty {
-  width: min(100%, 300px, 36vh);
-  height: auto;
-  min-height: 0;
-  aspect-ratio: 9 / 16;
-  margin-inline: auto;
 }
 .content-cover-options .studio-media,
 .content-cover-empty {

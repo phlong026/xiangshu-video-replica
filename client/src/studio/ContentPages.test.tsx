@@ -77,6 +77,7 @@ const {
   resolveMaterials,
   createGenerationTaskPreviewUrl,
   createPublishRecord,
+  optimizePublishCopy,
   fetchCoverStyles,
   generateCoverFromTemplate,
   listPublishRecords,
@@ -204,6 +205,7 @@ const {
   ),
   createGenerationTaskPreviewUrl: vi.fn(),
   createPublishRecord: vi.fn(),
+  optimizePublishCopy: vi.fn(),
   fetchCoverStyles: vi.fn(),
   generateCoverFromTemplate: vi.fn(),
   listPublishRecords: vi.fn(async (): Promise<unknown[]> => []),
@@ -282,6 +284,7 @@ vi.mock("../api", async (importOriginal) => ({
   resolveMaterials,
   createGenerationTaskPreviewUrl,
   createPublishRecord,
+  optimizePublishCopy,
   fetchCoverStyles,
   generateCoverFromTemplate,
   listPublishRecords,
@@ -4265,6 +4268,7 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<PublishPage />);
 
+    fireEvent.click(screen.getByRole("button", { name: "发布工具" }));
     const manual = within(screen.getByRole("region", { name: "快手手动发布" }));
     const link = manual.getByRole("link", { name: "前往快手手动发布" });
     expect(link).toHaveAttribute(
@@ -4330,6 +4334,7 @@ describe("V1.4 内容与运营页面", () => {
         target: { value: "庭院" },
       });
       fireEvent.keyDown(screen.getByLabelText("添加标签"), { key: "Enter" });
+      fireEvent.click(screen.getByRole("button", { name: "发布工具" }));
       const manual = within(
         screen.getByRole("region", { name: "快手手动发布" }),
       );
@@ -4367,6 +4372,7 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(studio());
     render(<PublishPage />);
 
+    fireEvent.click(screen.getByRole("button", { name: "发布工具" }));
     fireEvent.click(screen.getByRole("link", { name: "前往快手手动发布" }));
     await waitFor(() =>
       expect(tauriNative.invoke).toHaveBeenCalledWith("open_kuaishou_creator"),
@@ -4381,6 +4387,7 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(studio());
     render(<PublishPage />);
 
+    fireEvent.click(screen.getByRole("button", { name: "发布工具" }));
     const link = screen.getByRole("link", { name: "前往快手手动发布" });
     fireEvent.click(link);
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -4448,15 +4455,20 @@ describe("V1.4 内容与运营页面", () => {
       target: { value: "乡墅建房预算避坑清单" },
     });
     fireEvent.change(screen.getByLabelText("添加标签"), {
-      target: { value: " 建房避坑 " },
+      target: { value: " #建房避坑 " },
     });
-    fireEvent.keyDown(screen.getByLabelText("添加标签"), { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "添加话题标签" }));
+    const footer = within(screen.getByRole("contentinfo"));
+    expect(footer.getAllByRole("button")).toEqual([
+      footer.getByRole("button", { name: "保存草稿" }),
+      footer.getByRole("button", { name: "立即发布" }),
+    ]);
     expect(
       screen.getByRole("button", { name: "移除标签 建房避坑" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("添加标签")).toHaveAttribute(
       "placeholder",
-      "输入标签后按 Enter",
+      "输入话题标签",
     );
     fireEvent.change(screen.getByLabelText("添加标签"), {
       target: { value: "建房避坑" },
@@ -4695,14 +4707,15 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<PublishPage />);
 
-    expect(
-      screen.getByText("选择成片与账号发布，或前往快手创作者中心手动发布"),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "发布管理" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "草稿" }));
     expect(screen.getByText("草稿保存在云端，可反复编辑")).toBeInTheDocument();
     expect(screen.queryByText(/待发布\s*0/)).not.toBeInTheDocument();
     expect(screen.queryByText(/已发布\s*0/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "发布记录" }));
+    expect(await screen.findByText("暂无发布记录")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "编辑发布" }));
     await screen.findByText("尚未连接该平台账号，请先扫码连接");
-    await screen.findByText("暂无发布记录");
     expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
     fireEvent.click(
       screen.getByRole("button", { name: "前往用户档案管理账号" }),
@@ -4794,7 +4807,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(listPublishRecords).toHaveBeenCalled();
 
     // Scheduled: the datetime-local value is local wall-clock time → ISO instant.
-    fireEvent.click(screen.getByRole("button", { name: "定时" }));
+    fireEvent.click(screen.getByRole("radio", { name: "定时发布" }));
     const timeInput = screen.getByLabelText("定时发布时间");
     fireEvent.change(timeInput, { target: { value: "2020-01-01T10:00" } });
     fireEvent.click(screen.getByRole("button", { name: "定时发布" }));
@@ -4885,7 +4898,7 @@ describe("V1.4 内容与运营页面", () => {
     render(<PublishPage />);
     const platform = screen.getByRole("button", { name: "快手" });
     await waitFor(() => expect(platform).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "定时" }));
+    fireEvent.click(screen.getByRole("radio", { name: "定时发布" }));
     fireEvent.change(screen.getByLabelText("定时发布时间"), {
       target: { value: "2026-12-01T12:00" },
     });
@@ -4898,7 +4911,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(platform).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("快手目前仅支持立即发布。")).toBeInTheDocument();
     expect(screen.queryByLabelText("定时发布时间")).toBeNull();
-    expect(screen.queryByRole("button", { name: "定时" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "定时发布" })).toBeNull();
     const accountSelect = await screen.findByLabelText("选择发布账号");
     expect(within(accountSelect).queryByText(/抖音账号/)).toBeNull();
     fireEvent.change(accountSelect, { target: { value: "ks-cloud" } });
@@ -4912,6 +4925,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(submit).toBeDisabled();
     expect(screen.getByText("请填写快手发布标题。")).toBeInTheDocument();
     fireEvent.change(title, { target: { value: " 庭院设计 " } });
+    fireEvent.click(screen.getByRole("button", { name: "更换封面" }));
     fireEvent.click(screen.getByRole("button", { name: "选择封面 庭院封面" }));
     saveStudioDraft.mockResolvedValueOnce({ revision: 2 });
     fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
@@ -6380,6 +6394,8 @@ describe("发布封面标题与确认", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("发布标题")).toBeEnabled(),
     );
+    const coverToggle = screen.queryByRole("button", { name: "更换封面" });
+    if (coverToggle) fireEvent.click(coverToggle);
     fireEvent.click(screen.getByRole("tab", { name: "模板封面" }));
     const template = await screen.findByRole("button", {
       name: "选择模板 简洁",
@@ -6445,6 +6461,78 @@ describe("发布封面标题与确认", () => {
       scheduled_at: null,
     });
     listPublishRecords.mockReset().mockResolvedValue([]);
+    optimizePublishCopy.mockReset();
+  });
+
+  it("发布文案分别生成建议，采用时只回填对应字段", async () => {
+    optimizePublishCopy
+      .mockResolvedValueOnce({ text: "三步看懂乡墅庭院设计" })
+      .mockResolvedValueOnce({ text: "从大门到入户，看看庭院的采光与动线。" });
+    render(<StatefulPublishPage value={workspace()} />);
+    const optimizeTitle = screen.getByRole("button", {
+      name: "AI 优化发布标题",
+    });
+    await waitFor(() => expect(optimizeTitle).toBeEnabled());
+    const title = screen.getByLabelText("发布标题");
+    const description = screen.getByLabelText("发布描述");
+    fireEvent.change(description, { target: { value: "原始描述" } });
+    fireEvent.click(optimizeTitle);
+    const applyTitle = await screen.findByRole("button", { name: "采用建议" });
+    expect(title).toHaveValue("发布 A");
+    expect(optimizePublishCopy).toHaveBeenNthCalledWith(
+      1,
+      {
+        field: "title",
+        platform: "抖音",
+        title: "发布 A",
+        description: "原始描述",
+      },
+      expect.any(AbortSignal),
+    );
+    fireEvent.click(applyTitle);
+    expect(title).toHaveValue("三步看懂乡墅庭院设计");
+    expect(description).toHaveValue("原始描述");
+    fireEvent.click(screen.getByRole("button", { name: "AI 优化发布描述" }));
+    const applyDescription = await screen.findByRole("button", {
+      name: "采用建议",
+    });
+    expect(description).toHaveValue("原始描述");
+    expect(optimizePublishCopy).toHaveBeenNthCalledWith(
+      2,
+      {
+        field: "description",
+        platform: "抖音",
+        title: "三步看懂乡墅庭院设计",
+        description: "原始描述",
+      },
+      expect.any(AbortSignal),
+    );
+    fireEvent.click(applyDescription);
+    expect(title).toHaveValue("三步看懂乡墅庭院设计");
+    expect(description).toHaveValue("从大门到入户，看看庭院的采光与动线。");
+    expect(createPublishRecord).not.toHaveBeenCalled();
+  });
+
+  it("请求中的字段继续编辑后会丢弃旧建议，失败时保留手写原文", async () => {
+    const result = pending<{ text: string }>();
+    optimizePublishCopy
+      .mockReturnValueOnce(result.promise)
+      .mockRejectedValueOnce(new Error("AI 优化暂时失败，请稍后重试。"));
+    render(<StatefulPublishPage value={workspace()} />);
+    const optimize = screen.getByRole("button", { name: "AI 优化发布标题" });
+    await waitFor(() => expect(optimize).toBeEnabled());
+    fireEvent.click(optimize);
+    expect(optimize).toBeDisabled();
+    const title = screen.getByLabelText("发布标题");
+    fireEvent.change(title, { target: { value: "手工调整后的标题" } });
+    expect(optimizePublishCopy.mock.calls[0][1].aborted).toBe(true);
+    await act(async () => result.resolve({ text: "迟到的建议" }));
+    expect(screen.queryByText("迟到的建议")).not.toBeInTheDocument();
+    fireEvent.click(optimize);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "AI 优化暂时失败",
+    );
+    expect(title).toHaveValue("手工调整后的标题");
   });
 
   it("默认直接显示发布标题，独立编辑后可恢复跟随且保留所选模板", async () => {
@@ -6616,6 +6704,7 @@ describe("发布封面标题与确认", () => {
     render(<StatefulPublishPage value={workspace()} />);
     await screen.findByText(/当前封面的标题或模板已变化/);
     expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "更换封面" }));
     fireEvent.click(screen.getByRole("button", { name: "选择封面 视频 A" }));
     expect(screen.getByRole("button", { name: "立即发布" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "立即发布" }));
@@ -6686,6 +6775,7 @@ describe("发布封面标题与确认", () => {
     render(<StatefulPublishPage value={workspace()} />);
     await openTemplates();
     fireEvent.click(screen.getByRole("button", { name: "生成封面" }));
+    fireEvent.click(screen.getByRole("button", { name: "草稿" }));
     fireEvent.click(
       screen.getByText("发布 B").closest("button") as HTMLButtonElement,
     );
@@ -6736,10 +6826,12 @@ describe("发布封面标题与确认", () => {
             }}
           />,
         );
-      else
+      else {
+        fireEvent.click(screen.getByRole("button", { name: "发布工具" }));
         fireEvent.click(
           screen.getByRole("button", { name: "重新加载云端草稿与本机账号" }),
         );
+      }
       await act(async () => result.resolve(generatedImage));
       expect(screen.queryByAltText("生成的封面预览")).toBeNull();
       expect(createMaterialUploadIntent).not.toHaveBeenCalled();
