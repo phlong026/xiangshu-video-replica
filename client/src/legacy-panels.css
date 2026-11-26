@@ -3345,6 +3345,7 @@
 }
 
 .creation-replica .source-frame-strip .source-frame-option {
+  position: relative;
   padding-bottom: 0;
 }
 

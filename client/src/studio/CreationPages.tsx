@@ -40,6 +40,7 @@ import {
   readShotConsistencyIssues,
   readSourceFrameCandidates,
   readSourceReview,
+  resolveMaterials,
   rewriteProjectScript,
   type SavedPromptItem,
   type ScriptRewriteTask,
@@ -1729,6 +1730,60 @@ export function customerDurationMax(
   );
 }
 
+const REPLICA_ANALYSIS_STEPS = ["排队", "AI 拆解", "读取分镜"] as const;
+const REPLICA_ANALYSIS_PHASES = {
+  CONNECTING: { completed: 0, message: "正在连接拆解服务" },
+  PENDING: { completed: 0, message: "拆解任务已排队，等待开始" },
+  RUNNING: { completed: 1, message: "正在分析视频画面与口播" },
+  SUCCEEDED: { completed: 2, message: "拆解已完成，正在读取分镜" },
+  COMPLETE: { completed: 3, message: "拆解完成，分镜表已就绪" },
+} as const;
+
+function ReplicaAnalysisProgress({
+  phase,
+  elapsed,
+}: {
+  phase: keyof typeof REPLICA_ANALYSIS_PHASES;
+  elapsed: number;
+}) {
+  const { completed, message } = REPLICA_ANALYSIS_PHASES[phase];
+  return (
+    <div className="creation-replica-progress">
+      <div
+        aria-label="拆解进度"
+        aria-valuemax={REPLICA_ANALYSIS_STEPS.length}
+        aria-valuemin={0}
+        aria-valuenow={completed}
+        aria-valuetext={message}
+        className="creation-replica-progress__steps"
+        role="progressbar"
+      >
+        {REPLICA_ANALYSIS_STEPS.map((label, index) => (
+          <span
+            className={
+              index < completed
+                ? "is-done"
+                : index === completed
+                  ? "is-current"
+                  : undefined
+            }
+            key={label}
+          >
+            {index < completed && <Icon name="check" size={14} />}
+            {label}
+          </span>
+        ))}
+      </div>
+      <div className="creation-replica-progress__meta">
+        <span role="status">{message}</span>
+        {phase !== "COMPLETE" && (
+          <span role="timer">已等待 {formatExtractionElapsed(elapsed)}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ReplicaPage() {
   const {
     state,
@@ -1747,6 +1802,16 @@ export function ReplicaPage() {
   const project = data.projects.find(
     (item) => item.id === state.draft.projectId,
   );
+  const referenceAssetId =
+    project?.reference_asset_id ?? state.draft.sourceAssetId;
+  const { analysisTaskId, analysisTaskStatus } = state.draft;
+  const inFlightAnalysisId =
+    analysisTaskId &&
+    (analysisTaskStatus === "PENDING" || analysisTaskStatus === "RUNNING")
+      ? analysisTaskId
+      : !analysisTaskId && project?.analysis_status === "PENDING"
+        ? (project.analysis_task_id ?? undefined)
+        : undefined;
   const storyboardReview = Boolean(
     state.storyboardReviewProjectId &&
       state.storyboardReviewProjectId === state.draft.projectId,
@@ -1754,8 +1819,38 @@ export function ReplicaPage() {
   const source = findSource(
     data.assets,
     data.videos,
-    state.draft.sourceId ?? state.selectedVideoId,
+    state.draft.sourceId ?? referenceAssetId ?? state.selectedVideoId,
   );
+  const [measuredSource, setMeasuredSource] = useState<{
+    assetId: string;
+    seconds: number;
+  }>();
+  const knownSourceDuration =
+    (state.draft.sourceAssetId === referenceAssetId
+      ? state.draft.sourceDurationSeconds
+      : undefined) ??
+    (measuredSource?.assetId === referenceAssetId
+      ? measuredSource?.seconds
+      : undefined) ??
+    (source?.id === referenceAssetId ? source?.durationSeconds : undefined);
+  useEffect(() => {
+    if (review || !referenceAssetId || knownSourceDuration) return;
+    let active = true;
+    void resolveMaterials([`asset:${referenceAssetId}`])
+      .then(({ items }) => {
+        const seconds = items.find(
+          (item) => item.asset_id === referenceAssetId,
+        )?.duration_seconds;
+        if (active && seconds && Number.isFinite(seconds) && seconds > 0)
+          setMeasuredSource({ assetId: referenceAssetId, seconds });
+      })
+      .catch(() => {
+        // 历史素材缺少时长时，等播放器读到元数据或从分镜时间轴补齐。
+      });
+    return () => {
+      active = false;
+    };
+  }, [knownSourceDuration, referenceAssetId, review]);
   const sourceMediaKey = source?.url || source?.poster || source?.id || "";
   const [sourceRatio, setSourceRatio] = useState<{
     source: string;
@@ -1805,7 +1900,6 @@ export function ReplicaPage() {
   useEffect(() => {
     if (!analysisBusy) return;
     const started = Date.now();
-    setAnalysisElapsed(0);
     const timer = window.setInterval(() => {
       const base = analysisWaitStartedRef.current ?? started;
       setAnalysisElapsed(Math.max(0, Math.floor((Date.now() - base) / 1000)));
@@ -1964,6 +2058,19 @@ export function ReplicaPage() {
         ? REVIEW_SAMPLE_SHOTS
         : [];
   const hasShots = stage === "ready" && displayShots.length > 0;
+  // 上一版已就绪时，重新拆解不卸载首帧与文案编辑器。
+  const analysisAvailable = Boolean(
+    project &&
+      (displayShots.length > 0 ||
+        (!analysisBusy && project.analysis_status === "READY")),
+  );
+  const analysisPhase = analysisBusy
+    ? analysisStatus === "FAILED"
+      ? null
+      : (analysisStatus ?? "CONNECTING")
+    : hasShots && !analysisError
+      ? "COMPLETE"
+      : null;
 
   useEffect(
     () => () => {
@@ -2004,6 +2111,9 @@ export function ReplicaPage() {
   };
 
   const resetReplicaState = () => {
+    // 换源或重来后，旧任务的轮询与结果读取不能再更新当前页面。
+    analysisSessionRef.current += 1;
+    setAnalysisBusy(false);
     setAnalysisError("");
     setAnalysisStatus(undefined);
     setShots([]);
@@ -2035,10 +2145,6 @@ export function ReplicaPage() {
     uploadAbortRef.current?.abort();
     const previousTaskId = state.draft.analysisTaskId;
     const previousTaskStatus = state.draft.analysisTaskStatus;
-    // S8：重来接管会话——旧会话号前进一位并立即释放忙碌态，旧任务迟到的
-    // 轮询收尾不能再把重来后的界面按在“拆解中”。
-    analysisSessionRef.current += 1;
-    setAnalysisBusy(false);
     restoreOperationRef.current += 1;
     restoredProjectIdRef.current = undefined;
     restoreSuppressedRef.current = false;
@@ -2055,6 +2161,7 @@ export function ReplicaPage() {
       projectId: undefined,
       sourceId: undefined,
       sourceAssetId: undefined,
+      sourceDurationSeconds: undefined,
       firstFrameId: undefined,
       firstFrameSelectionVersionId: undefined,
       analysisTaskId: undefined,
@@ -2395,10 +2502,6 @@ export function ReplicaPage() {
       restoreOperationRef.current += 1;
       restoreBusyRef.current = false;
       setRestoreBusy(false);
-      // S8：换源接管会话——立即释放旧会话的忙碌态，旧任务迟到的轮询收尾
-      // （取消失败时可能还要跑很久）不再占着新项目的拆解入口。
-      analysisSessionRef.current += 1;
-      setAnalysisBusy(false);
       resetReplicaState();
       setPromptText("");
       promptTextRef.current = "";
@@ -2414,6 +2517,7 @@ export function ReplicaPage() {
         projectId: uploaded.projectId,
         sourceId: uploaded.assetId,
         sourceAssetId: uploaded.assetId,
+        sourceDurationSeconds: uploaded.durationSeconds ?? duration,
         analysisTaskId: uploaded.analysisTaskId,
         analysisTaskStatus: uploaded.analysisTaskStatus,
         prompt: "",
@@ -2458,6 +2562,7 @@ export function ReplicaPage() {
   };
 
   const selectExistingProject = (selectedId: string) => {
+    if (readOnly) return;
     const selected = data.projects.find((item) => item.id === selectedId);
     if (!selected) {
       return;
@@ -2486,6 +2591,7 @@ export function ReplicaPage() {
       projectId: selected.id,
       sourceId: selected.reference_asset_id ?? undefined,
       sourceAssetId: selected.reference_asset_id ?? undefined,
+      sourceDurationSeconds: undefined,
       prompt: "",
       promptEdited: false,
       script: blankScript,
@@ -2513,18 +2619,18 @@ export function ReplicaPage() {
       notify("请先上传或选择来源视频。");
       return;
     }
-    const taskInFlight =
-      state.draft.analysisTaskStatus === "PENDING" ||
-      state.draft.analysisTaskStatus === "RUNNING";
     // 已有拆解结果且不在途：先弹窗让用户在「复用现有结果 / 重新拆解」间
     // 明确取舍；在途任务与无结果场景直接走原有流程（接回/新建）。
-    if (!options?.skipDedupe && !taskInFlight && displayShots.length > 0) {
+    if (
+      !options?.skipDedupe &&
+      !inFlightAnalysisId &&
+      displayShots.length > 0
+    ) {
       setDedupeDialogOpen(true);
       return;
     }
     await runAnalysis();
   };
-  startAnalysisRef.current = startAnalysis;
 
   /** 去重确认后的实际执行体：S9 未保存修改确认 → 发起/接回拆解。
    * 独立成函数让「复用现有结果」完全绕开计费路径。 */
@@ -2554,13 +2660,15 @@ export function ReplicaPage() {
     setRestoreError("");
     analysisProjectRef.current = projectId;
     const sessionCurrent = capturePromptSession();
+    const session = ++analysisSessionRef.current;
     const isCurrentAnalysis = () =>
+      session === analysisSessionRef.current &&
       analysisProjectRef.current === projectId &&
       latestDraftRef.current.projectId === projectId &&
       sessionCurrent();
     // S8：会话号 + 等待起点。手动启动与挂载期自动接回共用这一条路径。
-    const session = ++analysisSessionRef.current;
     analysisWaitStartedRef.current = undefined;
+    setAnalysisElapsed(0);
     setAnalysisBusy(true);
     setAnalysisError("");
     setAnalysisStatus(undefined);
@@ -2572,19 +2680,14 @@ export function ReplicaPage() {
       // 却没拿到分镜（视频过短、无有效镜头）时必须强制重跑，否则「重新拆解」
       // 永远复用已完成的任务，陷入拿不到分镜的死循环；FAILED 与「已有分镜的
       // 显式重跑」同样强制新建。
-      const taskInFlight =
-        state.draft.analysisTaskStatus === "PENDING" ||
-        state.draft.analysisTaskStatus === "RUNNING";
-      const force =
-        !taskInFlight &&
-        (shots.length > 0 ||
-          Boolean(
-            state.draft.analysisTaskId || state.draft.analysisTaskStatus,
-          ));
-      const task =
-        !force && state.draft.analysisTaskId
-          ? await getAnalysisTask(state.draft.analysisTaskId)
-          : await startVideoAnalysis(projectId, assetId, undefined, force);
+      const task = inFlightAnalysisId
+        ? await getAnalysisTask(inFlightAnalysisId)
+        : await startVideoAnalysis(
+            projectId,
+            assetId,
+            undefined,
+            Boolean(shots.length || analysisTaskId || analysisTaskStatus),
+          );
       if (!isCurrentAnalysis()) return;
       patchDraft({ analysisTaskId: task.id, analysisTaskStatus: task.status });
       setAnalysisStatus(task.status);
@@ -2595,17 +2698,21 @@ export function ReplicaPage() {
       analysisWaitStartedRef.current = Number.isFinite(createdAtMs)
         ? createdAtMs
         : undefined;
+      if (analysisWaitStartedRef.current !== undefined)
+        setAnalysisElapsed(
+          Math.max(0, Math.floor((Date.now() - createdAtMs) / 1000)),
+        );
       await waitForAnalysisTask(task.id, (updated) => {
         if (isCurrentAnalysis()) setAnalysisStatus(updated.status);
       });
       if (!isCurrentAnalysis()) {
         return; // 等待期间用户更换了来源视频，丢弃旧项目的拆解结果。
       }
+      setAnalysisStatus("SUCCEEDED");
       patchDraft({ analysisTaskStatus: "SUCCEEDED" });
       const analysisVersion = await getLatestProjectAnalysis(projectId).catch(
         () => undefined,
       );
-      setAnalysisVersionCreatedAt(analysisVersion?.created_at);
       const analysisShots: ShotCard[] = analysisVersion
         ? (readAnalysisPayload(analysisVersion)?.shots ?? [])
         : [];
@@ -2630,6 +2737,7 @@ export function ReplicaPage() {
             : "";
       const finalShots = shotPayload.shots ?? analysisShots;
       setShots(finalShots);
+      setAnalysisVersionCreatedAt(analysisVersion?.created_at);
       setSourceReview(readSourceReview(shotPayload.source_review));
       setShotIssues(readShotConsistencyIssues(shotPayload?.consistency_issues));
       setShotTableContext(
@@ -2711,10 +2819,8 @@ export function ReplicaPage() {
     )
       return;
     if (restoreSuppressedRef.current) return;
-    const taskId = state.draft.analysisTaskId;
-    const taskStatus = state.draft.analysisTaskStatus;
-    if (!taskId || (taskStatus !== "PENDING" && taskStatus !== "RUNNING"))
-      return;
+    const taskId = inFlightAnalysisId;
+    if (!taskId) return;
     if (autoResumeTaskRef.current === taskId) return;
     if (!project || !(state.draft.sourceAssetId ?? project.reference_asset_id))
       return;
@@ -2722,12 +2828,11 @@ export function ReplicaPage() {
     void startAnalysisRef.current();
   }, [
     analysisBusy,
+    inFlightAnalysisId,
     project,
     readOnly,
     restoreBusy,
     review,
-    state.draft.analysisTaskId,
-    state.draft.analysisTaskStatus,
     state.draft.sourceAssetId,
   ]);
 
@@ -2912,6 +3017,7 @@ export function ReplicaPage() {
     (duration, shot) => Math.max(duration, shot.end_time),
     0,
   );
+  const referenceVideoDuration = knownSourceDuration ?? sourceDuration;
   // 输出时长跟随源视频。复刻页没有时长控件（时长下拉框属于独立创作页的
   // ParameterControls），草稿默认的 8 秒对用户既不可见也不可改；源视频在上传时
   // 已被限定为 4–30 秒（16–30 秒走长档 video_768p_long，需后台启用价目，
@@ -3043,6 +3149,13 @@ export function ReplicaPage() {
   const missingFirstFrameHint = (
     <Hint>请先完成首帧置换并选定图片，再合成最终提示词。</Hint>
   );
+  // 项目列表首屏可能尚未拉到这个项目，已恢复的文案和首帧仍可预览。
+  const narrationAvailable =
+    replicaProjectId &&
+    (analysisAvailable ||
+      displayShots.length > 0 ||
+      state.draft.firstFrameId ||
+      promptText.trim());
   return (
     <section className="creation-page creation-replica">
       <CreationNavigation />
@@ -3148,6 +3261,19 @@ export function ReplicaPage() {
                         // 首帧已选时它的真实比例优先，源视频只在没有首帧时兜底。
                         if (!state.draft.firstFrameId) alignDraftRatio(ratio);
                       }}
+                      onVideoDurationChange={(seconds) => {
+                        if (
+                          referenceAssetId &&
+                          source?.id === referenceAssetId &&
+                          !knownSourceDuration &&
+                          Number.isFinite(seconds) &&
+                          seconds > 0
+                        )
+                          setMeasuredSource({
+                            assetId: referenceAssetId,
+                            seconds,
+                          });
+                      }}
                       presentation="video"
                       aspectRatio="adaptive"
                     />
@@ -3160,7 +3286,7 @@ export function ReplicaPage() {
                       <span className="creation-replica-project-name">
                         {project?.name}
                       </span>
-                      {displayShots.length > 0 && (
+                      {hasShots && (
                         <small>已拆解 {displayShots.length} 个镜头</small>
                       )}
                     </span>
@@ -3169,23 +3295,33 @@ export function ReplicaPage() {
                     <div className="creation-replica-stat is-gold">
                       <span>视频时长</span>
                       <strong>
-                        {sourceDuration > 0
-                          ? `${sourceDuration.toFixed(1)} 秒`
-                          : "—"}
+                        {referenceVideoDuration > 0
+                          ? `${referenceVideoDuration.toFixed(1)} 秒`
+                          : referenceAssetId
+                            ? "待获取"
+                            : "—"}
                       </strong>
                     </div>
                     <div className="creation-replica-stat is-gold">
                       <span>拆解镜头</span>
                       <strong>
-                        {displayShots.length > 0
+                        {hasShots
                           ? `${displayShots.length} 个`
-                          : "—"}
+                          : analysisBusy
+                            ? "等待结果"
+                            : "—"}
                       </strong>
                     </div>
                     <div className="creation-replica-stat">
                       <span>末次拆解</span>
-                      <strong title={analysisVersionCreatedAt ?? undefined}>
-                        {analysisCreatedLabel}
+                      <strong
+                        title={hasShots ? analysisVersionCreatedAt : undefined}
+                      >
+                        {hasShots
+                          ? analysisCreatedLabel
+                          : analysisBusy
+                            ? "完成后更新"
+                            : "—"}
                       </strong>
                     </div>
                   </div>
@@ -3306,18 +3442,11 @@ export function ReplicaPage() {
                   {restoreBusy && (
                     <Hint>正在读取已保存的分镜、文案和 Prompt…</Hint>
                   )}
-                  {analysisBusy && (
-                    <p role="status" aria-live="polite">
-                      {analysisStatus === "PENDING"
-                        ? "拆解任务已排队，等待开始"
-                        : analysisStatus === "RUNNING"
-                          ? "正在分析视频画面与口播"
-                          : analysisStatus === "SUCCEEDED"
-                            ? "拆解已完成，正在读取分镜"
-                            : "正在连接拆解服务"}
-                      {` · 已等待 ${Math.floor(analysisElapsed / 60)}分${analysisElapsed % 60}秒。`}
-                      视频拆解可能需要数分钟，请勿重复提交。
-                    </p>
+                  {analysisPhase && (
+                    <ReplicaAnalysisProgress
+                      elapsed={analysisElapsed}
+                      phase={analysisPhase}
+                    />
                   )}
                   {analysisError && (
                     <div className="creation-inline-error" role="alert">
@@ -3387,7 +3516,11 @@ export function ReplicaPage() {
                   <SourceReviewNotice review={sourceReview} />
                   <details
                     className="creation-shot-details"
-                    open={shotIssues.length > 0 || undefined}
+                    open={
+                      analysisStatus === "SUCCEEDED" ||
+                      shotIssues.length > 0 ||
+                      undefined
+                    }
                   >
                     <summary>展开编辑完整分镜</summary>
                     <ShotCardEditor
@@ -3404,19 +3537,52 @@ export function ReplicaPage() {
         </section>
         <section className="creation-workflow-section" id="replica-step-2">
           <h2>2 首帧置换</h2>
-          <ReplicaFirstFrameSection
-            ratio={firstFramePreviewRatio}
-            videoDurationSeconds={sourceDuration || null}
-          />
+          {project && analysisAvailable ? (
+            <ReplicaFirstFrameSection
+              project={project}
+              ratio={firstFramePreviewRatio}
+              videoDurationSeconds={referenceVideoDuration || null}
+            />
+          ) : (
+            <Panel className="creation-empty-workspace">
+              <Empty
+                title={analysisBusy ? "等待视频拆解完成" : "先完成视频拆解"}
+                description={
+                  project
+                    ? "拆解完成后将在这里提取源画面并置换首帧。"
+                    : "请在第 1 步上传参考视频或选择已有项目。"
+                }
+                action={
+                  <Button
+                    variant="outline"
+                    onClick={() => scrollToReplicaStep("replica-step-1")}
+                  >
+                    返回视频拆解
+                  </Button>
+                }
+              />
+            </Panel>
+          )}
         </section>
         <section className="creation-workflow-section" id="replica-step-3">
           <h2>3 文案与生成</h2>
-          {!replicaProjectId || !state.draft.firstFrameId ? (
+          {!narrationAvailable || !state.draft.firstFrameId ? (
             <ReplicaPreflightChecklist checks={workflowChecks} />
           ) : null}
-          {/* 门禁按项目判定：拆解未完成时也要挂载口播文案占位，否则用户看不到还差哪一步。 */}
-          {!replicaProjectId ? (
-            <Hint>先完成视频拆解，再确认首帧与文案。</Hint>
+          {!narrationAvailable ? (
+            <div className="creation-upload-row">
+              <Hint>
+                {project
+                  ? "拆解完成后可查看口播文案。确认首帧后可合成最终提示词。"
+                  : "先导入参考视频。拆解完成后可编辑口播文案。"}
+              </Hint>
+              <Button
+                variant="outline"
+                onClick={() => scrollToReplicaStep("replica-step-1")}
+              >
+                返回视频拆解
+              </Button>
+            </div>
           ) : (
             <>
               <ReplicaMediaRow ratio={firstFramePreviewRatio}>
@@ -3630,9 +3796,11 @@ export function ReplicaPage() {
 }
 
 function ReplicaFirstFrameSection({
+  project,
   ratio,
   videoDurationSeconds,
 }: {
+  project: Project;
   /** 首帧素材宽高比，供媒体行推算左栏宽度；未知时为 9:16。 */
   ratio: number;
   videoDurationSeconds: number | null;
@@ -3640,9 +3808,6 @@ function ReplicaFirstFrameSection({
   const { state, data, review, patchDraft, notify, updateData, user } =
     useStudio();
   const readOnly = user.role === "auditor";
-  const project = data.projects.find(
-    (item) => item.id === state.draft.projectId,
-  );
   const [characterSelection, setCharacterSelection] =
     useState<ProjectMainCharacter | null>(null);
   const [sourceFrameSelection, setSourceFrameSelection] =
@@ -3699,11 +3864,9 @@ function ReplicaFirstFrameSection({
     } as Partial<StudioDraft>);
   }, []);
 
-  // 只认真实存在于 data.projects 的项目。早先会在列表非空时拿草稿里的 id 兜底，
-  // 但那个 id 可能已经被删/换号，于是用一份不存在的项目渲染出空壳界面（缺陷 A4）。
-  const projectId = project?.id;
+  const projectId = project.id;
   const referenceAssetId =
-    project?.reference_asset_id ?? state.draft.sourceAssetId ?? null;
+    project.reference_asset_id ?? state.draft.sourceAssetId ?? null;
   // 换项目时重置全部下游状态与草稿中的旧首帧。
   useEffect(() => {
     const projectChanged =
@@ -3937,45 +4100,7 @@ function ReplicaFirstFrameSection({
 
   return (
     <div className="creation-replacement">
-      {!projectId ? (
-        <Panel className="creation-empty-workspace">
-          <Empty
-            title="先在视频复刻中准备好项目"
-            description="人物替换需要一个已完成 AI 拆解的项目：选择下方项目即可开始提取源画面并生成置换首帧。"
-            action={
-              data.projects.length > 0 ? (
-                <select
-                  aria-label="选择项目"
-                  className="creation-project-select"
-                  defaultValue=""
-                  disabled={readOnly}
-                  onChange={(event) => {
-                    if (readOnly) return;
-                    const selected = data.projects.find(
-                      (item) => item.id === event.target.value,
-                    );
-                    if (selected) {
-                      patchDraft({ projectId: selected.id });
-                      notify(`已切换到项目「${selected.name}」。`);
-                    }
-                  }}
-                >
-                  <option value="" disabled>
-                    选择已有项目
-                  </option>
-                  {data.projects
-                    .filter((item) => item.analysis_status === "READY")
-                    .map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                </select>
-              ) : undefined
-            }
-          />
-        </Panel>
-      ) : review ? (
+      {review ? (
         <>
           <Hint>审核示例 · 只读</Hint>
           {/* 审核示例必须与生产分支同构（三带 + .media-frame），否则复刻页在

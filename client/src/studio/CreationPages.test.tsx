@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -29,7 +30,10 @@ const replicaApi = vi.hoisted(() => ({
   cancelAnalysisTask: vi.fn(),
   waitForAnalysisTask: vi.fn(),
   getLatestProjectShotCards: vi.fn(),
-  getLatestProjectAnalysis: vi.fn(async () => ({ id: "av-x", payload: {} })),
+  getLatestProjectAnalysis: vi
+    .fn()
+    .mockResolvedValue({ id: "av-x", payload: {} }),
+  resolveMaterials: vi.fn().mockResolvedValue({ items: [] }),
   getLatestGenerationPrompt: vi.fn(),
   getLatestScriptVersion: vi.fn(),
   fetchViralCopyExtractions: vi.fn(),
@@ -1886,11 +1890,14 @@ describe("V1.4 创作页面", () => {
 
   it("人物替换：无项目时引导先准备项目", () => {
     const value = studio({ review: false });
-    value.state = { ...value.state, page: "replacement" };
+    value.state = createState("replacement");
     value.data = { ...value.data, projects: [] };
     useStudio.mockReturnValue(value);
     render(<ReplacementPage />);
-    expect(screen.getByText(/先在视频复刻中准备好项目/)).toBeInTheDocument();
+    expect(screen.getByText("先完成视频拆解")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: "返回视频拆解" }),
+    ).toHaveLength(2);
   });
 
   it("人物替换：首次挂载保留当前项目已确认首帧", () => {
@@ -5331,25 +5338,94 @@ describe("视频复刻（模块①）", () => {
     );
   });
 
-  it("拆解等待时展示真实运行状态而不是只有按钮忙碌", async () => {
+  it("先显示参考视频时长，按任务状态推进并一起显示镜头数、时间和分镜", async () => {
     const value = replicaStudio();
+    value.state.draft = {
+      ...createState("replica").draft,
+      projectId: "project-1",
+      sourceAssetId: "asset-1",
+    };
+    value.data.projects[0].analysis_status = "NOT_READY";
+    replicaApi.resolveMaterials.mockResolvedValueOnce({
+      items: [{ asset_id: "asset-1", duration_seconds: 12.4 }],
+    });
     replicaApi.startVideoAnalysis.mockResolvedValueOnce({
       id: "task-wait",
       status: "PENDING",
     });
-    replicaApi.waitForAnalysisTask.mockImplementationOnce((_id, update) => {
-      update({ id: "task-wait", status: "RUNNING" });
-      return new Promise(() => {});
-    });
+    let publishStatus!: (task: { id: string; status: string }) => void;
+    let completeTask!: (task: unknown) => void;
+    replicaApi.waitForAnalysisTask.mockImplementationOnce(
+      (_id, update) =>
+        new Promise((resolve) => {
+          publishStatus = update;
+          completeTask = resolve;
+        }),
+    );
     useStudio.mockReturnValue(value);
     render(<ReplicaPage />);
+
+    expect(await screen.findByText("12.4 秒")).toBeInTheDocument();
+    expect(screen.getByText("先完成视频拆解")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "口播文案" })).toBeNull();
+    expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
+
+    const createdAt = "2026-11-25T04:30:00Z";
+    replicaApi.getLatestProjectAnalysis.mockResolvedValueOnce({
+      id: "fresh-analysis",
+      created_at: createdAt,
+      payload: {},
+    });
+    let deliverShots!: (version: unknown) => void;
+    replicaApi.getLatestProjectShotCards.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          deliverShots = resolve;
+        }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "启动 AI 拆解" }));
-    expect(await screen.findByText(/正在分析视频画面与口播/)).toHaveTextContent(
-      "已等待",
+    const progress = screen.getByRole("progressbar", { name: "拆解进度" });
+    await screen.findByText("拆解任务已排队，等待开始");
+    expect(progress).toHaveAttribute("aria-valuenow", "0");
+    expect(screen.getByRole("timer")).toHaveTextContent("已等待");
+
+    act(() => publishStatus({ id: "task-wait", status: "RUNNING" }));
+    expect(progress).toHaveAttribute("aria-valuenow", "1");
+    expect(progress).toHaveAttribute(
+      "aria-valuetext",
+      "正在分析视频画面与口播",
     );
-    expect(screen.getByText(/正在分析视频画面与口播/)).toHaveTextContent(
-      "请勿重复提交",
+    expect(screen.getByText("等待视频拆解完成")).toBeInTheDocument();
+
+    await act(async () =>
+      completeTask({ id: "task-wait", status: "SUCCEEDED" }),
     );
+    expect(progress).toHaveAttribute("aria-valuenow", "2");
+    expect(screen.getByText("12.4 秒")).toBeInTheDocument();
+    expect(screen.getByText("等待结果")).toBeInTheDocument();
+    expect(screen.getByText("完成后更新")).toBeInTheDocument();
+    expect(screen.queryByTitle(createdAt)).toBeNull();
+    expect(screen.queryByText(/分镜表 ·/)).toBeNull();
+
+    await act(async () =>
+      deliverShots({
+        id: "fresh-shots",
+        payload: {
+          source_analysis_version_id: "fresh-analysis",
+          shots: [shot],
+        },
+      }),
+    );
+    expect(progress).toHaveAttribute("aria-valuenow", "3");
+    expect(screen.getByText("1 个")).toBeInTheDocument();
+    expect(screen.getByTitle(createdAt)).toBeInTheDocument();
+    expect(screen.getByText(/分镜表 · 1 个镜头/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "stub-选择人物" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "口播文案" }),
+    ).toBeInTheDocument();
     expect(replicaApi.startVideoAnalysis).toHaveBeenCalledTimes(1);
   });
 
@@ -6259,7 +6335,7 @@ describe("视频复刻（模块①）", () => {
     return value;
   }
 
-  it("上传参考视频后写入草稿的项目与来源", async () => {
+  it("上传参考视频后将来源和已测量的时长写入草稿", async () => {
     const value = studio({ review: false });
     value.state = {
       ...value.state,
@@ -6274,6 +6350,7 @@ describe("视频复刻（模块①）", () => {
     replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
       projectId: "project-upload-1",
       assetId: "asset-upload-1",
+      durationSeconds: 11.7,
       project: {
         id: "project-upload-1",
         owner_user_id: "user-1",
@@ -6309,6 +6386,7 @@ describe("视频复刻（模块①）", () => {
           projectId: "project-upload-1",
           sourceId: "asset-upload-1",
           sourceAssetId: "asset-upload-1",
+          sourceDurationSeconds: 11.7,
           prompt: "",
           script: expect.objectContaining({ text: "" }),
         }),
@@ -6890,48 +6968,50 @@ describe("视频复刻（模块①）", () => {
     expect(replicaApi.cancelAnalysisTask).toHaveBeenCalledTimes(1);
   });
 
-  it("重开页面时自动接回草稿里在途的拆解任务，不重复创建", async () => {
-    const value = replicaStudio();
-    value.state = {
-      ...value.state,
-      draft: {
-        ...value.state.draft,
-        analysisTaskId: "task-live",
-        analysisTaskStatus: "RUNNING",
-      },
-    };
-    // 上一版的历史分镜仍在：接回不能被它误判成「显式重跑」而新建任务。
-    mockAnalysisSuccess({ existingShotCards: true });
-    replicaApi.getAnalysisTask.mockResolvedValue({
-      id: "task-live",
-      status: "RUNNING",
-      created_at: new Date().toISOString(),
-    });
-    let finish!: (task: { id: string; status: string }) => void;
-    replicaApi.waitForAnalysisTask.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
-    useStudio.mockReturnValue(value);
-    render(<ReplicaPage />);
+  it.each(["草稿", "项目记录"])(
+    "重开页面时自动接回%s里的在途拆解任务",
+    async (origin) => {
+      const value = replicaStudio();
+      if (origin === "草稿") {
+        value.state.draft.analysisTaskId = "task-live";
+        value.state.draft.analysisTaskStatus = "RUNNING";
+      } else {
+        value.data.projects[0].analysis_status = "PENDING";
+        value.data.projects[0].analysis_task_id = "task-live";
+      }
+      // 上一版的历史分镜仍在：接回不能被它误判成「显式重跑」而新建任务。
+      mockAnalysisSuccess({ existingShotCards: true });
+      replicaApi.getAnalysisTask.mockResolvedValue({
+        id: "task-live",
+        status: "RUNNING",
+        created_at: new Date().toISOString(),
+      });
+      let finish!: (task: { id: string; status: string }) => void;
+      replicaApi.waitForAnalysisTask.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      useStudio.mockReturnValue(value);
+      render(<ReplicaPage />);
 
-    // 自动进入进度态：复用原任务，不再退回「启动 AI 拆解」。
-    expect(
-      await screen.findByText(/正在分析视频画面与口播/),
-    ).toBeInTheDocument();
-    expect(replicaApi.getAnalysisTask).toHaveBeenCalledWith("task-live");
-    expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
+      // 自动进入进度态：复用原任务，不再退回「启动 AI 拆解」。
+      expect(
+        await screen.findByText(/正在分析视频画面与口播/),
+      ).toBeInTheDocument();
+      expect(replicaApi.getAnalysisTask).toHaveBeenCalledWith("task-live");
+      expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
 
-    // 任务完成后落在同一条完成路径上。
-    finish({ id: "task-live", status: "SUCCEEDED" });
-    await waitFor(() =>
-      expect(value.notify).toHaveBeenCalledWith(
-        "拆解完成。请确认文案和置换首帧，再合成最终提示词。",
-      ),
-    );
-  });
+      // 任务完成后落在同一条完成路径上。
+      finish({ id: "task-live", status: "SUCCEEDED" });
+      await waitFor(() =>
+        expect(value.notify).toHaveBeenCalledWith(
+          "拆解完成。请确认文案和置换首帧，再合成最终提示词。",
+        ),
+      );
+    },
+  );
 
   it("自动接回在途任务前先落挂载期历史恢复，不把在途恢复静默作废", async () => {
     // 回归：自动接回 effect 与历史恢复 effect 同批执行，守卫只读 state 会放行
@@ -7367,7 +7447,7 @@ describe("视频复刻（模块①）", () => {
     useStudio.mockReturnValue(value);
     render(<ReplacementPage />);
 
-    const selector = screen.getByLabelText("选择项目");
+    const selector = screen.getByLabelText("选择已有项目");
     expect(selector).toBeDisabled();
     fireEvent.change(selector, { target: { value: "project-1" } });
     expect(value.patchDraft).not.toHaveBeenCalled();

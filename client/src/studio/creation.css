@@ -2096,6 +2096,66 @@
   color: var(--studio-gold, #e5aa36);
 }
 
+.creation-replica-progress {
+  display: grid;
+  width: 100%;
+  justify-self: stretch;
+  gap: 8px;
+  color: var(--studio-muted);
+  font-size: var(--font-label);
+}
+.creation-replica-progress__steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+.creation-replica-progress__steps > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--studio-border);
+  text-align: center;
+}
+.creation-replica-progress__steps > .is-done {
+  background: var(--studio-gold);
+  color: var(--studio-bg);
+  font-weight: 600;
+}
+.creation-replica-progress__steps > .is-current {
+  border-color: var(--studio-gold);
+  background: repeating-linear-gradient(
+    135deg,
+    var(--studio-panel) 0 8px,
+    color-mix(in srgb, var(--studio-gold) 24%, var(--studio-panel)) 8px 16px
+  );
+  background-size: 22.63px 100%;
+  color: var(--studio-gold);
+  font-weight: 600;
+}
+.creation-replica-progress__meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 14px;
+}
+.creation-replica-progress__meta [role="timer"] {
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .creation-replica-progress__steps > .is-current {
+    animation: replica-analysis-progress 1s linear infinite;
+  }
+}
+@keyframes replica-analysis-progress {
+  to {
+    background-position-x: 22.63px;
+  }
+}
+
 .creation-final-copy {
   display: grid;
   gap: 16px;

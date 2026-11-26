@@ -294,6 +294,7 @@ export function Media({
   onPlay,
   aspectRatio,
   onAspectRatioChange,
+  onVideoDurationChange,
   fallback,
   fitContainer = false,
   audioControls = true,
@@ -301,6 +302,7 @@ export function Media({
   presentation?: "video";
   aspectRatio?: string;
   onAspectRatioChange?: (ratio: number) => void;
+  onVideoDurationChange?: (seconds: number) => void;
   fallback?: ReactNode;
   fitContainer?: boolean;
   // 卡片本体是 <button>，内嵌原生播放器属于交互元素嵌套（不合法且抢点击）；
@@ -364,6 +366,11 @@ export function Media({
       <VideoPreview
         onPlay={onPlay}
         onAspectRatioChange={onAspectRatioChange}
+        onLoadedMetadata={
+          onVideoDurationChange
+            ? (event) => onVideoDurationChange(event.currentTarget.duration)
+            : undefined
+        }
         frameRatio={
           aspectRatio ?? (asset.kind === "image" ? "adaptive" : undefined)
         }
