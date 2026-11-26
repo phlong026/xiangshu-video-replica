@@ -80,13 +80,18 @@ function CustomerShell() {
   // memo cache invalidation (including Fast Refresh). Browser reloads restore
   // CSRF handles from HttpOnly cookies; desktop credentials stay in the vault.
   const [store] = useState(customerCredentialStore);
+  // 更新和进度独立于登录状态，也不随个人中心卸载。
+  const appUpdate = useAppUpdate({ autoCheck: true, autoInstall: true });
 
-  return <CustomerSessionShell store={store} />;
+  return (
+    <>
+      <CustomerSessionShell store={store} />
+      {appUpdate.dialog}
+    </>
+  );
 }
 
 function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
-  // 更新独立于登录状态：欢迎页、登录页及会话终屏也共用这一个启动入口。
-  useAppUpdate({ autoCheck: true, autoInstall: true });
   const session = useCustomerSession(store);
   const [accessOpen, setAccessOpen] = useState(
     () =>

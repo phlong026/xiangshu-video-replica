@@ -30,6 +30,7 @@ import {
 } from "../api";
 import { BrandIdentity } from "../BrandIdentity";
 import { CustomerCenterPage } from "../customer/CustomerCenterPage";
+import { DesktopDownload } from "../customer/DesktopDownload";
 import { isInsufficientCredits } from "../insufficientCredits";
 import {
   discountSourceLabel,
@@ -2513,6 +2514,7 @@ export function StudioWorkspace({
                 <Icon name="search" />
               </button>
             </form>
+            <DesktopDownload />
             <MessageCenter />
             <button
               type="button"

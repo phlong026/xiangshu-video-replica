@@ -1,0 +1,42 @@
+.uc-update .uc-primary {
+  background: #e8b441;
+  color: #17120a;
+  border-color: #e8b441;
+  font-weight: 600;
+  padding: 10px 22px;
+}
+.uc-update .uc-primary:hover {
+  background: #f3c65d;
+}
+.uc-update h3 {
+  margin: 12px 0 4px;
+  font-size: 14px;
+}
+.uc-update-notes {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.uc-update-notes p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+.uc-update__hint {
+  color: var(--text-muted);
+}
+.uc-update__progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+.uc-update__progress progress {
+  flex: 1;
+  accent-color: #e8b441;
+}
+.uc-update__percent {
+  min-width: 48px;
+  text-align: right;
+  color: var(--text-muted);
+}

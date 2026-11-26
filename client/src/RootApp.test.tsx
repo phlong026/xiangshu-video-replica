@@ -143,6 +143,58 @@ describe("RootApp", () => {
     resetBrowserIdentity();
   });
 
+  it("访客可下载生产清单中的最新版安装包，Mac 链接使用 DMG", async () => {
+    const fetchWorkspace = stubCustomerWorkspaceFetch();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("/stable.json"))
+          return jsonResponse({ version: "3.1.2" });
+        if (url.endsWith("/3.1.2/release-manifest.json")) {
+          return jsonResponse({
+            version: "3.1.2",
+            assets: [
+              {
+                platform: "windows-x86_64",
+                role: "update",
+                path: "安装包 x64.exe",
+              },
+              {
+                platform: "darwin-aarch64",
+                role: "update",
+                path: "arm.app.tar.gz",
+              },
+              {
+                platform: "darwin-aarch64",
+                role: "installer",
+                path: "arm.dmg",
+              },
+              {
+                platform: "darwin-x86_64",
+                role: "installer",
+                path: "intel.dmg",
+              },
+            ],
+          });
+        }
+        return fetchWorkspace(url);
+      }),
+    );
+    render(<RootApp />);
+    fireEvent.click(await screen.findByRole("button", { name: "下载桌面端" }));
+    expect(await screen.findByText("最新版 3.1.2")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Windows" })).toHaveAttribute(
+      "href",
+      "/downloads/customer-cloud/3.1.2/%E5%AE%89%E8%A3%85%E5%8C%85%20x64.exe",
+    );
+    expect(
+      screen.getByRole("link", { name: "macOS · Apple 芯片" }),
+    ).toHaveAttribute("href", "/downloads/customer-cloud/3.1.2/arm.dmg");
+    expect(
+      screen.getByRole("link", { name: "macOS · Intel 芯片" }),
+    ).toHaveAttribute("href", "/downloads/customer-cloud/3.1.2/intel.dmg");
+  });
+
   // CW-019: /admin 由独立管理制品（client/dist-admin）提供，客户入口不再认识
   // 该路径。浏览器命中客户 index.html 的 /admin 或 /admin/* 时降级到客户壳
   // （激活屏），不得渲染任何管理内容——这是"客户所有 chunk 不得含内部/管理
@@ -611,11 +663,19 @@ describe("RootApp", () => {
     expect(window.location.pathname).toBe("/forgot");
   });
 
-  it("未登录也延迟自动安装重启，StrictMode、门禁视图及登录退出不重复启动更新", async () => {
+  it("未登录也显示下载进度并自动安装重启，登录退出不重复更新", async () => {
+    let finishDownload: (() => void) | undefined;
+    const download = new Promise<void>((resolve) => {
+      finishDownload = resolve;
+    });
     const pending = {
       version: "2.7.0",
       body: "启动更新",
-      downloadAndInstall: vi.fn(async () => {}),
+      downloadAndInstall: vi.fn<Update["downloadAndInstall"]>((onEvent) => {
+        onEvent?.({ event: "Started", data: { contentLength: 100 } });
+        onEvent?.({ event: "Progress", data: { chunkLength: 42 } });
+        return download;
+      }),
       close: vi.fn(async () => {}),
     } as unknown as Update;
     vi.mocked(check).mockResolvedValue(pending);
@@ -661,13 +721,13 @@ describe("RootApp", () => {
       );
     });
     expect(screen.getByRole("heading", { name: "工作台" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "下载桌面端" })).toBeNull();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4000);
       fireEvent.click(screen.getByRole("button", { name: "用户档案" }));
     });
     expect(screen.getByRole("heading", { name: "登录账号" })).toBeVisible();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3999);
+      await vi.advanceTimersByTimeAsync(249);
     });
     expect(check).not.toHaveBeenCalled();
     await act(async () => {
@@ -675,6 +735,14 @@ describe("RootApp", () => {
     });
     expect(check).toHaveBeenCalledTimes(1);
     expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("dialog", { name: "软件更新" })).toBeVisible();
+    expect(
+      screen.getByRole("progressbar", { name: "下载进度" }),
+    ).toHaveAttribute("value", "42");
+    expect(screen.queryByRole("button", { name: "立即更新" })).toBeNull();
+    await act(async () => {
+      finishDownload?.();
+    });
     expect(
       nativeInvoke.mock.calls.filter(([command]) => command === "restart_app"),
     ).toHaveLength(1);

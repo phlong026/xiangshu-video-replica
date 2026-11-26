@@ -6,6 +6,7 @@ import { navGroups } from "../studio/StudioWorkspace";
 import { createState } from "../studio/state";
 import type { StudioContextValue } from "../studio/types";
 import { Icon } from "../studio/ui";
+import { DesktopDownload } from "./DesktopDownload";
 import "../studio/studio.css";
 
 /** Public home reuses the production workbench. It never loads account data. */
@@ -87,6 +88,7 @@ export function CustomerWelcomePage({ onLogin }: { onLogin(): void }) {
             <span style={{ flex: 1, color: "#a4a4ad" }}>
               AI 即创· {__APP_VERSION__}
             </span>
+            <DesktopDownload />
             <button
               type="button"
               className="studio-top-avatar"

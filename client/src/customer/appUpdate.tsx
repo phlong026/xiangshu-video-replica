@@ -12,9 +12,9 @@ import { isTauriRuntime } from "./useCustomerSession";
  * 签名，插件下载后会先验签再安装，前端不自己拼升级逻辑。
  *
  * 两条路径：
- * - 自动路径（autoInstall，由会话壳开启）：每次启动延迟 8 秒检查一次，
- *   未登录也生效；发现新版本免确认自动下载、验签安装并重启，全程静默。
- *   检查/安装失败不阻塞使用，下次启动重试，不在跨启动存储里记节流标记。
+ * - 自动路径（autoInstall，由客户壳开启）：界面打开后立即安排检查，
+ *   未登录也生效；发现新版本后显示进度，免确认下载、验签安装并重启。
+ *   启动时检查失败会重试一次，避免短暂的网络初始化失败错过更新。
  * - 手动路径（用户中心「检查更新」）：弹 UpdateDialog，确认→下载→重启，
  *   全程有界面反馈，作为自动路径失败时的兜底入口。
  */
@@ -51,7 +51,8 @@ export interface AppUpdateController {
 /** UpdateDialog 只消费状态与动作，不消费 dialog 自身（避免自引用）。 */
 export type AppUpdateView = Omit<AppUpdateController, "dialog">;
 
-const AUTO_CHECK_DELAY_MS = 8000;
+const AUTO_CHECK_DELAY_MS = 250;
+const AUTO_CHECK_RETRY_DELAY_MS = 1500;
 // 原生请求负责真正停止超时网络流；仅在前端结束等待会让后台安装继续占用更新对象。
 const CHECK_TIMEOUT_MS = 20_000;
 // 安装包远大于更新清单，给慢速网络保留分钟级下载窗口，同时避免永久占用互斥锁。
@@ -136,6 +137,7 @@ async function restartInstalled(): Promise<void> {
   setState({ phase: "installed", error: "" });
   try {
     await invoke("restart_app");
+    setState({ dialogOpen: false });
   } catch {
     setState({
       phase: "failed",
@@ -152,6 +154,7 @@ async function installPending(): Promise<void> {
     phase: "downloading",
     progress: { received: 0, total: null },
     error: "",
+    dialogOpen: state.dialogOpen || autoInstallRequested,
   });
   try {
     await downloadPendingWithProgress(pending, (progress) =>
@@ -173,6 +176,18 @@ async function installPending(): Promise<void> {
   }
 }
 
+async function checkForUpdate(): Promise<Update | null> {
+  try {
+    return await check({ timeout: CHECK_TIMEOUT_MS });
+  } catch (error) {
+    if (!autoInstallRequested) throw error;
+    await new Promise<void>((resolve) =>
+      window.setTimeout(resolve, AUTO_CHECK_RETRY_DELAY_MS),
+    );
+    return check({ timeout: CHECK_TIMEOUT_MS });
+  }
+}
+
 async function runCheck(
   autoInstall = false,
   showAvailable = false,
@@ -184,7 +199,7 @@ async function runCheck(
   setState({ phase: "checking", update: null, progress: null, error: "" });
   try {
     await releasePendingUpdate();
-    const found = await check({ timeout: CHECK_TIMEOUT_MS });
+    const found = await checkForUpdate();
     pendingUpdate = found;
     if (!found) {
       setState({ phase: "up-to-date" });
@@ -228,7 +243,7 @@ function startAutomaticCheck(autoInstall: boolean): void {
     autoInstallRequested = autoInstall;
     return;
   }
-  if (hasChecked) {
+  if (hasChecked && state.phase !== "failed") {
     // 延迟窗口内的手动检查已覆盖本次启动，复用结果即可。
     if (state.phase === "available") {
       if (autoInstall) void runDownload(true);

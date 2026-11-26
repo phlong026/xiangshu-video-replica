@@ -1594,7 +1594,6 @@ export function CustomerCenterPage({
       )}
       {confirmDialog}
       {tour}
-      {appUpdate.dialog}
       {help && <HelpDialog onClose={() => setHelp(false)} />}
       <CustomerRechargeDialog
         isOpen={recharge}

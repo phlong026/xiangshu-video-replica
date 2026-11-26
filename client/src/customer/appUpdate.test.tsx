@@ -83,7 +83,7 @@ function ManualPage() {
   return <>{manualController.dialog}</>;
 }
 
-async function advance(ms = 8000): Promise<void> {
+async function advance(ms = 250): Promise<void> {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
   });
@@ -202,6 +202,7 @@ test.each(["自动检查", "手动检查", "自动下载", "手动下载"])(
             );
           }),
       );
+      if (automatic) checkMock.mockRejectedValueOnce(new Error("network"));
     }
     checkMock.mockResolvedValue(next);
     render(<Harness autoCheck={automatic} autoInstall />);
@@ -228,15 +229,27 @@ test.each(["自动检查", "手动检查", "自动下载", "手动下载"])(
     expect(controller.phase).toBe(downloading ? "downloading" : "checking");
     expect(invokeMock).not.toHaveBeenCalled();
     await advance(1);
+    if (automatic && !downloading) {
+      expect(controller.phase).toBe("checking");
+      await advance(1500);
+    }
     expect(controller.phase).toBe("failed");
-    if (automatic) expect(controller.dialog).toBeNull();
+    if (automatic && !downloading) expect(controller.dialog).toBeNull();
+    if (automatic && downloading) {
+      expect(screen.getByRole("dialog", { name: "软件更新" })).toBeVisible();
+    }
     if (downloading) expect(failed.close).toHaveBeenCalledTimes(1);
     expect(invokeMock).not.toHaveBeenCalled();
 
     await act(async () => {
       controller.retry();
     });
-    expect(checkMock).toHaveBeenNthCalledWith(2, { timeout: 20_000 });
+    expect(checkMock).toHaveBeenNthCalledWith(
+      automatic && !downloading ? 3 : 2,
+      {
+        timeout: 20_000,
+      },
+    );
     expect(controller.phase).toBe("available");
     expect(next.downloadAndInstall).not.toHaveBeenCalled();
     await act(async () => {
@@ -268,10 +281,10 @@ test("取消手动检查仅关闭弹窗，再次打开复用在途检查", async
   expect(screen.getByText("已是最新版本")).toBeVisible();
 });
 
-test("保留 8 秒异步延迟，旧的当日 localStorage 标记不影响同一天两次新启动", async () => {
+test("界面打开后尽快检查，旧的当日 localStorage 标记不影响两次新启动", async () => {
   window.localStorage.setItem(OLD_AUTO_CHECK_DAY_KEY, localDayStamp());
   const first = render(<Harness autoCheck autoInstall />);
-  await advance(7999);
+  await advance(249);
   expect(checkMock).not.toHaveBeenCalled();
   await advance(1);
   expect(checkMock).toHaveBeenCalledTimes(1);
@@ -294,13 +307,13 @@ test("StrictMode、重渲染与组件重挂在同一生命周期内只检查一�
       <Harness autoCheck autoInstall />
     </StrictMode>,
   );
-  await advance(4000);
+  await advance(125);
   view.rerender(
     <StrictMode>
       <Harness autoCheck autoInstall />
     </StrictMode>,
   );
-  await advance(4000);
+  await advance(125);
   expect(checkMock).toHaveBeenCalledTimes(1);
   view.unmount();
   render(
@@ -340,11 +353,13 @@ test("自动更新免确认下载安装，沿用累计进度，安装成功后�
 });
 
 test.each(["检查", "下载安装"])(
-  "自动%s失败静默，同生命周期重挂不重试，新启动可重试并安装",
+  "自动%s最终失败后重挂不重复更新，新启动可重新尝试",
   async (failure) => {
     const pending = fakeUpdate();
     if (failure === "检查") {
-      checkMock.mockRejectedValueOnce(new Error("network"));
+      checkMock
+        .mockRejectedValueOnce(new Error("network"))
+        .mockRejectedValueOnce(new Error("network"));
     } else {
       checkMock.mockResolvedValueOnce(
         fakeUpdate({
@@ -357,25 +372,43 @@ test.each(["检查", "下载安装"])(
     checkMock.mockResolvedValue(pending);
     const first = render(<Harness autoCheck autoInstall />);
     await advance();
+    if (failure === "检查") await advance(1500);
     expect(controller.phase).toBe("failed");
-    expect(controller.dialog).toBeNull();
+    if (failure === "检查") expect(controller.dialog).toBeNull();
+    else expect(screen.getByText("更新失败")).toBeVisible();
     expect(invokeMock).not.toHaveBeenCalled();
     first.unmount();
 
     const remount = render(<Harness autoCheck autoInstall />);
     await advance(30000);
-    expect(checkMock).toHaveBeenCalledTimes(1);
+    const checks = failure === "检查" ? 2 : 1;
+    expect(checkMock).toHaveBeenCalledTimes(checks);
     remount.unmount();
 
     await freshStartup();
     render(<Harness autoCheck autoInstall />);
     await advance();
-    expect(checkMock).toHaveBeenCalledTimes(2);
+    expect(checkMock).toHaveBeenCalledTimes(checks + 1);
     expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
     expect(controller.phase).toBe("installed");
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
   },
 );
+
+test("启动时网络暂不可用，重试发现新版后仍自动安装重启", async () => {
+  const pending = fakeUpdate();
+  checkMock
+    .mockRejectedValueOnce(new Error("network"))
+    .mockResolvedValueOnce(pending);
+  render(<Harness autoCheck autoInstall />);
+  await advance();
+  expect(controller.phase).toBe("checking");
+  expect(controller.dialog).toBeNull();
+  await advance(1500);
+  expect(checkMock).toHaveBeenCalledTimes(2);
+  expect(pending.downloadAndInstall).toHaveBeenCalledTimes(1);
+  expect(invokeMock).toHaveBeenCalledExactlyOnceWith("restart_app");
+});
 
 test("自动检查在途时切页和手动重试复用检查，下载中手动操作不创建另一个 Update", async () => {
   const result = deferred<Update | null>();
@@ -427,7 +460,7 @@ test("自动检查在途时切页和手动重试复用检查，下载中手动�
 });
 
 test.each(["checking", "available", "downloading", "up-to-date"])(
-  "8 秒到期时手动流程处于 %s：复用请求或结果，自动更新不并发",
+  "启动检查时手动流程处于 %s：复用请求或结果，自动更新不并发",
   async (phase) => {
     const result = deferred<Update | null>();
     const download = deferred<void>();
@@ -515,14 +548,14 @@ test("自动下载安装失败后，手动兜底重新检查使用新对象，�
   expect(invokeMock).not.toHaveBeenCalled();
 });
 
-test("自动重启失败时静默，手动重试只重启，不重复检查或安装", async () => {
+test("自动重启失败显示提示，重试只重启，不重复检查或安装", async () => {
   const pending = fakeUpdate();
   checkMock.mockResolvedValue(pending);
   invokeMock.mockRejectedValueOnce(new Error("restart"));
   render(<Harness autoCheck autoInstall />);
   await advance();
   expect(controller.phase).toBe("failed");
-  expect(controller.dialog).toBeNull();
+  expect(screen.getByText("更新失败")).toBeVisible();
   await act(async () => {
     controller.openManualCheck();
     controller.beginDownload();
