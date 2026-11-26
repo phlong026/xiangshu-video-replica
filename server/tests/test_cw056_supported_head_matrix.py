@@ -118,7 +118,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 发布域三表平台 CHECK 的快手值，计数不变，digest 随约束定义重算。
 # 20261120T1000_account_diagnosis（账号诊断 P0）再追加两张表并种子价目行，
 # counts/表名集/digest 均按上方 HEAD_SCHEMA_COUNTS 注释重算。
-HEAD_REVISION = "20261125T1000_software_licenses"
+HEAD_REVISION = "20261126T1900_asr_request_aliases"
 
 
 @pytest.mark.pg
@@ -469,14 +469,14 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 表名集不变；digest 在空库→新 head 的 PG16 探针库重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
     "check_constraints": 412,
-    "columns": 1626,
-    "foreign_keys": 226,
+    "columns": 1630,
+    "foreign_keys": 228,
     "identity_columns": 0,
     "jsonb_columns": 16,
     "partial_indexes": 52,
-    "primary_keys": 143,
+    "primary_keys": 144,
     "sequences": 8,
-    "tables": 143,
+    "tables": 144,
     "timestamptz_columns": 138,
     "triggers": 61,
     "unique_constraints": 47,
@@ -600,6 +600,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "refund_executions",
     "registration_bonus_settings",
     "runtime_settings",
+    "script_from_audio_request_aliases",
     "script_from_audio_tasks",
     "script_rewrite_tasks",
     "security_auth_failures",
@@ -755,7 +756,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 2026-11-24 充值最低额与步长列默认值调整后，在隔离 PG16 空库升级至 head 实测。
 # 表名及计数均保持一致，仅 column_default 进入摘要后产生变化。
 # 2026-11-25: Recomputed on PostgreSQL 16 after the annual-license migration.
-HEAD_SCHEMA_DIGEST = "dfb4409e740e27d0c6f172fd855727d193e5fd6f30ae936407101010517bf46d"
+HEAD_SCHEMA_DIGEST = "20508cb81bec89a227d075bccb8e60122cf5687491a72d769dccaa7b56f97447"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
