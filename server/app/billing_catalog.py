@@ -35,6 +35,7 @@ SERVICES: dict[str, Service] = {
     "first_frame": Service("首帧图片", "image", "apilio", "replacement"),
     "character": Service("人物形象及任务图片", "image", "apilio", "people"),
     "rewrite": Service("文案改写", "call", "deepseek", "copy"),
+    "rewrite_gemini": Service("文案改写模型调用", "call", "apilio", "internal", False),
     "oral": Service("数字人口播", "second", "hifly", "oral"),
     "asr": Service("语音转写", "second", "dashscope", "copy"),
     "viral_data": Service("爆款视频数据请求", "call", "tikhub", "viral"),
@@ -117,6 +118,7 @@ SERVICE_INTERFACE: dict[str, str] = {
     "quality_inspection": PLATFORM_INTERFACE_KEY,
     "analysis_repair": PLATFORM_INTERFACE_KEY,
     "analysis_repair_deepseek": PLATFORM_INTERFACE_KEY,
+    "rewrite_gemini": PLATFORM_INTERFACE_KEY,
     "cos": PLATFORM_INTERFACE_KEY,
     "zpay": PLATFORM_INTERFACE_KEY,
 }

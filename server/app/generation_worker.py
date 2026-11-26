@@ -137,12 +137,14 @@ from app.script_from_audio import (
     prepare_script_from_audio_task,
 )
 from app.script_rewrite import (
+    GEMINI_REWRITE_SERVICE,
     acquire_script_rewrite_task,
     complete_script_rewrite_task,
     fail_script_rewrite_task,
     mark_script_rewrite_submission_started,
     perform_script_rewrite_task,
     prepare_script_rewrite_task,
+    switch_script_rewrite_to_fallback,
 )
 from app.simple_character import SIMPLE_CONTACT_SHEET_MODEL
 from app.source_frames import (
@@ -712,6 +714,7 @@ def run_worker_once(
                 mark_script_rewrite_submission_started(
                     conn,
                     lease=script_rewrite_lease,
+                    service=GEMINI_REWRITE_SERVICE if rewrite_work.primary else "rewrite",
                 )
                 submission_started = True
                 with external_call_context(
@@ -719,7 +722,12 @@ def run_worker_once(
                     script_rewrite_lease.id,
                     attempt=script_rewrite_lease.attempt,
                 ):
-                    rewrite_result = perform_script_rewrite_task(rewrite_work)
+                    rewrite_result = perform_script_rewrite_task(
+                        rewrite_work,
+                        on_fallback=lambda: switch_script_rewrite_to_fallback(
+                            conn, lease=rewrite_work.lease
+                        ),
+                    )
                 complete_script_rewrite_task(
                     conn,
                     lease=script_rewrite_lease,
@@ -2032,14 +2040,24 @@ def run_pg_worker_once(
                     mark_script_rewrite_submission_started(
                         BusinessConnection.postgres(raw_conn),
                         lease=script_rewrite_lease,
+                        service=GEMINI_REWRITE_SERVICE if rewrite_work.primary else "rewrite",
                     )
                 submission_started = True
+
+                def start_rewrite_fallback() -> None:
+                    with pg_transaction() as raw:
+                        switch_script_rewrite_to_fallback(
+                            BusinessConnection.postgres(raw), lease=rewrite_work.lease
+                        )
+
                 with external_call_context(
                     "SCRIPT_REWRITE",
                     script_rewrite_lease.id,
                     attempt=script_rewrite_lease.attempt,
                 ):
-                    rewrite_result = perform_script_rewrite_task(rewrite_work)
+                    rewrite_result = perform_script_rewrite_task(
+                        rewrite_work, on_fallback=start_rewrite_fallback
+                    )
                 with pg_transaction() as raw_conn:
                     complete_script_rewrite_task(
                         BusinessConnection.postgres(raw_conn),

@@ -196,3 +196,36 @@ def test_configured_deepseek_model_is_shared(monkeypatch, configured_model, expe
     expected_config = ("https://api.deepseek.com", "test-key", expected)
     assert account_diagnosis_llm.load_narrative_llm_config(object()) == expected_config
     assert script_rewrite.load_script_rewrite_configuration(object()) == expected_config
+
+
+@pytest.mark.parametrize("output", ["valid_with_fence", "invalid_shape", "timeout"])
+def test_diagnosis_gemini_primary_and_deepseek_fallback(monkeypatch, output) -> None:
+    from unittest.mock import Mock
+
+    from app import account_diagnosis_llm
+    from app.analysis import NETWORK_FAILURE_PHASE, AnalysisProviderFailed
+
+    primary = Mock()
+    if output == "timeout":
+        complete = Mock(
+            side_effect=AnalysisProviderFailed("timeout", failure_phase=NETWORK_FAILURE_PHASE)
+        )
+    else:
+        reply = "\x60\x60\x60json\n" + _VALID_CONTENT + "\n\x60\x60\x60"
+        complete = Mock(return_value=reply if output == "valid_with_fence" else "{}")
+    monkeypatch.setattr(account_diagnosis_llm, "complete_gemini_text", complete)
+    fallback = Mock(return_value=(200, _chat(_VALID_CONTENT)))
+
+    result = build_llm_narrative(
+        base_url="https://api.deepseek.com",
+        api_key="test-key",
+        model="deepseek-flash",
+        report=_report(),
+        primary=primary,
+        post_json=fallback,
+    )
+
+    assert (result is not None) == (output != "timeout")
+    assert fallback.call_count == (1 if output == "invalid_shape" else 0)
+    complete.assert_called_once()
+    assert complete.call_args.kwargs["json_output"] is True

@@ -52,7 +52,9 @@ from app.account_diagnosis_scoring import (
 from app.account_link import AccountTarget
 from app.billing_catalog import read_tariff
 from app.db_portable import BusinessConnection
+from app.settings import DEEPSEEK_DEFAULT_MODEL
 from app.sub_account_permissions import enforce_sub_account_feature
+from app.text_gemini import load_gemini_text_provider
 from app.usage_billing import accept_operation, finish_source
 from app.viral_content_state import customer_visible_sql
 from app.viral_tikhub import (
@@ -691,12 +693,15 @@ def _run(
     # LLM 解读：打分不变，只替换解读文案；未配置/失败/开关关闭都回落规则。
     cards_dict = [card.to_dict() for card in cards]
     if not narrative_llm_disabled():
-        llm_config = load_narrative_llm_config(conn)
-        if llm_config is not None:
+        primary = load_gemini_text_provider(conn)
+        fallback = load_narrative_llm_config(conn)
+        if primary is not None or fallback is not None:
+            base_url, api_key, _ = fallback or ("", "", "")
             llm = build_llm_narrative(
-                base_url=llm_config[0],
-                api_key=llm_config[1],
-                model=llm_config[2],
+                base_url=base_url,
+                api_key=api_key,
+                model=DEEPSEEK_DEFAULT_MODEL,
+                primary=primary,
                 report=document,
             )
             if llm is not None:
@@ -704,9 +709,10 @@ def _run(
             # 行动卡话术升级：LLM 把规则步骤重写成贴合账号类目的具体做法
             # （含 Before/After 话术）；逐卡校验，未命中的卡保留规则文案。
             enriched = enrich_action_cards(
-                base_url=llm_config[0],
-                api_key=llm_config[1],
-                model=llm_config[2],
+                base_url=base_url,
+                api_key=api_key,
+                model=DEEPSEEK_DEFAULT_MODEL,
+                primary=primary,
                 cards=cards_dict,
                 titles=[v.title for v in posts if v.title][:12],
             )

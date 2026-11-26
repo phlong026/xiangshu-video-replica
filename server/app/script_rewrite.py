@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -18,6 +19,12 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from app.analysis import (
+    NETWORK_FAILURE_PHASE,
+    RESPONSE_FAILURE_PHASE,
+    AnalysisProviderFailed,
+    ApilioGemini,
+)
 from app.auth import CurrentUser
 from app.db_portable import (
     BusinessConnection,
@@ -29,12 +36,14 @@ from app.external_calls import CallTimer, Outcome, record_external_call
 from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.settings import (
     DEEPSEEK_DEFAULT_BASE_URL,
+    DEEPSEEK_DEFAULT_MODEL,
     SettingsRepository,
     SettingsUnavailableError,
     deepseek_completion_options,
     resolve_deepseek_model,
 )
 from app.task_lease import TaskLease, claim_script_rewrite_task
+from app.text_gemini import complete_gemini_text, gemini_can_fail_over, load_gemini_text_provider
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +65,11 @@ class ConfirmedRewriteResponseError(HTTPException):
 DEEPSEEK_TIMEOUT_SECONDS = 240
 DEEPSEEK_MAX_OUTPUT_TOKENS = 8192
 SCRIPT_REWRITE_TASK_LEASE_MINUTES = 5
+GEMINI_REWRITE_SERVICE = "rewrite_gemini"
+TextPurpose = Literal[
+    "rewrite", "analysis", "title", "prompt", "json_repair", "publish_title", "publish_description"
+]
+
 IP_PROFILE_TEXT_LIMITS = {
     "display_name": 120,
     "role": 160,
@@ -119,6 +133,7 @@ class PreparedScriptRewrite:
     model: str
     ip_profile_snapshot: dict[str, object] | None
     instructions: str = ""
+    primary: ApilioGemini | None = None
 
 
 @dataclass(frozen=True)
@@ -439,6 +454,20 @@ def load_script_rewrite_configuration(
     )
 
 
+def load_script_text_route(
+    conn: BusinessConnection,
+) -> tuple[ApilioGemini | None, tuple[str, str, str]]:
+    primary = load_gemini_text_provider(conn)
+    try:
+        base_url, api_key, _ = load_script_rewrite_configuration(conn)
+        fallback = (base_url, api_key, DEEPSEEK_DEFAULT_MODEL)
+    except HTTPException:
+        if primary is None:
+            raise
+        fallback = ("", "", "")
+    return primary, fallback
+
+
 def enqueue_script_rewrite_task(
     conn: BusinessConnection,
     *,
@@ -478,7 +507,7 @@ def enqueue_script_rewrite_task(
         )
     # Fail fast before a task is accepted; the worker reloads the current
     # secret later and never persists it in request_json.
-    load_script_rewrite_configuration(conn)
+    load_script_text_route(conn)
     profile_snapshot = (
         None
         if identity_id is None
@@ -720,7 +749,7 @@ def prepare_script_rewrite_task(
         request = validated_script_rewrite_request(row)
     except ValueError as exc:
         raise RuntimeError("script rewrite task request is unavailable") from exc
-    base_url, api_key, model = load_script_rewrite_configuration(conn)
+    primary, (base_url, api_key, model) = load_script_text_route(conn)
     return PreparedScriptRewrite(
         lease=lease,
         source_text=request.source_text,
@@ -729,6 +758,7 @@ def prepare_script_rewrite_task(
         model=model,
         ip_profile_snapshot=request.ip_profile_snapshot,
         instructions=request.instructions,
+        primary=primary,
     )
 
 
@@ -736,6 +766,7 @@ def mark_script_rewrite_submission_started(
     conn: BusinessConnection,
     *,
     lease: ScriptRewriteTaskLease,
+    service: str = "rewrite",
 ) -> None:
     now = _time_text(datetime.now(UTC))
     deadline = _time_text(datetime.now(UTC) + timedelta(minutes=SCRIPT_REWRITE_TASK_LEASE_MINUTES))
@@ -753,24 +784,93 @@ def mark_script_rewrite_submission_started(
         raise RuntimeError("script rewrite task lease was lost")
     from app.usage_billing import begin_source_attempt
 
-    begin_source_attempt(conn, lease.id)
+    begin_source_attempt(conn, lease.id, service=service)
     conn.commit()
 
 
-def perform_script_rewrite_task(work: PreparedScriptRewrite) -> ScriptRewriteResult:
-    rewritten = _request_deepseek(
-        base_url=work.base_url,
-        api_key=work.api_key,
-        model=work.model,
+def switch_script_rewrite_to_fallback(
+    conn: BusinessConnection, *, lease: ScriptRewriteTaskLease
+) -> None:
+    from app.usage_billing import begin_source_attempt, complete_source_attempt
+
+    now = _time_text(datetime.now(UTC))
+    updated = conn.execute(
+        """
+        UPDATE script_rewrite_tasks SET updated_at = %s
+        WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
+          AND provider_started_at IS NOT NULL AND locked_until > %s
+        """,
+        (now, lease.id, lease.worker_id, lease.attempt, now),
+    )
+    if updated.rowcount != 1:
+        raise RuntimeError("script rewrite task lease was lost")
+    complete_source_attempt(conn, lease.id, usage=0)
+    begin_source_attempt(conn, lease.id, service="rewrite")
+    conn.commit()
+
+
+def perform_script_rewrite_task(
+    work: PreparedScriptRewrite, *, on_fallback: Callable[[], None] | None = None
+) -> ScriptRewriteResult:
+    return request_script_text(
+        work.primary,
+        (work.base_url, work.api_key, work.model),
         source_text=work.source_text,
         ip_profile_snapshot=work.ip_profile_snapshot,
-        **({"instructions": work.instructions} if work.instructions else {}),
+        instructions=work.instructions,
+        on_fallback=on_fallback,
     )
-    return ScriptRewriteResult(
-        rewritten_text=rewritten,
-        provider="deepseek",
-        model=work.model,
-    )
+
+
+def request_script_text(
+    primary: ApilioGemini | None,
+    fallback: tuple[str, str, str],
+    *,
+    source_text: str,
+    ip_profile_snapshot: dict[str, object] | None = None,
+    instructions: str = "",
+    purpose: TextPurpose = "rewrite",
+    on_fallback: Callable[[], None] | None = None,
+) -> ScriptRewriteResult:
+    base_url, api_key, model = fallback
+    if primary is not None:
+        try:
+            return ScriptRewriteResult(
+                rewritten_text=request_script_gemini(
+                    primary,
+                    source_text=source_text,
+                    ip_profile_snapshot=ip_profile_snapshot,
+                    instructions=instructions,
+                    purpose=purpose,
+                ),
+                provider="apilio_gemini",
+                model=primary.model,
+            )
+        except AnalysisProviderFailed as exc:
+            if not api_key or not gemini_can_fail_over(exc):
+                raise _script_gemini_failure(exc) from exc
+            if on_fallback is not None:
+                on_fallback()
+    if purpose == "rewrite":
+        rewritten = _request_deepseek(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            source_text=source_text,
+            ip_profile_snapshot=ip_profile_snapshot,
+            **({"instructions": instructions} if instructions else {}),
+        )
+    else:
+        rewritten = request_deepseek_text(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            source_text=source_text,
+            ip_profile_snapshot=ip_profile_snapshot,
+            instructions=instructions,
+            purpose=purpose,
+        )
+    return ScriptRewriteResult(rewritten_text=rewritten, provider="deepseek", model=model)
 
 
 def complete_script_rewrite_task(
@@ -942,28 +1042,13 @@ def _time_text(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def request_deepseek_text(
+def _script_text_messages(
     *,
-    base_url: str,
-    api_key: str,
-    model: str,
     source_text: str,
-    ip_profile_snapshot: dict[str, object] | None = None,
-    instructions: str = "",
-    purpose: Literal[
-        "rewrite",
-        "analysis",
-        "title",
-        "prompt",
-        "json_repair",
-        "publish_title",
-        "publish_description",
-    ] = "rewrite",
-) -> str:
-    """Single DeepSeek transport for text AI; visual/audio providers stay separate."""
-    from curl_cffi import requests as curl_requests
-    from curl_cffi.requests.exceptions import RequestException
-
+    ip_profile_snapshot: dict[str, object] | None,
+    instructions: str,
+    purpose: TextPurpose,
+) -> list[dict[str, str]]:
     text_prompts = {
         "rewrite": SCRIPT_REWRITE_SYSTEM_PROMPT,
         "analysis": "分析给定文案的主题、受众、结构、表达和待核实信息，给出具体改进建议。",
@@ -1000,6 +1085,67 @@ def request_deepseek_text(
         )
         messages.append({"role": "user", "content": f"{label}：\n{instructions}"})
     messages.append({"role": "user", "content": f"待处理原文：\n\n{source_text}"})
+    return messages
+
+
+def request_script_gemini(
+    provider: ApilioGemini,
+    *,
+    source_text: str,
+    ip_profile_snapshot: dict[str, object] | None = None,
+    instructions: str = "",
+    purpose: TextPurpose = "rewrite",
+) -> str:
+    messages = _script_text_messages(
+        source_text=source_text,
+        ip_profile_snapshot=ip_profile_snapshot,
+        instructions=instructions,
+        purpose=purpose,
+    )
+    return complete_gemini_text(
+        provider,
+        messages,
+        max_tokens=3500 if purpose in {"publish_title", "publish_description"} else 8192,
+        json_output=purpose == "json_repair",
+    )
+
+
+def _script_gemini_failure(cause: AnalysisProviderFailed) -> HTTPException:
+    if cause.failure_phase == NETWORK_FAILURE_PHASE:
+        return HTTPException(
+            status_code=504,
+            detail={"message": "文本 AI 请求未能确认完成，请先核对任务状态。"},
+        )
+    error = (
+        ConfirmedRewriteResponseError
+        if cause.failure_phase == RESPONSE_FAILURE_PHASE
+        else HTTPException
+    )
+    return error(
+        status_code=502,
+        detail={"message": "文本 AI 服务未返回可用内容，请稍后重试。"},
+    )
+
+
+def request_deepseek_text(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    source_text: str,
+    ip_profile_snapshot: dict[str, object] | None = None,
+    instructions: str = "",
+    purpose: TextPurpose = "rewrite",
+) -> str:
+    from curl_cffi import requests as curl_requests
+    from curl_cffi.requests.exceptions import RequestException
+
+    messages = _script_text_messages(
+        source_text=source_text,
+        ip_profile_snapshot=ip_profile_snapshot,
+        instructions=instructions,
+        purpose=purpose,
+    )
     publish_copy = purpose in {"publish_title", "publish_description"}
     payload_object = {
         "model": model,
