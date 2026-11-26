@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.account_diagnosis_llm import (
     _validated_narrative,
     build_llm_narrative,
@@ -67,13 +69,15 @@ def test_build_llm_narrative_validates_and_normalizes() -> None:
     def _transport(url: str, payload: bytes) -> tuple[int, bytes]:
         sent = json.loads(payload)
         assert sent["response_format"] == {"type": "json_object"}
+        assert sent["model"] == "deepseek-flash"
+        assert sent["thinking"] == {"type": "disabled"}
         assert "互动健康度" in sent["messages"][-1]["content"]
         return 200, _chat(_VALID_CONTENT)
 
     narrative = build_llm_narrative(
         base_url="https://api.deepseek.com",
         api_key="key",
-        model="deepseek-chat",
+        model="deepseek-flash",
         report=_report(),
         post_json=_transport,
     )
@@ -164,3 +168,64 @@ def test_load_narrative_llm_config_requires_api_key(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "SettingsRepository", _Repo)
     assert load_narrative_llm_config(object()) is None
+
+
+@pytest.mark.parametrize(
+    ("configured_model", "expected"),
+    [
+        ("", "deepseek-flash"),
+        ("deepseek-chat", "deepseek-flash"),
+        ("deepseek-v4-flash", "deepseek-flash"),
+        ("deepseek-flash", "deepseek-flash"),
+        ("custom-text-model", "custom-text-model"),
+    ],
+)
+def test_configured_deepseek_model_is_shared(monkeypatch, configured_model, expected) -> None:
+    from app import account_diagnosis_llm, script_rewrite
+
+    class _Repo:
+        def __init__(self, _conn) -> None:
+            pass
+
+        def load_provider_config(self, provider: str) -> dict[str, str]:
+            assert provider == "deepseek"
+            return {"api_key": "test-key", "model": configured_model}
+
+    monkeypatch.setattr(account_diagnosis_llm, "SettingsRepository", _Repo)
+    monkeypatch.setattr(script_rewrite, "SettingsRepository", _Repo)
+    expected_config = ("https://api.deepseek.com", "test-key", expected)
+    assert account_diagnosis_llm.load_narrative_llm_config(object()) == expected_config
+    assert script_rewrite.load_script_rewrite_configuration(object()) == expected_config
+
+
+@pytest.mark.parametrize("output", ["valid_with_fence", "invalid_shape", "timeout"])
+def test_diagnosis_gemini_primary_and_deepseek_fallback(monkeypatch, output) -> None:
+    from unittest.mock import Mock
+
+    from app import account_diagnosis_llm
+    from app.analysis import NETWORK_FAILURE_PHASE, AnalysisProviderFailed
+
+    primary = Mock()
+    if output == "timeout":
+        complete = Mock(
+            side_effect=AnalysisProviderFailed("timeout", failure_phase=NETWORK_FAILURE_PHASE)
+        )
+    else:
+        reply = "\x60\x60\x60json\n" + _VALID_CONTENT + "\n\x60\x60\x60"
+        complete = Mock(return_value=reply if output == "valid_with_fence" else "{}")
+    monkeypatch.setattr(account_diagnosis_llm, "complete_gemini_text", complete)
+    fallback = Mock(return_value=(200, _chat(_VALID_CONTENT)))
+
+    result = build_llm_narrative(
+        base_url="https://api.deepseek.com",
+        api_key="test-key",
+        model="deepseek-flash",
+        report=_report(),
+        primary=primary,
+        post_json=fallback,
+    )
+
+    assert (result is not None) == (output != "timeout")
+    assert fallback.call_count == (1 if output == "invalid_shape" else 0)
+    complete.assert_called_once()
+    assert complete.call_args.kwargs["json_output"] is True

@@ -156,7 +156,7 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
   },
   deepseek: {
     title: "文本 AI · DeepSeek",
-    note: "文本 AI 统一使用 DeepSeek；人物 IP 和自定义要求共用此配置",
+    note: "用于文案二创、账号诊断解读和发布文案优化的备用通道",
     fields: [{ name: "api_key", label: "API Key", secret: true }],
   },
   hifly: {

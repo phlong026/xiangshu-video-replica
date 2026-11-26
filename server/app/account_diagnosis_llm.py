@@ -18,8 +18,15 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from app.analysis import RESPONSE_FAILURE_PHASE, AnalysisProviderFailed, ApilioGemini
 from app.llm_json import parse_llm_json
-from app.settings import SettingsRepository
+from app.settings import (
+    DEEPSEEK_DEFAULT_BASE_URL,
+    SettingsRepository,
+    deepseek_completion_options,
+    resolve_deepseek_model,
+)
+from app.text_gemini import complete_gemini_text, gemini_can_fail_over
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +73,8 @@ def load_narrative_llm_config(conn: Any) -> tuple[str, str, str] | None:
     api_key = str(config.get("api_key") or "").strip()
     if not api_key:
         return None
-    base_url = str(config.get("base_url") or "https://api.deepseek.com").rstrip("/")
-    model = str(config.get("model") or "deepseek-chat")
+    base_url = (config.get("base_url") or DEEPSEEK_DEFAULT_BASE_URL).rstrip("/")
+    model = resolve_deepseek_model(config.get("model"))
     return base_url, api_key, model
 
 
@@ -136,16 +143,11 @@ def build_llm_narrative(
     api_key: str,
     model: str,
     report: dict[str, Any],
+    primary: ApilioGemini | None = None,
     post_json: Callable[[str, bytes], tuple[int, bytes]] | None = None,
 ) -> dict[str, Any] | None:
-    """调用文本模型生成解读；任何失败返回 None（调用方回落规则解读）.
+    """生成并校验诊断解读，失败时允许调用方沿用规则。"""
 
-    ``post_json`` 仅供测试注入；生产走 curl_cffi 直连 deepseek。
-    """
-
-    transport = post_json or (
-        lambda url, payload: _post_chat_completion(url, payload, api_key=api_key)
-    )
     slim_report = {
         "score": report.get("score"),
         "rating": report.get("rating"),
@@ -174,45 +176,81 @@ def build_llm_narrative(
         ],
         "risks": report.get("risks", []),
     }
-    payload_object = {
-        "model": model,
-        "messages": [
+    return _request_diagnosis_json(
+        primary=primary,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        messages=[
             {"role": "system", "content": NARRATIVE_LLM_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": json.dumps(slim_report, ensure_ascii=False),
-            },
+            {"role": "user", "content": json.dumps(slim_report, ensure_ascii=False)},
         ],
+        max_tokens=NARRATIVE_LLM_MAX_TOKENS,
+        validate=_validated_narrative,
+        post_json=post_json,
+    )
+
+
+def _request_diagnosis_json[T](
+    *,
+    primary: ApilioGemini | None,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    validate: Callable[[Any], T | None],
+    post_json: Callable[[str, bytes], tuple[int, bytes]] | None,
+) -> T | None:
+    if primary is not None:
+        try:
+            content = complete_gemini_text(
+                primary, messages, max_tokens=max(3500, max_tokens), json_output=True
+            )
+        except AnalysisProviderFailed as exc:
+            reason = (exc.upstream_diagnostic or {}).get("reason")
+            if not gemini_can_fail_over(exc) and (
+                exc.failure_phase != RESPONSE_FAILURE_PHASE
+                or reason == "finish_reason_content_filter"
+            ):
+                return None
+        else:
+            try:
+                value, _ = parse_llm_json(content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                logger.warning("账号诊断主模型输出无法解析为 JSON")
+            else:
+                result = validate(value)
+                if result is not None:
+                    return result
+
+    if not api_key:
+        return None
+    payload = {
+        "model": model,
+        **deepseek_completion_options(model),
+        "messages": messages,
         "stream": False,
         "temperature": 0.3,
-        "max_tokens": NARRATIVE_LLM_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
     url = f"{base_url.rstrip('/')}/chat/completions"
+    transport = post_json or (lambda u, p: _post_chat_completion(u, p, api_key=api_key))
     try:
-        status, body = transport(
-            url, json.dumps(payload_object, ensure_ascii=False).encode("utf-8")
-        )
-    except Exception as exc:  # noqa: BLE001 - 解读层失败一律降级，不向上抛
-        logger.warning("账号诊断 LLM 解读请求失败：%s", type(exc).__name__)
-        return None
-    if not 200 <= status < 300:
-        logger.warning("账号诊断 LLM 解读返回 HTTP %s", status)
-        return None
-    try:
-        envelope = json.loads(body.decode("utf-8"))
-        content = envelope["choices"][0]["message"]["content"]
+        status, body = transport(url, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        if not 200 <= status < 300:
+            logger.warning("账号诊断备选模型返回 HTTP %s", status)
+            return None
+        choice = json.loads(body.decode("utf-8"))["choices"][0]
+        content = choice["message"]["content"]
         if not isinstance(content, str):
             return None
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError, UnicodeDecodeError):
-        logger.warning("账号诊断 LLM 解读响应结构异常")
+        parsed, _ = parse_llm_json(content)
+    except Exception as exc:  # noqa: BLE001 - 解读层失败一律降级，不向上抛
+        logger.warning("账号诊断备选模型调用失败：%s", type(exc).__name__)
         return None
-    try:
-        parsed, _error = parse_llm_json(content)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        logger.warning("账号诊断 LLM 解读输出无法解析为 JSON")
-        return None
-    return _validated_narrative(parsed)
+    return validate(parsed)
 
 
 def _post_chat_completion(url: str, payload: bytes, *, api_key: str) -> tuple[int, bytes]:
@@ -258,6 +296,7 @@ def enrich_action_cards(
     model: str,
     cards: list[dict[str, Any]],
     titles: list[str],
+    primary: ApilioGemini | None = None,
     post_json: Callable[[str, bytes], tuple[int, bytes]] | None = None,
 ) -> dict[str, dict[str, Any]] | None:
     """把规则行动卡的 steps 重写成类目化、可抄的行动话术.
@@ -277,48 +316,28 @@ def enrich_action_cards(
         }
         for card in cards
     ]
-    payload_object = {
-        "model": model,
-        "messages": [
+    valid_keys = {key for card in cards if isinstance(key := card.get("key"), str)}
+    return _request_diagnosis_json(
+        primary=primary,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        messages=[
             {"role": "system", "content": ACTION_CARDS_LLM_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": json.dumps({"titles": titles, "cards": skeleton}, ensure_ascii=False),
             },
         ],
-        "stream": False,
-        "temperature": 0.3,
-        "max_tokens": 2000,
-        "response_format": {"type": "json_object"},
-    }
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    transport = post_json or (lambda u, p: _post_chat_completion(u, p, api_key=api_key))
-    try:
-        status, body = transport(
-            url, json.dumps(payload_object, ensure_ascii=False).encode("utf-8")
-        )
-    except Exception as exc:  # noqa: BLE001 - 行动卡话术失败逐卡回落，不向上抛
-        logger.warning("账号诊断行动卡话术请求失败：%s", type(exc).__name__)
-        return None
-    if not 200 <= status < 300:
-        logger.warning("账号诊断行动卡话术返回 HTTP %s", status)
-        return None
-    try:
-        envelope = json.loads(body.decode("utf-8"))
-        content = envelope["choices"][0]["message"]["content"]
-        if not isinstance(content, str):
-            return None
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError, UnicodeDecodeError):
-        logger.warning("账号诊断行动卡话术响应结构异常")
-        return None
-    try:
-        parsed, _error = parse_llm_json(content)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        logger.warning("账号诊断行动卡话术输出无法解析为 JSON")
-        return None
+        max_tokens=2000,
+        validate=lambda parsed: _validated_action_cards(parsed, valid_keys),
+        post_json=post_json,
+    )
+
+
+def _validated_action_cards(parsed: Any, valid_keys: set[str]) -> dict[str, dict[str, Any]] | None:
     if not isinstance(parsed, dict) or not isinstance(parsed.get("cards"), list):
         return None
-    valid_keys = {card.get("key") for card in cards}
     enriched: dict[str, dict[str, Any]] = {}
     for item in parsed["cards"]:
         if not isinstance(item, dict):

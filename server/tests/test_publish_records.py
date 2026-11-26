@@ -355,25 +355,47 @@ def test_auditor_cannot_create_records(
     assert pg.execute("SELECT count(*) FROM publish_records").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("rate_limited", [False, True])
 def test_publish_copy_optimizes_individual_fields_without_creating_a_record(
-    client: TestClient, pg: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, pg: psycopg.Connection, monkeypatch: pytest.MonkeyPatch, rate_limited: bool
 ) -> None:
+    from unittest.mock import Mock
+
+    from app import script_rewrite
+    from app.analysis import HTTP_FAILURE_PHASE, AnalysisProviderFailed
+
+    primary = Mock(model="gemini-4-carbon")
     monkeypatch.setattr(
         publish_copy,
-        "load_script_rewrite_configuration",
-        lambda _conn: ("http://example.test", "test", "text"),
+        "load_script_text_route",
+        lambda _conn: (primary, ("https://api.deepseek.com", "test", "deepseek-flash")),
     )
-    calls: list[dict[str, Any]] = []
+    primary_calls: list[dict[str, Any]] = []
+    fallback_calls: list[dict[str, Any]] = []
 
     def suggest(**kwargs: Any) -> str:
-        calls.append(kwargs)
         return (
             "庭院采光怎么做"
             if kwargs["purpose"] == "publish_title"
             else "从入口到客厅，看看庭院的采光设计。"
         )
 
-    monkeypatch.setattr(publish_copy, "request_deepseek_text", suggest)
+    def gemini_suggest(provider: Any, **kwargs: Any) -> str:
+        assert provider.model == "gemini-4-carbon"
+        primary_calls.append(kwargs)
+        if rate_limited:
+            raise AnalysisProviderFailed(
+                "请求频率过高", http_status=429, failure_phase=HTTP_FAILURE_PHASE
+            )
+        return suggest(**kwargs)
+
+    def flash_suggest(**kwargs: Any) -> str:
+        assert kwargs["model"] == "deepseek-flash"
+        fallback_calls.append(kwargs)
+        return suggest(**kwargs)
+
+    monkeypatch.setattr(script_rewrite, "request_script_gemini", gemini_suggest)
+    monkeypatch.setattr(script_rewrite, "request_deepseek_text", flash_suggest)
     path = "/api/studio/publish/copy/optimize"
     original = {"platform": "抖音", "title": "庭院设计", "description": "看看入户庭院"}
     assert client.post(path, json={**original, "field": "title"}).json() == {
@@ -382,12 +404,14 @@ def test_publish_copy_optimizes_individual_fields_without_creating_a_record(
     assert client.post(path, json={**original, "field": "description"}).json() == {
         "text": "从入口到客厅，看看庭院的采光设计。"
     }
-    assert [call["purpose"] for call in calls] == ["publish_title", "publish_description"]
-    assert json.loads(calls[0]["source_text"]) == {
+    purposes = ["publish_title", "publish_description"]
+    assert [call["purpose"] for call in primary_calls] == purposes
+    assert [call["purpose"] for call in fallback_calls] == (purposes if rate_limited else [])
+    assert json.loads(primary_calls[0]["source_text"]) == {
         "发布标题": original["title"],
         "发布描述": original["description"],
     }
-    assert "抖音" in calls[0]["instructions"]
+    assert "抖音" in primary_calls[0]["instructions"]
     assert pg.execute("SELECT count(*) FROM publish_records").fetchone()[0] == 0
 
 

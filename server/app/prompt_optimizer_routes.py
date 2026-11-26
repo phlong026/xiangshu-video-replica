@@ -6,19 +6,18 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from app.analysis import ApilioGemini
+from app.analysis import ApilioGemini, UrllibApilioChatTransport
 from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.prompt_optimizer import PromptOptimizeRequest, enqueue, task_result
 from app.settings import SettingsRepository, SettingsUnavailableError
+from app.text_gemini import GEMINI_TEXT_MODEL
 
 router = APIRouter(prefix="/api/prompt-optimizations", tags=["prompts"])
 
-# 优化器模型钉死为正式版 flash（方案 T14）：不跟随拆解默认值换代，也不启用
-# 视频重试预算——它的租约按「结构纠错再调一次」设计，隐式升级会吃满租约。
-# 模型换代须单独评估后改这里，不接受设置页隐式覆盖。
-PROMPT_OPTIMIZER_MODEL = "gemini-3.8-flash"
+# 单次请求限时，给备选与已有的结构纠错留出任务时间。
+PROMPT_OPTIMIZER_MODEL = GEMINI_TEXT_MODEL
 
 
 def get_prompt_optimizer_provider(conn: BusinessConnection) -> ApilioGemini:
@@ -35,7 +34,12 @@ def get_prompt_optimizer_provider(conn: BusinessConnection) -> ApilioGemini:
             503,
             detail={"code": "PROMPT_OPTIMIZER_UNAVAILABLE", "message": "请先配置提示词优化服务。"},
         )
-    return ApilioGemini(api_key=key, model=PROMPT_OPTIMIZER_MODEL)
+    return ApilioGemini(
+        api_key=key,
+        model=PROMPT_OPTIMIZER_MODEL,
+        fallback_models=("gemini-3.8-flash",),
+        transport=UrllibApilioChatTransport(timeout_seconds=120),
+    )
 
 
 @router.post("", status_code=202)

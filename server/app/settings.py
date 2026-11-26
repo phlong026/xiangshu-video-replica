@@ -41,6 +41,8 @@ ProviderName = Literal[
     "pan123",
 ]
 
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
 ACCEPTANCE_PAYMENT_USER_ID_ENV = "VIDEO_REPLICA_ACCEPTANCE_PAYMENT_USER_ID"
 ACCEPTANCE_PAYMENT_AMOUNT_FEN_ENV = "VIDEO_REPLICA_ACCEPTANCE_PAYMENT_AMOUNT_FEN"
@@ -531,6 +533,25 @@ def normalize_config(config: dict[str, Any]) -> dict[str, str]:
             continue
         normalized[str(key)] = str(value).strip()
     return normalized
+
+
+def resolve_deepseek_model(configured_model: str | None) -> str:
+    model = (configured_model or "").strip()
+    # 旧默认值可能已保存到加密配置，读取时迁移已退役的模型名。
+    if model in {
+        "",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    }:
+        return DEEPSEEK_DEFAULT_MODEL
+    return model
+
+
+def deepseek_completion_options(model: str) -> dict[str, dict[str, str]]:
+    # Flash 默认启用思考，会消耗现有生成预算。文本任务沿用直接输出模式。
+    return {"thinking": {"type": "disabled"}} if model == DEEPSEEK_DEFAULT_MODEL else {}
 
 
 def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> None:
