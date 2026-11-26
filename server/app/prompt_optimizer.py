@@ -26,6 +26,7 @@ from app.h3_prompts import (
     mode_rules,
     prompt_issues,
 )
+from app.llm_json import parse_llm_json
 from app.prompt_context import attach_context_media, context_source_data, resolve_context
 from app.storage import StorageAdapter
 
@@ -134,7 +135,7 @@ def enqueue(
 
 def validate_result(text: str, *, snapshot: dict[str, Any]) -> tuple[dict[str, Any], str]:
     context = snapshot["context"]
-    value = json.loads(text)
+    value, _ = parse_llm_json(text)
     if (
         not isinstance(value, dict)
         or set(value) != {"prompt_text", "warnings"}

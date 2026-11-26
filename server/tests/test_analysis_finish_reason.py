@@ -547,10 +547,8 @@ def test_prompt_optimizer_provider_pins_its_own_model(
     provider = prompt_optimizer_routes.get_prompt_optimizer_provider(Mock())
 
     assert isinstance(provider, ApilioGemini)
-    # D9 后主链路出厂值与优化器同为 flash：钉死的意义在「不跟随设置页变化」，
-    # 由显式常量保证；主备链路各自的出厂值在模型配置测试里另行钉死。
-    assert provider.model == PROMPT_OPTIMIZER_MODEL
-    assert provider.model == "gemini-3.8-flash"
+    assert provider.model == PROMPT_OPTIMIZER_MODEL == "gemini-4-carbon"
+    assert provider.fallback_models == ("gemini-3.8-flash",)
     assert provider.video_call_budget is None
 
 

@@ -1442,6 +1442,83 @@ def test_script_rewrite_worker_settles_on_pg(
     assert "这是改写后的口播稿。" in str(row["result_json"])
 
 
+@pytest.mark.parametrize("primary_outcome", ["success", "rate_limit", "timeout", "gateway_timeout"])
+def test_rewrite_gemini_and_deepseek_track_only_one_customer_charge(
+    pg_state, monkeypatch, primary_outcome
+):
+    from unittest.mock import Mock
+
+    from app import script_rewrite
+    from app.analysis import HTTP_FAILURE_PHASE, NETWORK_FAILURE_PHASE, AnalysisProviderFailed
+    from app.usage_billing import accept_operation
+
+    _seed_base(pg_state)
+    _configure_deepseek(monkeypatch)
+    _seed_script_rewrite_task(pg_state, task_id="sr-gemini")
+    _exec(
+        pg_state,
+        "INSERT INTO wallets(user_id,available_credits) VALUES('u1',100) "
+        "ON CONFLICT(user_id) DO UPDATE SET available_credits=100",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+        "VALUES('rewrite',true,5,2),('rewrite_gemini',false,NULL,3)",
+    )
+    with pg_transaction() as raw:
+        accept_operation(
+            BusinessConnection.postgres(raw),
+            user_id="u1",
+            service="rewrite",
+            source_id="sr-gemini",
+            units=1,
+        )
+
+    primary = Mock(model="gemini-4-carbon")
+    if primary_outcome == "rate_limit":
+        primary._complete.side_effect = AnalysisProviderFailed(
+            "limited", http_status=429, failure_phase=HTTP_FAILURE_PHASE
+        )
+    elif primary_outcome == "timeout":
+        primary._complete.side_effect = AnalysisProviderFailed(
+            "timeout", failure_phase=NETWORK_FAILURE_PHASE
+        )
+    elif primary_outcome == "gateway_timeout":
+        primary._complete.side_effect = AnalysisProviderFailed(
+            "gateway timeout", http_status=504, failure_phase=HTTP_FAILURE_PHASE
+        )
+    else:
+        primary._complete.return_value = ("改写好的文案。", {})
+    fallback = Mock(return_value="备选模型改写的文案。")
+    monkeypatch.setattr(script_rewrite, "load_gemini_text_provider", lambda _conn, **_kw: primary)
+    monkeypatch.setattr(script_rewrite, "_request_deepseek", fallback)
+
+    assert _run_worker("rewrite-primary-and-fallback") == 1
+
+    status = _task_status(pg_state, "script_rewrite_tasks", "sr-gemini")
+    usage = {
+        row["service"]: (row["provider"], row["usage"])
+        for row in _rows(pg_state, "SELECT service, provider, usage FROM billing_attempts")
+    }
+    charged = _one(pg_state, "SELECT charged_credits FROM billing_operations")
+    if primary_outcome in {"timeout", "gateway_timeout"}:
+        assert status == "SUBMISSION_UNCERTAIN"
+        assert usage == {"rewrite_gemini": ("apilio", None)}
+        assert charged == 0
+        fallback.assert_not_called()
+    else:
+        expected = {"rewrite_gemini": ("apilio", 1)}
+        if primary_outcome == "rate_limit":
+            expected = {"rewrite_gemini": ("apilio", 0), "rewrite": ("deepseek", 1)}
+            fallback.assert_called_once()
+            assert fallback.call_args.kwargs["model"] == "deepseek-flash"
+        else:
+            fallback.assert_not_called()
+        assert status == "SUCCEEDED"
+        assert usage == expected
+        assert charged == 5
+
+
 def test_truncated_rewrite_refunds_customer_but_preserves_confirmed_cost(pg_state, monkeypatch):
     from types import SimpleNamespace
 
@@ -2664,7 +2741,7 @@ def test_text_ai_purposes_use_same_deepseek_transport(monkeypatch, purpose):
     result = rewrite.request_deepseek_text(
         base_url="https://api.deepseek.com",
         api_key="test-key",
-        model="deepseek-chat",
+        model="deepseek-flash",
         source_text="来源文本",
         instructions="简洁表达",
         purpose=purpose,
@@ -2672,7 +2749,8 @@ def test_text_ai_purposes_use_same_deepseek_transport(monkeypatch, purpose):
     assert result == "测试输出"
     assert requests[0][0] == "https://api.deepseek.com/chat/completions"
     body = json.loads(requests[0][1])
-    assert body["model"] == "deepseek-chat"
+    assert body["model"] == "deepseek-flash"
+    assert body["thinking"] == {"type": "disabled"}
     assert body["max_tokens"] == 8192
     assert "简洁表达" in body["messages"][-2]["content"]
     assert "来源文本" in body["messages"][-1]["content"]
