@@ -1,0 +1,36 @@
+.desktop-download-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.desktop-download-trigger svg,
+.desktop-download a svg {
+  width: 16px;
+  height: 16px;
+}
+.desktop-download > p {
+  color: var(--text-muted);
+}
+.desktop-download ul {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 16px 0 0;
+  list-style: none;
+}
+.desktop-download a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--text);
+  text-decoration: none;
+}
+.desktop-download a:hover,
+.desktop-download a:focus-visible {
+  border-color: var(--accent);
+}

@@ -20,12 +20,11 @@ const PAGE_SIZE = 25;
 type Action =
   | { kind: "issue" }
   | { kind: "policy"; enabled: boolean }
-  | { kind: "reveal" | "renew"; license: SoftwareLicense };
+  | { kind: "renew"; license: SoftwareLicense };
 
 const actionLabels = {
   issue: "生成软件激活码",
   policy: "修改自动延期设置",
-  reveal: "复制软件激活码",
   renew: "线下续费一年",
 };
 
@@ -102,7 +101,6 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
                 `${deadline}:00+08:00`,
               ).toISOString(),
             },
-            reason,
             actionKey,
           );
           setSearchDraft("");
@@ -120,20 +118,6 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
           setNotice(action.enabled ? "自动延期已开启。" : "自动延期已关闭。");
           break;
         }
-        case "reveal": {
-          const result = await revealSoftwareLicense(
-            action.license.id,
-            reason,
-            actionKey,
-          );
-          try {
-            await navigator.clipboard.writeText(result.activation_code);
-            setNotice("激活码已复制。");
-          } catch {
-            setRevealedCode(result.activation_code);
-          }
-          break;
-        }
         case "renew": {
           const result = await renewSoftwareLicense(
             action.license.id,
@@ -147,9 +131,30 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
         }
       }
       setAction(null);
-      if (action.kind !== "reveal") setRevision((value) => value + 1);
+      setRevision((value) => value + 1);
     } catch (cause) {
       setActionError(adminActivationErrorMessage(cause, "软件授权操作失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyLicense(id: string) {
+    if (busy || readOnly) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setRevealedCode("");
+    try {
+      const result = await revealSoftwareLicense(id, createIdempotencyKey());
+      try {
+        await navigator.clipboard.writeText(result.activation_code);
+        setNotice("激活码已复制。");
+      } catch {
+        setRevealedCode(result.activation_code);
+      }
+    } catch (cause) {
+      setError(adminActivationErrorMessage(cause, "读取激活码失败"));
     } finally {
       setBusy(false);
     }
@@ -174,6 +179,7 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
             <button
               type="button"
               className="admin-primary-btn"
+              disabled={busy}
               onClick={() => openAction({ kind: "issue" })}
             >
               生成激活码
@@ -187,7 +193,7 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
               role="switch"
               aria-checked={page?.auto_extend ?? false}
               checked={page?.auto_extend ?? false}
-              disabled={readOnly || loading || !page}
+              disabled={readOnly || busy || loading || !page}
               onChange={(event) =>
                 openAction({ kind: "policy", enabled: event.target.checked })
               }
@@ -260,9 +266,8 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
                       {item.can_reveal && !item.expired ? (
                         <button
                           type="button"
-                          onClick={() =>
-                            openAction({ kind: "reveal", license: item })
-                          }
+                          disabled={busy}
+                          onClick={() => void copyLicense(item.id)}
                         >
                           复制
                         </button>
@@ -270,6 +275,7 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
                       {item.username ? (
                         <button
                           type="button"
+                          disabled={busy}
                           onClick={() =>
                             openAction({ kind: "renew", license: item })
                           }
@@ -308,10 +314,10 @@ export function SoftwareLicensesPage({ readOnly }: { readOnly: boolean }) {
               ? action.enabled
                 ? "开启后，所有未使用的软件激活码将按 7 天周期自动延期。"
                 : "关闭后，所有未使用的软件激活码恢复按发码时的截止时间校验。"
-              : action?.kind === "issue"
-                ? "请确认已收到线下软件授权款。"
-                : undefined
+              : undefined
         }
+        level={action?.kind === "issue" ? "standard" : "reason"}
+        confirmLabel={action?.kind === "issue" ? "生成激活码" : undefined}
         busy={busy}
         error={actionError}
         onConfirm={(reason) => void submitAction(reason)}

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { AppUpdateView } from "./appUpdate";
+import "./customer-dialog.css";
+import "./app-update.css";
 
 /**
  * 「软件更新」弹窗（桌面客户端专用）。状态全部由 useAppUpdate 持有，

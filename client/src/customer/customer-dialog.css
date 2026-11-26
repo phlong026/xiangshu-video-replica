@@ -1,0 +1,22 @@
+.uc-dialog {
+  color: #f0f0f2;
+  background: #17181b;
+  border: 1px solid #756038;
+  border-radius: 14px;
+  padding: 30px;
+  width: min(540px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+}
+.uc-dialog::backdrop {
+  background: #000b;
+}
+.uc-dialog h2 {
+  margin-bottom: 14px;
+}
+.uc-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 24px;
+}

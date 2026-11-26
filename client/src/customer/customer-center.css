@@ -468,21 +468,6 @@
 .uc-settings form > button {
   margin-top: 20px;
 }
-.uc-dialog {
-  color: #f0f0f2;
-  background: #17181b;
-  border: 1px solid #756038;
-  border-radius: 14px;
-  padding: 30px;
-  width: min(540px, calc(100vw - 32px));
-  max-height: calc(100vh - 40px);
-}
-.uc-dialog::backdrop {
-  background: #000b;
-}
-.uc-dialog h2 {
-  margin-bottom: 14px;
-}
 /* 绑定邮箱（EmailBindingSection）：状态行右侧的动作按钮与表单动作行。 */
 .uc-email .uc-preference > button {
   margin-left: auto;
@@ -490,13 +475,6 @@
 }
 .uc-email__actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 24px;
-}
-.uc-dialog-actions {
-  display: flex;
-  justify-content: flex-end;
   flex-wrap: wrap;
   gap: 12px;
   margin-top: 24px;
@@ -1114,37 +1092,4 @@
   font-size: var(--font-caption);
   color: var(--text-muted);
   text-decoration: underline;
-}
-
-/* 桌面自动更新（UpdateDialog）：更新日志与下载进度。 */
-.uc-update h3 {
-  margin: 12px 0 4px;
-  font-size: 14px;
-}
-.uc-update-notes {
-  max-height: 40vh;
-  overflow-y: auto;
-}
-.uc-update-notes p {
-  margin: 0;
-  color: var(--text-muted);
-  line-height: 1.8;
-  white-space: pre-wrap;
-}
-.uc-update__hint {
-  color: var(--text-muted);
-}
-.uc-update__progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 8px 0;
-}
-.uc-update__progress progress {
-  flex: 1;
-}
-.uc-update__percent {
-  min-width: 48px;
-  text-align: right;
-  color: var(--text-muted);
 }

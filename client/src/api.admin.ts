@@ -740,13 +740,12 @@ export function getSoftwareLicenses(
 
 export function issueSoftwareLicense(
   fields: { authorization_years: number; activation_expires_at: string },
-  reason: string,
   key: string,
 ) {
   return adminWrite<{ id: string }>(
     "/api/control/software-licenses",
     fields,
-    reason,
+    "生成软件激活码",
     "生成激活码失败",
     key,
   );
@@ -767,11 +766,11 @@ export function updateSoftwareActivationPolicy(
   );
 }
 
-export function revealSoftwareLicense(id: string, reason: string, key: string) {
+export function revealSoftwareLicense(id: string, key: string) {
   return adminWrite<{ activation_code: string }>(
     `/api/control/software-licenses/${encodeURIComponent(id)}/reveal`,
     {},
-    reason,
+    "复制软件激活码",
     "读取激活码失败",
     key,
   );
