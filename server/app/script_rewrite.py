@@ -33,6 +33,7 @@ from app.db_portable import (
     is_unique_conflict_on,
 )
 from app.external_calls import CallTimer, Outcome, record_external_call
+from app.llm_json import parse_llm_json
 from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.settings import (
     DEEPSEEK_DEFAULT_BASE_URL,
@@ -43,7 +44,12 @@ from app.settings import (
     resolve_deepseek_model,
 )
 from app.task_lease import TaskLease, claim_script_rewrite_task
-from app.text_gemini import complete_gemini_text, gemini_can_fail_over, load_gemini_text_provider
+from app.text_gemini import (
+    complete_gemini_text,
+    gemini_can_fail_over,
+    gemini_output_invalid,
+    load_gemini_text_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +64,10 @@ class ConfirmedRewriteResponseError(HTTPException):
     （``complete_source_attempt(usage=1)`` + external_calls 流水），不进入
     客户账单。触码：DEEPSEEK_RESPONSE_INVALID / _TRUNCATED / _EMPTY。
     """
+
+
+class InvalidScriptTextOutput(ValueError):
+    """模型已返回，文本未通过入口的输出校验。"""
 
 
 # Non-streaming libcurl enforces this wall-clock limit, including keep-alive data.
@@ -834,26 +844,33 @@ def request_script_text(
     instructions: str = "",
     purpose: TextPurpose = "rewrite",
     on_fallback: Callable[[], None] | None = None,
+    validate_output: Callable[[str], str] | None = None,
 ) -> ScriptRewriteResult:
     base_url, api_key, model = fallback
     if primary is not None:
         try:
+            rewritten = request_script_gemini(
+                primary,
+                source_text=source_text,
+                ip_profile_snapshot=ip_profile_snapshot,
+                instructions=instructions,
+                purpose=purpose,
+            )
             return ScriptRewriteResult(
-                rewritten_text=request_script_gemini(
-                    primary,
-                    source_text=source_text,
-                    ip_profile_snapshot=ip_profile_snapshot,
-                    instructions=instructions,
-                    purpose=purpose,
-                ),
+                rewritten_text=validate_output(rewritten) if validate_output else rewritten,
                 provider="apilio_gemini",
                 model=primary.model,
             )
         except AnalysisProviderFailed as exc:
-            if not api_key or not gemini_can_fail_over(exc):
+            if not api_key or not (
+                gemini_can_fail_over(exc) or (validate_output and gemini_output_invalid(exc))
+            ):
                 raise _script_gemini_failure(exc) from exc
-            if on_fallback is not None:
-                on_fallback()
+        except InvalidScriptTextOutput:
+            if not api_key:
+                raise
+        if on_fallback is not None:
+            on_fallback()
     if purpose == "rewrite":
         rewritten = _request_deepseek(
             base_url=base_url,
@@ -873,7 +890,11 @@ def request_script_text(
             instructions=instructions,
             purpose=purpose,
         )
-    return ScriptRewriteResult(rewritten_text=rewritten, provider="deepseek", model=model)
+    return ScriptRewriteResult(
+        rewritten_text=validate_output(rewritten) if validate_output else rewritten,
+        provider="deepseek",
+        model=model,
+    )
 
 
 def complete_script_rewrite_task(
@@ -1105,12 +1126,29 @@ def request_script_gemini(
         instructions=instructions,
         purpose=purpose,
     )
-    return complete_gemini_text(
+    if purpose == "publish_title":
+        messages[0]["content"] += (
+            '用 JSON 对象交付，唯一字段为 title，例如 {"title":"玄关收纳怎么做"}。'
+        )
+    content = complete_gemini_text(
         provider,
         messages,
         max_tokens=3500 if purpose in {"publish_title", "publish_description"} else 8192,
-        json_output=purpose == "json_repair",
+        json_output=purpose in {"json_repair", "publish_title"},
     )
+    if purpose != "publish_title":
+        return content
+    try:
+        value, _ = parse_llm_json(content)
+    except ValueError as exc:
+        raise InvalidScriptTextOutput("标题响应无法解析") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"title"}
+        or not isinstance(value["title"], str)
+    ):
+        raise InvalidScriptTextOutput("标题响应缺少有效字段")
+    return value["title"]
 
 
 def _script_gemini_failure(cause: AnalysisProviderFailed) -> HTTPException:

@@ -6,39 +6,28 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from app.analysis import ApilioGemini, UrllibApilioChatTransport
+from app.analysis import ApilioGemini
 from app.auth import ReadDatabase, ShortAuthUser
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.prompt_optimizer import PromptOptimizeRequest, enqueue, task_result
-from app.settings import SettingsRepository, SettingsUnavailableError
-from app.text_gemini import GEMINI_TEXT_MODEL
+from app.text_gemini import load_gemini_text_provider
 
 router = APIRouter(prefix="/api/prompt-optimizations", tags=["prompts"])
 
-# 单次请求限时，给备选与已有的结构纠错留出任务时间。
-PROMPT_OPTIMIZER_MODEL = GEMINI_TEXT_MODEL
 
-
-def get_prompt_optimizer_provider(conn: BusinessConnection) -> ApilioGemini:
-    try:
-        config = SettingsRepository(conn).load_provider_config("apilio")
-    except SettingsUnavailableError as exc:
-        raise HTTPException(
-            503,
-            detail={"code": "PROMPT_OPTIMIZER_UNAVAILABLE", "message": "请先配置提示词优化服务。"},
-        ) from exc
-    key = config.get("analysis_api_key") or config.get("api_key")
-    if not key:
+def get_prompt_optimizer_providers(conn: BusinessConnection) -> tuple[ApilioGemini, ApilioGemini]:
+    primary = load_gemini_text_provider(conn, timeout_seconds=120)
+    if primary is None:
         raise HTTPException(
             503,
             detail={"code": "PROMPT_OPTIMIZER_UNAVAILABLE", "message": "请先配置提示词优化服务。"},
         )
-    return ApilioGemini(
-        api_key=key,
-        model=PROMPT_OPTIMIZER_MODEL,
-        fallback_models=("gemini-3.8-flash",),
-        transport=UrllibApilioChatTransport(timeout_seconds=120),
+    return primary, ApilioGemini(
+        api_key=primary.api_key,
+        base_url=primary.base_url,
+        model="gemini-3.8-flash",
+        transport=primary.transport,
     )
 
 

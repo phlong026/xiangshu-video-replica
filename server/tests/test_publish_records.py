@@ -428,6 +428,63 @@ def test_publish_copy_rejects_blank_input_and_read_only_users(
     assert forbidden.status_code == 403
 
 
+@pytest.mark.parametrize(
+    ("content", "fallback_text", "expected"),
+    [
+        ('{"title":"庭院采光怎么做"}', None, "庭院采光怎么做"),
+        ('{"title":"庭院采光\\n入户庭院怎么设计"}', "庭院采光的三个细节", "庭院采光的三个细节"),
+        ("格式不符", "庭院采光的三个细节", "庭院采光的三个细节"),
+        (r'{"title":"庭院\u0000采光"}', "庭院采光的三个细节", "庭院采光的三个细节"),
+        ("", "庭院采光的三个细节", "庭院采光的三个细节"),
+        ('{"title":"庭院采光\\n入户庭院怎么设计"}', "两行建议\n另一行", None),
+    ],
+)
+def test_publish_title_validates_each_model_output(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    fallback_text: str | None,
+    expected: str | None,
+) -> None:
+    from unittest.mock import Mock
+
+    from app import script_rewrite
+    from app.analysis import ApilioGemini
+
+    transport = Mock()
+    transport.post.return_value = (
+        json.dumps({"choices": [{"message": {"content": content}}]}).encode(),
+        {},
+    )
+    primary = ApilioGemini(api_key="test", model="gemini-4-carbon", transport=transport)
+    monkeypatch.setattr(
+        publish_copy,
+        "load_script_text_route",
+        lambda conn: (primary, ("https://api.deepseek.com", "test", "deepseek-flash")),
+    )
+    fallback = Mock(return_value=fallback_text)
+    monkeypatch.setattr(script_rewrite, "request_deepseek_text", fallback)
+    response = client.post(
+        "/api/studio/publish/copy/optimize",
+        json={"platform": "抖音", "field": "title", "title": "庭院设计"},
+    )
+    transport.post.assert_called_once()
+    payload = json.loads(transport.post.call_args.kwargs["body"])
+    assert payload["model"] == "gemini-4-carbon"
+    assert payload["response_format"] == {"type": "json_object"}
+    if fallback_text is None:
+        fallback.assert_not_called()
+    else:
+        fallback.assert_called_once()
+        assert fallback.call_args.kwargs["model"] == "deepseek-flash"
+    if expected is None:
+        assert response.status_code == 502
+        assert response.json()["detail"]["code"] == "PUBLISH_COPY_INVALID"
+    else:
+        assert response.status_code == 200
+        assert response.json() == {"text": expected}
+
+
 def test_list_get_and_isolation(
     client: TestClient, pg: psycopg.Connection, holder: _PgBusinessDb
 ) -> None:
