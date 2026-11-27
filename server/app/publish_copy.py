@@ -35,7 +35,7 @@ def _validated_title(text: str) -> str:
         length = len(title.encode("utf-16-le")) // 2
     except UnicodeEncodeError as exc:
         raise InvalidScriptTextOutput("发布标题含无效字符") from exc
-    if not title or len(title.splitlines()) != 1 or length > MAX_TITLE_LENGTH:
+    if not title or "\x00" in title or len(title.splitlines()) != 1 or length > MAX_TITLE_LENGTH:
         raise InvalidScriptTextOutput("发布标题须为一行有效文本")
     return title
 

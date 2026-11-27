@@ -41,7 +41,8 @@ from app.text_gemini import gemini_output_invalid
 PROMPT_OPTIMIZE_SERVICE = "prompt_optimize"
 _OPENING_TIMESTAMP = re.compile(
     r"(?m)^([ \t]*(?:(?:integrated_multimodal_description|detailed_description):[ \t]*)?"
-    r"\[Shot 1\][ \t]+)At 0{1,2}:0{1,2}(?:\.0+)?(?:[ \t]*[,，:：][ \t]*|[ \t]+)"
+    r"\[Shot 1\][ \t]+)At 0{1,2}:0{1,2}(?:\.0+)?"
+    r"(?![\d.]|[ \t]*[:：]\d)(?:[ \t]*[,，:：][ \t]*|[ \t]+)"
 )
 
 
@@ -207,7 +208,7 @@ def run_prompt_task(
 ) -> bool:
     """Run at most one request per model, while the task still owns its lease."""
     from app.prompt_optimizer_routes import get_prompt_optimizer_providers
-    from app.usage_billing import begin_source_attempt, complete_source_attempt, finish_source
+    from app.usage_billing import begin_source_attempt, complete_attempt, finish_source
 
     with connection() as conn:
         row = conn.execute(
@@ -223,8 +224,7 @@ def run_prompt_task(
         task_id = str(row["id"])
         snapshot = json.loads(str(row["request_json"]))
     sent = False
-    received = False
-    any_response = False
+    usage: int | None = None
     result: dict[str, Any] | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -333,30 +333,38 @@ def run_prompt_task(
                     )
                     if cursor.rowcount != 1:
                         return True
-                    # 主备调用归属同一次优化，用户仍按一次成功结果结算。
-                    if not sent:
-                        begin_source_attempt(conn, task_id)
+                    # 用户结算对应一次优化，每次上游调用单独留存成本证据。
+                    attempt_id = begin_source_attempt(
+                        conn, task_id, service=PROMPT_OPTIMIZE_SERVICE
+                    )
                 sent = True
-                received = False
+                usage = None
                 result = None
                 try:
                     raw_text = ask(provider, correction)
                 except AnalysisProviderFailed as exc:
-                    if gemini_output_invalid(exc):
-                        received = any_response = True
-                    elif index == 0 and _should_try_fallback(exc, model=provider.model):
-                        provider.failover_pause(FAILOVER_RETRY_WAIT_SECONDS)
-                        continue
-                    else:
+                    if exc.failure_phase == RESPONSE_FAILURE_PHASE:
+                        usage = 1
+                    elif _should_try_fallback(exc, model=provider.model):
+                        usage = 0
+                    if not gemini_output_invalid(exc):
+                        if index == 0 and usage == 0:
+                            provider.failover_pause(FAILOVER_RETRY_WAIT_SECONDS)
+                            continue
                         raise
                 else:
-                    received = any_response = True
+                    usage = 1
                     try:
                         result, state = validate_result(raw_text, snapshot=snapshot)
                     except ValueError:
                         state = "FAILED"
                     if state != "FAILED":
                         break
+                finally:
+                    if attempt_id is not None:
+                        # 租约结束后仍保存已确认的上游用量，客户账本由下方租约守卫保护。
+                        with connection() as conn:
+                            complete_attempt(conn, attempt_id=attempt_id, usage=usage)
                 correction = [str(item["message"]) for item in (result or {}).get("issues", [])]
                 if not correction:
                     correction = ["返回合法 JSON，只包含 prompt_text 和 warnings 两个字段。"]
@@ -364,9 +372,7 @@ def run_prompt_task(
                 error_code = "PROMPT_OPTIMIZE_INVALID"
                 error_message = "生成结果未通过结构自检，原文已保留，可重新生成或手动修改。"
     except Exception as exc:
-        if isinstance(exc, AnalysisProviderFailed) and exc.failure_phase == RESPONSE_FAILURE_PHASE:
-            received = any_response = sent
-        state = "SUBMISSION_UNCERTAIN" if sent and not received else "FAILED"
+        state = "SUBMISSION_UNCERTAIN" if sent and usage is None else "FAILED"
         if isinstance(exc, AnalysisProviderFailed) and exc.http_status is not None:
             state = "FAILED"
         error_code = (
@@ -387,7 +393,8 @@ def run_prompt_task(
             """UPDATE prompt_optimization_receipts SET status=%s,response_json=%s,
             error_code=%s,error_message_redacted=%s,
             completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-            WHERE id=%s AND status='RUNNING' AND lease_owner=%s""",
+            WHERE id=%s AND status='RUNNING' AND lease_owner=%s
+            AND lease_expires_at::timestamptz>CURRENT_TIMESTAMP""",
             (
                 state,
                 json.dumps(result) if result else None,
@@ -398,8 +405,6 @@ def run_prompt_task(
             ),
         )
         if cursor.rowcount == 1:
-            if sent:
-                complete_source_attempt(conn, task_id, usage=1 if any_response else None)
             finish_source(
                 conn,
                 task_id,

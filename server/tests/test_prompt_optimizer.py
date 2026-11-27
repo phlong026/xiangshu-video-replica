@@ -622,11 +622,25 @@ def test_failure_preserves_cost_and_never_resubmits(
     assert not run_one(route_state, tmp_path)
     assert provider.calls == 1
     assert fallback.calls == (0 if bad in ("network", "filtered") else 1)
+    expected_cost = {
+        "network": [("UNKNOWN", None)],
+        "json": [("ACTUAL", 1), ("ACTUAL", 1)],
+        "structure": [("ACTUAL", 1), ("ACTUAL", 1)],
+        "fallback_network": [("ACTUAL", 1), ("UNKNOWN", None)],
+        "filtered": [("ACTUAL", 1)],
+    }
     with psycopg.connect(route_state) as conn:
         assert conn.execute(
             "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s",
             (user["user_id"],),
         ).fetchone() == (10, 0)
+        assert (
+            conn.execute(
+                "SELECT state,usage FROM billing_attempts WHERE service='prompt_optimize' "
+                "ORDER BY state,id"
+            ).fetchall()
+            == expected_cost[bad]
+        )
 
 
 def test_assumptions_apply_without_blocking(
@@ -703,15 +717,24 @@ def test_invalid_primary_or_rate_limit_switches_to_fallback(
             ).fetchone()[0]
             == 7
         )
+        primary_usage = 0 if reason == "rate_limit" else 1
         assert conn.execute(
-            "SELECT state,usage FROM billing_attempts WHERE service='prompt_optimize'"
-        ).fetchall() == [("ACTUAL", 1)]
+            "SELECT state,usage FROM billing_attempts WHERE service='prompt_optimize' "
+            "ORDER BY created_at,id"
+        ).fetchall() == [("ACTUAL", primary_usage), ("ACTUAL", 1)]
 
 
-def test_zero_second_opening_is_normalized_and_interior_timestamp_is_preserved() -> None:
-    text = GOOD_TEXT.replace(
-        "[Shot 1] A person waves.", "[Shot 1] At 00:00, starts. At 00:03, waves."
-    )
+@pytest.mark.parametrize(
+    ("opening", "normalized"),
+    [
+        ("At 00:00, starts.", "开场时，starts."),
+        ("At 00:00: 2 people enter.", "开场时，2 people enter."),
+    ],
+)
+def test_zero_second_opening_is_normalized_and_interior_timestamp_is_preserved(
+    opening: str, normalized: str
+) -> None:
+    text = GOOD_TEXT.replace("A person waves.", f"{opening} At 00:03, waves.")
     result, state = validate_result(
         json.dumps({"prompt_text": text, "warnings": []}),
         snapshot={
@@ -720,7 +743,21 @@ def test_zero_second_opening_is_normalized_and_interior_timestamp_is_preserved()
         },
     )
     assert state == "SUCCEEDED"
-    assert result["prompt_text"] == text.replace("At 00:00, ", "开场时，")
+    assert result["prompt_text"] == text.replace(opening, normalized)
+
+
+def test_zero_prefix_of_longer_timecode_is_not_normalized() -> None:
+    text = GOOD_TEXT.replace("A person waves.", "At 00:00:03, a person waves.")
+    result, state = validate_result(
+        json.dumps({"prompt_text": text, "warnings": []}),
+        snapshot={
+            "context": {"mode": "T2VA", "duration_seconds": 6, "generation_assets": []},
+            "prompt_text": "A person waves.",
+        },
+    )
+    assert state == "FAILED"
+    assert result["prompt_text"] == text
+    assert any(issue["code"] == "TIMELINE_CONFLICT" for issue in result["issues"])
 
 
 def test_ownership_and_missing_assets(client: TestClient, route_state: str, tmp_path: Any) -> None:
@@ -831,6 +868,42 @@ def test_expired_lease_refunds_without_resubmitting(
             "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s",
             (user["user_id"],),
         ).fetchone() == (10, 0)
+
+
+def test_late_provider_response_records_cost_without_settling_again(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from app.usage_billing import reconcile_operations
+
+    user, headers = _customer(client, route_state, credits=10)
+    task = client.post(OPTIMIZE_PATH, headers=headers, json=request_body()).json()
+    provider = Provider()
+    fallback = bind_providers(monkeypatch, provider)
+    complete = provider._complete
+
+    def reconcile_before_response(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        with psycopg.connect(route_state) as raw:
+            conn = BusinessConnection.postgres(raw)
+            conn.execute(
+                "UPDATE prompt_optimization_receipts SET lease_expires_at='2000-01-01' WHERE id=%s",
+                (task["task_id"],),
+            )
+            assert reconcile_operations(conn) == 1
+        return complete(payload)
+
+    monkeypatch.setattr(provider, "_complete", reconcile_before_response)
+    assert run_one(route_state, tmp_path)
+    result = client.get(OPTIMIZE_PATH + "/" + task["task_id"], headers=headers).json()
+    assert result["status"] == "SUBMISSION_UNCERTAIN"
+    assert provider.calls == 1 and fallback.calls == 0
+    with psycopg.connect(route_state) as conn:
+        assert conn.execute(
+            "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s",
+            (user["user_id"],),
+        ).fetchone() == (10, 0)
+        assert conn.execute(
+            "SELECT state,usage FROM billing_attempts WHERE service='prompt_optimize'"
+        ).fetchall() == [("ACTUAL", 1)]
 
 
 def test_task_is_private_to_its_owner(client: TestClient, route_state: str) -> None:

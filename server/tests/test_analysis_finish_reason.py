@@ -13,7 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app import analysis_routes, prompt_optimizer_routes
+from app import analysis_routes, prompt_optimizer_routes, text_gemini
 from app.analysis import (
     ANALYSIS_MAX_TOKENS_CAP,
     ANALYSIS_MIN_MAX_TOKENS,
@@ -25,7 +25,6 @@ from app.analysis import (
     _analysis_max_tokens,
     _with_failover_note,
 )
-from app.prompt_optimizer_routes import PROMPT_OPTIMIZER_MODEL
 
 PRIMARY = "gemini-4-carbon"
 BACKUP = "gemini-3.8-flash"
@@ -542,14 +541,16 @@ def test_prompt_optimizer_provider_pins_its_own_model(
     repository.load_provider_config.side_effect = lambda provider_name: (
         {"analysis_api_key": "k"} if provider_name == "apilio" else {}
     )
-    monkeypatch.setattr(prompt_optimizer_routes, "SettingsRepository", lambda conn: repository)
+    monkeypatch.setattr(text_gemini, "SettingsRepository", lambda conn: repository)
 
-    provider = prompt_optimizer_routes.get_prompt_optimizer_provider(Mock())
+    primary, fallback = prompt_optimizer_routes.get_prompt_optimizer_providers(Mock())
 
-    assert isinstance(provider, ApilioGemini)
-    assert provider.model == PROMPT_OPTIMIZER_MODEL == "gemini-4-carbon"
-    assert provider.fallback_models == ("gemini-3.8-flash",)
-    assert provider.video_call_budget is None
+    assert (primary.model, fallback.model) == (PRIMARY, BACKUP)
+    for provider in (primary, fallback):
+        assert isinstance(provider, ApilioGemini)
+        assert provider.transport.timeout_seconds == 120
+        assert not provider.fallback_models
+        assert provider.video_call_budget is None
 
 
 # ---------------------------------------------------------------------------
