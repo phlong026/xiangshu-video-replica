@@ -28,7 +28,7 @@ export function SummaryReportExport({
         end_date: range.end,
       });
       setNotice(
-        `已导出 ${result.filename}；范围 ${range.start} 至 ${range.end}。`,
+        `已导出 ${result.filename}（${range.start} 至 ${range.end}）。`,
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "导出失败");
@@ -41,8 +41,8 @@ export function SummaryReportExport({
   return (
     <section className="summary-export" aria-label="当前范围报表导出">
       <p>
-        导出当前范围：{range.start} 至 {range.end}
-        （北京时间）。预收余额为当前时点数；未知金额保留待核对。
+        报表日期 {range.start} 至 {range.end}
+        （北京时间）。积分余额取下载时的余额，待确认金额标为待核对。
       </p>
       <button
         type="button"

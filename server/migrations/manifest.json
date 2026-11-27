@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261126T1900_asr_request_aliases"
+      "20261125T1500_billing_review"
     ],
     "parents": {
       "001_core": null,
@@ -217,9 +217,10 @@
       "20261122T1000_replica_prompt_mode": "20261120T1000_account_diagnosis",
       "20261124T1000_recharge_minimum_step": "20261122T1000_replica_prompt_mode",
       "20261125T1000_software_licenses": "20261124T1000_recharge_minimum_step",
+      "20261125T1500_billing_review": "20261126T1900_asr_request_aliases",
       "20261126T1900_asr_request_aliases": "20261125T1000_software_licenses"
     },
-    "revision_count": 195
+    "revision_count": 196
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -1009,6 +1010,10 @@
     "20261125T1000_software_licenses": {
       "file": "versions/20261125T1000_software_licenses.py",
       "sha256": "4b320a3cdd7029a9405208205717f189a4d002eda6c1af30eeb5061c892e531c"
+    },
+    "20261125T1500_billing_review": {
+      "file": "versions/20261125T1500_billing_review.py",
+      "sha256": "8cb0abea40ba809b585e7eca2463f30b9961684bcba4cc5257ed288dbb657f6a"
     },
     "20261126T1900_asr_request_aliases": {
       "file": "versions/20261126T1900_asr_request_aliases.py",

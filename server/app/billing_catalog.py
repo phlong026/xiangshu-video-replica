@@ -203,6 +203,34 @@ def merge_customer_discount(platform_basis_points: int, rate: Decimal | None) ->
     return max(1, min(platform_basis_points, customer_basis_points))
 
 
+# 旧爆款价目仍用于追溯历史账单，当前价格页只允许查看。
+_READ_ONLY_COST_SERVICES = frozenset({"viral_search", "viral_detail", "viral_copy"})
+
+
+def unconfigured_cost_services(conn: BusinessConnection) -> list[str]:
+    """提示对客服务及近期实用的内部服务缺少成本单价，忽略明确免计费的通道。"""
+    configured = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT service FROM billing_tariffs WHERE unit_cost_fen IS NOT NULL"
+        ).fetchall()
+    }
+    recently_used = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT DISTINCT service FROM billing_attempts "
+            "WHERE created_at >= now() - interval '24 hours' AND usage > 0"
+        ).fetchall()
+    }
+    return sorted(
+        key
+        for key, item in SERVICES.items()
+        if key not in configured
+        and key not in _READ_ONLY_COST_SERVICES
+        and (item.customer_charge_allowed or (key in recently_used and not item.zero_cost_platform))
+    )
+
+
 def read_tariff(conn: BusinessConnection, service: str) -> Tariff | None:
     if service not in SERVICES:
         raise ValueError("未知计费科目")

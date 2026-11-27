@@ -2357,6 +2357,7 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
     _, uid = account(pricing_client)
     with psycopg.connect(route_state) as raw:
         conn = BusinessConnection.postgres(raw)
+        actor_id = backfill_admin_actor(raw)
         raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
         # 质检目录先不配单价：begin_attempt 快照到 NULL，complete_attempt 落 UNKNOWN。
         raw.execute(
@@ -2413,9 +2414,9 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
         "--service",
         "quality_inspection",
         "--actor-user-id",
-        uid,
+        actor_id,
         "--reason",
-        "质检单价已配置为 7 分/次，按目录批量补录历史调用",
+        "按原始质检账单补录",
         "--database-url",
         route_state,
     ]
@@ -2430,13 +2431,28 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0
 
-    # --apply：恰好补 1 条（usage=NULL 的跳过，已知成本的不动），金额 = 1×7。
-    assert backfill_main([*base_args, "--apply"]) == 0
+    with pytest.raises(SystemExit) as failure:
+        backfill_main([*base_args, "--apply"])
+    assert failure.value.code == 2
+    # 历史单价为 5 分，当前目录为 7 分，批量写入使用原凭证。
+    apply_args = [
+        *base_args,
+        "--apply",
+        "--attempt-id",
+        insp_unknown,
+        "--attempt-id",
+        insp_unmetered,
+        "--reference",
+        "历史质检账单",
+        "--verified-unit-cost-fen",
+        "5",
+    ]
+    assert backfill_main(apply_args) == 0
     with psycopg.connect(route_state) as raw:
         rows = raw.execute("SELECT attempt_id, cost_fen FROM billing_evidence").fetchall()
         assert len(rows) == 1
         assert rows[0][0] == insp_unknown
-        assert rows[0][1] == Decimal(7)
+        assert rows[0][1] == Decimal(5)
         assert (
             raw.execute(
                 "SELECT count(*) FROM audit_logs WHERE "
@@ -2447,7 +2463,7 @@ def test_backfill_operation_costs_fills_unknown_internal_costs(pricing_client, r
         )
 
     # 幂等重跑：没有可补的行。
-    assert backfill_main([*base_args, "--apply"]) == 0
+    assert backfill_main(apply_args) == 0
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 1
 
@@ -2554,13 +2570,23 @@ def test_backfill_attempt_usage_costs_recovers_call_usage_once_per_operation(
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 0
 
-    assert backfill_main([*base_args, "--apply"]) == 0
+    apply_args = [
+        *base_args,
+        "--apply",
+        "--attempt-id",
+        first_unknown,
+        "--attempt-id",
+        second_unknown,
+        "--verified-unit-cost-fen",
+        "6",
+    ]
+    assert backfill_main(apply_args) == 0
     with psycopg.connect(route_state) as raw:
         rows = raw.execute("SELECT attempt_id,cost_fen,reference FROM billing_evidence").fetchall()
         assert len(rows) == 1
         assert rows[0][0] in {first_unknown, second_unknown}
-        assert rows[0][1] == Decimal(7)
-        assert rows[0][2].startswith("historical-analysis:analysis@v")
+        assert rows[0][1] == Decimal(6)
+        assert rows[0][2] == "historical-analysis"
         assert (
             raw.execute(
                 "SELECT count(*) FROM audit_logs WHERE "
@@ -2571,7 +2597,7 @@ def test_backfill_attempt_usage_costs_recovers_call_usage_once_per_operation(
         )
 
     # 已有同科目 evidence 的操作不允许因为另一条重试 attempt 被再次补录。
-    assert backfill_main([*base_args, "--apply"]) == 0
+    assert backfill_main(apply_args) == 0
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM billing_evidence").fetchone()[0] == 1
 
@@ -2611,7 +2637,7 @@ def test_backfill_attempt_usage_costs_yields_to_manual_evidence_after_selection(
             usage=None,
             service="analysis",
         )
-        record_attempt(
+        batch_attempt = record_attempt(
             conn,
             operation_id=operation_id,
             attempt_key="analysis-attempt-batch",
@@ -2655,6 +2681,10 @@ def test_backfill_attempt_usage_costs_yields_to_manual_evidence_after_selection(
                         "--database-url",
                         route_state,
                         "--apply",
+                        "--attempt-id",
+                        batch_attempt,
+                        "--verified-unit-cost-fen",
+                        "7",
                     ]
                 )
             )
@@ -2764,7 +2794,21 @@ def test_backfill_attempt_usage_costs_uses_delivered_video_duration(
     assert "operations_to_confirm=1" in captured.out
     assert "usage_missing=0" in captured.out
 
-    assert backfill_main([*base_args, "--apply"]) == 0
+    assert (
+        backfill_main(
+            [
+                *base_args,
+                "--apply",
+                "--attempt-id",
+                unknown_attempt,
+                "--reference",
+                "历史成片账单",
+                "--verified-unit-cost-fen",
+                "7",
+            ]
+        )
+        == 0
+    )
     with psycopg.connect(route_state) as raw:
         row = raw.execute("SELECT attempt_id,cost_fen FROM billing_evidence").fetchone()
         assert tuple(row) == (unknown_attempt, Decimal("66.5"))
@@ -2852,7 +2896,21 @@ def test_backfill_attempt_usage_costs_requires_archived_oral_output(
     assert "operations_to_confirm=0" in captured.out
     assert "usage_missing=1" in captured.out
 
-    assert backfill_main([*base_args, "--apply"]) == 0
+    assert (
+        backfill_main(
+            [
+                *base_args,
+                "--apply",
+                "--attempt-id",
+                unknown_attempt,
+                "--reference",
+                "待核实口播账单",
+                "--verified-unit-cost-fen",
+                "15",
+            ]
+        )
+        == 0
+    )
     with psycopg.connect(route_state) as raw:
         assert (
             raw.execute(
@@ -2880,7 +2938,7 @@ def test_backfill_attempt_usage_costs_rejects_non_admin_actor(pricing_client, ro
         operation_id = accept_operation(
             conn, user_id=uid, service="analysis", source_id="usage-backfill-customer", units=1
         )
-        record_attempt(
+        attempt = record_attempt(
             conn,
             operation_id=operation_id,
             attempt_key="analysis-attempt-customer",
@@ -2900,6 +2958,12 @@ def test_backfill_attempt_usage_costs_rejects_non_admin_actor(pricing_client, ro
             "--database-url",
             route_state,
             "--apply",
+            "--attempt-id",
+            attempt,
+            "--reference",
+            "凭证测试",
+            "--verified-unit-cost-fen",
+            "7",
         ]
     )
     captured = capsys.readouterr()

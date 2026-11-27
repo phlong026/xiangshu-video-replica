@@ -118,7 +118,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 发布域三表平台 CHECK 的快手值，计数不变，digest 随约束定义重算。
 # 20261120T1000_account_diagnosis（账号诊断 P0）再追加两张表并种子价目行，
 # counts/表名集/digest 均按上方 HEAD_SCHEMA_COUNTS 注释重算。
-HEAD_REVISION = "20261126T1900_asr_request_aliases"
+HEAD_REVISION = "20261125T1500_billing_review"
 
 
 @pytest.mark.pg
@@ -467,18 +467,19 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 追加 mode 列（Text NOT NULL DEFAULT 'prompt'，storyboard=分镜表拆解，合法值
 # 校验在 API 层 Literal 收口，本迁移不加 CHECK），故 columns +1，其余计数与
 # 表名集不变；digest 在空库→新 head 的 PG16 探针库重算。
+# 经营核对与收入凭证新增两张表和一个经营视图，按隔离 PG16 实测重算。
 HEAD_SCHEMA_COUNTS: dict[str, int] = {
-    "check_constraints": 412,
-    "columns": 1630,
-    "foreign_keys": 228,
+    "check_constraints": 418,
+    "columns": 1671,
+    "foreign_keys": 232,
     "identity_columns": 0,
-    "jsonb_columns": 16,
+    "jsonb_columns": 18,
     "partial_indexes": 52,
-    "primary_keys": 144,
+    "primary_keys": 146,
     "sequences": 8,
-    "tables": 144,
-    "timestamptz_columns": 138,
-    "triggers": 61,
+    "tables": 146,
+    "timestamptz_columns": 142,
+    "triggers": 63,
     "unique_constraints": 47,
 }
 
@@ -533,6 +534,8 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
     "billing_evidence",
     "billing_operations",
     "billing_reconciliation_items",
+    "billing_revenue_confirmations",
+    "billing_review_cases",
     "billing_tariffs",
     "character_asset_reviews",
     "character_assets",
@@ -756,7 +759,7 @@ HEAD_TABLE_NAMES: tuple[str, ...] = (
 # 2026-11-24 充值最低额与步长列默认值调整后，在隔离 PG16 空库升级至 head 实测。
 # 表名及计数均保持一致，仅 column_default 进入摘要后产生变化。
 # 2026-11-25: Recomputed on PostgreSQL 16 after the annual-license migration.
-HEAD_SCHEMA_DIGEST = "20508cb81bec89a227d075bccb8e60122cf5687491a72d769dccaa7b56f97447"
+HEAD_SCHEMA_DIGEST = "8378f415b6072c178e913d85bad67f961d835280e331a263caf132990790b6b6"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

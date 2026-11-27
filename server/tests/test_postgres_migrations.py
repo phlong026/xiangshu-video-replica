@@ -65,7 +65,45 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # recharge_orders.closed_at 与 CLOSED 扫描部分索引，链尾随之前移。
 # 20261117T1000_kuaishou_publish_platform 仅扩发布域三张表的平台 CHECK。
 # 20261120T1000_account_diagnosis 新建账号诊断报告与免费额度两张表并种子价目行。
-HEAD_REVISION = "20261126T1900_asr_request_aliases"
+HEAD_REVISION = "20261125T1500_billing_review"
+
+
+def test_billing_review_migration_preserves_saved_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    from alembic import command
+    from sqlalchemy.exc import DBAPIError
+
+    monkeypatch.delenv("VIDEO_REPLICA_DATABASE_URL", raising=False)
+    previous = "20261126T1900_asr_request_aliases"
+    dsn = _rehearsal_dsn()
+    _drop_database("t06_migrate_test")
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute('CREATE DATABASE "t06_migrate_test"')
+    config = _alembic_config(dsn.replace("postgresql://", "postgresql+psycopg://"))
+    try:
+        command.upgrade(config, HEAD_REVISION)
+        command.downgrade(config, previous)
+        command.upgrade(config, HEAD_REVISION)
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id,username,display_name,role) "
+                "VALUES ('review-admin','review-admin','核对测试','admin')"
+            )
+            conn.execute(
+                "INSERT INTO billing_review_cases "
+                "(subject_id,kind,state,owner_id,next_step,version) VALUES "
+                "('legacy-item','legacy_settlement','review','review-admin','查原凭证',1)"
+            )
+        with pytest.raises(DBAPIError, match="saved review evidence"):
+            command.downgrade(config, previous)
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                HEAD_REVISION,
+            )
+            assert conn.execute("SELECT subject_id FROM billing_review_cases").fetchone() == (
+                "legacy-item",
+            )
+    finally:
+        _drop_database("t06_migrate_test")
 
 
 def test_recharge_policy_migration_preserves_packages_and_order_snapshots(

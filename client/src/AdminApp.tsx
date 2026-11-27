@@ -357,15 +357,24 @@ const adminIntents = new Set([
   "ledger",
 ]);
 
+const costReviewIntents = new Set([
+  "costDetails",
+  "pendingOperations",
+  "unknownCost",
+  "unknownRevenue",
+]);
+
 export function adminRouteFromHash(hash: string): {
   tab: AdminTab;
   intent: string;
 } {
   const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
   const requested = path.replace(/^admin\//, "") as AdminTab;
+  const params = new URLSearchParams(query);
+  const intent = params.get("intent") ?? "";
   // 告警、团队原是系统设置的页签（?sub=alerts|team），现为独立入口；
   // 旧书签与外部链接在此重定向，不丢落点。
-  const legacySub = new URLSearchParams(query).get("sub");
+  const legacySub = params.get("sub");
   const legacySettingsTab =
     requested === "systemSettings" &&
     (legacySub === "alerts" || legacySub === "team")
@@ -375,15 +384,12 @@ export function adminRouteFromHash(hash: string): {
     tab:
       legacySettingsTab ??
       (requested === "analytics" &&
-      new URLSearchParams(query).get("analyticsTab") === "cost"
+      (params.get("analyticsTab") === "cost" || costReviewIntents.has(intent))
         ? "costReview"
         : adminTabs.has(requested)
           ? requested
           : "overview"),
-    intent: (() => {
-      const intent = new URLSearchParams(query).get("intent") ?? "";
-      return adminIntents.has(intent) ? intent : "";
-    })(),
+    intent: adminIntents.has(intent) ? intent : "",
   };
 }
 
@@ -1310,12 +1316,10 @@ export function AdminApp() {
                     customerAdjustments: "customersMgmt",
                     customerPackage: "customersMgmt",
                     customerRefund: "customersMgmt",
-                    costDetails: "analytics",
-                    // 待结算 / 成本待核对 / 收入未确定都是计费操作口径，落在
-                    // 经营分析而不是资金流水（方案 P0-5）。
-                    pendingOperations: "analytics",
-                    unknownCost: "analytics",
-                    unknownRevenue: "analytics",
+                    costDetails: "costReview",
+                    pendingOperations: "costReview",
+                    unknownCost: "costReview",
+                    unknownRevenue: "costReview",
                     failedGenerationRecords: "generationRecords",
                     analysisFailures: "generationRecords",
                     rates: "systemSettings",
@@ -1329,6 +1333,10 @@ export function AdminApp() {
                     pendingOrders: {
                       tab: "funds",
                       target: { sub: "orders", status: "PENDING" },
+                    },
+                    frozenBillingReviews: {
+                      tab: "funds",
+                      target: { sub: "billingQueue", status: "ESCALATED" },
                     },
                     queueAttention: { tab: "workerObservations", target: {} },
                     openTickets: {
@@ -1371,11 +1379,7 @@ export function AdminApp() {
                 onScopeChange={persistAnalyticsScope}
                 initialTab={
                   viewTab === "costReview" ||
-                  businessTarget.get("analyticsTab") === "cost" ||
-                  navigationIntent === "costDetails" ||
-                  navigationIntent === "pendingOperations" ||
-                  navigationIntent === "unknownCost" ||
-                  navigationIntent === "unknownRevenue"
+                  businessTarget.get("analyticsTab") === "cost"
                     ? "cost"
                     : "dashboard"
                 }

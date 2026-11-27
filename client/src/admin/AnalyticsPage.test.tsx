@@ -6,19 +6,146 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { adminRead, exportSummaryReportCsv } from "../api.admin";
+import {
+  adminRead,
+  adminWrite,
+  downloadBillingCsv,
+  exportSummaryReportCsv,
+} from "../api.admin";
 import { AnalyticsPage } from "./AnalyticsPage";
+import { BillingEvidenceReview } from "./BillingEvidenceReview";
 
 vi.mock("../api.admin", () => ({
   adminRead: vi.fn(),
+  adminWrite: vi.fn(),
+  createIdempotencyKey: () => "batch-review-key",
   downloadBillingCsv: vi.fn(),
   exportSummaryReportCsv: vi.fn(),
 }));
 
+test("uses the same deduplicated batch numbers for the review list and export", async () => {
+  vi.mocked(adminRead).mockClear().mockResolvedValue({
+    items: [],
+    total: 0,
+    without_owner: 0,
+    overdue: 0,
+  });
+  vi.mocked(downloadBillingCsv).mockClear().mockResolvedValue("清单已下载");
+  const review = (refreshRevision: number) => (
+    <BillingEvidenceReview
+      query="start=2026-11-01&end=2026-11-25"
+      refreshRevision={refreshRevision}
+      readOnly={false}
+      serviceName={(name) => name}
+      onInspect={vi.fn()}
+    />
+  );
+  const { rerender } = render(review(0));
+  const numbers = screen.getByPlaceholderText("粘贴记录编号，用逗号或换行分开");
+  const filter = screen.getByRole("button", { name: "应用筛选" });
+  fireEvent.change(numbers, {
+    target: {
+      value: Array.from({ length: 26 }, (_, i) => `row-${i}`).join(","),
+    },
+  });
+  expect(filter).toBeDisabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("一次最多查找 25 个编号");
+  fireEvent.change(numbers, { target: { value: "row-a，row-b\nrow-a" } });
+  fireEvent.click(filter);
+  expect(await screen.findByText(/本批找到 0 \/ 2 条/)).toBeVisible();
+  expect(adminRead).toHaveBeenLastCalledWith(
+    expect.stringContaining("subject_id=row-a&subject_id=row-b"),
+    expect.any(String),
+  );
+  const requestCount = vi.mocked(adminRead).mock.calls.length;
+  rerender(review(1));
+  await waitFor(() =>
+    expect(adminRead).toHaveBeenCalledTimes(requestCount + 1),
+  );
+  expect(adminRead).toHaveBeenLastCalledWith(
+    expect.stringContaining("subject_id=row-a&subject_id=row-b"),
+    expect.any(String),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下载当前清单（CSV）" }));
+  expect(downloadBillingCsv).toHaveBeenLastCalledWith(
+    expect.stringContaining("subject_id=row-a&subject_id=row-b"),
+    true,
+  );
+});
+
+test("confirms only the explicit revenue batch with its original record versions", async () => {
+  const rows = ["row-a", "row-b"].map((subject_id, version) => ({
+    subject_id,
+    version,
+    kind: "revenue",
+    service: "oral",
+    state: "review",
+    reason_code: "missing_funding",
+    needs_evidence: true,
+    occurred_at: "2026-10-10T03:00:00Z",
+    age_days: 46,
+  }));
+  vi.mocked(adminRead).mockImplementation(async (url) => ({
+    items: url.includes("subject_id=") ? rows : [],
+    total: url.includes("subject_id=") ? 2 : 0,
+    without_owner: 0,
+    overdue: 0,
+  }));
+  vi.mocked(adminWrite).mockResolvedValue({
+    confirmed_count: 2,
+    confirmed_revenue_fen: "10000",
+  });
+  render(
+    <BillingEvidenceReview
+      query="start=2026-11-01&end=2026-11-25"
+      refreshRevision={0}
+      readOnly={false}
+      serviceName={(name) => name}
+      onInspect={vi.fn()}
+    />,
+  );
+  fireEvent.change(screen.getByLabelText("核对类型"), {
+    target: { value: "revenue" },
+  });
+  fireEvent.change(
+    screen.getByPlaceholderText("粘贴记录编号，用逗号或换行分开"),
+    { target: { value: "row-a,row-b" } },
+  );
+  fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "核对本批收入（2 条）" }),
+  );
+  fireEvent.change(screen.getByLabelText("本批负责人账号"), {
+    target: { value: "admin_u" },
+  });
+  fireEvent.change(screen.getByLabelText("本批凭证编号"), {
+    target: { value: "review-001" },
+  });
+  fireEvent.change(screen.getByLabelText("本批核对说明"), {
+    target: { value: "核对原充值凭证" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认本批收入" }));
+  expect(await screen.findByText(/已核对 2 条收入/)).toBeVisible();
+  expect(adminWrite).toHaveBeenCalledWith(
+    "/api/control/billing/reviews/revenue-batch",
+    {
+      items: [
+        { subject_id: "row-a", expected_version: 0 },
+        { subject_id: "row-b", expected_version: 1 },
+      ],
+      owner: "admin_u",
+      evidence_ref: "review-001",
+    },
+    "核对原充值凭证",
+    expect.any(String),
+    "batch-review-key",
+  );
+});
+
 /** 新导航：默认页签是经营看板，计费明细在「成本核对」页签下。 */
 async function openCostTab() {
   fireEvent.click(screen.getByRole("tab", { name: "成本核对" }));
-  return screen.findByRole("table", { name: "生成明细" });
+  return screen.findByRole("table", { name: "逐笔账务明细" });
 }
 
 test.each([
@@ -118,12 +245,12 @@ test.each([
     expect(headers).not.toContain("确认收入");
     fireEvent.click(within(table).getByRole("button", { name: "查看详情" }));
     const detail = await screen.findByRole("complementary", {
-      name: "生成核算详情",
+      name: "账务详情",
     });
     expect(detail).toHaveTextContent(
       `按售价折合 ${nominalDisplay} · 确认收入 ${paidDisplay}`,
     );
-    expect(detail).toHaveTextContent("预算 68.3 秒，实际 68.0 秒");
+    expect(detail).toHaveTextContent("预计用量 68.3 秒 · 实际用量 68.0 秒");
     expect(
       within(detail).getByRole("cell", { name: "68.3 秒" }),
     ).toBeInTheDocument();
@@ -173,11 +300,9 @@ test("lands on the business dashboard by default and keeps cost page behind its 
 
   const dashboard = await screen.findByRole("region", { name: "经营看板" });
   expect(within(dashboard).getByText("¥150.00")).toBeInTheDocument();
+  expect(within(dashboard).getByText("1 笔成本待核对")).toBeInTheDocument();
   expect(
-    within(dashboard).getAllByText(/含 1 项待核对/).length,
-  ).toBeGreaterThan(0);
-  expect(
-    within(dashboard).queryByRole("table", { name: "生成明细" }),
+    within(dashboard).queryByRole("table", { name: "逐笔账务明细" }),
   ).toBeNull();
 
   fireEvent.click(screen.getByRole("tab", { name: "成本核对" }));
@@ -217,12 +342,11 @@ test("cost queue cards count with the same scope as the filtered list", async ()
   expect(screen.getByRole("button", { name: /待核对成本/ })).toHaveTextContent(
     "5",
   );
-  expect(screen.getByRole("button", { name: /历史待核对/ })).toHaveTextContent(
-    "7",
-  );
+  expect(
+    screen.getByRole("button", { name: /累计成本待核对/ }),
+  ).toHaveTextContent("7");
 
-  // 点击「历史待核对」→ 明细区以全历史 + unknown_cost 筛选重挂（明细请求带 limit=100）。
-  fireEvent.click(screen.getByRole("button", { name: /历史待核对/ }));
+  fireEvent.click(screen.getByRole("button", { name: /累计成本待核对/ }));
   await waitFor(() => {
     const called = vi
       .mocked(adminRead)
@@ -318,7 +442,7 @@ describe("current range summary export", () => {
       }),
     );
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "范围 2026-09-01 至 2026-09-30",
+      "business_2026-09-01_2026-09-30.csv（2026-09-01 至 2026-09-30）",
     );
   });
   test("surfaces server export errors; auditors can export too (T19)", async () => {
@@ -352,7 +476,7 @@ describe("current range summary export", () => {
         initialEnd="2026-09-30"
       />,
     );
-    await screen.findByRole("table", { name: "生成明细" });
+    await screen.findByRole("table", { name: "逐笔账务明细" });
     fireEvent.change(screen.getByLabelText("客户"), {
       target: { value: "同名公司" },
     });
@@ -376,8 +500,9 @@ describe("current range summary export", () => {
       ).toBe(true),
     );
     fireEvent.click(screen.getByRole("tab", { name: "采集账单" }));
-    expect(screen.getByLabelText("客户")).toHaveValue("同名公司");
+    expect(screen.queryByLabelText("客户")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "账务明细" }));
+    expect(screen.getByLabelText("客户")).toHaveValue("同名公司");
     expect(screen.getByLabelText("开始日期")).toHaveValue("2026-09-01");
   });
 });

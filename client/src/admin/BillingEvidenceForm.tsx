@@ -61,11 +61,11 @@ export function BillingEvidenceForm({
     >
       <p>
         {attemptId
-          ? "按上游服务账单补录本次调用总成本，原始调用记录保留。"
-          : "仅可为已成功交付且缺少时长的任务补录实际时长；按受理时售价结算，最多扣已生成冻结的积分。"}
+          ? "请按原服务账单填写这一次的实际费用。"
+          : "请填写已交付成品的实际时长。系统按接单时价格结算，最多扣除这笔任务已冻结的积分。"}
       </p>
       <label>
-        {attemptId ? "本次调用总成本（分）" : "实际成功时长（秒）"}
+        {attemptId ? "本次服务费用（人民币分）" : "实际交付时长（秒）"}
         <input
           id={`${formId}-value`}
           name="billing_evidence_value"
@@ -84,7 +84,7 @@ export function BillingEvidenceForm({
           name="billing_evidence_reference"
           value={reference}
           onChange={(e) => setReference(e.target.value)}
-          placeholder="上游服务账单号或媒体检测记录"
+          placeholder="服务账单号或时长检测记录编号"
           maxLength={500}
           required
         />

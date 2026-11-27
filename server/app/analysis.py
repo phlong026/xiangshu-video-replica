@@ -670,9 +670,11 @@ class _SourceReviewTransport:
     def post(
         self, url: str, *, headers: Mapping[str, str], body: bytes
     ) -> tuple[bytes, Mapping[str, str]]:
-        with meter_call("quality_inspection"):
-            self.on_request()
-            return self.transport.post(url, headers=headers, body=body)
+        self.on_request()
+        with meter_call("quality_inspection") as charge:
+            response = self.transport.post(url, headers=headers, body=body)
+            charge.record_usage()
+            return response
 
 
 class ApilioGemini:

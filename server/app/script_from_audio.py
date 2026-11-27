@@ -635,7 +635,10 @@ def mark_script_from_audio_submission_started(
         raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
     from app.usage_billing import begin_source_attempt
 
-    begin_source_attempt(conn, lease.id)
+    if begin_source_attempt(conn, lease.id, service="asr") is None:
+        raise script_from_audio_error(
+            503, "SCRIPT_FROM_AUDIO_BILLING_MISSING", "转写计费单缺失，请联系管理员核实。"
+        )
     conn.commit()
 
 
@@ -768,7 +771,7 @@ def complete_script_from_audio_task(
         "language": result.language,
     }
     # 租约守卫：不在持锁状态即抛 SCRIPT_FROM_AUDIO_LEASE_LOST。
-    _require_leased_task(conn, lease)
+    task = _require_leased_task(conn, lease)
     result_json = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
     updated = conn.execute(
         """
@@ -793,8 +796,26 @@ def complete_script_from_audio_task(
     )
     if updated.rowcount != 1:
         raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
-    from app.usage_billing import complete_source_attempt, finish_source
+    from app.usage_billing import complete_source_attempt, find_operation, finish_source
 
+    if task["provider_task_id"]:
+        # 旧任务可能已保存回执但缺调用行。保留已证实的调用和实测时长，
+        # 让核对员据历史账单补价，避免对已发出的请求套用今天的费率。
+        operation_id = find_operation(conn, lease.id, service="asr")
+        if operation_id:
+            from app.billing_catalog import SERVICES
+
+            conn.execute(
+                """
+                INSERT INTO billing_attempts(id,operation_id,attempt_key,service,provider,unit)
+                SELECT %s,o.id,'recovered-receipt','asr',%s,'second'
+                FROM billing_operations o WHERE o.id=%s AND o.state='PENDING'
+                  AND NOT EXISTS (SELECT 1 FROM billing_attempts a WHERE a.operation_id=o.id
+                    AND a.service='asr')
+                ON CONFLICT DO NOTHING
+                """,
+                (str(uuid4()), SERVICES["asr"].provider, operation_id),
+            )
     complete_source_attempt(conn, lease.id, usage=result.duration_sec)
     if result.duration_sec is not None:
         finish_source(conn, lease.id, units=result.duration_sec, succeeded=True)

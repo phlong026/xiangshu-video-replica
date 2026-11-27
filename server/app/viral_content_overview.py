@@ -37,9 +37,10 @@ def content_overview(
         )
         previous = count
     revenue = conn.execute(
-        """SELECT service,count(*),COALESCE(sum(revenue_fen),0),
-          count(*) FILTER(WHERE revenue_fen IS NULL)
-          FROM billing_operations o WHERE (service IN ('viral_search','viral_detail','viral_copy')
+        """SELECT service,count(*),COALESCE(sum(effective_revenue_fen),0),
+          count(*) FILTER(WHERE effective_revenue_fen IS NULL)
+          FROM billing_effective_operations o
+          WHERE (service IN ('viral_search','viral_detail','viral_copy')
           OR (service='asr' AND EXISTS(SELECT 1 FROM script_from_audio_tasks t
               WHERE t.id=o.source_id
               AND jsonb_typeof(t.request_json::jsonb->'viral_source')='array')))

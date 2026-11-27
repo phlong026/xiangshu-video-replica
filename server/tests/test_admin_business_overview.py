@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -423,15 +424,17 @@ def _billing_fact(
     unit: str,
     revenue: int | None,
     costs: tuple[str | None, ...],
-) -> None:
+    funding: list[dict[str, object]] | None = None,
+    user_id: str = "cust_1",
+) -> str:
     # when_expr 是本模块常量里的 SQL 表达式（timestamptz），必须内联而非参数绑定。
     operation = str(uuid4())
     raw.execute(
         "INSERT INTO billing_operations(id,user_id,service,module,source_id,unit,budget_units,"
-        "pricing_snapshot_json,state,reserved_credits,charged_credits,actual_units,revenue_fen,"
-        f"created_at,completed_at) VALUES(%s,'cust_1',%s,%s,%s,%s,10,'{{}}','SUCCEEDED',10,10,1,"
-        f"%s,{when_expr},{when_expr})",
-        (operation, service, module, operation, unit, revenue),
+        "pricing_snapshot_json,state,reserved_credits,charged_credits,actual_units,revenue_fen,funding_json,"
+        f"created_at,completed_at) VALUES(%s,%s,%s,%s,%s,%s,10,'{{}}','SUCCEEDED',10,10,1,"
+        f"%s,%s,{when_expr},{when_expr})",
+        (operation, user_id, service, module, operation, unit, revenue, json.dumps(funding or [])),
     )
     for index, cost in enumerate(costs):
         raw.execute(
@@ -448,12 +451,14 @@ def _billing_fact(
                 "ACTUAL" if cost is not None else "UNKNOWN",
             ),
         )
+    return operation
 
 
 @pytest.fixture()
 def overview_app(monkeypatch: pytest.MonkeyPatch, overview_pg_dsn: str) -> Iterator[FastAPI]:
     from app.admin_auth_routes import router as admin_auth_router
     from app.admin_dashboard_routes import router as admin_dashboard_router
+    from app.billing_routes import router as billing_router
 
     close_pg_pool()
     monkeypatch.setenv(DATABASE_URL_ENV, overview_pg_dsn)
@@ -462,6 +467,7 @@ def overview_app(monkeypatch: pytest.MonkeyPatch, overview_pg_dsn: str) -> Itera
     app = FastAPI()
     app.include_router(admin_auth_router)
     app.include_router(admin_dashboard_router)
+    app.include_router(billing_router)
     from app.export_controller import router as export_router
 
     app.include_router(export_router)
@@ -494,7 +500,15 @@ def recon_app(monkeypatch: pytest.MonkeyPatch, overview_pg_dsn: str) -> Iterator
 
 
 @pytest.fixture()
-def client(overview_app: FastAPI) -> Iterator[TestClient]:
+def client(overview_app: FastAPI, overview_pg_dsn: str) -> Iterator[TestClient]:
+    from app.security_rate_limit import DIMENSION_CONTROL_EXPORT_ACCOUNT, bucket_key
+
+    # 同一测试库的用例复用管理员，导出额度只应在单个用例内累计。
+    with psycopg.connect(overview_pg_dsn, autocommit=True) as conn:
+        conn.execute(
+            "DELETE FROM security_rate_limit_counters WHERE bucket_key LIKE %s",
+            (bucket_key(DIMENSION_CONTROL_EXPORT_ACCOUNT, "%"),),
+        )
     with TestClient(overview_app) as test_client:
         yield test_client
 
@@ -946,6 +960,312 @@ def test_business_margin_unknown_zero_and_negative_share_trend_contract(
     assert zero["metrics"]["margin_pct"] is None
 
 
+def test_unknown_revenue_filter_matches_summary_actions_and_csv(
+    client: TestClient, admin_headers: dict[str, str], overview_pg_dsn: str
+) -> None:
+    day = "2026-10-08"
+    with psycopg.connect(overview_pg_dsn, autocommit=True) as raw:
+        for revenue in (None, 100):
+            _billing_fact(
+                raw,
+                when_expr=f"'{day} 04:00:00+08'::timestamptz",
+                service="oral",
+                module="oral",
+                unit="second",
+                revenue=revenue,
+                costs=("20",),
+            )
+
+    params = {"start": day, "end": day, "attention": "unknown_revenue"}
+    endpoints = {
+        name: client.get(f"/api/control/billing/{name}", headers=admin_headers, params=params)
+        for name in ("operations", "statistics", "source-actions", "export")
+    }
+    for response in endpoints.values():
+        assert response.status_code == 200, response.text
+    operations = endpoints["operations"].json()
+    assert operations["total"] == 1
+    row = operations["items"][0]
+    assert row["revenue_fen"] is None
+    totals = endpoints["statistics"].json()["totals"]
+    assert totals["operation_count"] == totals["unknown_revenue_count"] == 1
+    actions = endpoints["source-actions"].json()
+    assert actions["total"] == 1
+    assert actions["items"][0]["source_id"] == row["source_id"]
+    assert row["id"] in endpoints["export"].text
+
+
+def test_financial_review_uses_receipts_and_preserves_original_facts(
+    client: TestClient, admin_headers: dict[str, str], overview_pg_dsn: str
+) -> None:
+    day = "2026-10-09"
+    with psycopg.connect(overview_pg_dsn, autocommit=True) as conn:
+        conn.execute("""
+            INSERT INTO users (id,username,display_name,role,is_active,parent_user_id,account_type)
+            VALUES ('review-child','review-child','核对测试子账号','customer',1,'cust_2','SUB')
+        """)
+        conn.execute("""
+            INSERT INTO recharge_orders (id,user_id,provider,amount_fen,credits,status,
+                merchant_order_no,payment_method,base_unit_price_fen_snapshot,
+                charged_unit_price_fen_snapshot,min_recharge_fen_snapshot,
+                recharge_step_fen_snapshot,paid_at)
+            VALUES ('review-paid-1','cust_1','admin_adjustment',10000,10,'PAID',
+                    'TEST-REVIEW-1','offline',1000,1000,10000,1000,'2026-10-08 20:00:00')
+        """)
+        conn.execute("""
+            INSERT INTO wallet_transactions (id,user_id,type,available_delta,reserved_delta,
+                recharge_order_id,idempotency_key,created_at)
+            VALUES ('review-lot-1','cust_1','CHARGE',10,0,'review-paid-1',
+                    'test-review-1','2026-10-08 20:00:00')
+        """)
+        ids = [
+            _billing_fact(
+                conn,
+                when_expr=f"'{day} 07:00:00+08'::timestamptz",
+                service="oral",
+                module="oral",
+                unit="second",
+                revenue=None,
+                costs=("20",),
+                funding=[{"lot_id": lot, "credits": 10, "lot_credits": 10, "amount_fen": None}],
+                user_id=user_id,
+            )
+            for lot, user_id in (("review-lot-1", "review-child"), (None, "cust_1"))
+        ]
+        conn.execute(
+            """
+            INSERT INTO wallet_transactions (id,user_id,type,available_delta,reserved_delta,
+                billing_operation_id,billing_round,idempotency_key,created_at)
+            VALUES ('review-reserve','cust_1','RESERVE',-10,10,%s,1,'review-reserve',
+                    '2026-10-08 22:55:00')
+            """,
+            (ids[0],),
+        )
+        for operation in ids:
+            conn.execute(
+                """
+                INSERT INTO wallet_transactions (id,user_id,type,available_delta,reserved_delta,
+                    billing_operation_id,billing_round,idempotency_key,created_at)
+                VALUES (%s,'cust_1','SETTLE',0,-10,%s,1,%s,'2026-10-08 23:00:00')
+                """,
+                (f"settle-{operation}", operation, f"settle-{operation}"),
+            )
+    path = "/api/control/billing/reviews"
+    params = {"kind": "revenue", "start": day, "end": day, "reason_code": "missing_funding"}
+    before = client.get(path, headers=admin_headers, params={**params, "owner": "unassigned"})
+    assert before.status_code == 200, before.text
+    assert before.json()["total"] == before.json()["without_owner"] == 2
+    batch = {**params, "start": "2026-10-01", "end": "2026-10-01", "subject_id": [ids[0], ids[0]]}
+    matched = client.get(path, headers=admin_headers, params=batch)
+    assert matched.status_code == 200, matched.text
+    assert [item["subject_id"] for item in matched.json()["items"]] == [ids[0]]
+    batch_csv = client.get(f"{path}/export", headers=admin_headers, params=batch)
+    assert (
+        batch_csv.status_code == 200 and ids[0] in batch_csv.text and ids[1] not in batch_csv.text
+    )
+    too_many = client.get(
+        path, headers=admin_headers, params={**batch, "subject_id": [ids[0]] * 26}
+    )
+    assert too_many.status_code == 422
+
+    def update(subject: str, state: str, version: int, key: str):
+        return client.post(
+            f"{path}/revenue/{subject}",
+            headers={**admin_headers, "Idempotency-Key": key},
+            json={
+                "state": state,
+                "owner": "admin_u",
+                "next_step": "核对原订单",
+                "evidence_ref": "TEST-REVIEW-1",
+                "expected_version": version,
+                "confirm": True,
+                "reason": "测试收入凭证",
+            },
+        )
+
+    assert update(ids[0], "review", 0, "review-assignment").status_code == 200
+    assert update(ids[0], "verified", 0, "review-stale").status_code == 409
+    rejected = update(ids[1], "verified", 0, "review-unknown-funding")
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "REVENUE_PROOF_REQUIRED"
+
+    def confirm_batch(entries: list[tuple[str, int]], key: str):
+        return client.post(
+            f"{path}/revenue-batch",
+            headers={**admin_headers, "Idempotency-Key": key},
+            json={
+                "items": [
+                    {"subject_id": subject, "expected_version": version}
+                    for subject, version in entries
+                ],
+                "owner": "admin_u",
+                "evidence_ref": "TEST-REVIEW-BATCH-1",
+                "confirm": True,
+                "reason": "测试收入凭证整批确认",
+            },
+        )
+
+    # 缺失编号会排在真实编号之后，验证前一笔已执行的凭证写入也会回退。
+    failed_batch = confirm_batch([(ids[0], 1), ("zz-missing", 0)], "batch-missing")
+    assert failed_batch.status_code == 404, failed_batch.text
+    assert failed_batch.json()["detail"]["subject_id"] == "zz-missing"
+    mixed_batch = confirm_batch([(ids[0], 1), (ids[1], 0)], "batch-mixed")
+    assert mixed_batch.status_code == 409, mixed_batch.text
+    assert mixed_batch.json()["detail"]["subject_id"] == ids[1]
+    with psycopg.connect(overview_pg_dsn) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM billing_revenue_confirmations WHERE operation_id=ANY(%s)",
+            (ids,),
+        ).fetchone() == (0,)
+    approved = confirm_batch([(ids[0], 1)], "review-approved")
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["confirmed_count"] == 1
+    assert float(approved.json()["confirmed_revenue_fen"]) == 10000
+    replay = confirm_batch([(ids[0], 1)], "review-approved")
+    assert replay.status_code == 200 and replay.headers["X-Idempotent-Replay"] == "true"
+    filtered = {**params, "state": "verified", "owner": "admin_u"}
+    rows = client.get(path, headers=admin_headers, params=filtered).json()
+    assert rows["items"][0]["needs_evidence"] is False
+    assert rows["items"][0]["reviewed_by"] == "admin_u"
+    assert rows["total"] == 1
+    csv = client.get(f"{path}/export", headers=admin_headers, params=filtered)
+    assert csv.status_code == 200 and ids[0] in csv.text and ids[1] not in csv.text
+    stats = _get(client, admin_headers, day, day).json()["metrics"]
+    assert stats["revenue_fen"] == 10000 and stats["unknown_revenue_count"] == 1
+    import csv as csv_reader
+    import gzip
+    import io
+
+    report = client.post(
+        "/api/control/reports/export",
+        headers=admin_headers,
+        json={"start_date": day, "end_date": day},
+    )
+    assert report.status_code == 200, report.text
+    entries = list(csv_reader.DictReader(io.StringIO(gzip.decompress(report.content).decode())))
+    settled_ids = {f"settle-{operation}" for operation in ids}
+    settlements = [row for row in entries if row["Transaction ID"] in settled_ids]
+    assert len(settlements) == 2
+    assert sum(float(row["Total Cost (Fen)"]) for row in settlements) == 40
+    assert [
+        row["Confirmed Revenue (Fen)"]
+        for row in entries
+        if row["Transaction ID"] == f"settle-{ids[0]}"
+    ] == ["10000.00000000"]
+    with psycopg.connect(overview_pg_dsn) as conn:
+        assert conn.execute(
+            "SELECT revenue_fen FROM billing_operations WHERE id=%s", (ids[0],)
+        ).fetchone() == (None,)
+        assert conn.execute(
+            "SELECT count(*) FROM billing_revenue_confirmations WHERE operation_id=%s", (ids[0],)
+        ).fetchone() == (1,)
+        for change in (
+            "UPDATE billing_revenue_confirmations SET revenue_fen=0",
+            "DELETE FROM billing_revenue_confirmations",
+            "TRUNCATE billing_revenue_confirmations",
+        ):
+            with (
+                pytest.raises(psycopg.errors.CheckViolation, match="append-only"),
+                conn.transaction(),
+            ):
+                conn.execute(change)
+        unrelated = _billing_fact(
+            conn,
+            when_expr=f"'{day} 07:00:00+08'::timestamptz",
+            service="oral",
+            module="oral",
+            unit="second",
+            revenue=None,
+            costs=("20",),
+            funding=[
+                {"lot_id": "review-lot-1", "credits": 10, "lot_credits": 10, "amount_fen": None}
+            ],
+            user_id="cust_2",
+        )
+        conn.commit()
+    unrelated_result = update(unrelated, "verified", 0, "review-foreign-wallet")
+    assert unrelated_result.status_code == 409
+    assert unrelated_result.json()["detail"]["code"] == "REVENUE_PROOF_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("name", "amount_fen", "method"), [("cash", 10000, "offline"), ("grant", 0, None)]
+)
+def test_financial_review_pilot_keeps_wallet_unchanged(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    overview_pg_dsn: str,
+    name: str,
+    amount_fen: int,
+    method: str | None,
+) -> None:
+    order_id, lot_id = f"pilot-{name}-order", f"pilot-{name}-lot"
+
+    def wallet_state(conn: psycopg.Connection):
+        return conn.execute(
+            "SELECT available_credits,reserved_credits, "
+            "(SELECT count(*) FROM wallet_transactions WHERE user_id='cust_2') "
+            "FROM wallets WHERE user_id='cust_2'"
+        ).fetchone()
+
+    with psycopg.connect(overview_pg_dsn, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO recharge_orders (id,user_id,provider,amount_fen,credits,status,
+                merchant_order_no,payment_method,pricing_scope,base_unit_price_fen_snapshot,
+                charged_unit_price_fen_snapshot,min_recharge_fen_snapshot,
+                recharge_step_fen_snapshot,paid_at)
+            VALUES (%s,'cust_2','admin_adjustment',%s,10,'PAID',
+                    %s,%s,'INTERNAL',1000,1000,10000,1000,'2026-07-28 02:00:00')
+            """,
+            (order_id, amount_fen, order_id, method),
+        )
+        conn.execute(
+            """
+            INSERT INTO wallet_transactions (id,user_id,type,available_delta,reserved_delta,
+                recharge_order_id,idempotency_key,created_at)
+            VALUES (%s,'cust_2','CHARGE',10,0,%s,%s,'2026-07-28 02:00:00')
+            """,
+            (lot_id, order_id, lot_id),
+        )
+        operation = _billing_fact(
+            conn,
+            when_expr="'2026-07-28 11:00:00+08'::timestamptz",
+            service="oral",
+            module="oral",
+            unit="second",
+            revenue=None,
+            costs=("20",),
+            funding=[{"lot_id": lot_id, "credits": 10, "lot_credits": 10, "amount_fen": None}],
+            user_id="cust_2",
+        )
+        before = wallet_state(conn)
+        assert before is not None
+
+    response = client.post(
+        f"/api/control/billing/reviews/revenue/{operation}",
+        headers={**admin_headers, "Idempotency-Key": f"pilot-{name}-confirm"},
+        json={
+            "state": "verified",
+            "owner": "admin_u",
+            "next_step": "核对报表",
+            "evidence_ref": order_id,
+            "expected_version": 0,
+            "confirm": True,
+            "reason": "核对已有原始凭证",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert float(response.json()["confirmed_revenue_fen"]) == amount_fen
+    with psycopg.connect(overview_pg_dsn) as conn:
+        assert wallet_state(conn) == before
+        assert conn.execute(
+            "SELECT proof_json->0->>'source' FROM billing_revenue_confirmations "
+            "WHERE operation_id=%s",
+            (operation,),
+        ).fetchone() == (name,)
+
+
 def test_same_provider_actual_methods_are_separate_and_missing_is_unknown(
     client: TestClient, admin_headers: dict[str, str], overview_pg_dsn: str
 ) -> None:
@@ -1191,6 +1511,51 @@ def test_business_card_trend_and_csv_keep_legacy_evidence_unknown(
                 "siness-task',99,'legacy-business-settle',%s)",
                 (f"{day}T02:00:00Z",),
             )
+    if legacy_kind == "settlement":
+        review_path = "/api/control/billing/reviews/legacy_settlement/legacy-business-settle"
+        body = {
+            "state": "verified",
+            "owner": "admin_u",
+            "next_step": "已找到原视频任务和扣分流水",
+            "evidence_ref": "TEST-LEGACY-DELIVERY",
+            "expected_version": 0,
+            "confirm": True,
+            "reason": "核实旧任务的交付和扣分",
+        }
+        with psycopg.connect(overview_pg_dsn) as raw:
+            raw.execute(
+                "INSERT INTO wallet_transactions(id,user_id,type,available_delta,reserved_delta,"
+                "task_id,billing_round,idempotency_key,created_at) VALUES "
+                "('legacy-business-reserve','cust_1','RESERVE',-1,1,'legacy-business-task',99,"
+                "'legacy-business-reserve',%s)",
+                (f"{day}T01:00:00Z",),
+            )
+            raw.execute(
+                "UPDATE generation_tasks SET archive_status='DIRECT',"
+                "provider_result_url='https://example.invalid/video.mp4', "
+                "quality_status='VISUAL_QUALITY_FAILED' WHERE id='legacy-business-task'"
+            )
+        invalid = client.post(
+            review_path, headers={**admin_headers, "Idempotency-Key": "legacy-quality"}, json=body
+        )
+        assert invalid.status_code == 409
+        with psycopg.connect(overview_pg_dsn) as raw:
+            raw.execute(
+                "UPDATE generation_tasks SET quality_status='NOT_REQUIRED' "
+                "WHERE id='legacy-business-task'"
+            )
+        verified = client.post(
+            review_path, headers={**admin_headers, "Idempotency-Key": "legacy-confirm"}, json=body
+        )
+        assert verified.status_code == 200, verified.text
+        assert verified.json()["confirmed_revenue_fen"] is None
+        assert verified.json()["state"] == "verified"
+        listed = client.get(
+            "/api/control/billing/reviews",
+            headers=admin_headers,
+            params={"start": day, "end": day, "kind": "legacy_settlement"},
+        ).json()["items"]
+        assert len(listed) == 1 and listed[0]["needs_evidence"] is False
     report = _get(client, admin_headers, day, day).json()
     field = "legacy_cost_count" if legacy_kind == "cost" else "legacy_settlement_count"
     assert report["metrics"][field] == report["daily"][0][field] == 1

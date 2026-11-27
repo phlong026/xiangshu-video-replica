@@ -81,17 +81,66 @@ describe("BusinessDashboard", () => {
     const panel = await screen.findByRole("region", { name: "经营看板" });
     const cards = within(panel).getByRole("region", { name: "经营指标卡" });
     expect(within(cards).getAllByText("¥150.00").length).toBe(1);
-    // 确认收入环比 +33%
-    expect(within(cards).getAllByText("环比 +33%").length).toBeGreaterThan(0);
-    // 成本卡与毛利卡都标注待核对；毛利口径 = 确认收入 − 成本。
-    expect(within(cards).getAllByText(/含 3 项待核对/).length).toBe(1);
-    expect(within(cards).getAllByText("含 2 项待核对").length).toBe(1);
+    expect(
+      within(cards).getByText("2 笔成本待核对 · 1 笔待结算"),
+    ).toBeInTheDocument();
+    expect(within(cards).queryByText("环比 +33%")).toBeNull();
     expect(within(cards).queryByText("¥600.00")).toBeNull();
     expect(within(cards).getByText("待核对")).toBeInTheDocument();
-    expect(within(cards).getByText(/毛利率：待核对/)).toBeInTheDocument();
+    expect(within(cards).getByText("账务核对后显示毛利")).toBeInTheDocument();
     expect(within(cards).getByText("355 积分")).toBeInTheDocument();
     // 预收折合金额依赖积分兑换比例
-    expect(within(cards).getByText(/折合 ¥3.55/)).toBeInTheDocument();
+    expect(
+      within(cards).getByText(/含可用和冻结积分 · 约 ¥3.55/),
+    ).toBeInTheDocument();
+    expect(within(cards).queryByText("环比 +18%")).toBeNull();
+  });
+
+  test("rejects an impossible range from a shared link", () => {
+    vi.mocked(adminRead).mockClear();
+    render(
+      <BusinessDashboard range={{ start: "2026-02-30", end: "2026-03-03" }} />,
+    );
+    expect(
+      screen.getByText("请选择有效的开始和结束日期。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查询" })).toBeDisabled();
+    expect(adminRead).not.toHaveBeenCalled();
+  });
+
+  test("applies a custom range only after valid dates are submitted", async () => {
+    mockOverview();
+    const onRangeChange = vi.fn();
+    const { rerender } = render(
+      <BusinessDashboard
+        range={{ start: "2026-09-01", end: "2026-09-30" }}
+        onRangeChange={onRangeChange}
+      />,
+    );
+    await screen.findByRole("region", { name: "经营指标卡" });
+    fireEvent.change(screen.getByLabelText("开始日期"), {
+      target: { value: "2026-09-25" },
+    });
+    fireEvent.change(screen.getByLabelText("结束日期"), {
+      target: { value: "2026-09-20" },
+    });
+    const submit = screen.getByRole("button", { name: "查询" });
+    expect(submit).toBeDisabled();
+    expect(screen.getByText("结束日期不能早于开始日期。")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("结束日期"), {
+      target: { value: "2026-09-29" },
+    });
+    expect(onRangeChange).not.toHaveBeenCalled();
+    fireEvent.click(submit);
+    const range = { start: "2026-09-25", end: "2026-09-29" };
+    expect(onRangeChange).toHaveBeenCalledExactlyOnceWith(range);
+    rerender(<BusinessDashboard range={range} onRangeChange={onRangeChange} />);
+    expect(
+      await screen.findByRole("link", { name: "查看本区间账务明细" }),
+    ).toHaveAttribute(
+      "href",
+      "#admin/costReview?start=2026-09-25&end=2026-09-29",
+    );
   });
 
   test("renders daily trend and module breakdown without treating missing evidence as zero", async () => {
@@ -107,7 +156,7 @@ describe("BusinessDashboard", () => {
       within(modules).getByRole("cell", { name: "视频生成 · 768P" }),
     ).toBeInTheDocument();
     expect(within(modules).getAllByText(/另有 1 项待核对/).length).toBe(2);
-    const top = screen.getByRole("table", { name: "Top 10 客户" });
+    const top = screen.getByRole("table", { name: "确认收入前 10 位客户" });
     expect(within(top).getByText("客户一公司")).toBeInTheDocument();
   });
 
@@ -130,21 +179,33 @@ test("gross margin line has gaps for unknown and zero income, supports negative 
       { day: "2026-09-02", revenue_fen: 100, cost_fen: null },
       { day: "2026-09-03", revenue_fen: 0, cost_fen: 20 },
       { day: "2026-09-04", revenue_fen: 100, cost_fen: 20 },
+      { day: "2026-09-05", revenue_fen: 80, cost_fen: 2911 },
     ],
     top_customers: [{ ...overview.top_customers[0], user_id: "a/opaque" }],
   });
   render(<BusinessDashboard readOnly onCustomer={customer} />);
-  const chart = await screen.findByRole("img", {
+  const amounts = await screen.findByRole("img", {
     name: /收入与成本按日趋势图/,
   });
+  expect(amounts.querySelector("path")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "毛利率" }));
+  const chart = screen.getByRole("img", { name: "毛利率按日趋势图" });
   const path = chart.querySelector("path")?.getAttribute("d") ?? "";
   expect(path.match(/M/g)).toHaveLength(2);
   expect(path).not.toContain("L");
-  expect(chart.querySelectorAll("circle")).toHaveLength(2);
+  expect(chart.querySelectorAll("circle")).toHaveLength(3);
+  expect(chart.querySelectorAll(".business-trend__outlier")).toHaveLength(1);
+  expect(chart).toHaveTextContent("毛利率 -3539%");
+  fireEvent.change(screen.getByLabelText("查看某日"), {
+    target: { value: "2026-09-05" },
+  });
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "已知成本 ¥29.11，毛利率 -3539%",
+  );
   expect(chart).toHaveTextContent("毛利率 -100%");
   fireEvent.click(screen.getByRole("button", { name: "客户一公司" }));
   expect(customer).toHaveBeenCalledWith("a/opaque");
-  const help = screen.getByRole("button", { name: "毛利 / 毛利率口径" });
+  const help = screen.getByRole("button", { name: "了解毛利 / 毛利率怎么算" });
   expect(help).toHaveAttribute("aria-describedby");
   expect(screen.getAllByRole("tooltip").length).toBe(8);
 });

@@ -10,8 +10,7 @@
 - 只处理**业务已成功交付**（SUCCEEDED）的调用，绝不触碰在途或失败请求；
 - 用量必须能从源任务表的事实数据取到（如成片秒数），取不到就跳过报告，
   绝不编造用量；
-- 单价取目录当前值（unit_cost_fen 已配置才跑），成本 = 用量 × 单价，与
-  complete_attempt 运行时口径一致；
+- 写入按原凭证核对的单价和调用范围，成本 = 用量 × 单价；
 - 逐行写 billing_evidence + 审计，批次独立提交，重跑幂等（已有证据的调用
   被候选查询排除）。
 
@@ -20,7 +19,8 @@
     python -m scripts.backfill_attempt_usage_costs \
         --services video_768p,analysis,character \
         --actor-user-id <uuid> --reason "按源任务交付用量批量确认成本"
-    python -m scripts.backfill_attempt_usage_costs ... --apply --limit 500
+    python -m scripts.backfill_attempt_usage_costs ... --apply \
+        --attempt-id <uuid> --reference <账单编号> --verified-unit-cost-fen <账单单价>
 
 只输出聚合计数，不打印任何客户身份或金额明细。
 """
@@ -37,7 +37,7 @@ import psycopg
 
 from app.billing_catalog import read_tariff
 from app.db_pg import CliDatabaseConfigError, resolve_cli_pg_dsn
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, BusinessRow
 
 _BATCH_SIZE = 300
 
@@ -104,6 +104,7 @@ def _pending_stats(
     task_join_sql: str,
     extra_where_sql: str,
     is_call_unit: bool,
+    attempt_ids: list[str] | None,
 ) -> dict[str, int]:
     """报告已成功交付 UNKNOWN 操作中可确认与缺少源任务用量的数量。
 
@@ -115,6 +116,7 @@ def _pending_stats(
         FROM billing_attempts ba
         JOIN billing_operations o ON o.id = ba.operation_id
         WHERE ba.service = %s
+          AND (%s::text[] IS NULL OR ba.id=ANY(%s))
           AND ba.state = 'UNKNOWN'
           AND ba.cost_fen IS NULL
           AND o.state = 'SUCCEEDED'
@@ -136,7 +138,7 @@ def _pending_stats(
     """
     total_row = conn.execute(
         "SELECT COUNT(DISTINCT o.id) AS operations " + base_sql,
-        (service,),
+        (service, attempt_ids, attempt_ids),
     ).fetchone()
     total = int(total_row["operations"])
     if is_call_unit:
@@ -149,6 +151,7 @@ def _pending_stats(
         JOIN billing_operations o ON o.id = ba.operation_id
         {task_join_sql}
         WHERE ba.service = %s
+          AND (%s::text[] IS NULL OR ba.id=ANY(%s))
           AND ba.state = 'UNKNOWN'
           AND ba.cost_fen IS NULL
           AND o.state = 'SUCCEEDED'
@@ -169,7 +172,7 @@ def _pending_stats(
           )
           {extra_where_sql}
         """,  # noqa: S608 - JOIN/条件仅取自本模块白名单
-        (service,),
+        (service, attempt_ids, attempt_ids),
     ).fetchone()
     with_usage = int(with_usage_row["operations"])
     return {"with_usage": with_usage, "without_usage": total - with_usage}
@@ -183,7 +186,8 @@ def _fetch_batch(
     task_join_sql: str,
     extra_where_sql: str,
     limit: int,
-) -> list[psycopg.Row]:
+    attempt_ids: list[str],
+) -> list[BusinessRow]:
     """每个操作只取一条 UNKNOWN 调用（DISTINCT ON）。
 
     同一操作多轮重试调用会产生多条 UNKNOWN attempt——若逐条按全量时长确认
@@ -219,6 +223,7 @@ def _fetch_batch(
                     AND ba.service = %s
                     AND ba.state = 'UNKNOWN'
                     AND ba.cost_fen IS NULL
+                    AND ba.id=ANY(%s)
                     {extra_where_sql}
               )
             ORDER BY o.id
@@ -235,10 +240,11 @@ def _fetch_batch(
         WHERE ba.service = %s
           AND ba.state = 'UNKNOWN'
           AND ba.cost_fen IS NULL
+          AND ba.id=ANY(%s)
           {extra_where_sql}
         ORDER BY ba.operation_id, ba.completed_at DESC, ba.id DESC
         """,  # noqa: S608 - JOIN/条件仅取自本模块白名单
-        (service, service, service, limit, service),
+        (service, service, service, attempt_ids, limit, service, attempt_ids),
     ).fetchall()
 
 
@@ -267,6 +273,7 @@ def _backfill_service(
     reason: str,
     reference: str,
     limit: int,
+    attempt_ids: list[str],
 ) -> tuple[int, Decimal]:
     """单科目回填；返回 (确认操作数, 成本合计分)。"""
     usage_expr, task_join, extra_where, _ = _usage_rule(service)
@@ -283,6 +290,7 @@ def _backfill_service(
                 task_join_sql=task_join,
                 extra_where_sql=extra_where,
                 limit=min(_BATCH_SIZE, limit - total),
+                attempt_ids=attempt_ids,
             )
             if not rows:
                 return total, cost_total
@@ -355,9 +363,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reason", required=True, help="non-blank evidence reason")
     parser.add_argument(
         "--reference",
-        default="attempt-usage-backfill",
-        help="evidence reference prefix",
+        default="",
+        help="核对历史调用的账单或费率凭证编号",
     )
+    parser.add_argument(
+        "--attempt-id", action="append", default=[], help="已核实的调用编号，可重复"
+    )
+    parser.add_argument("--verified-unit-cost-fen", type=Decimal, help="凭证确认的历史单价（分）")
     parser.add_argument(
         "--database-url",
         default="",
@@ -387,6 +399,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    verified_price: Decimal | None = args.verified_unit_cost_fen
+    if verified_price is not None and (not verified_price.is_finite() or verified_price < 0):
+        parser.error("--verified-unit-cost-fen 必须为有限非负数")
+    if args.apply and (
+        len(services) != 1
+        or verified_price is None
+        or not args.reference.strip()
+        or not args.attempt_id
+    ):
+        parser.error("--apply 必须指定单一科目、--attempt-id、--reference 和历史单价")
 
     try:
         database_url = resolve_cli_pg_dsn(args.database_url)
@@ -409,24 +431,11 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            # 一次冻结全部科目的单价与版本（单位：分）
-            tariffs: dict[str, Decimal] = {}
-            versions: dict[str, int] = {}
-            for service in services:
-                tariff = read_tariff(conn, service)
-                if tariff is None or tariff.unit_cost_fen is None:
-                    print(
-                        f"error: service {service!r} has no configured unit_cost_fen; "
-                        "configure it first via PUT /api/control/billing/tariff",
-                        file=sys.stderr,
-                    )
-                    return 1
-                tariffs[service] = Decimal(str(tariff.unit_cost_fen))
-                versions[service] = int(tariff.version)
-
         if not args.apply:
             # dry-run 预演：打印每个科目的可确认操作数与无法定价的用量缺失数
             for service in services:
+                tariff = read_tariff(conn, service)
+                catalog_price = tariff.unit_cost_fen if tariff else None
                 _, task_join, extra_where, is_call_unit = _usage_rule(service)
                 stats = _pending_stats(
                     conn,
@@ -434,28 +443,28 @@ def main(argv: list[str] | None = None) -> int:
                     task_join_sql=task_join,
                     extra_where_sql=extra_where,
                     is_call_unit=is_call_unit,
+                    attempt_ids=args.attempt_id or None,
                 )
                 print(
-                    f"service={service} unit_cost_fen={tariffs[service]} "
+                    f"service={service} current_catalog_cost={catalog_price} "
                     f"operations_to_confirm={stats['with_usage']} "
                     f"usage_missing={stats['without_usage']}"
                 )
             print("DRY-RUN（未写库）。加 --apply 执行。")
             return 0
 
+        assert verified_price is not None
         actor_id = str(actor["id"])
         for service in services:
-            unit_cost = tariffs[service]
-            version = versions[service]
-            reference = f"{args.reference}:{service}@v{version}"
             confirmed, cost_total = _backfill_service(
                 conn,
                 service=service,
-                unit_cost=unit_cost,
+                unit_cost=verified_price,
                 actor_id=actor_id,
                 reason=args.reason,
-                reference=reference,
+                reference=args.reference.strip(),
                 limit=args.limit,
+                attempt_ids=args.attempt_id,
             )
             print(f"service={service} confirmed={confirmed} total_cost_fen={cost_total}")
 

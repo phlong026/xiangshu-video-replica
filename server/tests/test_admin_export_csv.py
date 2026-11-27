@@ -44,6 +44,8 @@ def _row(username: str | None) -> dict:
         "credits_used": 100,
         "unit_cost_fen": 10,
         "cost_fen": 10.0,
+        "revenue_fen": 30,
+        "is_posting": True,
         "billing_round": 1,
     }
 

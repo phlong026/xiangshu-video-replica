@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { adminRead, downloadBillingCsv } from "../api.admin";
 import { BillingEvidenceForm } from "./BillingEvidenceForm";
+import { BillingEvidenceReview } from "./BillingEvidenceReview";
 import {
   type BillingService,
   billingStates,
@@ -197,6 +198,7 @@ export function BillingEconomics({
   const canExport = useCan()("export");
   const costView = view === "cost";
   const detailRequest = useRef(0);
+  const activeDetailId = useRef<string | undefined>(undefined);
   const seed = () =>
     ({
       ...initialFilters(initialAttention, initialStart, initialEnd),
@@ -216,12 +218,15 @@ export function BillingEconomics({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  // 成本核对三视图写入 URL（?sub=），与 billingQuery 一起可分享。
+  // 子页写入 URL（?sub=），与日期和账务筛选一起可分享。
   const [section, setSection] = useHashParam<string>("sub", "details", [
     "details",
     "collections",
     "actions",
+    "reviews",
   ]);
+  const showDetails = section === "details";
+  const showOperationFilters = showDetails || section === "actions";
   const name = (key: string) =>
     catalog.find((item) => item.service === key)?.name ?? key;
   useEffect(() => {
@@ -241,15 +246,23 @@ export function BillingEconomics({
       active = false;
     };
   }, []);
+  const closeDetail = useCallback(() => {
+    activeDetailId.current = undefined;
+    detailRequest.current += 1;
+    setDetail(undefined);
+  }, []);
+  useEffect(() => {
+    void query;
+    void offset;
+    closeDetail();
+  }, [closeDetail, query, offset]);
   useEffect(() => {
     void revision;
     // 来源范围只由业务全景接口支持；普通统计不能混入其他动作的金额。
-    if (new URLSearchParams(query).get("source_id")) return;
+    if (!showDetails || new URLSearchParams(query).get("source_id")) return;
     let active = true;
     setBusy(true);
     setError("");
-    detailRequest.current += 1;
-    setDetail(undefined);
     void Promise.all([
       adminRead<Report>(
         `/api/control/billing/statistics?${query}`,
@@ -279,8 +292,9 @@ export function BillingEconomics({
     return () => {
       active = false;
     };
-  }, [query, offset, revision]);
+  }, [query, offset, revision, showDetails]);
   async function inspect(id: string) {
+    activeDetailId.current = id;
     const sequence = ++detailRequest.current;
     try {
       const result = await adminRead<Operation>(
@@ -292,6 +306,10 @@ export function BillingEconomics({
       if (sequence === detailRequest.current)
         setError(cause instanceof Error ? cause.message : "读取失败");
     }
+  }
+  function refreshEvidence(id: string) {
+    setRevision((value) => value + 1);
+    if (activeDetailId.current === id) void inspect(id);
   }
   async function exportRows() {
     try {
@@ -316,7 +334,9 @@ export function BillingEconomics({
         aria-label="关联业务账单"
       >
         <h2>关联业务账单</h2>
-        <p>查看这次业务的积分与调用成本；证据不齐时显示待核对。</p>
+        <p>
+          查看这次业务用了多少积分、产生了多少费用。待确认的费用会单独标出。
+        </p>
         {error && <PageBanner tone="error">{error}</PageBanner>}
         <a href="#admin/analytics?analyticsTab=cost">查看全部成本账单</a>
         <SourceActionPanorama key={query} query={query} name={name} />
@@ -331,14 +351,18 @@ export function BillingEconomics({
       <TabBar
         ariaLabel="成本核对内容页签"
         active={section}
-        onChange={setSection}
+        onChange={(next) => {
+          closeDetail();
+          setSection(next);
+        }}
         items={[
           { id: "details", label: "账务明细" },
           { id: "collections", label: "采集账单" },
           { id: "actions", label: "业务全景" },
+          { id: "reviews", label: "凭证核对" },
         ]}
       />
-      {costView && (
+      {costView && showDetails && (
         <CostQueues
           query={query}
           revision={revision}
@@ -356,10 +380,16 @@ export function BillingEconomics({
         />
       )}
       <form
-        className="billing-economics-filters"
+        className="billing-economics-filters cost-review-filters"
         onSubmit={(event) => {
           event.preventDefault();
-          const next = params(filters);
+          const next = showOperationFilters
+            ? params(filters)
+            : new URLSearchParams({
+                ...Object.fromEntries(new URLSearchParams(query)),
+                start: filters.start,
+                end: filters.end,
+              }).toString();
           setQuery(next);
           onQueryChange?.(next);
           setOffset(0);
@@ -389,115 +419,123 @@ export function BillingEconomics({
             required
           />
         </label>
-        <label>
-          客户
-          <input
-            value={filters.username}
-            onChange={(event) =>
-              setFilters({ ...filters, username: event.target.value })
-            }
-            placeholder="用户名或公司名"
-          />
-        </label>
-        <label>
-          业务模块
-          <select
-            value={filters.module}
-            onChange={(event) =>
-              setFilters({ ...filters, module: event.target.value })
-            }
-          >
-            <option value="">全部模块</option>
-            {Object.entries(modules).map(([key, label]) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          只看
-          <select
-            value={filters.attention}
-            onChange={(event) =>
-              setFilters({
-                ...filters,
-                attention: narrowAttention(event.target.value),
-              })
-            }
-          >
-            <option value="">全部生成</option>
-            <option value="pending">待结算</option>
-            <option value="unknown_cost">成本待核对</option>
-            <option value="unknown_revenue">收入待核对</option>
-          </select>
-        </label>
-        {/* 科目、服务商与用户编号属于排查口径，收进高级筛选（方案：主筛选只留
+        {showOperationFilters && (
+          <>
+            <label>
+              客户
+              <input
+                value={filters.username}
+                onChange={(event) =>
+                  setFilters({ ...filters, username: event.target.value })
+                }
+                placeholder="用户名或公司名"
+              />
+            </label>
+            <label>
+              业务模块
+              <select
+                value={filters.module}
+                onChange={(event) =>
+                  setFilters({ ...filters, module: event.target.value })
+                }
+              >
+                <option value="">全部模块</option>
+                {Object.entries(modules).map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              只看
+              <select
+                value={filters.attention}
+                onChange={(event) =>
+                  setFilters({
+                    ...filters,
+                    attention: narrowAttention(event.target.value),
+                  })
+                }
+              >
+                <option value="">全部记录</option>
+                <option value="pending">待结算</option>
+                <option value="unknown_cost">成本待核对</option>
+                <option value="unknown_revenue">收入待核对</option>
+              </select>
+            </label>
+            {/* 科目、服务商与用户编号属于排查口径，收进高级筛选（方案：主筛选只留
             时间 + 客户 + 业务模块）。 */}
-        <details className="billing-economics-advanced">
-          <summary>高级筛选</summary>
-          <label>
-            统计周期
-            <select
-              value={filters.grain}
-              onChange={(event) =>
-                setFilters({ ...filters, grain: event.target.value })
-              }
-            >
-              <option value="day">天</option>
-              <option value="week">周（周一开始）</option>
-              <option value="month">月 / 多月</option>
-              <option value="year">年</option>
-            </select>
-          </label>
-          <label>
-            业务科目
-            <select
-              value={filters.service}
-              onChange={(event) =>
-                setFilters({ ...filters, service: event.target.value })
-              }
-            >
-              <option value="">全部科目</option>
-              {catalog.map((item) => (
-                <option key={item.service} value={item.service}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            上游服务
-            <select
-              value={filters.provider}
-              onChange={(event) =>
-                setFilters({ ...filters, provider: event.target.value })
-              }
-            >
-              <option value="">全部上游服务</option>
-              {[...new Set(catalog.map((item) => item.provider))].map((key) => (
-                <option key={key} value={key}>
-                  {providerLabels[key] ?? key}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            用户 ID
-            <input
-              value={filters.user_id}
-              onChange={(event) =>
-                setFilters({ ...filters, user_id: event.target.value })
-              }
-              placeholder="排查用，全部用户及平台后台"
-            />
-          </label>
-        </details>
+            <details className="billing-economics-advanced">
+              <summary>高级筛选</summary>
+              {showDetails && (
+                <label>
+                  统计周期
+                  <select
+                    value={filters.grain}
+                    onChange={(event) =>
+                      setFilters({ ...filters, grain: event.target.value })
+                    }
+                  >
+                    <option value="day">天</option>
+                    <option value="week">周（周一开始）</option>
+                    <option value="month">月 / 多月</option>
+                    <option value="year">年</option>
+                  </select>
+                </label>
+              )}
+              <label>
+                业务项目
+                <select
+                  value={filters.service}
+                  onChange={(event) =>
+                    setFilters({ ...filters, service: event.target.value })
+                  }
+                >
+                  <option value="">全部项目</option>
+                  {catalog.map((item) => (
+                    <option key={item.service} value={item.service}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                上游服务
+                <select
+                  value={filters.provider}
+                  onChange={(event) =>
+                    setFilters({ ...filters, provider: event.target.value })
+                  }
+                >
+                  <option value="">全部上游服务</option>
+                  {[...new Set(catalog.map((item) => item.provider))].map(
+                    (key) => (
+                      <option key={key} value={key}>
+                        {providerLabels[key] ?? key}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <label>
+                用户 ID
+                <input
+                  value={filters.user_id}
+                  onChange={(event) =>
+                    setFilters({ ...filters, user_id: event.target.value })
+                  }
+                  placeholder="排查用，全部用户及平台后台"
+                />
+              </label>
+            </details>
+          </>
+        )}
         <div className="billing-economics-filters__actions">
-          <button type="submit" disabled={busy}>
+          <button type="submit" disabled={showDetails && busy}>
             查询
           </button>
-          {canExport ? (
+          {canExport && showDetails ? (
             <button
               type="button"
               disabled={busy || !operations}
@@ -509,26 +547,40 @@ export function BillingEconomics({
         </div>
       </form>
       {error && <PageBanner tone="error">{error}</PageBanner>}
-      {notice && <p role="status">{notice}</p>}
-      {busy && <p role="status">正在计算…</p>}
+      {showDetails && notice && <p role="status">{notice}</p>}
+      {showDetails && busy && <p role="status">正在计算…</p>}
       {section === "collections" && (
-        <ViralCollectionBilling key={query} query={query} />
+        <ViralCollectionBilling key={`${query}:${revision}`} query={query} />
       )}
       {section === "actions" && (
-        <SourceActionPanorama key={query} query={query} name={name} />
+        <SourceActionPanorama
+          key={`${query}:${revision}`}
+          query={query}
+          name={name}
+        />
+      )}
+      {section === "reviews" && (
+        <BillingEvidenceReview
+          key={query}
+          query={query}
+          refreshRevision={revision}
+          readOnly={readOnly}
+          serviceName={name}
+          onInspect={(id) => void inspect(id)}
+        />
       )}
       <div hidden={section !== "details"}>
         {report && (
           <>
-            <p>{report.basis} 时区：北京时间。</p>
+            <RuleNote summary="查看金额怎么算">
+              <p>{report.basis} 日期按北京时间计算。</p>
+            </RuleNote>
             <p>
-              上游服务调用记录 {report.totals.provider_call_count ?? 0}{" "}
-              次；客户采集计费{" "}
-              {report.totals.shared_collection_charge_count ?? 0} 笔。
-              客户累计用量（含免费）：{usage(report.totals.seconds ?? 0)} 秒 /{" "}
+              服务使用 {report.totals.provider_call_count ?? 0} 次 · 采集扣分{" "}
+              {report.totals.shared_collection_charge_count ?? 0} 笔 ·
+              客户总用量（含免费） {usage(report.totals.seconds ?? 0)} 秒 /{" "}
               {usage(report.totals.images ?? 0)} 张 /{" "}
-              {usage(report.totals.calls ?? 0)} 次。平台承担的已确认成本：
-              {money(report.totals.platform_cost_fen)}。
+              {usage(report.totals.calls ?? 0)} 次
             </p>
             {(report.totals.legacy_cost_count ?? 0) +
               (report.totals.legacy_settlement_count ?? 0) >
@@ -545,13 +597,16 @@ export function BillingEconomics({
                     ["已确认成本", money(report.totals.known_cost_fen)],
                     ["平台承担成本", money(report.totals.platform_cost_fen)],
                     ["待核对成本", `${report.totals.unknown_cost_count} 项`],
-                    ["生成次数", `${report.totals.operation_count} 次`],
+                    ["账务记录", `${report.totals.operation_count} 条`],
                   ]
                 : [
                     ["确认收入", money(report.totals.known_revenue_fen)],
                     ["已确认成本", money(report.totals.known_cost_fen)],
-                    ["利润", money(report.totals.profit_fen)],
-                    ["净扣积分", String(report.totals.charged_credits ?? 0)],
+                    ["毛利", money(report.totals.profit_fen)],
+                    [
+                      "实际扣除积分",
+                      String(report.totals.charged_credits ?? 0),
+                    ],
                   ]
               ).map(([label, value]) => (
                 <article key={label}>
@@ -574,10 +629,10 @@ export function BillingEconomics({
                   <tr>
                     <th>周期起始</th>
                     <th>账务记录数</th>
-                    <th>{costView ? "秒 / 张 / 次" : "净扣积分"}</th>
+                    <th>{costView ? "秒 / 张 / 次" : "实际扣除积分"}</th>
                     {!costView && <th>确认收入</th>}
                     <th>已确认成本</th>
-                    <th>{costView ? "平台承担成本" : "利润"}</th>
+                    <th>{costView ? "平台承担成本" : "毛利"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -606,19 +661,18 @@ export function BillingEconomics({
         )}
         {operations && (
           <>
-            <h3>生成账务明细（共 {operations.total} 条）</h3>
+            <h3>逐笔账务明细（共 {operations.total} 条）</h3>
             {!costView && (
-              <RuleNote>
+              <RuleNote summary="售价与确认收入有什么区别">
                 <p className="admin-hint">
-                  按售价折合以受理时的积分售价计算；确认收入按所消费积分对应的实际充值金额分摊，
-                  赠送或免费加款不产生确认收入。利润按确认收入减成本计算。
+                  售价折合按接单时的价格计算。确认收入按这次使用的积分所对应的实际充值款计算，赠送积分的收入为零。
                 </p>
               </RuleNote>
             )}
             <div className="admin-table-scroll">
               <table
                 className="admin-data-table billing-economics-table"
-                aria-label="生成明细"
+                aria-label="逐笔账务明细"
               >
                 <thead>
                   <tr>
@@ -634,7 +688,7 @@ export function BillingEconomics({
                       </>
                     )}
                     <th>成本</th>
-                    {!costView && <th>利润</th>}
+                    {!costView && <th>毛利</th>}
                     <th>详情</th>
                   </tr>
                 </thead>
@@ -689,43 +743,38 @@ export function BillingEconomics({
           </>
         )}
       </div>
-      {detail && snapshot && section === "details" && (
-        <aside aria-label="生成核算详情">
-          <button
-            type="button"
-            onClick={() => {
-              detailRequest.current += 1;
-              setDetail(undefined);
-            }}
-          >
+      {detail && snapshot && (showDetails || section === "reviews") && (
+        <aside aria-label="账务详情">
+          <button type="button" onClick={closeDetail}>
             关闭详情
           </button>
           <h3>
             {name(detail.service)} · {detail.username}
           </h3>
           <p>
-            生成编号：{detail.id} · {billingStates[detail.state]}
+            业务编号 {detail.id} · {billingStates[detail.state]}
           </p>
           {detail.collection_batch_id && (
             <p>
-              采集批次：{detail.collection_batch_id}
-              。公共成本记在平台生成记录，客户明细仅记录其扣分收入；批次账单汇总成本与利润。
+              采集批次 {detail.collection_batch_id}
+              。请在采集账单查看整批的收入和费用。
             </p>
           )}
           <p>
-            受理时售价：{snapshot.enabled ? snapshot.unit_credits : "0"} 积分 /{" "}
-            {billingUnit[detail.unit]}；折扣{" "}
-            {snapshot.discount_basis_points / 1000} 折；价格版本{" "}
+            接单时单价 {snapshot.enabled ? snapshot.unit_credits : "0"} 积分 /{" "}
+            {billingUnit[detail.unit]} · 折扣{" "}
+            {snapshot.discount_basis_points / 1000} 折 · 价格版本{" "}
             {snapshot.version}。
           </p>
           <p>
-            预算 {usage(detail.budget_units)} {billingUnit[detail.unit]}，实际{" "}
-            {usage(detail.actual_units)} {billingUnit[detail.unit]}；生成冻结{" "}
-            {detail.reserved_credits}，净扣 {detail.charged_credits} 积分。
+            预计用量 {usage(detail.budget_units)} {billingUnit[detail.unit]} ·
+            实际用量 {usage(detail.actual_units)} {billingUnit[detail.unit]} ·
+            当时冻结 {detail.reserved_credits} 积分 · 实际扣除{" "}
+            {detail.charged_credits} 积分。
           </p>
           <p>
             按售价折合 {money(detail.nominal_revenue_fen)} · 确认收入{" "}
-            {money(detail.revenue_fen)} · 成本 {money(detail.cost_fen)} · 利润{" "}
+            {money(detail.revenue_fen)} · 成本 {money(detail.cost_fen)} · 毛利{" "}
             {money(detail.profit_fen)}
           </p>
           {!readOnly &&
@@ -736,10 +785,10 @@ export function BillingEconomics({
               <BillingEvidenceForm
                 key={detail.id}
                 operationId={detail.id}
-                onSaved={() => setRevision((value) => value + 1)}
+                onSaved={() => refreshEvidence(detail.id)}
               />
             )}
-          <h4>上游服务调用（重试分别记成本）</h4>
+          <h4>服务费用明细（含每次重试）</h4>
           <table>
             <thead>
               <tr>
@@ -779,12 +828,12 @@ export function BillingEconomics({
               .map((item) => (
                 <section key={item.id}>
                   <h4>
-                    核对 {name(item.service)} · 调用 {item.id}
+                    核对 {name(item.service)} · 服务记录 {item.id}
                   </h4>
                   <BillingEvidenceForm
                     operationId={detail.id}
                     attemptId={item.id}
-                    onSaved={() => setRevision((value) => value + 1)}
+                    onSaved={() => refreshEvidence(detail.id)}
                   />
                 </section>
               ))}
