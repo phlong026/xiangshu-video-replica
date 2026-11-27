@@ -40,6 +40,40 @@ beforeEach(() => {
   vi.mocked(adminWrite).mockResolvedValue(catalog);
 });
 
+test("旧售价只供查账，停用的收费项目保留维护入口", async () => {
+  const [item] = catalog.services;
+  vi.mocked(adminRead).mockResolvedValue({
+    ...catalog,
+    services: [
+      item,
+      {
+        ...item,
+        service: "viral_copy",
+        name: "爆款视频文案",
+        tariff: { ...item.tariff, enabled: true, unit_credits: "3" },
+      },
+      { ...item, service: "viral_search", name: "爆款视频搜索" },
+      { ...item, service: "viral_statistics", name: "爆款视频互动统计" },
+    ],
+  });
+  render(<BillingRatesManager />);
+  await screen.findByText("视频生成 · 768P");
+  expect(screen.queryByText("爆款视频文案")).toBeNull();
+  fireEvent.click(screen.getByRole("tab", { name: "历史价目" }));
+  expect(screen.getByText("仅供查账")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "配置 爆款视频文案" }),
+  ).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "查看 爆款视频文案 的价目历史" }),
+  ).toBeVisible();
+  fireEvent.click(screen.getByRole("tab", { name: "暂停项目" }));
+  expect(screen.getByText("入口已停用")).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "配置 爆款视频互动统计" }),
+  ).toBeVisible();
+});
+
 test("cost-only configuration leaves the customer tariff absent and disabled", async () => {
   render(<BillingRatesManager />);
   fireEvent.click(
@@ -285,12 +319,8 @@ test("zero-cost platform subjects stay locked with an explanatory note", async (
     ],
   });
   render(<BillingRatesManager />);
-  const platform = await screen.findByRole("table", {
-    name: "平台科目成本（不向客户收费）",
-  });
-  const row = within(platform)
-    .getByText("云存储")
-    .closest("tr") as HTMLTableRowElement;
+  fireEvent.click(await screen.findByText("其他平台费率", { exact: true }));
+  const row = screen.getByText("云存储").closest("tr") as HTMLTableRowElement;
   expect(within(row).getByText("按零费用核算")).toBeInTheDocument();
   expect(
     within(row).getByRole("button", { name: "配置 云存储" }),
@@ -457,12 +487,12 @@ test("history button reads the subject price-version sequence and flags the curr
   expect(within(latest).getByText("用户承担")).toBeInTheDocument();
   expect(within(latest).getByText("price_admin")).toBeInTheDocument();
   expect(within(latest).getByText("首页活动价调整")).toBeInTheDocument();
-  expect(within(latest).getByText("审计记录")).toBeInTheDocument();
+  expect(within(latest).getByText("有调整记录")).toBeInTheDocument();
   expect(within(latest).getByText(/2026/)).toBeInTheDocument();
   expect(within(earliest).getByText("V1")).toBeInTheDocument();
   expect(within(earliest).getByText("未配置")).toBeInTheDocument();
   expect(within(earliest).getByText("平台承担")).toBeInTheDocument();
-  expect(within(earliest).getByText("当前行（无审计）")).toBeInTheDocument();
+  expect(within(earliest).getByText("仅保留价目")).toBeInTheDocument();
   expect(within(earliest).getAllByText("—").length).toBeGreaterThanOrEqual(3);
 });
 

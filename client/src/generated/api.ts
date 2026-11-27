@@ -2808,6 +2808,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/billing-reconciliation/items/{item_id}/verify-generation": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Verify Generation
+     * @description 把视频卡单交给已有对账 Worker，入队时保留账本状态。
+     */
+    post: operations["verify_generation_api_control_billing_reconciliation_items__item_id__verify_generation_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/dashboard/summary": {
     parameters: {
       query?: never;
@@ -4098,6 +4118,77 @@ export interface paths {
     /** Update Prices */
     put: operations["update_prices_api_control_settings_customer_pricing_put"];
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/reviews": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Reviews */
+    get: operations["reviews_api_control_billing_reviews_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/reviews/export": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Export Reviews */
+    get: operations["export_reviews_api_control_billing_reviews_export_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/reviews/revenue-batch": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Confirm Revenue Batch
+     * @description 同一事务核实整批来源。每笔凭证、确认与审计一起成功或一起回退。
+     */
+    post: operations["confirm_revenue_batch_api_control_billing_reviews_revenue_batch_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/reviews/{kind}/{subject_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Update Review */
+    post: operations["update_review_api_control_billing_reviews__kind___subject_id__post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -14664,6 +14755,63 @@ export interface components {
       /** Expected Evidence Id */
       expected_evidence_id?: string | null;
     };
+    /** RevenueReviewBatch */
+    RevenueReviewBatch: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Items */
+      items: components["schemas"]["RevenueReviewEntry"][];
+      /** Owner */
+      owner: string;
+      /** Evidence Ref */
+      evidence_ref: string;
+    };
+    /** RevenueReviewEntry */
+    RevenueReviewEntry: {
+      /** Subject Id */
+      subject_id: string;
+      /** Expected Version */
+      expected_version: number;
+    };
+    /** ReviewUpdate */
+    ReviewUpdate: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * State
+       * @enum {string}
+       */
+      state: "evidence" | "review" | "verified" | "unverifiable";
+      /** Owner */
+      owner: string;
+      /** Next Step */
+      next_step: string;
+      /** Next Review On */
+      next_review_on?: string | null;
+      /**
+       * Evidence Ref
+       * @default
+       */
+      evidence_ref: string;
+      /** Expected Version */
+      expected_version: number;
+    };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
       /** Max Generation Count Per Batch */
@@ -23359,6 +23507,43 @@ export interface operations {
       };
     };
   };
+  verify_generation_api_control_billing_reconciliation_items__item_id__verify_generation_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        item_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   dashboard_summary_api_control_dashboard_summary_get: {
     parameters: {
       query?: never;
@@ -25934,6 +26119,159 @@ export interface operations {
       };
     };
   };
+  reviews_api_control_billing_reviews_get: {
+    parameters: {
+      query: {
+        start: string;
+        end: string;
+        kind?: "cost" | "revenue" | "legacy_settlement";
+        state?: ("evidence" | "review" | "verified" | "unverifiable") | null;
+        age?: ("0-7" | "8-30" | "31-60" | "61-90" | "over-90") | null;
+        reason_code?: string | null;
+        owner?: string | null;
+        subject_id?: string[];
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  export_reviews_api_control_billing_reviews_export_get: {
+    parameters: {
+      query: {
+        start: string;
+        end: string;
+        kind?: "cost" | "revenue" | "legacy_settlement";
+        state?: ("evidence" | "review" | "verified" | "unverifiable") | null;
+        age?: ("0-7" | "8-30" | "31-60" | "61-90" | "over-90") | null;
+        reason_code?: string | null;
+        owner?: string | null;
+        subject_id?: string[];
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  confirm_revenue_batch_api_control_billing_reviews_revenue_batch_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RevenueReviewBatch"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_review_api_control_billing_reviews__kind___subject_id__post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        kind: "cost" | "revenue" | "legacy_settlement";
+        subject_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ReviewUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   collection_batches_api_control_billing_viral_collections_get: {
     parameters: {
       query: {
@@ -26300,7 +26638,7 @@ export interface operations {
         service?: string | null;
         module?: string | null;
         provider?: string | null;
-        attention?: ("pending" | "unknown_cost") | null;
+        attention?: ("pending" | "unknown_cost" | "unknown_revenue") | null;
         limit?: number;
         offset?: number;
       };
@@ -26343,6 +26681,7 @@ export interface operations {
         service?: string | null;
         module?: string | null;
         provider?: string | null;
+        attention?: ("pending" | "unknown_cost" | "unknown_revenue") | null;
       };
       header?: never;
       path?: never;
@@ -26417,7 +26756,7 @@ export interface operations {
         module?: string | null;
         provider?: string | null;
         platform?: boolean;
-        attention?: ("pending" | "unknown_cost") | null;
+        attention?: ("pending" | "unknown_cost" | "unknown_revenue") | null;
         limit?: number;
         offset?: number;
       };
@@ -26495,7 +26834,7 @@ export interface operations {
         service?: string | null;
         module?: string | null;
         provider?: string | null;
-        attention?: ("pending" | "unknown_cost") | null;
+        attention?: ("pending" | "unknown_cost" | "unknown_revenue") | null;
       };
       header?: never;
       path?: never;

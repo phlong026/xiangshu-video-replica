@@ -2000,11 +2000,13 @@ describe("V1.4 内容与运营页面", () => {
       fireEvent.click(extract);
 
       // 共享文案缓存退役：不再前置查缓存，直接走服务端导入 → 转写。
-      expect(createViralImportTask).toHaveBeenCalledWith(
-        "douyin",
-        "native-dy-1",
-        "copy",
-        expect.any(String),
+      await waitFor(() =>
+        expect(createViralImportTask).toHaveBeenCalledWith(
+          "douyin",
+          "native-dy-1",
+          "copy",
+          expect.any(String),
+        ),
       );
     },
   );

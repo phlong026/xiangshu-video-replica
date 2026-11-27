@@ -42,11 +42,11 @@ _NEVER_AUTO_FINALIZE = frozenset(
 )
 
 _REASON_LABELS = {
-    "SUCCESS_MISSING_DURATION": "任务成功但缺成片时长，等待计费证据落账",
-    "SUCCESS_EVIDENCE_MISSING": "任务成功但交付/归档证据不全，无法结算",
-    "UNKNOWN_TIMEOUT": "提交结果未知超时，需人工核对供应商实况",
-    "DELIVERY_UNFINALIZED": "任务成功但发布事务未收口交付数",
-    "ORPHAN_SOURCE_MISSING": "计费预留找不到源任务记录",
+    "SUCCESS_MISSING_DURATION": "任务已完成，缺少计费时长",
+    "SUCCESS_EVIDENCE_MISSING": "缺少可确认交付的凭证",
+    "UNKNOWN_TIMEOUT": "任务结果迟迟未确认",
+    "DELIVERY_UNFINALIZED": "任务已完成，实际交付数量还未确认",
+    "ORPHAN_SOURCE_MISSING": "积分已冻结，找不到对应任务",
 }
 
 _STUCK_MINUTES_ENV = "VIDEO_REPLICA_BILLING_STUCK_AFTER_MINUTES"
@@ -91,16 +91,16 @@ def _recheck_max_count() -> int:
 def next_step_for(state: str, reason: str) -> str:
     """队列页给运营的下一步指引；与自动/人工边界一一对应。"""
     if state == "RESOLVED":
-        return "已收口，可在明细里核对最终账务。"
+        return "已完成核对，可在账务明细查看结果。"
     if state == "ESCALATED":
         if reason == "ORPHAN_SOURCE_MISSING":
-            return "已升级人工：源任务缺失需逐笔核证，调账须走调账审批，不可凭缺源退分。"
+            return "请先查找原始任务和积分记录。需要调整积分时，请走审批。"
         if reason == "UNKNOWN_TIMEOUT":
-            return "已升级人工：请先用专项对账接口核对供应商实况，再回到这里收口。"
-        return "已升级人工：请通过专项对账或调账审批收口，本队列不会自动退分。"
+            return "请人工核实任务结果。可在本页查询的视频会显示「查询视频结果」。"
+        return "请核实任务结果和积分记录。需要调整积分时，请走审批。"
     if reason in _NEVER_AUTO_FINALIZE:
-        return "等待人工核对；系统只重查不代答。"
-    return "等待自动重查：证据补齐后自动结算或释放。"
+        return "请人工确认任务结果和积分去向。"
+    return "系统会继续检查。凭证补齐后，会按任务结果扣除积分或解除冻结。"
 
 
 def _classify(
@@ -291,22 +291,24 @@ def process_reconciliation_items(conn: BusinessConnection, *, limit: int = 50) -
     升级只改变队列状态（提醒人工接手），绝不代替人做退分或调账；ESCALATED
     条目停止自动收口，只在底层计费已终态时被动对齐（迟到回调场景）。重查
     次数达到熔断上限（VIDEO_REPLICA_BILLING_RECHECK_MAX_COUNT，默认 96）的
-    条目不再进入重查集——继续烧查询不会产生新信息，条目保持 ESCALATED 等
-    人工收口。熔断只限 ESCALATED：OPEN 条目不受影响，否则低上限配置会把
+    条目停止重查未结账目。底层计费后来进入终态时仍同步关闭队列。
+    熔断只限 ESCALATED：OPEN 条目不受影响，否则低上限配置会把
     超时升级与自动结算路径一起堵死。
     """
     rows = conn.execute(
         """
-        SELECT id, service, source_id, billing_operation_id, reason, state,
-               created_at
-        FROM billing_reconciliation_items
-        WHERE state IN ('OPEN', 'ESCALATED')
-          AND (state = 'OPEN' OR check_count < %s)
-          AND (last_checked_at IS NULL
-               OR last_checked_at < now() - (%s * interval '1 minute'))
-        ORDER BY created_at, id
+        SELECT item.id, item.service, item.source_id, item.billing_operation_id,
+               item.reason, item.state, item.created_at
+        FROM billing_reconciliation_items item
+        LEFT JOIN billing_operations bill ON bill.id = item.billing_operation_id
+        WHERE item.state IN ('OPEN', 'ESCALATED')
+          AND (bill.state <> 'PENDING'
+               OR ((item.state = 'OPEN' OR item.check_count < %s)
+                   AND (item.last_checked_at IS NULL
+                        OR item.last_checked_at < now() - (%s * interval '1 minute'))))
+        ORDER BY item.created_at, item.id
         LIMIT %s
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF item SKIP LOCKED
         """,
         (_recheck_max_count(), _recheck_after_minutes(), limit),
     ).fetchall()
@@ -401,29 +403,35 @@ def list_reconciliation_items(
     filters = ["1 = 1"]
     params: list[object] = []
     if state:
-        filters.append("state = %s")
+        filters.append("item.state = %s")
         params.append(state)
     if service:
-        filters.append("service = %s")
+        filters.append("item.service = %s")
         params.append(service)
     where = " AND ".join(filters)
     rows = conn.execute(
         f"""
-        SELECT id, service, source_kind, source_id, billing_operation_id,
-               billing_round, owner_user_id, reason, detail_json,
-               provider_receipt_id, state, check_count, last_checked_at,
-               escalated_at, resolution, resolution_note, resolved_by,
-               resolved_at, created_at, updated_at
-        FROM billing_reconciliation_items
+        SELECT item.*, job.result_status AS generation_check_status,
+               (task.status='SUBMISSION_UNCERTAIN' AND task.superseded_by_task_id IS NULL
+                AND task.provider_task_id IS NOT NULL
+                AND trim(task.provider_task_id)<>'') AS can_verify_generation
+        FROM billing_reconciliation_items AS item
+        LEFT JOIN generation_tasks AS task
+          ON item.source_kind='generation' AND task.id=item.source_id
+        LEFT JOIN LATERAL (
+            SELECT result_status FROM generation_task_operations
+            WHERE task_id=task.id AND action='RECONCILE'
+            ORDER BY (result_status='PENDING') DESC, created_at DESC, id DESC LIMIT 1
+        ) AS job ON true
         WHERE {where}
-        ORDER BY CASE state WHEN 'ESCALATED' THEN 0 WHEN 'OPEN' THEN 1 ELSE 2 END,
-                 created_at, id
+        ORDER BY CASE item.state WHEN 'ESCALATED' THEN 0 WHEN 'OPEN' THEN 1 ELSE 2 END,
+                 item.created_at, item.id
         LIMIT %s OFFSET %s
         """,  # noqa: S608 - fixed column list
         (*params, limit, offset),
     ).fetchall()
     total = conn.execute(
-        f"SELECT COUNT(*) FROM billing_reconciliation_items WHERE {where}",  # noqa: S608
+        f"SELECT COUNT(*) FROM billing_reconciliation_items AS item WHERE {where}",  # noqa: S608
         tuple(params),
     ).fetchone()[0]
     items = []
@@ -472,6 +480,12 @@ def list_reconciliation_items(
                 "created_at": str(row["created_at"]),
                 "updated_at": str(row["updated_at"]),
                 "next_step": next_step_for(state_value, reason),
+                "generation_check_status": row["generation_check_status"],
+                "can_verify_generation": bool(
+                    row["can_verify_generation"]
+                    and reason == "UNKNOWN_TIMEOUT"
+                    and state_value != "RESOLVED"
+                ),
             }
         )
     return {"items": items, "total": int(total)}
@@ -500,7 +514,7 @@ def resolve_reconciliation_item(
     if item is None:
         raise _http(404, "BILLING_RECONCILE_ITEM_NOT_FOUND", "核对记录不存在或已被清理。")
     if str(item["state"]) == "RESOLVED":
-        raise _http(409, "BILLING_RECONCILE_ALREADY_RESOLVED", "该核对记录已收口，无需重复处理。")
+        raise _http(409, "BILLING_RECONCILE_ALREADY_RESOLVED", "这条记录已完成核对。")
     operation_id = item["billing_operation_id"]
     operation_state: str | None = None
     if operation_id is not None:
@@ -531,8 +545,7 @@ def resolve_reconciliation_item(
         raise _http(
             409,
             "BILLING_RECONCILE_NOT_CLOSEABLE",
-            "计费仍未收口：请先用专项对账接口核对供应商实况或补齐计费证据；"
-            "涉及真实调账须走调账审批，本队列不能直接退分。",
+            "这笔积分还未结算。请先确认任务结果并补齐凭证。需要人工调整积分时，请走审批。",
         )
     resolution = "MANUAL_VERIFIED" if not finalized_now else "MANUAL_FINALIZED"
     conn.execute(

@@ -632,6 +632,30 @@ def test_alerts_overview_lists_all_four_sources(api: TestClient, seeded: str) ->
             raw.execute("DELETE FROM wallets WHERE user_id = 'overview-user'")
 
 
+def test_recent_internal_usage_without_cost_rate_is_included_in_alert(seeded: str) -> None:
+    from app.billing_catalog import unconfigured_cost_services
+    from app.failure_rate_alerts import build_alerts_overview
+    from app.usage_billing import accept_platform_operation, begin_attempt, complete_attempt
+
+    with psycopg.connect(seeded) as raw:
+        conn = BusinessConnection.postgres(raw)
+        initial = unconfigured_cost_services(conn)
+        assert "quality_inspection" not in initial
+        assert not {"viral_search", "viral_detail", "viral_copy"}.intersection(initial)
+        for service in ("quality_inspection", "cos"):
+            operation = accept_platform_operation(conn, service=service, source_id=service)
+            attempt = begin_attempt(conn, operation_id=operation, attempt_key="request")
+            complete_attempt(conn, attempt_id=attempt, usage=1)
+
+        assert set(unconfigured_cost_services(conn)) - set(initial) == {"quality_inspection"}
+        alert = next(
+            item for item in build_alerts_overview(conn).items if item.key == "unconfigured_rates"
+        )
+        assert alert.count == len(initial) + 1
+        assert "有实际用量的内部服务" in alert.detail
+        raw.rollback()
+
+
 def test_alerts_overview_flags_paid_without_charge_as_danger(api: TestClient, seeded: str) -> None:
     """已支付未入账是最危险的一类（客户付了钱没到账），severity 必须是 danger。"""
     import psycopg as _psycopg

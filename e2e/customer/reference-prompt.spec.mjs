@@ -61,7 +61,9 @@ test("参考素材变化后告警条给出手动核对与重新生成入口", as
   await expect(page.getByRole("alert")).toHaveCount(0);
 
   // 上传素材即绑定变化：正文里的 @1 可能已经指错，告警条必须出现。
-  await page.getByLabel("上传参考素材", { exact: true }).setInputFiles({
+  const upload = page.getByLabel("上传参考素材", { exact: true });
+  await expect(upload).toBeEnabled();
+  await upload.setInputFiles({
     name: "e2e-reference.png",
     mimeType: "image/png",
     buffer: PNG_BYTES,

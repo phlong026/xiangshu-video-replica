@@ -4549,6 +4549,7 @@ def enqueue_generation_reconcile_operation(
     project_id: str,
     actor: CurrentUser,
     request: ReconcileGenerationTaskRequest,
+    commit: bool = True,
 ) -> BusinessRow:
     action = "RECONCILE"
     request_hash = generation_task_operation_hash(
@@ -4589,7 +4590,8 @@ def enqueue_generation_reconcile_operation(
                 "IDEMPOTENCY_CONFLICT",
                 "This idempotency key was already used for a different task operation.",
             )
-        conn.commit()
+        if commit:
+            conn.commit()
         return cast(BusinessRow, existing)
     active = conn.execute(
         """
@@ -4600,7 +4602,8 @@ def enqueue_generation_reconcile_operation(
         (task_id,),
     ).fetchone()
     if active is not None:
-        conn.commit()
+        if commit:
+            conn.commit()
         return cast(BusinessRow, active)
     if str(row["status"]) != "SUBMISSION_UNCERTAIN":
         conn.rollback()
@@ -4670,7 +4673,8 @@ def enqueue_generation_reconcile_operation(
             ),
         },
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cast(BusinessRow, operation)
 
 

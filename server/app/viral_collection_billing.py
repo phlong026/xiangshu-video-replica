@@ -191,11 +191,13 @@ def collection_batch_rows(
           SELECT p.collection_batch_id AS batch_id,count(*) AS processed_count,
             count(*) FILTER(WHERE c.state='INSUFFICIENT_CREDITS') AS failed_count,
             count(*) FILTER(WHERE c.state='SKIPPED_INACTIVE') AS skipped_count,
-            sum(o.charged_credits) AS charged_credits,sum(o.revenue_fen) AS known_revenue_fen,
-            count(*) FILTER(WHERE o.id IS NOT NULL AND o.revenue_fen IS NULL) AS
+            sum(o.charged_credits) AS charged_credits,
+            sum(o.effective_revenue_fen) AS known_revenue_fen,
+            count(*) FILTER(WHERE o.id IS NOT NULL AND o.effective_revenue_fen IS NULL) AS
               unknown_revenue_count
           FROM viral_collection_charges c JOIN billing_operations p ON p.id=c.request_id
-          LEFT JOIN billing_operations o ON o.id=c.operation_id GROUP BY p.collection_batch_id
+          LEFT JOIN billing_effective_operations o ON o.id=c.operation_id
+          GROUP BY p.collection_batch_id
         ) SELECT b.*,COALESCE(r.request_count,0) AS request_count,
           COALESCE(r.confirmed_count,0) AS confirmed_count,
           COALESCE(r.uncertain_count,0) AS uncertain_count,
@@ -245,9 +247,10 @@ def collection_charge_rows(
         dict(row)
         for row in conn.execute(
             f"""SELECT c.*,u.username,COALESCE(o.charged_credits,0) AS charged_credits,
-            o.revenue_fen,count(*) OVER() AS total_count
+            o.effective_revenue_fen AS revenue_fen,count(*) OVER() AS total_count
         FROM viral_collection_charges c JOIN billing_operations p ON p.id=c.request_id
-        JOIN users u ON u.id=c.user_id LEFT JOIN billing_operations o ON o.id=c.operation_id
+        JOIN users u ON u.id=c.user_id
+        LEFT JOIN billing_effective_operations o ON o.id=c.operation_id
         WHERE p.collection_batch_id=%s ORDER BY c.created_at DESC,c.request_id,c.user_id
         {PAGE_CLAUSE}""",
             (batch_id, limit, offset),

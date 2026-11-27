@@ -56,16 +56,16 @@ function dayCount(start: string, end: string): number {
   return (Date.parse(end) - Date.parse(start)) / 86_400_000 + 1;
 }
 
-function shanghaiToday(): { month: string; year: number; quarter: number } {
-  const month = new Intl.DateTimeFormat("en-CA", {
+function shanghaiToday() {
+  const date = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
     month: "2-digit",
-  })
-    .format(new Date())
-    .slice(0, 7);
+    day: "2-digit",
+  }).format(new Date());
+  const month = date.slice(0, 7);
   const [year, mon] = month.split("-").map(Number);
-  return { month, year, quarter: Math.ceil(mon / 3) };
+  return { date, month, year, quarter: Math.ceil(mon / 3) };
 }
 
 function describeFilters(filters: Record<string, string>): string {
@@ -73,10 +73,24 @@ function describeFilters(filters: Record<string, string>): string {
   if (filters.start || filters.end)
     parts.push(`${filters.start ?? "…"} 至 ${filters.end ?? "…"}`);
   for (const [key, value] of Object.entries(filters)) {
-    if (key === "start" || key === "end" || key === "format") continue;
+    if (!value || key === "start" || key === "end" || key === "format")
+      continue;
+    if (key === "subject_id_count") {
+      parts.push(`按 ${value} 个编号筛选`);
+      continue;
+    }
+    if (key === "attention") {
+      const labels: Record<string, string> = {
+        pending: "待结算",
+        unknown_cost: "成本待核对",
+        unknown_revenue: "收入待核对",
+      };
+      if (value) parts.push(`只看${labels[value] ?? value}`);
+      continue;
+    }
     parts.push(`${key}=${value}`);
   }
-  return parts.join("；") || "全部";
+  return parts.join(" · ") || "全部";
 }
 
 export function ReportsPage({
@@ -114,18 +128,27 @@ export function ReportsPage({
     void loadRecent();
   }, [loadRecent]);
 
-  const range =
+  const selectedRange =
     mode === "month"
       ? month
         ? monthBounds(month)
         : null
       : mode === "quarter"
-        ? Number.isInteger(year) && year >= 2000
+        ? Number.isInteger(year) && year >= 2000 && year <= 2100
           ? quarterBounds(year, quarter)
           : null
         : customStart && customEnd
           ? { start: customStart, end: customEnd }
           : null;
+  const throughToday =
+    !!selectedRange &&
+    mode !== "custom" &&
+    selectedRange.start <= today.date &&
+    selectedRange.end > today.date;
+  const range =
+    throughToday && selectedRange
+      ? { ...selectedRange, end: today.date }
+      : selectedRange;
   const days = range ? dayCount(range.start, range.end) : 0;
   const rangeProblem = !range
     ? "请先选定报表区间。"
@@ -133,7 +156,9 @@ export function ReportsPage({
       ? "结束日期不能早于开始日期。"
       : days > SUMMARY_MAX_DAYS
         ? `区间最长 ${SUMMARY_MAX_DAYS} 天。`
-        : "";
+        : range.end > today.date
+          ? "报表区间不能晚于今天。"
+          : "";
   const periodWord =
     mode === "month" ? "月报" : mode === "quarter" ? "季报" : "报表";
 
@@ -147,7 +172,7 @@ export function ReportsPage({
     {
       key: "business",
       title: `经营${periodWord}`,
-      hint: "收入、成本、毛利与业务模块构成（与经营看板同口径）",
+      hint: "查看收入、成本、毛利和各项业务表现，数字与经营看板一致。",
       disabledReason: "",
       run: (r) =>
         exportSummaryReportCsv({
@@ -159,7 +184,7 @@ export function ReportsPage({
     {
       key: "funds",
       title: `资金${periodWord}`,
-      hint: "充值实收、赠送、退款与预收余额（与资金中心同口径）",
+      hint: "查看实收充值款、赠送积分、退款和当前积分余额。",
       disabledReason: "",
       run: (r) =>
         exportSummaryReportCsv({
@@ -171,7 +196,7 @@ export function ReportsPage({
     {
       key: "billing",
       title: "账务明细",
-      hint: `按客户×业务的积分流水与成本明细（最长 ${BILLING_MAX_DAYS} 天）`,
+      hint: `查看每笔业务的积分变动和成本，最多选 ${BILLING_MAX_DAYS} 天。`,
       disabledReason:
         days > BILLING_MAX_DAYS
           ? `账务明细区间最长 ${BILLING_MAX_DAYS} 天，请缩短区间。`
@@ -188,7 +213,7 @@ export function ReportsPage({
     try {
       const result = await item.run(range);
       setNotice(
-        `已导出 ${result.filename}；范围 ${range.start} 至 ${range.end}。`,
+        `已导出 ${result.filename}（${range.start} 至 ${range.end}）。`,
       );
       void loadRecent();
     } catch (cause) {
@@ -202,8 +227,7 @@ export function ReportsPage({
     <section className="admin-panel admin-reports-page" aria-label="报表中心">
       <header>
         <p className="admin-hint">
-          统一出口：选定月份、季度或自定义区间后一键导出经营报表、资金报表与账务明细；
-          区间为北京时间自然日。
+          选择日期后，下载所需报表。日期按北京时间计算。
         </p>
       </header>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
@@ -229,6 +253,7 @@ export function ReportsPage({
             <input
               type="month"
               value={month}
+              max={today.month}
               onChange={(event) => setMonth(event.target.value)}
             />
           </label>
@@ -267,6 +292,7 @@ export function ReportsPage({
               <input
                 type="date"
                 value={customStart}
+                max={today.date}
                 onChange={(event) => setCustomStart(event.target.value)}
               />
             </label>
@@ -275,6 +301,7 @@ export function ReportsPage({
               <input
                 type="date"
                 min={customStart || undefined}
+                max={today.date}
                 value={customEnd}
                 onChange={(event) => setCustomEnd(event.target.value)}
               />
@@ -284,7 +311,7 @@ export function ReportsPage({
       </form>
       <p className="admin-hint" role="status">
         {range && !rangeProblem
-          ? `当前区间：${range.start} 至 ${range.end}（共 ${days} 天）`
+          ? `当前区间：${range.start} 至 ${range.end}（共 ${days} 天）${throughToday ? " · 本期截至今天" : ""}`
           : rangeProblem}
       </p>
       {canExport ? null : (
@@ -294,11 +321,12 @@ export function ReportsPage({
       )}
       <div className="admin-viral-tiles" hidden={!canExport}>
         {items.map((item) => (
-          <div className="admin-viral-tile" key={item.key}>
-            <dt>{item.title}</dt>
-            <dd>
+          <article className="admin-viral-tile" key={item.key}>
+            <h3>{item.title}</h3>
+            <div className="admin-report-actions">
               <button
                 type="button"
+                aria-label={`导出${item.title} CSV`}
                 disabled={
                   busy !== "" || Boolean(rangeProblem) || !!item.disabledReason
                 }
@@ -308,8 +336,8 @@ export function ReportsPage({
                 {busy === item.key ? "正在导出…" : "导出 CSV"}
               </button>
               <small>{item.disabledReason || item.hint}</small>
-            </dd>
-          </div>
+            </div>
+          </article>
         ))}
       </div>
       <section aria-label="最近导出记录">
@@ -330,9 +358,7 @@ export function ReportsPage({
         )}
       </section>
       <p className="admin-hint">
-        底稿类导出保留在各自页面：客户清单（客户列表）、调账记录（资金中心 →
-        人工调整）、审计日志（管理操作日志）——它们带各自的筛选参数，从原页
-        导出才能带上当前筛选。
+        客户清单、人工调整记录和管理操作日志可在各自页面下载。下载时会沿用该页的筛选条件。
       </p>
     </section>
   );

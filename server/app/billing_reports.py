@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -11,6 +11,8 @@ from fastapi import HTTPException
 from app.billing_catalog import SERVICES
 from app.db_portable import BusinessConnection
 from app.sql_pagination import PAGE_CLAUSE
+
+BillingAttention = Literal["pending", "unknown_cost", "unknown_revenue"]
 
 # A delivered request that took the customer's credits always ran a provider call.
 # Recording none is missing evidence, not proof the call was free: pricing the
@@ -42,7 +44,7 @@ def _attention_predicate(unknown_count: str, unmetered: str) -> str:
       OR (%s='pending' AND o.state='PENDING')
       OR (%s='unknown_cost' AND o.state<>'PENDING'
         AND (COALESCE({unknown_count},0)>0 OR {unmetered}))
-      OR (%s='unknown_revenue' AND o.state<>'PENDING' AND o.revenue_fen IS NULL))"""
+      OR (%s='unknown_revenue' AND o.state<>'PENDING' AND o.effective_revenue_fen IS NULL))"""
 
 
 def date_bounds(start: date, end: date) -> tuple[datetime, datetime]:
@@ -90,7 +92,7 @@ def operation_rows(
             AND NOT {unmetered}
             THEN COALESCE(c.known_cost_fen,0) ELSE NULL END AS cost_fen,
           count(*) OVER() AS total_count
-        FROM billing_operations o LEFT JOIN users u ON u.id=o.user_id
+        FROM billing_effective_operations o LEFT JOIN users u ON u.id=o.user_id
         LEFT JOIN (
           SELECT operation_id,count(*) AS attempt_count,sum(effective_cost_fen) AS known_cost_fen,
             count(*) FILTER(WHERE effective_cost_fen IS NULL) AS unknown_cost_count
@@ -137,6 +139,7 @@ def operation_rows(
     result = []
     for row in rows:
         item = dict(row)
+        item["revenue_fen"] = item.pop("effective_revenue_fen")
         known = (
             item["cost_fen"] is not None
             and item["revenue_fen"] is not None
@@ -185,7 +188,7 @@ def source_action_rows(
     rows = conn.execute(
         f"""
         WITH scoped AS (
-          SELECT o.* FROM billing_operations o
+          SELECT o.* FROM billing_effective_operations o
           WHERE COALESCE(o.completed_at,o.created_at)>=%s AND COALESCE(o.completed_at,
             o.created_at)<%s
             AND (%s::text IS NULL OR o.user_id=%s)
@@ -310,13 +313,15 @@ def source_action_detail(
         return None
     operations = []
     for row in conn.execute(
-        "SELECT o.*,COALESCE(u.username,'平台后台') AS username FROM billing_operations o "
+        "SELECT o.*,COALESCE(u.username,'平台后台') AS username "
+        "FROM billing_effective_operations o "
         "LEFT JOIN users u ON u.id=o.user_id WHERE o.source_id=%s "
         "AND (%s::text IS NULL OR o.user_id=%s) AND (NOT %s::boolean OR o.user_id IS NULL)"
         " ORDER BY o.created_at,o.id",
         (source_id, user_id, user_id, platform),
     ).fetchall():
         item = dict(row)
+        item["revenue_fen"] = item.pop("effective_revenue_fen")
         item["attempts"] = [
             dict(attempt)
             for attempt in conn.execute(
@@ -340,11 +345,13 @@ def statistics(
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
+    attention: BillingAttention | None = None,
 ) -> dict[str, Any]:
     if grain not in {"day", "week", "month", "year"}:
         raise HTTPException(422, detail="不支持的统计周期")
     lower, upper = date_bounds(start, end)
     unmetered = UNMETERED_DELIVERED_CHARGE.format(calls="c.calls")
+    attention_predicate = _attention_predicate("c.unknown_cost", unmetered)
     rows = conn.execute(
         f"""
         WITH costs AS (
@@ -354,7 +361,7 @@ def statistics(
         ), facts AS (
           SELECT o.*,COALESCE(c.calls,0) AS calls,COALESCE(c.known_cost,0) AS known_cost,
             COALESCE(c.unknown_cost,0)+CASE WHEN {unmetered} THEN 1 ELSE 0 END AS unknown_cost
-          FROM billing_operations o LEFT JOIN costs c ON c.operation_id=o.id
+          FROM billing_effective_operations o LEFT JOIN costs c ON c.operation_id=o.id
           LEFT JOIN users u ON u.id=o.user_id
           WHERE COALESCE(o.completed_at,o.created_at)>=%s AND COALESCE(o.completed_at,
             o.created_at)<%s
@@ -366,7 +373,8 @@ def statistics(
               JOIN billing_operations parent ON parent.id=a.operation_id
               WHERE (parent.id=o.id OR (o.collection_batch_id IS NOT NULL
                 AND parent.id=o.source_id AND parent.collection_batch_id=o.collection_batch_id))
-              AND a.provider=%s))
+            AND a.provider=%s))
+            AND {attention_predicate}
         )
         SELECT date_trunc(%s,COALESCE(completed_at,created_at) AT TIME ZONE 'Asia/Shanghai')
           AS period,
@@ -376,9 +384,10 @@ def statistics(
           sum(calls) AS provider_call_count, sum(charged_credits) AS charged_credits,
           sum(CASE WHEN state<>'PENDING' THEN reserved_credits-charged_credits ELSE 0 END) AS
             refunded_credits,
-          sum(known_cost) AS known_cost_fen,sum(revenue_fen) AS known_revenue_fen,
-          count(*) FILTER(WHERE unknown_cost>0) AS unknown_cost_count,
-          count(*) FILTER(WHERE revenue_fen IS NULL) AS unknown_revenue_count,
+          sum(known_cost) AS known_cost_fen,sum(effective_revenue_fen) AS known_revenue_fen,
+          count(*) FILTER(WHERE state<>'PENDING' AND unknown_cost>0) AS unknown_cost_count,
+          count(*) FILTER(WHERE state<>'PENDING' AND effective_revenue_fen IS NULL)
+            AS unknown_revenue_count,
           count(*) FILTER(WHERE collection_batch_id IS NOT NULL AND user_id IS NOT NULL) AS
             shared_collection_charge_count,
           sum(CASE WHEN reserved_credits=0 OR (state<>'PENDING' AND charged_credits=0) THEN
@@ -404,6 +413,10 @@ def statistics(
             module,
             provider,
             provider,
+            attention,
+            attention,
+            attention,
+            attention,
             grain,
         ),
     ).fetchall()
@@ -416,8 +429,12 @@ def statistics(
     # Old facts have no proven operation/provider attribution. Expose their date/customer
     # coverage even under service filters; never price them with today's tariff or count
     # the compatibility mirror of a linked attempt/settlement a second time.
-    legacy_rows = conn.execute(
-        """
+    # 历史记录无法归入操作队列，只在未选待办类型时展示。
+    legacy_rows = (
+        []
+        if attention
+        else conn.execute(
+            """
         WITH legacy AS (
           SELECT occurred_at AS at,user_id,1 AS costs,0 AS settlements
           FROM operation_cost_records WHERE billing_attempt_id IS NULL
@@ -436,19 +453,20 @@ def statistics(
             SELECT id FROM users WHERE username ILIKE %s OR display_name ILIKE %s))
         GROUP BY GROUPING SETS ((period),())
         """,
-        (
-            lower,
-            upper,
-            lower,
-            upper,
-            grain,
-            user_id,
-            user_id,
-            _username_pattern(username),
-            _username_pattern(username),
-            _username_pattern(username),
-        ),
-    ).fetchall()
+            (
+                lower,
+                upper,
+                lower,
+                upper,
+                grain,
+                user_id,
+                user_id,
+                _username_pattern(username),
+                _username_pattern(username),
+                _username_pattern(username),
+            ),
+        ).fetchall()
+    )
     empty = dict.fromkeys(metrics[None], 0)
     for row in legacy_rows:
         period = row["period"].date().isoformat() if row["period"] else None
@@ -485,7 +503,8 @@ def statistics(
         "totals": metrics[None],
         "periods": [metrics[key] for key in sorted(key for key in metrics if key is not None)],
         "legacy_scope": "date_and_customer",
-        "basis": "请求结算归属周期；未结算请求按受理时间列示。成本或收入证据未齐时利润待核对。"
-        "共享采集成本只记在平台请求，筛选单个客户时公共成本未分摊，请以采集批次核算利润。"
-        "成本口径为上游接口调用，不含云存储与支付通道费用，此处利润为毛利而非净利。",
+        "basis": "已结算业务按结算日期统计，待结算业务按接单日期列出。"
+        "缺少成本或收入时，毛利显示为待核对。"
+        "采集的公共费用由平台列账，看整批毛利请到采集账单。"
+        "毛利只扣除业务服务费用，云存储和支付手续费另计。",
     }

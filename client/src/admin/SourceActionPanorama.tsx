@@ -135,9 +135,7 @@ export function SourceActionPanorama({
     <section aria-label="操作全景">
       <h3>操作全景</h3>
       <p>
-        一次操作 =
-        同一业务下的所有计费请求与调用，含内部质检。客户只为用户业务被扣分；
-        内部业务与质检成本单独列出，证据不齐时按待核对显示，不计成零成本。
+        每条记录汇总一次业务的积分扣除和实际费用。平台承担的费用（如质检）单独显示，缺凭证的金额标为待核对。
       </p>
       <button
         type="button"
@@ -147,7 +145,7 @@ export function SourceActionPanorama({
           setRevision((value) => value + 1);
         }}
       >
-        刷新操作
+        刷新列表
       </button>
       {error && <PageBanner tone="error">{error}</PageBanner>}
       {!list && !error && <p role="status">正在读取操作…</p>}

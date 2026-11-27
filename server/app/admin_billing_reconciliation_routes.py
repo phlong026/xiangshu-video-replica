@@ -9,11 +9,19 @@ GET 出队给运营看：等待时长用 created_at 原文交前端换算，原�
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from hashlib import sha256
+
+import psycopg
+from fastapi import APIRouter, Request, Response
 from pydantic import Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter, admin_to_current_user
-from app.admin_write_contract import AdminWriteContract
+from app.admin_auth_routes import AdminReader, AdminWriter, FundsWriter, admin_to_current_user
+from app.admin_write_contract import (
+    IDEMPOTENCY_KEY_HEADER,
+    AdminWriteContract,
+    http_error,
+    write_with_idempotency,
+)
 from app.billing_reconciliation import (
     enqueue_stuck_billing_operations,
     list_reconciliation_items,
@@ -22,6 +30,7 @@ from app.billing_reconciliation import (
 )
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
+from app.generation import ReconcileGenerationTaskRequest, enqueue_generation_reconcile_operation
 from app.permissions import write_audit
 
 router = APIRouter(prefix="/api/control/billing-reconciliation", tags=["admin-billing"])
@@ -76,16 +85,18 @@ def trigger_scan(actor: AdminWriter) -> dict[str, int]:
 @router.post("/items/{item_id}/resolve")
 def resolve_item(
     item_id: str,
-    request: ReconciliationResolveRequest,
-    actor: AdminWriter,
+    payload: ReconciliationResolveRequest,
+    request: Request,
+    response: Response,
+    actor: FundsWriter,
 ) -> dict[str, object]:
-    with pg_transaction() as raw:
+    def business(raw: psycopg.Connection, _request_id: str) -> dict[str, object]:
         conn = BusinessConnection.postgres(raw)
         result = resolve_reconciliation_item(
             conn,
             item_id=item_id,
             actor_id=actor.user_id,
-            note=request.note,
+            note=payload.note,
         )
         write_audit(
             conn,
@@ -96,7 +107,88 @@ def resolve_item(
             metadata={
                 "resolution": result.get("resolution"),
                 "billing_state": result.get("billing_state"),
+                "reason": payload.reason.strip(),
             },
             commit=False,
         )
-    return result
+        return result
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code="BILLING_RECONCILE_UNAVAILABLE",
+        unavailable_message="卡单对账暂不可用。",
+    )
+
+
+@router.post("/items/{item_id}/verify-generation", status_code=202)
+def verify_generation(
+    item_id: str,
+    payload: AdminWriteContract,
+    request: Request,
+    response: Response,
+    actor: FundsWriter,
+) -> dict[str, object]:
+    """把视频卡单交给已有对账 Worker，入队时保留账本状态。"""
+    key = sha256(request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip().encode()).hexdigest()
+
+    def business(raw: psycopg.Connection, _request_id: str) -> dict[str, object]:
+        conn = BusinessConnection.postgres(raw)
+        item = conn.execute(
+            """
+            SELECT task.id, task.batch_id, batch.project_id
+            FROM billing_reconciliation_items AS item
+            JOIN billing_operations AS bill ON bill.id = item.billing_operation_id
+            JOIN generation_tasks AS task ON task.id = item.source_id
+            JOIN generation_batches AS batch ON batch.id = task.batch_id
+            WHERE item.id = %s AND item.source_kind = 'generation'
+              AND item.reason = 'UNKNOWN_TIMEOUT' AND item.state <> 'RESOLVED'
+              AND bill.state = 'PENDING' AND bill.service = item.service
+              AND bill.source_id = task.id AND bill.billing_round = item.billing_round
+              AND task.status = 'SUBMISSION_UNCERTAIN' AND task.superseded_by_task_id IS NULL
+              AND task.provider_task_id IS NOT NULL AND trim(task.provider_task_id) <> ''
+            FOR UPDATE OF task
+            """,
+            (item_id,),
+        ).fetchone()
+        if item is None:
+            raise http_error(
+                409,
+                "BILLING_RECONCILE_NOT_QUERYABLE",
+                "当前无法在这里查询视频结果，请刷新状态或到生成记录查看原任务。",
+            )
+        current_user = admin_to_current_user(actor)
+        job = enqueue_generation_reconcile_operation(
+            conn,
+            task_id=str(item["id"]),
+            batch_id=str(item["batch_id"]),
+            project_id=str(item["project_id"]),
+            actor=current_user,
+            request=ReconcileGenerationTaskRequest(idempotency_key=key),
+            commit=False,
+        )
+        write_audit(
+            conn,
+            actor=current_user,
+            action="billing_reconciliation.verify_generation",
+            entity_type="billing_reconciliation_item",
+            entity_id=item_id,
+            metadata={"operation_id": str(job["id"]), "reason": payload.reason.strip()},
+            commit=False,
+        )
+        return {"operation_id": str(job["id"])}
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=202,
+        unavailable_code="BILLING_RECONCILE_UNAVAILABLE",
+        unavailable_message="卡单对账暂不可用。",
+    )

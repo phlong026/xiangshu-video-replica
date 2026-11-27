@@ -7,12 +7,12 @@ import io
 import json
 from datetime import date
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any
 from uuid import uuid4
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from app.admin_auth_routes import (
     AdminExporter,
@@ -20,26 +20,263 @@ from app.admin_auth_routes import (
     AdminWriter,
     FundsWriter,
     SettingsWriter,
+    admin_to_current_user,
 )
 from app.admin_export_guard import guard_admin_export
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.billing_catalog import SERVICES, Tariff, read_tariff, retail_snapshot
 from app.billing_history import pricing_versions, retail_version, tariff_versions
 from app.billing_reports import (
+    BillingAttention,
     operation_rows,
     source_action_detail,
     source_action_rows,
     statistics,
 )
+from app.billing_reviews import ReviewAge, ReviewKind, ReviewState, list_reviews, save_review
 from app.csv_export import spreadsheet_safe_cell
 from app.customer_fence import customer_read_transaction
 from app.customer_pricing import read_pricing
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.ops_metrics import get_or_create_request_id
+from app.permissions import write_audit
 from app.usage_billing import resolve_wallet_owner
 
 router = APIRouter(tags=["itemized-billing"])
+_REVIEW_BATCH_SIZE = 25
+ReviewSubjectId = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+]
+
+
+class ReviewFilter(BaseModel):
+    start: date
+    end: date
+    kind: ReviewKind = "cost"
+    state: ReviewState | None = None
+    age: ReviewAge | None = None
+    reason_code: str | None = Field(default=None, max_length=40)
+    owner: str | None = Field(default=None, max_length=100)
+    subject_id: list[ReviewSubjectId] = Field(default_factory=list, max_length=_REVIEW_BATCH_SIZE)
+
+    def read(self, conn: BusinessConnection, *, limit: int, offset: int) -> dict[str, Any]:
+        return list_reviews(
+            conn,
+            start=self.start,
+            end=self.end,
+            kind=self.kind,
+            state=self.state,
+            age=self.age,
+            reason_code=self.reason_code,
+            owner=self.owner,
+            subject_ids=self.subject_id,
+            limit=limit,
+            offset=offset,
+        )
+
+
+class ReviewListFilter(ReviewFilter):
+    limit: int = Field(default=50, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
+@router.get("/api/control/billing/reviews")
+def reviews(filters: Annotated[ReviewListFilter, Query()], _actor: AdminReader) -> dict[str, Any]:
+    with pg_transaction() as raw:
+        return filters.read(
+            BusinessConnection.postgres(raw), limit=filters.limit, offset=filters.offset
+        )
+
+
+@router.get("/api/control/billing/reviews/export")
+def export_reviews(filters: Annotated[ReviewFilter, Query()], actor: AdminExporter) -> Response:
+    audit_filters = filters.model_dump(
+        exclude_none=True, exclude={"start", "end"} if filters.subject_id else {"subject_id"}
+    )
+    if filters.subject_id:
+        audit_filters["subject_id_count"] = len(set(filters.subject_id))
+    guard_admin_export(actor, kind="billing_reviews", filters=audit_filters)
+    with pg_transaction() as raw:
+        data = filters.read(BusinessConnection.postgres(raw), limit=5000, offset=0)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    columns = (
+        "subject_id",
+        "kind",
+        "service",
+        "occurred_at",
+        "age_days",
+        "reason_code",
+        "state",
+        "owner",
+        "next_step",
+        "next_review_on",
+        "last_checked_at",
+        "reviewed_by",
+        "evidence_ref",
+        "needs_evidence",
+    )
+    writer.writerow(columns)
+    for item in data["items"]:
+        writer.writerow(
+            [
+                spreadsheet_safe_cell(value) if isinstance(value, str) else value
+                for value in (item[column] for column in columns)
+            ]
+        )
+    return Response(
+        "\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="billing-reviews.csv"',
+            "X-Export-Truncated": str(data["total"] > len(data["items"])).lower(),
+        },
+    )
+
+
+class ReviewUpdate(AdminWriteContract):
+    state: ReviewState
+    owner: str = Field(min_length=1, max_length=100)
+    next_step: str = Field(min_length=1, max_length=500)
+    next_review_on: date | None = None
+    evidence_ref: str = Field(default="", max_length=500)
+    expected_version: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def check_followup(self) -> ReviewUpdate:
+        if not self.owner.strip() or not self.next_step.strip():
+            raise ValueError("请填写负责人和下一步。")
+        if self.state == "unverifiable" and self.next_review_on is None:
+            raise ValueError("暂无法核实的记录必须填写下次跟进日期。")
+        return self
+
+
+class RevenueReviewEntry(BaseModel):
+    subject_id: ReviewSubjectId
+    expected_version: int = Field(ge=0)
+
+
+class RevenueReviewBatch(AdminWriteContract):
+    items: list[RevenueReviewEntry] = Field(min_length=1, max_length=_REVIEW_BATCH_SIZE)
+    owner: ReviewSubjectId
+    evidence_ref: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
+    ]
+
+    @model_validator(mode="after")
+    def check_subjects(self) -> RevenueReviewBatch:
+        if len({item.subject_id for item in self.items}) != len(self.items):
+            raise ValueError("批次中有重复记录，请重新查找这批编号。")
+        return self
+
+
+@router.post("/api/control/billing/reviews/revenue-batch")
+def confirm_revenue_batch(
+    payload: RevenueReviewBatch, request: Request, response: Response, actor: FundsWriter
+) -> dict[str, object]:
+    """同一事务核实整批来源。每笔凭证、确认与审计一起成功或一起回退。"""
+
+    def business(raw: psycopg.Connection, _request_id: str) -> dict[str, object]:
+        conn = BusinessConnection.postgres(raw)
+        current_user = admin_to_current_user(actor)
+        total = Decimal(0)
+        # 使用固定的锁顺序，避免两个部分重叠的批次互相等待。
+        for item in sorted(payload.items, key=lambda entry: entry.subject_id):
+            try:
+                result = save_review(
+                    conn,
+                    subject_id=item.subject_id,
+                    kind="revenue",
+                    state="verified",
+                    owner=payload.owner,
+                    actor_id=actor.user_id,
+                    next_step="已核对原充值或赠送凭证",
+                    next_review_on=None,
+                    evidence_ref=payload.evidence_ref,
+                    expected_version=item.expected_version,
+                    require_unconfirmed_revenue=True,
+                )
+            except HTTPException as exc:
+                if not isinstance(exc.detail, dict):
+                    raise
+                detail = {**exc.detail, "subject_id": item.subject_id}
+                detail["message"] = (
+                    f"记录 {item.subject_id}：{exc.detail.get('message', '核对失败')}"
+                )
+                raise HTTPException(exc.status_code, detail=detail, headers=exc.headers) from exc
+            total += Decimal(str(result["confirmed_revenue_fen"]))
+            write_audit(
+                conn,
+                actor=current_user,
+                action="billing.review.update",
+                entity_type="billing_review",
+                entity_id=item.subject_id,
+                metadata={
+                    **result,
+                    "reason": payload.reason.strip(),
+                    "batch_ref": payload.evidence_ref,
+                },
+                commit=False,
+            )
+        return {"confirmed_count": len(payload.items), "confirmed_revenue_fen": str(total)}
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code="BILLING_REVIEW_UNAVAILABLE",
+        unavailable_message="账务核对暂不可用。",
+    )
+
+
+@router.post("/api/control/billing/reviews/{kind}/{subject_id}")
+def update_review(
+    kind: ReviewKind,
+    subject_id: str,
+    payload: ReviewUpdate,
+    request: Request,
+    response: Response,
+    actor: FundsWriter,
+) -> dict[str, object]:
+    def business(raw: psycopg.Connection, _request_id: str) -> dict[str, object]:
+        conn = BusinessConnection.postgres(raw)
+        result = save_review(
+            conn,
+            subject_id=subject_id,
+            kind=kind,
+            state=payload.state,
+            owner=payload.owner.strip(),
+            actor_id=actor.user_id,
+            next_step=payload.next_step.strip(),
+            next_review_on=payload.next_review_on,
+            evidence_ref=payload.evidence_ref.strip(),
+            expected_version=payload.expected_version,
+        )
+        write_audit(
+            conn,
+            actor=admin_to_current_user(actor),
+            action="billing.review.update",
+            entity_type="billing_review",
+            entity_id=subject_id,
+            metadata={**result, "reason": payload.reason.strip()},
+            commit=False,
+        )
+        return result
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code="BILLING_REVIEW_UNAVAILABLE",
+        unavailable_message="凭证核对暂不可用。",
+    )
 
 
 @router.get("/api/control/billing/viral-collections")
@@ -446,7 +683,7 @@ def operations(
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
-    attention: Literal["pending", "unknown_cost"] | None = None,
+    attention: BillingAttention | None = None,
     limit: int = Query(default=100, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -478,6 +715,7 @@ def report(
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
+    attention: BillingAttention | None = None,
 ) -> dict[str, Any]:
     with pg_transaction(isolation="REPEATABLE READ") as raw:
         return statistics(
@@ -490,6 +728,7 @@ def report(
             service=service,
             module=module,
             provider=provider,
+            attention=attention,
         )
 
 
@@ -532,7 +771,7 @@ def source_actions(
     module: str | None = None,
     provider: str | None = None,
     platform: bool = False,
-    attention: Literal["pending", "unknown_cost"] | None = None,
+    attention: BillingAttention | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -589,7 +828,7 @@ def export(
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
-    attention: Literal["pending", "unknown_cost"] | None = None,
+    attention: BillingAttention | None = None,
 ) -> Response:
     guard_admin_export(
         actor,

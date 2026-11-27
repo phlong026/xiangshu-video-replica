@@ -13,7 +13,7 @@ from app.admin_auth_routes import AdminReader
 from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE, NONCASH_ADJUSTMENT, OFFLINE_CASH_EVIDENCE
 from app.admin_customer_metrics import utc_text_timestamp
 from app.admin_worker_observation_routes import queue_attention_count
-from app.billing_catalog import SERVICES
+from app.billing_catalog import SERVICES, unconfigured_cost_services
 from app.billing_reports import UNMETERED_DELIVERED_CHARGE, date_bounds, statistics
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
@@ -200,15 +200,7 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
             ).fetchall()
         ]
         reconciliation_problems = _reconciliation_problem_count(conn)
-        configured = {
-            row[0]
-            for row in conn.execute(
-                "SELECT service FROM billing_tariffs WHERE unit_cost_fen IS NOT NULL"
-            ).fetchall()
-        }
-        unconfigured_rates = sum(
-            item.customer_charge_allowed and key not in configured for key, item in SERVICES.items()
-        )
+        unconfigured_rates = len(unconfigured_cost_services(BusinessConnection.postgres(conn)))
         # 全局待办（整改 T11）：每项计数与跳转后清单同口径，点进去条数一致。
         open_tickets = int(
             _one(
@@ -220,6 +212,12 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
             _one(conn, "SELECT count(*) FROM recharge_orders WHERE status = 'PENDING'")
         )
         queue_attention = queue_attention_count(conn)
+        frozen_billing_reviews = int(
+            _one(
+                conn,
+                "SELECT count(*) FROM billing_reconciliation_items WHERE state='ESCALATED'",
+            )
+        )
         content_prepare_failed = int(
             _one(
                 conn,
@@ -280,6 +278,7 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
             "open_tickets": open_tickets,
             "pending_orders": pending_orders,
             "queue_attention": queue_attention,
+            "frozen_billing_reviews": frozen_billing_reviews,
             "content_prepare_failed": content_prepare_failed,
             "active_alerts": active_alerts,
         },
@@ -318,11 +317,11 @@ WITH costs AS (
          COUNT(*) FILTER (WHERE effective_cost_fen IS NULL) AS unknown_cost
   FROM billing_effective_attempts GROUP BY operation_id
 ), facts AS (
-  SELECT o.user_id, o.service, o.state, o.revenue_fen,
+  SELECT o.user_id, o.service, o.state, o.effective_revenue_fen AS revenue_fen,
          COALESCE(c.calls, 0) AS calls,
          COALESCE(c.known_cost, 0) AS known_cost,
          COALESCE(c.unknown_cost, 0) + CASE WHEN {unmetered} THEN 1 ELSE 0 END AS unknown_cost
-  FROM billing_operations o LEFT JOIN costs c ON c.operation_id = o.id
+  FROM billing_effective_operations o LEFT JOIN costs c ON c.operation_id = o.id
   WHERE COALESCE(o.completed_at, o.created_at) >= %s
     AND COALESCE(o.completed_at, o.created_at) < %s
 )
@@ -377,9 +376,11 @@ def _consumption_facts(conn: Any, *, lower: Any, upper: Any) -> list[dict[str, A
         SELECT service,
                COALESCE(SUM(revenue_fen), 0) AS revenue_fen,
                COALESCE(SUM(known_cost), 0) AS known_cost_fen,
-               COUNT(*) FILTER (WHERE unknown_cost > 0) AS unknown_cost_count,
+               COUNT(*) FILTER (WHERE state <> 'PENDING' AND unknown_cost > 0)
+                 AS unknown_cost_count,
                COUNT(*) FILTER (WHERE state = 'PENDING') AS pending_count,
-               COUNT(*) FILTER (WHERE revenue_fen IS NULL) AS unknown_revenue_count
+               COUNT(*) FILTER (WHERE state <> 'PENDING' AND revenue_fen IS NULL)
+                 AS unknown_revenue_count
         FROM facts
         GROUP BY service
         ORDER BY COALESCE(SUM(revenue_fen), 0) DESC,
@@ -543,7 +544,7 @@ def _prepaid_snapshot(conn: Any, *, since: Any) -> tuple[int, int | None, int, i
 
 @router.get("/business/overview")
 def business_overview(start: date, end: date, _actor: AdminReader) -> dict[str, Any]:
-    if (end - start).days > _MAX_OVERVIEW_RANGE_DAYS:
+    if (end - start).days >= _MAX_OVERVIEW_RANGE_DAYS:
         raise HTTPException(422, detail="经营看板单次最多查询 366 天")
     lower, upper = date_bounds(start, end)
     length = (end - start).days + 1
@@ -567,8 +568,8 @@ def business_overview(start: date, end: date, _actor: AdminReader) -> dict[str, 
         # ADM-16 月度趋势：无论当前查什么区间，始终附带近 6 个自然月（含当月）
         # 的按月汇总，看板不再只有"今日 + 近 7 日"两个时间维度。
         month_end = (datetime.now(UTC) + timedelta(hours=8)).date()
-        month_first = month_end.replace(day=1)
-        month_span_start = (month_first - timedelta(days=155)).replace(day=1)
+        year, month_index = divmod(month_end.year * 12 + month_end.month - 6, 12)
+        month_span_start = date(year, month_index + 1, 1)
         monthly_economics = statistics(
             business_conn, start=month_span_start, end=month_end, grain="month"
         )

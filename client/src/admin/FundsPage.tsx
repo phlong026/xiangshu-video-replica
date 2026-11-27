@@ -29,6 +29,7 @@ const FUNDS_TABS = [
   "adjustments",
   "refunds",
   "reconciliation",
+  "billingQueue",
 ] as const;
 
 export type FundsTab =

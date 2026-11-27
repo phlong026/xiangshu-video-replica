@@ -21,7 +21,7 @@ const baseItem = {
   billing_round: 1,
   owner_user_id: "user-1",
   reason: "UNKNOWN_TIMEOUT",
-  reason_label: "提交结果未知超时，需人工核对供应商实况",
+  reason_label: "任务结果迟迟未确认",
   detail: {},
   provider_receipt_id: "task_VIDEO_x",
   state: "ESCALATED" as const,
@@ -34,7 +34,7 @@ const baseItem = {
   resolved_at: null,
   created_at: "2026-09-30T02:33:46+00:00",
   updated_at: "2026-11-15T10:00:00+00:00",
-  next_step: "已升级人工：请先用专项对账接口核对供应商实况，再回到这里收口。",
+  next_step: "请人工核实任务结果。可在本页查询的视频会显示「查询视频结果」。",
 };
 
 function mockQueue(items: (typeof baseItem)[]) {
@@ -52,7 +52,8 @@ describe("BillingReconciliationQueue（2026-11-15 审计补闭环）", () => {
   it("表头行只渲染一层 tr（裸 th，不再嵌套 tr）", async () => {
     mockQueue([baseItem]);
     render(<BillingReconciliationQueue readOnly={false} />);
-    await screen.findByText("已升级人工");
+    await screen.findByText("任务结果迟迟未确认");
+    expect(screen.getByText("查询编号 task_VIDEO_x")).toBeInTheDocument();
     const headRows = document.querySelectorAll("thead tr");
     expect(headRows).toHaveLength(1);
     // 非法嵌套：<tr> 直接出现在 <tr> 里
@@ -97,12 +98,12 @@ describe("BillingReconciliationQueue（2026-11-15 审计补闭环）", () => {
       };
     });
     render(<BillingReconciliationQueue readOnly={false} />);
-    fireEvent.click(await screen.findByRole("button", { name: "收口" }));
+    fireEvent.click(await screen.findByRole("button", { name: "完成核对" }));
     fireEvent.change(
-      await screen.findByPlaceholderText("核对凭据/结论备注（必填）"),
+      await screen.findByPlaceholderText("填写核对结果和凭证（必填）"),
       { target: { value: "已按失败核对，预留已释放" } },
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认收口" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认完成" }));
     await waitFor(() => {
       expect(adminApi.adminWrite).toHaveBeenCalledWith(
         "/api/control/billing-reconciliation/items/item-1/resolve",
@@ -164,18 +165,18 @@ describe("BillingReconciliationQueue（2026-11-15 审计补闭环）", () => {
     );
     vi.mocked(adminApi.adminWrite).mockRejectedValue(
       new Error(
-        "计费仍未收口：请先用专项对账接口核对供应商实况或补齐计费证据；涉及真实调账须走调账审批，本队列不能直接退分。",
+        "这笔积分还未结算。请先确认任务结果并补齐凭证。需要人工调整积分时，请走审批。",
       ),
     );
     render(<BillingReconciliationQueue readOnly={false} />);
-    fireEvent.click(await screen.findByRole("button", { name: "收口" }));
+    fireEvent.click(await screen.findByRole("button", { name: "完成核对" }));
     fireEvent.change(
-      await screen.findByPlaceholderText("核对凭据/结论备注（必填）"),
+      await screen.findByPlaceholderText("填写核对结果和凭证（必填）"),
       { target: { value: "口头说已处理" } },
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认收口" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认完成" }));
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent(/计费仍未收口/);
+      expect(screen.getByRole("alert")).toHaveTextContent(/这笔积分还未结算/);
     });
   });
 });

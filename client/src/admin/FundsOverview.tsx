@@ -95,7 +95,7 @@ export function FundsOverview({
         month: formatFen(monthSummary.recharge_fen),
       },
       {
-        label: "线下收款",
+        label: "其中：线下收款",
         today: formatFen(todaySummary.offline_fen),
         month: formatFen(monthSummary.offline_fen),
       },
@@ -117,7 +117,7 @@ export function FundsOverview({
             : `${formatFen(monthSummary.refund_fen)}`,
       },
       {
-        label: "净收入",
+        label: "扣除退款后金额（参考）",
         today:
           todaySummary.net_fen === null
             ? "待核对"
@@ -126,7 +126,7 @@ export function FundsOverview({
           monthSummary.net_fen === null
             ? "待核对"
             : formatFen(monthSummary.net_fen),
-        hint: "充值实收 − 退款扣减",
+        hint: "从充值实收减去按退款积分折算的金额",
       },
     );
   }
@@ -152,8 +152,8 @@ export function FundsOverview({
         />
       </label>
       <p className="admin-hint">
-        所选月份范围 {range.start} 至 {range.end}
-        （北京时间）；今日单独对照。时点数据取当前余额与异常。
+        所选日期 {range.start} 至 {range.end}
+        （北京时间）。表内可对照今天和所选月份。
       </p>
       {error && <PageBanner tone="error">{error}</PageBanner>}
       {busy && <p role="status">正在计算…</p>}
@@ -184,35 +184,36 @@ export function FundsOverview({
               </tbody>
             </table>
           </div>
-          <h3>时点数据</h3>
+          <h3>当前余额与对账情况</h3>
           <div className="economics-kpis economics-kpis--four">
             <article>
-              <span>预收积分余额</span>
+              <span>当前客户积分余额</span>
               <strong>{monthSummary.prepaid_credits} 积分</strong>
               <small>
                 {monthSummary.prepaid_fen === null
-                  ? "未配置积分兑换比例，暂不折算金额"
-                  : `折合 ${formatFen(monthSummary.prepaid_fen)}`}
+                  ? "含可用和冻结积分"
+                  : `含可用和冻结积分 · 约 ${formatFen(monthSummary.prepaid_fen)}`}
               </small>
             </article>
             <article>
               <button type="button" onClick={onOpenReconciliation}>
                 <span>对账异常</span>
                 <strong>{monthSummary.reconciliation_problems}</strong>
-                <small>点击查看异常清单</small>
+                <small>查看待核对记录</small>
               </button>
             </article>
           </div>
           <h3>支付方式分布（{month}）</h3>
           {(monthSummary.unverified_manual_orders ?? 0) > 0 && (
             <p className="admin-hint">
-              历史人工订单 {monthSummary.unverified_manual_orders} 笔，记录金额{" "}
-              {formatFen(monthSummary.unverified_manual_fen ?? 0)}{" "}
-              待核对，未计入实收或线下收款。补偿/赠送积分不产生收款。
+              有 {monthSummary.unverified_manual_orders}{" "}
+              笔历史人工订单待确认收款，共{" "}
+              {formatFen(monthSummary.unverified_manual_fen ?? 0)}
+              。确认前，这些金额列为待核对。
             </p>
           )}
           {channels.length === 0 ? (
-            <p>所选月份暂无已知支付方式的收款；缺失方式显示为未知。</p>
+            <p>所选月份暂无可按支付方式统计的收款。</p>
           ) : (
             <div className="admin-table-scroll">
               <table className="admin-data-table" aria-label="支付方式分布">

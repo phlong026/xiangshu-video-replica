@@ -100,7 +100,7 @@ const pendingOperation = {
   }),
 };
 
-test.each(["pending", "unknown_cost"] as const)(
+test.each(["pending", "unknown_cost", "unknown_revenue"] as const)(
   "arrives from the dashboard todo with today's window and attention intent %s",
   async (attention) => {
     mockBilling();
@@ -112,8 +112,7 @@ test.each(["pending", "unknown_cost"] as const)(
     const statistics = callsTo("statistics")[0];
     expect(statistics).toContain(`start=${today}`);
     expect(statistics).toContain(`end=${today}`);
-    // 总览待办只承诺「今日操作待结算 / 成本待核对」的条数一致：
-    // 清单端点消费 attention，点进去必须落到同口径的行。
+    expect(statistics).toContain(`attention=${attention}`);
     const operations = callsTo("operations?")[0];
     expect(operations).toContain(`start=${today}`);
     expect(operations).toContain(`end=${today}`);
@@ -157,19 +156,51 @@ test("re-queries the list with the selected intent after submit", async () => {
   );
 });
 
+test("retrying the same query refreshes unavailable queue counts", async () => {
+  mockBilling();
+  const read = vi.mocked(adminRead);
+  const originalRead = read.getMockImplementation();
+  let failCounts = true;
+  read.mockImplementation(async (...args) => {
+    if (
+      String(args[0]).includes("limit=1&") ||
+      String(args[0]).endsWith("limit=1")
+    ) {
+      if (failCounts) throw new Error("temporary count failure");
+      return { total: 2 } as never;
+    }
+    return (await originalRead?.(...args)) as never;
+  });
+  render(<BillingEconomics view="cost" />);
+  const queue = screen.getByRole("region", { name: "待核对队列" });
+  expect(
+    await within(queue).findByText(/部分队列计数读取失败/),
+  ).toBeInTheDocument();
+  expect(
+    within(queue).getByRole("button", { name: /^待核对成本/ }),
+  ).toBeDisabled();
+  failCounts = false;
+  fireEvent.click(screen.getByRole("button", { name: "查询" }));
+  await waitFor(() =>
+    expect(
+      within(queue).getByRole("button", { name: /^待核对成本/ }),
+    ).toBeEnabled(),
+  );
+});
+
 test("opens the request detail with snapshot, usage and a reconciliation form", async () => {
   mockBilling({ items: [pendingOperation], detail: pendingOperation });
   render(<BillingEconomics />);
-  const table = await screen.findByRole("table", { name: "生成明细" });
+  const table = await screen.findByRole("table", { name: "逐笔账务明细" });
   fireEvent.click(within(table).getByRole("button", { name: "查看详情" }));
   const detail = await screen.findByRole("complementary", {
-    name: "生成核算详情",
+    name: "账务详情",
   });
-  expect(detail).toHaveTextContent("生成编号：op-detail · 处理中 / 待核对");
+  expect(detail).toHaveTextContent("业务编号 op-detail · 处理中 / 待核对");
   expect(detail).toHaveTextContent(
-    "受理时售价：2 积分 / 秒；折扣 10 折；价格版本 3",
+    "接单时单价 2 积分 / 秒 · 折扣 10 折 · 价格版本 3",
   );
-  expect(detail).toHaveTextContent("预算 10.0 秒，实际 8.0 秒");
+  expect(detail).toHaveTextContent("预计用量 10.0 秒 · 实际用量 8.0 秒");
   // 管理端可对缺时长的成功交付补录：PENDING + asr 在允许补录的业务列表里。
   expect(
     within(detail).getByRole("form", { name: "核对成功时长" }),
@@ -179,12 +210,12 @@ test("opens the request detail with snapshot, usage and a reconciliation form", 
 test("auditor sessions read the same detail without reconciliation forms", async () => {
   mockBilling({ items: [pendingOperation], detail: pendingOperation });
   render(<BillingEconomics readOnly />);
-  const table = await screen.findByRole("table", { name: "生成明细" });
+  const table = await screen.findByRole("table", { name: "逐笔账务明细" });
   fireEvent.click(within(table).getByRole("button", { name: "查看详情" }));
   const detail = await screen.findByRole("complementary", {
-    name: "生成核算详情",
+    name: "账务详情",
   });
-  expect(detail).toHaveTextContent("生成编号：op-detail");
+  expect(detail).toHaveTextContent("业务编号 op-detail");
   expect(
     within(detail).queryByRole("form", { name: "核对成功时长" }),
   ).toBeNull();
@@ -218,5 +249,5 @@ test("surfaces a load failure as an alert and hides the report tables", async ()
     "读取经营统计失败：统计暂不可用（500）",
   );
   expect(screen.queryByRole("table", { name: "周期汇总" })).toBeNull();
-  expect(screen.queryByRole("table", { name: "生成明细" })).toBeNull();
+  expect(screen.queryByRole("table", { name: "逐笔账务明细" })).toBeNull();
 });

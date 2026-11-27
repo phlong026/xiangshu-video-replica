@@ -92,7 +92,12 @@ describe("OverviewPage", () => {
 
     expect(await screen.findByText("328")).toBeInTheDocument();
     expect(screen.getByText("¥4850.00")).toBeInTheDocument();
-    expect(screen.getByText("¥486.20")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "今日成本" })).toHaveTextContent(
+      "¥486.20",
+    );
+    expect(
+      screen.getByRole("img", { name: "成本柱状图与成功数趋势曲线" }),
+    ).toHaveTextContent("¥486.20");
     expect(screen.getByText("¥1128.40")).toBeInTheDocument();
     expect(screen.queryByText("918 台")).not.toBeInTheDocument();
     expect(
@@ -159,23 +164,24 @@ describe("OverviewPage", () => {
 
     // 2026-09-18 匹配梳理 P3：这两个字段后端一直在返回，总览此前只字未提。
     // 它们决定"今天的数字能不能信"，所以摆进待办并可一键去处理。
-    const pendingOps = screen.getByText("今日操作待结算").closest("li");
+    const pendingOps = screen.getByText("今日待结算").closest("li");
     expect(pendingOps).toHaveTextContent("4");
-    expect(pendingOps).toHaveTextContent("当日金额尚未定稿");
+    expect(pendingOps).toHaveTextContent("这些记录的最终金额还未确定");
     // P0-5：这两项是计费操作口径，落到经营分析而不是资金流水。
     fireEvent.click(within(pendingOps as HTMLElement).getByRole("button"));
     expect(onNavigate).toHaveBeenCalledWith("pendingOperations");
 
-    const unknownRevenue = screen.getByText("今日收入未确定").closest("li");
+    const unknownRevenue = screen.getByText("今日收入待核对").closest("li");
     expect(unknownRevenue).toHaveTextContent("1");
     fireEvent.click(within(unknownRevenue as HTMLElement).getByRole("button"));
     expect(onNavigate).toHaveBeenCalledWith("unknownRevenue");
 
-    // 拆解失败单列一行，并把最集中的上游原因摆在行上。
+    // 拆解失败待办直接引导处理，原始错误文本留在诊断入口。
     expect(screen.getByText("拆解失败待排查")).toBeInTheDocument();
+    expect(screen.getByText("查看失败记录和处理建议")).toBeInTheDocument();
     expect(
-      screen.getByText("model gemini-3.8-flash is not available"),
-    ).toBeInTheDocument();
+      screen.queryByText("model gemini-3.8-flash is not available"),
+    ).toBeNull();
     const analysisFailures = screen.getByText("拆解失败待排查").closest("li");
     fireEvent.click(
       within(analysisFailures as HTMLElement).getByRole("button"),
@@ -267,7 +273,7 @@ describe("OverviewPage", () => {
     fireEvent.click(within(customer).getByRole("button", { name: "去处理" }));
     expect(onNavigate).toHaveBeenCalledWith("openTickets");
     const system = screen.getByRole("region", { name: "系统待办" });
-    expect(within(system).getByText("告警聚合暂不可用")).toBeInTheDocument();
+    expect(within(system).getByText("暂时无法读取告警")).toBeInTheDocument();
     expect(within(system).getByText("—")).toBeInTheDocument();
     for (const group of ["资金", "生成", "内容"]) {
       expect(
@@ -311,7 +317,7 @@ describe("OverviewPage", () => {
     // 条数同口径的 attention=unknown_cost 清单（AdminApp 三层映射已就绪）。
     const unknownCost = screen.getByText("今日成本待核对").closest("li");
     expect(unknownCost).toHaveTextContent("3");
-    expect(unknownCost).toHaveTextContent("成本金额尚未确定");
+    expect(unknownCost).toHaveTextContent("查看哪些业务还需确认成本");
     fireEvent.click(within(unknownCost as HTMLElement).getByRole("button"));
     expect(onNavigate).toHaveBeenCalledWith("unknownCost");
   });

@@ -64,7 +64,7 @@ test("selected month read and export use exact same dates, actual methods and un
       end_date: "2026-09-30",
     }),
   );
-  expect(screen.getAllByText(/未配置积分兑换比例/).length).toBeGreaterThan(0);
+  expect(screen.getByText("含可用和冻结积分")).toBeInTheDocument();
 });
 test("auditor can choose month and open anomalies but cannot export", async () => {
   const onOpen = vi.fn();

@@ -218,20 +218,14 @@ def test_dashboard_summary_counts(
     todos = payload["todos"]
     assert todos["failed_tasks_7d"] == 1
     assert todos["reconciliation_problems"] == 0
-    from app.billing_catalog import SERVICES
+    from app.billing_catalog import unconfigured_cost_services
+    from app.db_portable import BusinessConnection
 
-    # 未配置价目数 = 可计费科目数 − 已有价目行数。迁移链从
-    # 20261120T1000_account_diagnosis 起自带种子价目，不能再假设新库是零价目。
+    # 看板与费率告警共用可处理的科目范围，历史只读价目不计入待配置。
     with psycopg.connect(dashboard_pg_dsn) as conn:
-        configured = int(
-            conn.execute(
-                "SELECT count(*) FROM billing_tariffs WHERE service = ANY(%s)",
-                (sorted(SERVICES),),
-            ).fetchone()[0]
-        )
-    assert todos["unconfigured_rates"] == (
-        sum(s.customer_charge_allowed for s in SERVICES.values()) - configured
-    )
+        missing = unconfigured_cost_services(BusinessConnection.postgres(conn))
+    assert todos["unconfigured_rates"] == len(missing)
+    assert not {"viral_search", "viral_detail", "viral_copy"}.intersection(missing)
     assert todos["unknown_cost_records"] == 0
     assert "device_slots" not in payload
     assert "online_devices" not in payload["today"]
@@ -505,10 +499,13 @@ def test_dashboard_and_statistics_share_settled_financial_facts(
     client,
     dashboard_pg_dsn,
 ):
+    from app.billing_catalog import unconfigured_cost_services
     from app.billing_reports import date_bounds, statistics
     from app.db_portable import BusinessConnection
 
     with psycopg.connect(dashboard_pg_dsn) as raw:
+        missing_before = unconfigured_cost_services(BusinessConnection.postgres(raw))
+        assert {"analysis", "first_frame"} <= set(missing_before)
         today = raw.execute("SELECT (now() AT TIME ZONE 'Asia/Shanghai')::date").fetchone()[0]
         lower, upper = date_bounds(today, today)
         # Paid partial delivery, gifted credits, and a failed/refunded request.
@@ -562,12 +559,8 @@ def test_dashboard_and_statistics_share_settled_financial_facts(
     assert payload["today"]["recharge_fen"] == 10000  # Never added to consumption income.
     assert payload["today"]["output_seconds"] == 15.08
     assert payload["today"]["margin_pct"] == 93
-    # Zero cost is configured, NULL is not。本用例只为 analysis 配了成本单价，故计数 =
-    # 全部对客收费科目 - analysis。其中含五个爆款科目（viral_search /
-    # viral_search_refresh / viral_statistics / viral_detail / viral_copy，均未配置
-    # 费率 = NULL），加上 16-30 秒长档科目 video_768p_long（本场景未种子，同样
-    # 未配置），所以是 18。
-    assert payload["todos"]["unconfigured_rates"] == 18
+    # 零成本配置会关闭待办，NULL 仍待配置。
+    assert payload["todos"]["unconfigured_rates"] == len(missing_before) - 1
 
     with psycopg.connect(dashboard_pg_dsn) as raw:
         _billing_fact(raw, when=lower, revenue=None, costs=("1",))

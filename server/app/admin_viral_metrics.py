@@ -37,9 +37,9 @@ def video_business_metrics(
     rows = conn.execute(
         f"""
         SELECT {WALLET_OWNER_SQL} AS wallet_owner_id,o.service,o.charged_credits,
-               o.revenue_fen,o.completed_at,o.user_id AS actor_user_id,
+               o.effective_revenue_fen AS revenue_fen,o.completed_at,o.user_id AS actor_user_id,
                COALESCE(u.display_name,u.username) AS actor_name
-        FROM billing_operations o JOIN viral_videos v ON v.platform=%s AND v.video_id=%s
+        FROM billing_effective_operations o JOIN viral_videos v ON v.platform=%s AND v.video_id=%s
         LEFT JOIN users u ON u.id=o.user_id
         WHERE o.service IN ('viral_detail','viral_copy') AND o.state='SUCCEEDED'
           AND o.user_id IS NOT NULL AND {PURCHASE_VIDEO_MATCH_SQL}

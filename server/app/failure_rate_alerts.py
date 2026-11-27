@@ -390,23 +390,6 @@ class AlertsOverview(BaseModel):
     generated_at: str
 
 
-def _unconfigured_rate_services(conn: BusinessConnection) -> list[str]:
-    """对客收费但未配成本单价的科目（口径同总览待办 unconfigured_rates）。"""
-    from app.billing_catalog import SERVICES
-
-    configured = {
-        str(row[0])
-        for row in conn.execute(
-            "SELECT service FROM billing_tariffs WHERE unit_cost_fen IS NOT NULL"
-        ).fetchall()
-    }
-    return sorted(
-        key
-        for key, item in SERVICES.items()
-        if item.customer_charge_allowed and key not in configured
-    )
-
-
 def _reconciliation_bucket_counts(conn: BusinessConnection) -> dict[str, int]:
     """三类对账异常的分桶计数（与 /billing-reconciliation 汇总逐字同口径）。"""
     row = conn.execute(
@@ -468,6 +451,8 @@ def _sensitive_audit_digest(
 
 def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
     """四类告警聚合：失败率 / 成本未配置 / 对账异常 / 高敏审计（近 24h）。"""
+    from app.billing_catalog import unconfigured_cost_services
+
     failure = build_failure_rate_report(conn)
     items: list[AlertOverviewItem] = []
 
@@ -499,19 +484,19 @@ def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
                 count=sum(group.failed for group in breach),
             )
         )
-    unconfigured = _unconfigured_rate_services(conn)
+    unconfigured = unconfigured_cost_services(conn)
     if unconfigured:
         items.append(
             AlertOverviewItem(
                 key="unconfigured_rates",
                 severity="warn",
-                headline=f"{len(unconfigured)} 个对客业务未配置成本单价",
+                headline=f"{len(unconfigured)} 项服务未配置成本单价",
                 detail=(
                     # 实测指路纠偏（ADM-07）：系统设置没有"服务配置"页签，
                     # 实际入口是"价格与套餐 → 逐项成本与售价"。
-                    "未配置的成本不会记 0，也不会进毛利；在"
-                    "「系统设置 → 价格与套餐 → 逐项成本与售价」"
-                    "补齐后毛利口径才完整。"
+                    "包括对客业务和过去 24 小时有实际用量的内部服务。请到"
+                    "「系统设置 → 价格与套餐 → 逐项成本与售价」配置后续单价。"
+                    "历史账目仍按当时的凭证核对。"
                 ),
                 count=len(unconfigured),
             )

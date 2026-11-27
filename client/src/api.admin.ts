@@ -4746,6 +4746,7 @@ export type DashboardSummary = {
     pending_orders?: number;
     /** 队列需人工处理：口播隔离区 + 卡住的素材准备。 */
     queue_attention?: number;
+    frozen_billing_reviews?: number;
     /** 内容素材准备失败条数。 */
     content_prepare_failed?: number;
     /** 当前命中的告警条数；告警聚合不可用时为 null。 */
@@ -4848,9 +4849,12 @@ export async function paidTestControlProvider(
   }
 }
 
-export async function downloadBillingCsv(query: string): Promise<string> {
+export async function downloadBillingCsv(
+  query: string,
+  reviews = false,
+): Promise<string> {
   const response = await requestControl(
-    `/api/control/billing/export?${query}`,
+    `/api/control/billing/${reviews ? "reviews/export" : "export"}?${query}`,
     {},
   );
   if (!response.ok)
@@ -4858,7 +4862,7 @@ export async function downloadBillingCsv(query: string): Promise<string> {
   const url = URL.createObjectURL(await response.blob());
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "逐项经营明细.csv";
+  anchor.download = reviews ? "凭证核对清单.csv" : "逐项经营明细.csv";
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return response.headers.get("X-Export-Truncated") === "true"

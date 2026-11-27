@@ -194,11 +194,6 @@ export function OverviewPage({
       return `C ${middleX} ${previous.y}, ${middleX} ${point.y}, ${point.x} ${point.y}`;
     })
     .join(" ");
-  // 拆解失败中最集中的那条上游原因，直接摆在待办行上供定位。
-  const topAnalysisReason =
-    todos.analysis_failure_reasons?.[0]?.reason ??
-    todos.analysis_failure_reasons?.[0]?.error_code ??
-    undefined;
   const todoItems: Array<{
     key: string;
     group: TodoGroup;
@@ -217,15 +212,14 @@ export function OverviewPage({
       tab: "failedGenerationRecords",
     },
     {
-      // 拆解是付费上游调用：2026-09-20 那种「拆解全挂、总览全绿」不能再出现，
-      // 单列一行并把最集中的上游原因直接摆出来。
+      // 拆解失败单独列出，便于管理员直接打开对应的失败记录。
       key: "analysis",
       group: "生成",
       label: "拆解失败待排查",
       count: todos.analysis_failures_7d ?? 0,
       tone: "danger",
       tab: "analysisFailures",
-      hint: topAnalysisReason,
+      hint: "查看失败记录和处理建议",
     },
     {
       key: "recon",
@@ -251,12 +245,12 @@ export function OverviewPage({
       // unknown_revenue_count 是收入无法确定的操作数（同文件 :322）。
       key: "pendingOps",
       group: "资金",
-      label: "今日操作待结算",
+      label: "今日待结算",
       count: today.pending_operations ?? 0,
       tone: "info",
       // 这两项是计费操作口径，清单在经营分析的成本明细里（方案 P0-5）。
       tab: "pendingOperations",
-      hint: "当日金额尚未定稿",
+      hint: "这些记录的最终金额还未确定",
     },
     {
       // P0-5 收口：unknown_cost_records 此前只喂给「今日成本」KpiCard 的
@@ -269,18 +263,27 @@ export function OverviewPage({
       count: todos.unknown_cost_records ?? 0,
       tone: "warn",
       tab: "unknownCost",
-      hint: "成本金额尚未确定",
+      hint: "查看哪些业务还需确认成本",
     },
     {
       key: "unknownRevenue",
       group: "资金",
-      label: "今日收入未确定",
+      label: "今日收入待核对",
       count: today.unknown_revenue_operations ?? 0,
       tone: "warn",
       tab: "unknownRevenue",
-      hint: "毛利可能偏低",
+      hint: "这些金额尚未计入已确认收入",
     },
     // 全局待办（整改 T11）：每项计数与跳转后清单同口径，点进去条数一致。
+    {
+      key: "frozenBillingReviews",
+      group: "资金",
+      label: "积分冻结待处理",
+      count: todos.frozen_billing_reviews ?? 0,
+      tone: "danger",
+      tab: "frozenBillingReviews",
+      hint: "请核实任务结果和积分去向",
+    },
     {
       key: "pendingOrders",
       group: "资金",
@@ -288,7 +291,7 @@ export function OverviewPage({
       count: todos.pending_orders ?? 0,
       tone: "info",
       tab: "pendingOrders",
-      hint: "含客户放弃支付的订单；久未到账可查单补单",
+      hint: "客户称已付款时，可查询订单确认到账情况",
     },
     {
       key: "queueAttention",
@@ -297,7 +300,7 @@ export function OverviewPage({
       count: todos.queue_attention ?? 0,
       tone: "danger",
       tab: "queueAttention",
-      hint: "隔离区冻结了客户预扣积分",
+      hint: "异常任务可能仍占用客户积分",
     },
     {
       key: "openTickets",
@@ -322,7 +325,7 @@ export function OverviewPage({
       count: todos.active_alerts === undefined ? 0 : todos.active_alerts,
       tone: "danger",
       tab: "activeAlerts",
-      hint: todos.active_alerts === null ? "告警聚合暂不可用" : undefined,
+      hint: todos.active_alerts === null ? "暂时无法读取告警" : undefined,
     },
   ];
 
@@ -340,7 +343,7 @@ export function OverviewPage({
         </p>
       )}
       <div className="dashboard-kpis">
-        <h2 className="dashboard-kpi-group">今日</h2>
+        <h2 className="dashboard-kpi-group">核心指标</h2>
         <KpiCard
           icon={clapperboardIcon}
           label="今日生成"
@@ -363,7 +366,7 @@ export function OverviewPage({
           value={yuanOrUnknown(today.cost_fen, todos.unknown_cost_records)}
           sub={
             today.cost_fen == null
-              ? "结算或成本待核对"
+              ? "部分业务还未结算或确认成本"
               : yesterday?.cost_fen != null
                 ? `已确认成本 · 昨日 ¥${fenToYuan(yesterday.cost_fen)}`
                 : "已确认成本"
@@ -380,8 +383,10 @@ export function OverviewPage({
           }
           sub={
             today.margin_pct == null
-              ? "利润率未知"
-              : `利润率 ${today.margin_pct}%`
+              ? today.gross_fen == null
+                ? "账务核对后显示毛利率"
+                : "无收入，无法计算毛利率"
+              : `毛利率 ${today.margin_pct}%`
           }
         />
         <KpiCard
@@ -390,14 +395,11 @@ export function OverviewPage({
           value={`¥${fenToYuan(today.recharge_fen)}`}
           sub={`${today.recharge_orders ?? 0} 单`}
         />
-        {/* 存量指标与当日指标分开：有效客户不是「今天」发生的数。对账异常
-            只在待办里出现一次，不再与 KPI 卡重复。 */}
-        <h2 className="dashboard-kpi-group">存量</h2>
         <KpiCard
           icon={usersIcon}
           label="有效客户"
           value={String(today.active_customers)}
-          sub="已启用的客户账户"
+          sub="当前存量 · 已启用的客户账户"
         />
       </div>
 
@@ -422,7 +424,7 @@ export function OverviewPage({
                 className="dashboard-axis dashboard-axis--left"
                 aria-hidden="true"
               >
-                <span>¥{Math.round(maxCost / 100).toLocaleString()}</span>
+                <span>¥{fenToYuan(maxCost)}</span>
                 <span>¥0</span>
               </div>
               <div

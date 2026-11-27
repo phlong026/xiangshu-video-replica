@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReportsPage } from "./ReportsPage";
 
 const exportSummary = vi.fn();
@@ -14,39 +14,52 @@ vi.mock("../api.admin", () => ({
 
 describe("ReportsPage", () => {
   beforeEach(() => {
+    vi.setSystemTime(new Date("2026-11-25T05:00:00Z"));
     exportSummary.mockReset().mockResolvedValue({ filename: "x.csv" });
     exportBilling.mockReset().mockResolvedValue({ filename: "y.csv.gz" });
     listRecent.mockReset().mockResolvedValue({ items: [] });
   });
+  afterEach(() => vi.useRealTimers());
 
-  it("季度模式按自然季度起止导出（第 4 季度 = 10-01 至 12-31）", async () => {
+  it("已结束季度按自然季度导出，当前季度截到北京时间今天", async () => {
     render(<ReportsPage />);
+    expect(
+      screen.getByText(
+        "当前区间：2026-11-01 至 2026-11-25（共 25 天） · 本期截至今天",
+      ),
+    ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("区间类型"), {
       target: { value: "quarter" },
     });
     fireEvent.change(screen.getByLabelText("年份"), {
-      target: { value: "2026" },
+      target: { value: "2025" },
     });
     fireEvent.change(screen.getByLabelText("季度"), { target: { value: "4" } });
     expect(
-      screen.getByText("当前区间：2026-10-01 至 2026-12-31（共 92 天）"),
+      screen.getByText("当前区间：2025-10-01 至 2025-12-31（共 92 天）"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", { name: "导出 CSV" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "导出经营季报 CSV" }));
     await waitFor(() =>
       expect(exportSummary).toHaveBeenCalledWith({
         kind: "business",
-        start_date: "2026-10-01",
-        end_date: "2026-12-31",
+        start_date: "2025-10-01",
+        end_date: "2025-12-31",
       }),
     );
     // 季度长度（92 天）账务明细仍可导出。
-    fireEvent.click(screen.getAllByRole("button", { name: "导出 CSV" })[2]);
+    fireEvent.click(screen.getByRole("button", { name: "导出账务明细 CSV" }));
     await waitFor(() =>
       expect(exportBilling).toHaveBeenCalledWith({
-        start_date: "2026-10-01",
-        end_date: "2026-12-31",
+        start_date: "2025-10-01",
+        end_date: "2025-12-31",
       }),
     );
+    fireEvent.change(screen.getByLabelText("年份"), {
+      target: { value: "2026" },
+    });
+    expect(
+      screen.getByText(/2026-10-01 至 2026-11-25.*本期截至今天/),
+    ).toBeInTheDocument();
   });
 
   it("自定义区间：未选完、倒置、超长都给出原因并禁用；超过 92 天只禁用账务明细", () => {
@@ -55,7 +68,9 @@ describe("ReportsPage", () => {
       target: { value: "custom" },
     });
     expect(screen.getByText("请先选定报表区间。")).toBeInTheDocument();
-    for (const button of screen.getAllByRole("button", { name: "导出 CSV" }))
+    for (const button of screen.getAllByRole("button", {
+      name: /^导出.+ CSV$/,
+    }))
       expect(button).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText("开始日期"), {
@@ -64,7 +79,7 @@ describe("ReportsPage", () => {
     fireEvent.change(screen.getByLabelText("结束日期"), {
       target: { value: "2026-06-30" },
     });
-    const buttons = screen.getAllByRole("button", { name: "导出 CSV" });
+    const buttons = screen.getAllByRole("button", { name: /^导出.+ CSV$/ });
     expect(buttons[0]).toBeEnabled();
     expect(buttons[1]).toBeEnabled();
     expect(buttons[2]).toBeDisabled();
@@ -95,7 +110,7 @@ describe("ReportsPage", () => {
       await screen.findByText(/财务甲 · 资金报表 · 2026-10-01 至 2026-10-31/),
     ).toBeInTheDocument();
     const before = listRecent.mock.calls.length;
-    fireEvent.click(screen.getAllByRole("button", { name: "导出 CSV" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "导出资金月报 CSV" }));
     await waitFor(() => expect(listRecent.mock.calls.length).toBe(before + 1));
   });
 
@@ -108,7 +123,9 @@ describe("ReportsPage", () => {
       // （main 侧修过同一处事故，T42 重写本页时把这道防护一并带过来）。
       fireEvent.change(input, { target: { value } });
       expect(screen.getByText("请先选定报表区间。")).toBeInTheDocument();
-      for (const button of screen.getAllByRole("button", { name: "导出 CSV" }))
+      for (const button of screen.getAllByRole("button", {
+        name: /^导出.+ CSV$/,
+      }))
         expect(button).toBeDisabled();
     }
     fireEvent.change(input, { target: { value: "2026-01" } });

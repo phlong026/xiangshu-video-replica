@@ -19,10 +19,12 @@ os.environ.setdefault(
 
 import psycopg
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from pg_test_kit import (
     create_test_database,
     drop_test_database,
+    password_admin_session,
     require_pg_or_explicit_skip,
     upgrade_test_database_to_head,
 )
@@ -190,10 +192,72 @@ def _seed_video_task(dsn: str, *, task_id: str, status: str, seconds: int | None
 def _queue_rows(dsn: str) -> list[dict[str, object]]:
     with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as pg:
         rows = pg.execute(
-            "SELECT service, source_id, reason, state, check_count "
+            "SELECT service, source_id, reason, state, check_count, resolution "
             "FROM billing_reconciliation_items ORDER BY source_id"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def test_console_queues_video_receipt_without_touching_frozen_credits(reconcile_db: str) -> None:
+    from app.admin_billing_reconciliation_routes import router
+
+    _reset(reconcile_db)
+    _seed_video_task(
+        reconcile_db,
+        task_id="verify_video",
+        status="SUBMISSION_UNCERTAIN",
+        seconds=None,
+    )
+    _seed_pending_operation(
+        reconcile_db,
+        operation_id="verify_bill",
+        service="video_768p",
+        source_id="verify_video",
+        reserved=30,
+    )
+    with psycopg.connect(reconcile_db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id,username,display_name,role) "
+            "VALUES ('verify-admin','verify-admin','财务测试','admin')"
+        )
+        conn.execute(
+            "UPDATE generation_tasks SET provider_task_id='fixture-receipt' WHERE id='verify_video'"
+        )
+    with pg_transaction() as raw:
+        enqueue_stuck_billing_operations(BusinessConnection.postgres(raw))
+
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        csrf = password_admin_session(client, "verify-admin").json()["csrf_token"]
+        headers = {"X-Admin-CSRF": csrf}
+        rows = client.get("/api/control/billing-reconciliation/queue", headers=headers).json()
+        item = rows["items"][0]
+        assert item["can_verify_generation"] is True
+        path = f"/api/control/billing-reconciliation/items/{item['id']}/verify-generation"
+        payload = {"confirm": True, "reason": "核对测试回执"}
+        first = client.post(
+            path, headers={**headers, "Idempotency-Key": "video-verify-1"}, json=payload
+        )
+        assert first.status_code == 202, first.text
+        again = client.post(
+            path, headers={**headers, "Idempotency-Key": "video-verify-2"}, json=payload
+        )
+        assert again.status_code == 202 and again.json() == first.json()
+        assert (
+            client.get("/api/control/billing-reconciliation/queue", headers=headers).json()[
+                "items"
+            ][0]["generation_check_status"]
+            == "PENDING"
+        )
+
+    with psycopg.connect(reconcile_db) as conn:
+        assert conn.execute(
+            "SELECT state FROM billing_operations WHERE id='verify_bill'"
+        ).fetchone() == ("PENDING",)
+        assert conn.execute(
+            "SELECT reserved_credits FROM wallets WHERE user_id='user_1'"
+        ).fetchone() == (30,)
 
 
 def test_enqueue_classifies_stuck_reasons(reconcile_db: str) -> None:
@@ -425,7 +489,7 @@ def test_manual_resolve_requires_terminal_billing(reconcile_db: str) -> None:
 
 def test_next_step_copy_never_promises_refund(reconcile_db: str) -> None:
     # 队列话术红线：升级只触发人工，不承诺退分。
-    assert "退分" in next_step_for("ESCALATED", "ORPHAN_SOURCE_MISSING")
+    assert "请走审批" in next_step_for("ESCALATED", "ORPHAN_SOURCE_MISSING")
     assert "自动退" not in next_step_for("ESCALATED", "UNKNOWN_TIMEOUT")
     assert "人工" in next_step_for("ESCALATED", "UNKNOWN_TIMEOUT")
 
@@ -515,3 +579,14 @@ def test_recheck_cap_stops_rechecking(reconcile_db: str, monkeypatch: pytest.Mon
     rows = {str(r["source_id"]): r for r in _queue_rows(dsn)}
     assert int(rows["video_cap"]["check_count"]) == 1
     assert int(rows["video_open"]["check_count"]) == 2
+
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute("UPDATE billing_reconciliation_items SET last_checked_at=now()")
+        finish_operation(conn, operation_id="op_cap", units=0, succeeded=False, cancelled=True)
+        late = process_reconciliation_items(conn)
+    assert late == {"resolved": 1, "escalated": 0, "rechecked": 0}
+    rows = {str(r["source_id"]): r for r in _queue_rows(dsn)}
+    assert rows["video_cap"]["state"] == "RESOLVED"
+    assert rows["video_cap"]["resolution"] == "AUTO_TERMINAL_CANCELLED"
+    assert int(rows["video_cap"]["check_count"]) == 1

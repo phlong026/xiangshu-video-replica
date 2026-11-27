@@ -11,6 +11,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { adminRead, adminWrite } from "../api.admin";
 import { DataTable } from "./ui/DataTable";
+import { useHashParam } from "./ui/useHashParam";
+import { formatDateTime } from "./ui/vocabulary";
 
 type ReconciliationItem = {
   id: string;
@@ -34,6 +36,8 @@ type ReconciliationItem = {
   created_at: string;
   updated_at: string;
   next_step: string;
+  can_verify_generation?: boolean;
+  generation_check_status?: string | null;
 };
 
 const SERVICE_LABELS: Record<string, string> = {
@@ -47,14 +51,19 @@ const SERVICE_LABELS: Record<string, string> = {
 
 const STATE_LABELS: Record<ReconciliationItem["state"], string> = {
   OPEN: "待核对",
-  ESCALATED: "已升级人工",
-  RESOLVED: "已收口",
+  ESCALATED: "需要人工处理",
+  RESOLVED: "已完成核对",
 };
 
 type StateFilter = "ALL" | ReconciliationItem["state"];
 
-function waitingHours(created_at: string): number {
-  return Math.max(0, (Date.now() - new Date(created_at).getTime()) / 3_600_000);
+function waitingTime(createdAt: string, resolvedAt: string | null): string {
+  const end = resolvedAt ? Date.parse(resolvedAt) : Date.now();
+  const hours = Math.max(0, (end - Date.parse(createdAt)) / 3_600_000);
+  if (!Number.isFinite(hours)) return "—";
+  if (hours < 1) return "不到 1 小时";
+  if (hours < 24) return `${Math.floor(hours)} 小时`;
+  return `${Math.floor(hours / 24)} 天 ${Math.floor(hours % 24)} 小时`;
 }
 
 export function BillingReconciliationQueue({
@@ -64,7 +73,11 @@ export function BillingReconciliationQueue({
 }) {
   const [items, setItems] = useState<ReconciliationItem[] | null>(null);
   const [total, setTotal] = useState<number | null>(null);
-  const [stateFilter, setStateFilter] = useState<StateFilter>("ALL");
+  const [stateFilter, setStateFilter] = useHashParam<StateFilter>(
+    "status",
+    "ALL",
+    ["ALL", "OPEN", "ESCALATED", "RESOLVED"],
+  );
   const [error, setError] = useState("");
   // 忙碌用计数器而不是布尔：扫描/收口是"写"，写完还要触发一次读。若用布尔，
   // 慢写操作的 finally 会把并行中读请求的忙碌态提前清掉，按钮提前解禁。
@@ -73,6 +86,8 @@ export function BillingReconciliationQueue({
   // 收口交互：正在填写收口备注的条目 id 与备注文本。
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [resolveNote, setResolveNote] = useState("");
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [verifyReason, setVerifyReason] = useState("");
   // 请求序号：筛选切换后早发请求可能晚到，过期响应一律丢弃，
   // 不让旧数据覆盖新筛选下的列表。
   const loadSeq = useRef(0);
@@ -95,14 +110,14 @@ export function BillingReconciliationQueue({
         total: number;
       }>(
         `/api/control/billing-reconciliation/queue?limit=100${query}`,
-        "核对队列读取失败，请稍后重试。",
+        "卡单清单加载失败，请稍后重试。",
       );
       if (seq !== loadSeq.current) return;
       setItems(body.items);
       setTotal(body.total);
     } catch (cause) {
       if (seq !== loadSeq.current) return;
-      setError(cause instanceof Error ? cause.message : "核对队列读取失败");
+      setError(cause instanceof Error ? cause.message : "卡单清单加载失败");
     } finally {
       setBusyCount((count) => Math.max(0, count - 1));
     }
@@ -121,11 +136,11 @@ export function BillingReconciliationQueue({
         "/api/control/billing-reconciliation/scan",
         {},
         "管理端手动触发卡单扫描",
-        "核对队列扫描暂不可用，请稍后重试。",
+        "暂时无法查找卡单，请稍后重试。",
       );
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "扫描失败");
+      setError(cause instanceof Error ? cause.message : "查找卡单失败");
     } finally {
       setBusyCount((count) => Math.max(0, count - 1));
     }
@@ -140,27 +155,47 @@ export function BillingReconciliationQueue({
         `/api/control/billing-reconciliation/items/${item.id}/resolve`,
         { note: resolveNote },
         "人工核对收口卡单计费预留",
-        "收口请求失败，请稍后重试。",
+        "未能完成核对，请稍后重试。",
       );
       setResolvingId(null);
       setResolveNote("");
       await load();
     } catch (cause) {
       // 409（计费仍未终态）等信息会带后端原文展示，不吞。
-      setError(cause instanceof Error ? cause.message : "收口失败");
+      setError(cause instanceof Error ? cause.message : "未能完成核对");
+    } finally {
+      setBusyCount((count) => Math.max(0, count - 1));
+    }
+  }
+
+  async function submitVerify(item: ReconciliationItem) {
+    if (readOnly || busy || !verifyReason.trim()) return;
+    setBusyCount((count) => count + 1);
+    setError("");
+    try {
+      await adminWrite(
+        `/api/control/billing-reconciliation/items/${encodeURIComponent(item.id)}/verify-generation`,
+        {},
+        verifyReason,
+        "未能提交视频查询，请稍后重试。",
+      );
+      setVerifyingId(null);
+      setVerifyReason("");
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "未能提交视频查询");
     } finally {
       setBusyCount((count) => Math.max(0, count - 1));
     }
   }
 
   return (
-    <section className="admin-panel" aria-label="卡单积分核对队列">
+    <section className="admin-panel" aria-label="卡单核对">
       <header className="admin-toolbar">
         <div>
-          <h2>卡单积分核对队列</h2>
+          <h2>卡单核对</h2>
           <p className="admin-hint">
-            未闭合的计费预留：证据齐了自动结算/释放；未知结果与孤儿源只升级
-            人工，系统绝不自动退分。收口走各业务专项对账或调账审批。
+            这些任务因账务待查而产生过积分冻结。请先核实任务结果，再确认积分已扣除或解除冻结。需要人工调整积分时，请走审批。
           </p>
         </div>
         <button
@@ -168,7 +203,7 @@ export function BillingReconciliationQueue({
           disabled={readOnly || busy}
           onClick={() => void rescan()}
         >
-          {busy ? "处理中…" : "立即扫描"}
+          {busy ? "处理中…" : "查找新卡单"}
         </button>
       </header>
       <div className="admin-toolbar">
@@ -181,14 +216,17 @@ export function BillingReconciliationQueue({
             }
           >
             <option value="ALL">全部状态</option>
-            <option value="OPEN">待核对</option>
-            <option value="ESCALATED">已升级人工</option>
-            <option value="RESOLVED">已收口</option>
+            <option value="OPEN">{STATE_LABELS.OPEN}</option>
+            <option value="ESCALATED">{STATE_LABELS.ESCALATED}</option>
+            <option value="RESOLVED">{STATE_LABELS.RESOLVED}</option>
           </select>
         </label>
         {total !== null ? (
           <p className="admin-hint">共 {total} 条（当前筛选）</p>
         ) : null}
+        <button type="button" disabled={busy} onClick={() => void load()}>
+          刷新处理状态
+        </button>
       </div>
       {error ? (
         <p role="alert" className="settings-error">
@@ -196,12 +234,12 @@ export function BillingReconciliationQueue({
         </p>
       ) : null}
       {items === null ? (
-        <p className="admin-hint">正在读取队列…</p>
+        <p className="admin-hint">正在加载卡单…</p>
       ) : items.length === 0 ? (
         <p className="admin-hint">当前筛选下没有卡单记录。</p>
       ) : (
         <DataTable
-          ariaLabel="卡单积分核对队列"
+          ariaLabel="卡单核对明细"
           headers={
             <>
               <th>状态</th>
@@ -209,7 +247,7 @@ export function BillingReconciliationQueue({
               <th>原因</th>
               <th>影响客户</th>
               <th>等待时长</th>
-              <th>重查次数</th>
+              <th>检查记录</th>
               <th>下一步</th>
               <th>操作</th>
             </>
@@ -224,22 +262,81 @@ export function BillingReconciliationQueue({
                 {item.provider_receipt_id ? (
                   <small className="admin-hint">
                     {" "}
-                    请求标识 {item.provider_receipt_id}
+                    查询编号 {item.provider_receipt_id}
                   </small>
                 ) : null}
               </td>
               <td>{item.owner_user_id ?? "—"}</td>
-              <td>{waitingHours(item.created_at).toFixed(1)} 小时</td>
-              <td>{item.check_count}</td>
+              <td>{waitingTime(item.created_at, item.resolved_at)}</td>
+              <td>
+                检查 {item.check_count} 次
+                {item.last_checked_at && (
+                  <small className="admin-hint">
+                    上次检查 {formatDateTime(item.last_checked_at)}
+                  </small>
+                )}
+              </td>
               <td>{item.next_step}</td>
               <td>
+                {item.generation_check_status && (
+                  <p role="status" className="admin-hint">
+                    {item.generation_check_status === "PENDING"
+                      ? "已提交查询，稍后刷新查看结果"
+                      : item.generation_check_status === "COMPLETED"
+                        ? "视频查询已结束，请核对积分记录"
+                        : "视频查询未完成，请到生成记录查看任务"}
+                  </p>
+                )}
+                {!readOnly &&
+                  item.can_verify_generation &&
+                  item.generation_check_status !== "PENDING" &&
+                  (verifyingId === item.id ? (
+                    <div className="admin-resolve-form">
+                      <input
+                        aria-label="查询原因"
+                        value={verifyReason}
+                        onChange={(event) =>
+                          setVerifyReason(event.target.value)
+                        }
+                      />
+                      <button
+                        type="button"
+                        disabled={busy || !verifyReason.trim()}
+                        onClick={() => void submitVerify(item)}
+                      >
+                        提交查询
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setVerifyingId(null);
+                          setVerifyReason("");
+                        }}
+                      >
+                        取消查询
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setResolvingId(null);
+                        setVerifyingId(item.id);
+                      }}
+                    >
+                      查询视频结果
+                    </button>
+                  ))}
                 {item.state !== "RESOLVED" && !readOnly ? (
                   resolvingId === item.id ? (
                     <div className="admin-resolve-form">
                       <input
                         name={`resolve-note-${item.id}`}
                         value={resolveNote}
-                        placeholder="核对凭据/结论备注（必填）"
+                        aria-label="核对结果"
+                        placeholder="填写核对结果和凭证（必填）"
                         onChange={(event) => setResolveNote(event.target.value)}
                       />
                       <button
@@ -247,7 +344,7 @@ export function BillingReconciliationQueue({
                         disabled={busy || resolveNote.trim().length === 0}
                         onClick={() => void submitResolve(item)}
                       >
-                        确认收口
+                        确认完成
                       </button>
                       <button
                         type="button"
@@ -269,7 +366,7 @@ export function BillingReconciliationQueue({
                         setResolveNote("");
                       }}
                     >
-                      收口
+                      完成核对
                     </button>
                   )
                 ) : (

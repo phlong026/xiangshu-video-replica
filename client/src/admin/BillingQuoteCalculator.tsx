@@ -8,7 +8,7 @@ import {
   listCustomers,
   submitBillingQuote,
 } from "../api.admin";
-import type { BillingService } from "./billingTypes";
+import { type BillingService, historicalPriceSubjects } from "./billingTypes";
 import { PageBanner } from "./ui/PageBanner";
 import { formatFen } from "./ui/vocabulary";
 
@@ -49,7 +49,15 @@ export function BillingQuoteCalculator({
       "读取业务失败",
     )
       .then((payload) => {
-        if (active) setCatalog(payload.services);
+        if (active) {
+          setCatalog(
+            payload.services.filter(
+              (item) =>
+                !historicalPriceSubjects.has(item.service) &&
+                item.service !== "viral_search",
+            ),
+          );
+        }
       })
       .catch((cause: unknown) => {
         if (active)

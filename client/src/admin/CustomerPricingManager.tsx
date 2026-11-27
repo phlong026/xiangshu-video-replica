@@ -197,7 +197,7 @@ export function CustomerPricingManager({
       {!data ? (
         !error && <p role="status">正在读取积分配置…</p>
       ) : (
-        <form onSubmit={save} className="admin-recharge-rate__form">
+        <form noValidate onSubmit={save} className="admin-recharge-rate__form">
           <label>
             每 1 元充值获得积分
             <input
@@ -212,47 +212,50 @@ export function CustomerPricingManager({
               onChange={(event) => setPointsPerYuan(event.target.value)}
             />
           </label>
-          <label>
-            全科目折扣（折）
-            <input
-              type="number"
-              min="0.001"
-              max="10"
-              step="0.001"
-              required
-              disabled={readOnly || busy}
-              value={discountFolds}
-              placeholder="10 表示原价"
-              onChange={(event) => setDiscountFolds(event.target.value)}
-            />
-          </label>
-          <label>
-            消费取整方式
-            <select
-              disabled={readOnly || busy}
-              value={rounding}
-              onChange={(event) =>
-                setRounding(event.target.value as "ceil" | "floor")
-              }
-            >
-              <option value="ceil">向上取整（不足 1 积分进位）</option>
-              <option value="floor">向下取整（不足 1 积分舍去）</option>
-            </select>
-          </label>
           {!readOnly && (
             <button type="submit" disabled={busy}>
               {busy ? "正在保存…" : "保存价格配置"}
             </button>
           )}
-          <p className="admin-recharge-rate__hint">
-            折扣与取整影响所有科目的报价：报价 = 单价 ×
-            折扣，带小数时按取整方式处理， 单次计费至少 1
-            积分；已受理任务保留受理时价格。
-          </p>
+          <details className="admin-rule-note admin-recharge-rate__advanced">
+            <summary>高级计价设置</summary>
+            <div className="admin-toolbar">
+              <label>
+                全科目折扣（折）
+                <input
+                  type="number"
+                  min="0.001"
+                  max="10"
+                  step="0.001"
+                  required
+                  disabled={readOnly || busy}
+                  value={discountFolds}
+                  placeholder="10 表示原价"
+                  onChange={(event) => setDiscountFolds(event.target.value)}
+                />
+              </label>
+              <label>
+                消费取整方式
+                <select
+                  disabled={readOnly || busy}
+                  value={rounding}
+                  onChange={(event) =>
+                    setRounding(event.target.value as "ceil" | "floor")
+                  }
+                >
+                  <option value="ceil">向上取整（不足 1 积分进位）</option>
+                  <option value="floor">向下取整（不足 1 积分舍去）</option>
+                </select>
+              </label>
+            </div>
+            <p className="admin-recharge-rate__hint">
+              折扣和取整用于新受理的任务。已受理任务沿用当时的价格。
+            </p>
+          </details>
         </form>
       )}
       <p className="admin-recharge-rate__note">
-        客户专项折扣与套餐权益已接入扣费链路：受理任务时与上表全局折扣取更优（折数更低者）计价，并随任务冻结，事后调整不影响已受理任务。例外：爆款数据采集按批次统一冻结全局价格，暂不享受客户专项折扣与套餐权益。
+        定价时采用客户、套餐和全科目折扣中的最低折数。爆款数据采集按整批使用全科目折扣。
       </p>
       {data && (
         <div className="admin-recharge-rate__history">

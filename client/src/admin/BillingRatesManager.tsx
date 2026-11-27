@@ -1,9 +1,14 @@
 import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 import { adminRead, adminWrite } from "../api.admin";
 import { costInCredits, creditsToCost } from "./billingAmounts";
-import { type BillingService, billingUnit } from "./billingTypes";
+import {
+  type BillingService,
+  billingUnit,
+  historicalPriceSubjects,
+} from "./billingTypes";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
+import { TabBar } from "./ui/TabBar";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 
 /**
@@ -105,6 +110,7 @@ export function BillingRatesManager({
   readOnly?: boolean;
 }) {
   const [catalog, setCatalog] = useState<Catalog>();
+  const [priceTab, setPriceTab] = useState("current");
   const [selected, setSelected] = useState<BillingService>();
   const [price, setPrice] = useState("");
   const [cost, setCost] = useState("");
@@ -305,18 +311,44 @@ export function BillingRatesManager({
       setBusy(false);
     }
   }
+  const customerServices =
+    catalog?.services.filter((service) => service.customer_charge_allowed) ??
+    [];
+  const historicalServices = customerServices.filter((service) =>
+    historicalPriceSubjects.has(service.service),
+  );
+  const pausedServices = customerServices.filter(
+    (service) =>
+      service.service === "viral_search" ||
+      (["viral_search_refresh", "viral_statistics"].includes(service.service) &&
+        (!service.tariff.enabled || !Number(service.tariff.unit_credits))),
+  );
+  const currentServices = customerServices.filter(
+    (service) =>
+      !historicalServices.includes(service) &&
+      !pausedServices.includes(service),
+  );
+  const displayedServices =
+    priceTab === "historical"
+      ? historicalServices
+      : priceTab === "paused"
+        ? pausedServices
+        : currentServices;
   const platformServices =
     catalog?.services.filter((service) => !service.customer_charge_allowed) ??
     [];
+  const otherPlatformServices = platformServices.filter(
+    (service) =>
+      service.zero_cost_platform ||
+      ["analysis_repair", "analysis_repair_deepseek"].includes(service.service),
+  );
   function renderHistoryRow(service: BillingService, unit: string) {
     const pointsPerYuan = catalog?.pricing?.points_per_yuan ?? null;
     return (
       <tr className="billing-rates-history">
         <td colSpan={8}>
           <p>
-            {
-              "价目历史按审计记录重建，历史账单上的「费率 V{n}」对应下表版本号；「当前行（无审计）」表示该版本来自旧写入路径，只有当前快照。"
-            }
+            按旧账单上的价目版本号查找。标为「仅保留价目」的版本缺少当时的调整记录。
           </p>
           {historyBusy && <p role="status">正在读取价目历史…</p>}
           {historyError && <PageBanner tone="error">{historyError}</PageBanner>}
@@ -335,7 +367,7 @@ export function BillingRatesManager({
                     <th>用户扣分</th>
                     <th>操作人</th>
                     <th>调整原因</th>
-                    <th>记录来源</th>
+                    <th>留档情况</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -367,9 +399,7 @@ export function BillingRatesManager({
                       <td>{item.actor_username ?? "—"}</td>
                       <td>{item.reason ?? "—"}</td>
                       <td>
-                        {item.source === "audit"
-                          ? "审计记录"
-                          : "当前行（无审计）"}
+                        {item.source === "audit" ? "有调整记录" : "仅保留价目"}
                       </td>
                     </tr>
                   ))}
@@ -490,10 +520,31 @@ export function BillingRatesManager({
       </Fragment>
     );
   }
+  function renderPlatformTable(services: BillingService[], label: string) {
+    return (
+      <div className="admin-table-scroll admin-table-card billing-rates-table">
+        <table className="admin-data-table" aria-label={label}>
+          <thead>
+            <tr>
+              <th>业务</th>
+              <th>单位</th>
+              <th>成本（元）</th>
+              <th>售价（元主，积分辅）</th>
+              <th>毛利率</th>
+              <th>收费设置</th>
+              <th>最后修改</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>{services.map(renderPlatformRow)}</tbody>
+        </table>
+      </div>
+    );
+  }
   return (
     <section className="admin-panel" aria-label="逐项成本与售价">
       <p>
-        爆款视频数据按后台采集的已确认接口请求次数，使用采集批次开始时的单次售价向客户扣分；搜索分页和视频号详情分别计次。未配置或未启用售价时不向客户收费。视频库列表读取不扣积分；详情与文案按对应计费项目及已有授权判断是否扣分。
+        爆款视频详情免费查看。新版文案提取按语音转写收费，采集费用可在「爆款视频数据请求」核对。
       </p>
       <div className="billing-rates-toolbar">
         <span>
@@ -533,6 +584,31 @@ export function BillingRatesManager({
           onSubmit={save}
           aria-label={selected ? `配置 ${selected.name}` : "API 端点价格表"}
         >
+          <TabBar
+            ariaLabel="价目分类"
+            active={priceTab}
+            items={[
+              { id: "current", label: "日常价目" },
+              { id: "paused", label: "暂停项目" },
+              { id: "historical", label: "历史价目" },
+            ]}
+            onChange={(next) => {
+              setSelected(undefined);
+              setError("");
+              closeHistory();
+              setPriceTab(next);
+            }}
+          />
+          {priceTab === "paused" && (
+            <p className="admin-hint">
+              客户搜索入口已停止使用。刷新和互动统计需要恢复业务时，可在这里维护价目。
+            </p>
+          )}
+          {priceTab === "historical" && (
+            <p className="admin-hint">
+              这些售价仅供核对旧账，点「历史」查看原价目和修改记录。
+            </p>
+          )}
           <div className="admin-table-scroll admin-table-card billing-rates-table">
             <table className="admin-data-table" aria-label="API 端点成本与售价">
               <thead>
@@ -548,142 +624,151 @@ export function BillingRatesManager({
                 </tr>
               </thead>
               <tbody>
-                {catalog.services
-                  .filter((service) => service.customer_charge_allowed)
-                  .map((service) => {
-                    const editing = selected?.service === service.service;
-                    const historyOpen = historyService === service.service;
-                    const unit = billingUnit[service.unit];
-                    const displayedCost = costInCredits(
-                      service.tariff.unit_cost_fen,
-                      catalog.pricing?.points_per_yuan ?? null,
-                    );
-                    return (
-                      <Fragment key={service.service}>
-                        <tr className={editing ? "is-editing" : undefined}>
-                          <td>
-                            <strong>{service.name}</strong>
-                            <details>
-                              <summary>技术详情</summary>
-                              <code>{service.service}</code>
-                            </details>
-                          </td>
-                          <td>每{unit}</td>
-                          <td>
-                            {editing ? (
-                              <input
-                                ref={costInput}
-                                aria-label={`成本（积分 / ${unit}，留空待核对）`}
-                                value={cost}
-                                onChange={(event) =>
-                                  setCost(event.target.value)
-                                }
-                                inputMode="decimal"
-                                placeholder="待配置"
-                                disabled={
-                                  busy ||
-                                  readOnly ||
-                                  !catalog.pricing?.points_per_yuan
-                                }
-                              />
-                            ) : (
-                              costDisplay(
-                                service.tariff.unit_cost_fen,
-                                roundToOneDecimal(displayedCost),
-                              )
-                            )}
-                          </td>
-                          <td>
-                            {editing ? (
-                              <input
-                                aria-label={`售价（积分 / ${unit}）`}
-                                value={price}
-                                onChange={(event) =>
-                                  setPrice(event.target.value)
-                                }
-                                inputMode="decimal"
-                                placeholder="未配置"
-                                disabled={busy || readOnly}
-                              />
-                            ) : service.tariff.unit_credits != null ? (
-                              <>
-                                <strong>
-                                  {service.unit_price_fen == null
-                                    ? "换算待核对"
-                                    : `${formatFen(Number(service.unit_price_fen))}/${unit}`}
-                                </strong>
-                                <small>
-                                  {service.tariff.unit_credits} 积分/{unit}
-                                </small>
-                              </>
-                            ) : (
-                              "未配置"
-                            )}
-                          </td>
-                          <td>
-                            {service.gross_margin_percent == null
-                              ? service.tariff.unit_cost_fen == null
-                                ? "成本待核对"
-                                : !service.tariff.enabled ||
-                                    Number(service.tariff.unit_credits) === 0
-                                  ? "不适用"
-                                  : "换算待核对"
-                              : `${Number(service.gross_margin_percent).toFixed(1)}%`}
-                          </td>
-                          <td>
-                            {editing ? (
-                              <>
-                                <label>
-                                  <input
-                                    type="checkbox"
-                                    checked={enabled}
-                                    onChange={(event) =>
-                                      setEnabled(event.target.checked)
-                                    }
-                                    disabled={
-                                      busy ||
-                                      readOnly ||
-                                      !service.customer_charge_allowed
-                                    }
-                                  />
-                                  启用用户扣分
-                                </label>
-                                {service.unit === "second" && (
-                                  <select
-                                    aria-label="不足一秒的计费方式"
-                                    value={rounding}
-                                    onChange={(event) =>
-                                      setRounding(
-                                        event.target.value as "ceil" | "exact",
-                                      )
-                                    }
-                                    disabled={busy || readOnly}
-                                  >
-                                    <option value="ceil">向上取整到秒</option>
-                                    <option value="exact">按实际小数秒</option>
-                                  </select>
-                                )}
-                              </>
-                            ) : service.tariff.enabled &&
-                              Number(service.tariff.unit_credits) > 0 ? (
-                              "用户承担"
-                            ) : (
-                              "平台承担"
-                            )}
-                          </td>
-                          <td>
-                            {service.updated_by ? (
-                              <>
-                                <span>{service.updated_by}</span>
-                                <small>
-                                  {formatDateTime(service.updated_at)}
-                                </small>
-                              </>
-                            ) : (
-                              "—"
-                            )}
-                          </td>
-                          <td>
+                {displayedServices.length === 0 && (
+                  <tr>
+                    <td colSpan={8}>这一分类暂无价目。</td>
+                  </tr>
+                )}
+                {displayedServices.map((service) => {
+                  const editing = selected?.service === service.service;
+                  const historyOpen = historyService === service.service;
+                  const canEdit =
+                    priceTab !== "historical" &&
+                    service.service !== "viral_search";
+                  const unit = billingUnit[service.unit];
+                  const displayedCost = costInCredits(
+                    service.tariff.unit_cost_fen,
+                    catalog.pricing?.points_per_yuan ?? null,
+                  );
+                  return (
+                    <Fragment key={service.service}>
+                      <tr className={editing ? "is-editing" : undefined}>
+                        <td>
+                          <strong>{service.name}</strong>
+                          <details>
+                            <summary>技术详情</summary>
+                            <code>{service.service}</code>
+                          </details>
+                        </td>
+                        <td>每{unit}</td>
+                        <td>
+                          {editing ? (
+                            <input
+                              ref={costInput}
+                              aria-label={`成本（积分 / ${unit}，留空待核对）`}
+                              value={cost}
+                              onChange={(event) => setCost(event.target.value)}
+                              inputMode="decimal"
+                              placeholder="待配置"
+                              disabled={
+                                busy ||
+                                readOnly ||
+                                !catalog.pricing?.points_per_yuan
+                              }
+                            />
+                          ) : (
+                            costDisplay(
+                              service.tariff.unit_cost_fen,
+                              roundToOneDecimal(displayedCost),
+                            )
+                          )}
+                        </td>
+                        <td>
+                          {editing ? (
+                            <input
+                              aria-label={`售价（积分 / ${unit}）`}
+                              value={price}
+                              onChange={(event) => setPrice(event.target.value)}
+                              inputMode="decimal"
+                              placeholder="未配置"
+                              disabled={busy || readOnly}
+                            />
+                          ) : service.tariff.unit_credits != null ? (
+                            <>
+                              <strong>
+                                {service.unit_price_fen == null
+                                  ? "换算待核对"
+                                  : `${formatFen(Number(service.unit_price_fen))}/${unit}`}
+                              </strong>
+                              <small>
+                                {service.tariff.unit_credits} 积分/{unit}
+                              </small>
+                            </>
+                          ) : (
+                            "未配置"
+                          )}
+                        </td>
+                        <td>
+                          {service.gross_margin_percent == null
+                            ? service.tariff.unit_cost_fen == null
+                              ? "成本待核对"
+                              : !service.tariff.enabled ||
+                                  Number(service.tariff.unit_credits) === 0
+                                ? "不适用"
+                                : "换算待核对"
+                            : `${Number(service.gross_margin_percent).toFixed(1)}%`}
+                        </td>
+                        <td>
+                          {editing ? (
+                            <>
+                              <label>
+                                <input
+                                  type="checkbox"
+                                  checked={enabled}
+                                  onChange={(event) =>
+                                    setEnabled(event.target.checked)
+                                  }
+                                  disabled={
+                                    busy ||
+                                    readOnly ||
+                                    !service.customer_charge_allowed
+                                  }
+                                />
+                                启用用户扣分
+                              </label>
+                              {service.unit === "second" && (
+                                <select
+                                  aria-label="不足一秒的计费方式"
+                                  value={rounding}
+                                  onChange={(event) =>
+                                    setRounding(
+                                      event.target.value as "ceil" | "exact",
+                                    )
+                                  }
+                                  disabled={busy || readOnly}
+                                >
+                                  <option value="ceil">向上取整到秒</option>
+                                  <option value="exact">按实际小数秒</option>
+                                </select>
+                              )}
+                            </>
+                          ) : priceTab === "historical" ? (
+                            "仅供查账"
+                          ) : service.service === "viral_search" ? (
+                            "入口已停用"
+                          ) : priceTab === "paused" ? (
+                            "已暂停收费"
+                          ) : service.tariff.enabled &&
+                            Number(service.tariff.unit_credits) > 0 ? (
+                            "用户承担"
+                          ) : (
+                            "平台承担"
+                          )}
+                        </td>
+                        <td>
+                          {service.updated_by ? (
+                            <>
+                              <span>{service.updated_by}</span>
+                              <small>
+                                {formatDateTime(service.updated_at)}
+                              </small>
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td>
+                          {canEdit && (
                             <button
                               type="button"
                               disabled={readOnly || busy}
@@ -697,79 +782,72 @@ export function BillingRatesManager({
                             >
                               {editing ? "编辑中" : "配置"}
                             </button>
-                            <button
-                              type="button"
-                              className="btn-secondary"
-                              disabled={busy}
-                              aria-expanded={historyOpen}
-                              aria-label={
-                                historyOpen
-                                  ? `正在查看 ${service.name} 的价目历史`
-                                  : `查看 ${service.name} 的价目历史`
-                              }
-                              onClick={() => toggleHistory(service)}
-                            >
-                              {historyOpen ? "收起历史" : "历史"}
-                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={busy}
+                            aria-expanded={historyOpen}
+                            aria-label={
+                              historyOpen
+                                ? `正在查看 ${service.name} 的价目历史`
+                                : `查看 ${service.name} 的价目历史`
+                            }
+                            onClick={() => toggleHistory(service)}
+                          >
+                            {historyOpen ? "收起历史" : "历史"}
+                          </button>
+                        </td>
+                      </tr>
+                      {editing && (
+                        <tr className="billing-rates-editor">
+                          <td colSpan={8}>
+                            <div className="billing-rates-editor__actions">
+                              <button type="submit" disabled={busy || readOnly}>
+                                {busy ? "保存中…" : "保存"}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                disabled={busy}
+                                onClick={() => setSelected(undefined)}
+                              >
+                                取消
+                              </button>
+                            </div>
+                            {error && (
+                              <PageBanner tone="error">{error}</PageBanner>
+                            )}
                           </td>
                         </tr>
-                        {editing && (
-                          <tr className="billing-rates-editor">
-                            <td colSpan={8}>
-                              <div className="billing-rates-editor__actions">
-                                <button
-                                  type="submit"
-                                  disabled={busy || readOnly}
-                                >
-                                  {busy ? "保存中…" : "保存"}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-secondary"
-                                  disabled={busy}
-                                  onClick={() => setSelected(undefined)}
-                                >
-                                  取消
-                                </button>
-                              </div>
-                              {error && (
-                                <PageBanner tone="error">{error}</PageBanner>
-                              )}
-                            </td>
-                          </tr>
-                        )}
-                        {historyOpen && renderHistoryRow(service, unit)}
-                      </Fragment>
-                    );
-                  })}
+                      )}
+                      {historyOpen && renderHistoryRow(service, unit)}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
-          {platformServices.length > 0 && (
-            <div className="admin-table-scroll admin-table-card billing-rates-table">
-              <p>
-                平台科目（不向客户收费）：质量检查等科目只核算上游服务成本，不向客户扣分；
-                云存储与支付服务按零费用核算。
-              </p>
-              <table
-                className="admin-data-table"
-                aria-label="平台科目成本（不向客户收费）"
-              >
-                <thead>
-                  <tr>
-                    <th>业务</th>
-                    <th>单位</th>
-                    <th>成本（元）</th>
-                    <th>售价（元主，积分辅）</th>
-                    <th>毛利率</th>
-                    <th>收费设置</th>
-                    <th>最后修改</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>{platformServices.map(renderPlatformRow)}</tbody>
-              </table>
-            </div>
+          {priceTab === "current" && platformServices.length > 0 && (
+            <>
+              <h3>平台承担的成本</h3>
+              {platformServices.some(
+                (service) => !otherPlatformServices.includes(service),
+              ) &&
+                renderPlatformTable(
+                  platformServices.filter(
+                    (service) => !otherPlatformServices.includes(service),
+                  ),
+                  "平台科目成本（不向客户收费）",
+                )}
+              {otherPlatformServices.length > 0 && (
+                <details className="admin-rule-note">
+                  <summary>其他平台费率</summary>
+                  <p>云存储和支付通道的单次业务费率固定为零。</p>
+                  {renderPlatformTable(otherPlatformServices, "其他平台费率")}
+                </details>
+              )}
+            </>
           )}
         </form>
       )}

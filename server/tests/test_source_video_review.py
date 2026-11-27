@@ -408,16 +408,18 @@ def test_real_transport_uses_reserved_shorter_timeout_and_one_cost_boundary(
     from contextlib import contextmanager
 
     from app.analysis import UrllibApilioChatTransport
+    from app.billing_meter import MeteredCall
 
     now = [0.0]
     monkeypatch.setattr("app.analysis.time.monotonic", lambda: now[0])
     calls: list[float] = []
     meter_events: list[str] = []
+    charge = Mock(spec=MeteredCall)
 
     @contextmanager
     def meter(service: str):
         meter_events.append(service)
-        yield
+        yield charge
 
     def physical(request: Any, **kwargs: Any):
         calls.append(kwargs["timeout"])
@@ -448,6 +450,7 @@ def test_real_transport_uses_reserved_shorter_timeout_and_one_cost_boundary(
     )
     assert calls == [initial_timeout, review_timeout]
     assert meter_events == ["quality_inspection"]
+    charge.record_usage.assert_called_once_with()
     assert result["source_review"]["status"] == "PASSED"
 
 

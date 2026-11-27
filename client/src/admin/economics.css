@@ -263,10 +263,9 @@
 }
 .dashboard-kpis {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
-/* 「今日 / 存量」分组标题独占一行，把当日发生数与存量指标分开。 */
 .dashboard-kpis .dashboard-kpi-group {
   grid-column: 1 / -1;
   margin: 4px 0 0;
@@ -299,7 +298,7 @@
 }
 .dashboard-kpis .admin-summary-card {
   min-width: 0;
-  min-height: 132px;
+  min-height: 106px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -478,7 +477,7 @@
 }
 @media (max-width: 1250px) {
   .dashboard-kpis {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .admin-shell--control .profit-price-form.admin-form {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -555,6 +554,32 @@
 }
 .business-trend-panel h3 {
   margin-block: 14px 8px;
+}
+.business-trend-heading,
+.business-trend-heading fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.business-trend-heading fieldset {
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.business-trend-heading {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.business-trend-heading button[aria-pressed="false"] {
+  background: transparent;
+  color: var(--admin-text);
+  border: 1px solid var(--admin-border);
+}
+.business-trend__outlier {
+  fill: none;
+  stroke: var(--admin-gold);
+  stroke-width: 2;
 }
 .business-trend {
   display: block;
@@ -643,8 +668,14 @@
   overflow-wrap: anywhere;
 }
 .cost-queues {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-block: 12px;
+}
+.cost-queues > [role="alert"] {
+  grid-column: 1 / -1;
+}
+.cost-queues article {
+  padding: 6px;
 }
 .cost-queues button {
   width: 100%;
@@ -709,9 +740,44 @@
   .business-dashboard
   .billing-economics-filters
   label {
+  gap: 4px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .billing-economics-filters {
+  align-items: end;
+}
+.business-dashboard .billing-economics-filters input[type="date"] {
+  min-width: 150px;
+}
+.business-dashboard .admin-hint a {
+  color: var(--admin-gold);
+  text-underline-offset: 3px;
+}
+
+.admin-shell--control .billing-economics .cost-review-filters {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: end;
+  flex-wrap: wrap;
+  padding: 12px;
+  gap: 10px 12px;
+  margin: 12px 0 16px;
+}
+.cost-review-filters > label {
+  flex: 1 1 135px;
+}
+.cost-review-filters > label:has(input[type="date"]) {
+  flex: 0 1 150px;
+}
+.cost-review-filters > details {
+  flex: 1 0 100%;
+  order: 1;
+}
+.admin-shell--control .cost-review-filters .billing-economics-filters__actions {
+  flex-wrap: wrap;
+  padding-top: 0;
+  border-top: 0;
 }
 .admin-shell--control
   .admin-workspace
